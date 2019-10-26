@@ -288,25 +288,18 @@ impl StatusServer {
 
         Box::new(
             Self::dump_rsprof(seconds, frequency)
-                .and_then(|report| {
-                    let mut body: Vec<u8> = Vec::new();
-                    match report.flamegraph(&mut body) {
-                        Ok(_) => {
-                            info!("write report successfully");
-                            Box::new(ok(Response::new(Body::from(body))))
-                        }
-                        Err(err) => Box::new(ok(Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(Body::from(format!("{:?}", err)))
-                            .unwrap())),
-                    }
-                })
-                .or_else(|err| {
-                    let response = Response::builder()
+                .and_then(|report| match serde_json::to_string(&report.list()) {
+                    Ok(body) => ok(Response::builder().body(Body::from(body)).unwrap()),
+                    Err(err) => ok(Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Body::from(err.to_string()))
-                        .unwrap();
-                    ok(response)
+                        .unwrap()),
+                })
+                .or_else(|err| {
+                    ok(Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from(err.to_string()))
+                        .unwrap())
                 }),
         )
     }
