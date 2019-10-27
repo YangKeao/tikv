@@ -22,6 +22,8 @@ use tikv_util::collections::HashMap;
 use tikv_util::metrics::dump;
 use tikv_util::timer::GLOBAL_TIMER_HANDLE;
 
+use systemstat::{Platform, System};
+
 mod profiler_guard {
     use tikv_alloc::error::ProfResult;
     use tikv_alloc::{activate_prof, deactivate_prof};
@@ -263,6 +265,7 @@ impl StatusServer {
                 Ok(val) => val,
                 Err(_) => {
                     let response = Response::builder()
+                        .header("Access-Control-Allow-Origin", "*")
                         .status(StatusCode::BAD_REQUEST)
                         .body(Body::empty())
                         .unwrap();
@@ -277,6 +280,7 @@ impl StatusServer {
                 Ok(val) => val,
                 Err(_) => {
                     let response = Response::builder()
+                        .header("Access-Control-Allow-Origin", "*")
                         .status(StatusCode::BAD_REQUEST)
                         .body(Body::empty())
                         .unwrap();
@@ -289,19 +293,82 @@ impl StatusServer {
         Box::new(
             Self::dump_rsprof(seconds, frequency)
                 .and_then(|report| match serde_json::to_string(&report.list()) {
-                    Ok(body) => ok(Response::builder().body(Body::from(body)).unwrap()),
+                    Ok(body) => ok(Response::builder()
+                        .header("Access-Control-Allow-Origin", "*").body(Body::from(body)).unwrap()),
                     Err(err) => ok(Response::builder()
+                        .header("Access-Control-Allow-Origin", "*")
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Body::from(err.to_string()))
                         .unwrap()),
                 })
                 .or_else(|err| {
                     ok(Response::builder()
+                        .header("Access-Control-Allow-Origin", "*")
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Body::from(err.to_string()))
                         .unwrap())
                 }),
         )
+    }
+
+    fn cpu_load(
+        req: Request<Body>,
+    ) -> Box<dyn Future<Item = Response<Body>, Error = hyper::Error> + Send> {
+        let query = match req.uri().query() {
+            Some(query) => query,
+            None => {
+                let response = Response::builder()
+                    .header("Access-Control-Allow-Origin", "*")
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::empty())
+                    .unwrap();
+                return Box::new(ok(response));
+            }
+        };
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        let seconds: u64 = match query_pairs.get("seconds") {
+            Some(val) => match val.parse() {
+                Ok(val) => val,
+                Err(_) => {
+                    let response = Response::builder()
+                        .header("Access-Control-Allow-Origin", "*")
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::empty())
+                        .unwrap();
+                    return Box::new(ok(response));
+                }
+            },
+            None => 10,
+        };
+
+        let sys = System::new();
+        let timer = GLOBAL_TIMER_HANDLE.clone();
+        match sys.cpu_load_aggregate() {
+            Ok(cpu) => {
+                return Box::new(timer
+                    .delay(std::time::Instant::now() + std::time::Duration::from_secs(seconds))
+                    .then(
+                        move |_| -> Box<
+                            dyn Future<Item = Response<Body>, Error = hyper::Error> + Send,
+                        > {
+                            let cpu = cpu.done().unwrap();
+                            Box::new(ok(Response::builder()
+                                .header("Access-Control-Allow-Origin", "*")
+                                .body(Body::from(format!(
+                                    r#"{{"user":{}, "system":{}, "intr":{}, "idle":{}}}"#,
+                                    cpu.user, cpu.system, cpu.interrupt, cpu.idle
+                                )))
+                                .unwrap()))
+                        },
+                    ));
+            },
+            Err(err) => {
+                return Box::new(ok(Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(err.to_string()))
+                    .unwrap()));
+            },
+        }
     }
 
     pub fn start(&mut self, status_addr: String) -> Result<()> {
@@ -335,6 +402,7 @@ impl StatusServer {
                             (Method::GET, "/debug/pprof/heap") => Self::dump_prof_to_resp(req),
                             (Method::GET, "/config") => Self::config_handler(config.clone()),
                             (Method::GET, "/debug/pprof/profile") => Self::dump_rsperf_to_resp(req),
+                            (Method::GET, "/cpu_load") => Self::cpu_load(req),
                             _ => Box::new(ok(Response::builder()
                                 .status(StatusCode::NOT_FOUND)
                                 .body(Body::empty())
