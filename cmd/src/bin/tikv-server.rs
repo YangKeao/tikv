@@ -158,5 +158,25 @@ fn main() {
         validate_and_persist_config(&mut config, true);
     }
 
+    let data_dir = config.storage.data_dir.as_str().to_owned();
+
+    tikv::ALLOC.init_collector();
+
+    std::thread::spawn(move || {
+        use std::fs::File;
+        use std::time::Duration;
+
+        loop {
+            std::thread::sleep(Duration::from_secs(30));
+
+            let report = tikv::ALLOC.report();
+
+            let file = File::create(format!("{}/flamegraph.svg", data_dir)).unwrap();
+            report.as_ref().flamegraph(file);
+
+            println!("report generated");
+        }
+    });
+
     cmd::server::run_tikv(config);
 }

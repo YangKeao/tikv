@@ -86,3 +86,5 @@ pub fn log_tikv_info() {
         info!("{}", line);
     }
 }
+
+pub use tikv_alloc::ALLOC;

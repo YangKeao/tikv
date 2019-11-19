@@ -109,5 +109,7 @@ mod imp;
 
 pub use crate::imp::*;
 
+use cogito::AllocRecorder;
+
 #[global_allocator]
-static ALLOC: imp::Allocator = imp::allocator();
+pub static ALLOC: AllocRecorder<imp::Allocator> = AllocRecorder::new(imp::allocator());

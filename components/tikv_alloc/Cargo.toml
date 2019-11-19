@@ -16,6 +16,7 @@ mimalloc = ["mimallocator"]
 [dependencies]
 libc = "0.2"
 log = "0.4"
+cogito = { git = "https://github.com/YangKeao/cogito.git" }
 
 [dev-dependencies]
 tempfile = "3.0"
