@@ -431,7 +431,7 @@ dependencies = [
 [[package]]
 name = "cogito"
 version = "0.1.0"
-source = "git+https://github.com/YangKeao/cogito.git#2cba26fa8a81f19f2d376bf8611d4b1c9bc1d2f5"
+source = "git+https://github.com/YangKeao/cogito.git#9a6247a2982663ef3be373ac04d23ff6d223d9ab"
 dependencies = [
  "backtrace",
  "crossbeam",
