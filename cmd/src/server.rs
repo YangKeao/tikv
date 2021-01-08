@@ -19,7 +19,7 @@ use std::{
 
 use concurrency_manager::ConcurrencyManager;
 use encryption::DataKeyManager;
-use engine_rocks::{encryption::get_env, RocksEngine};
+use engine_rocks::{encryption::get_env, RocksEngine, spdk};
 use engine_traits::{
     compaction_job::CompactionJobInfo, Engines, MetricsFlusher, RaftEngine, CF_DEFAULT, CF_WRITE,
 };
@@ -880,15 +880,18 @@ impl<ER: RaftEngine> TiKVServer<ER> {
 
 impl TiKVServer<RocksEngine> {
     fn init_raw_engines(&mut self) -> Engines<RocksEngine, RocksEngine> {
-        let env = get_env(self.encryption_key_manager.clone(), None /*base_env*/).unwrap();
         let block_cache = self.config.storage.block_cache.build_shared_cache();
 
         // Create raft engine.
         let raft_db_path = Path::new(&self.config.raft_store.raftdb_path);
         let config_raftdb = &self.config.raftdb;
         let mut raft_db_opts = config_raftdb.build_opt();
-        raft_db_opts.set_env(env.clone());
         let raft_db_cf_opts = config_raftdb.build_cf_opts(&block_cache);
+
+        let base_env = spdk::get_env(raft_db_path.to_str().unwrap(), "/tmp/rocksdb.json", "NVMe0n1", 4096);
+        let env = get_env(self.encryption_key_manager.clone(), Some(base_env) /*base_env*/).unwrap();
+        raft_db_opts.set_env(env);
+
         let raft_engine = engine_rocks::raw_util::new_engine_opt(
             raft_db_path.to_str().unwrap(),
             raft_db_opts,
@@ -898,13 +901,17 @@ impl TiKVServer<RocksEngine> {
 
         // Create kv engine.
         let mut kv_db_opts = self.config.rocksdb.build_opt();
-        kv_db_opts.set_env(env);
         kv_db_opts.add_event_listener(self.create_raftstore_compaction_listener());
         let kv_cfs_opts = self
             .config
             .rocksdb
             .build_cf_opts(&block_cache, Some(&self.region_info_accessor));
         let db_path = self.store_path.join(Path::new(DEFAULT_ROCKSDB_SUB_DIR));
+
+        let base_env = spdk::get_env(db_path.to_str().unwrap(), "/tmp/rocksdb.json", "NVMe0n1", 4096);
+        let env = get_env(self.encryption_key_manager.clone(), Some(base_env) /*base_env*/).unwrap();
+        kv_db_opts.set_env(env);
+
         let kv_engine = engine_rocks::raw_util::new_engine_opt(
             db_path.to_str().unwrap(),
             kv_db_opts,

@@ -89,6 +89,7 @@ pub use event_listener::*;
 pub mod config;
 pub use config::*;
 pub mod encryption;
+pub mod spdk;
 
 mod raft_engine;
 
