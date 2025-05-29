@@ -2068,4 +2068,85 @@ mod tests {
 
         status_server.stop();
     }
+
+    #[test]
+    fn test_pprof_with_parking_lot() {
+        // We have met a issue that `pprof` will deadlock if the outside program is using parking_lot
+        // https://github.com/tikv/tikv/issues/18474
+        //
+        // This test is to ensure that `pprof` can work well with parking_lot.
+        let _test_guard = TEST_PROFILE_MUTEX.lock().unwrap();
+
+        let test_duration = std::time::Duration::from_secs(180);
+        let test_threads = 100;
+        let test_threads_repeat = 100;
+
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped_clone = stopped.clone();
+        // Start another thread to send request to the status server.
+        let t = std::thread::spawn(move || {
+            let start_time = std::time::Instant::now();
+            // Repeatedly start / stop profiling multiple times
+            loop {
+                let guard = pprof::ProfilerGuardBuilder::default()
+                    .frequency(999)
+                    .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+                    .build()
+                    .map_err(|e| format!("pprof::ProfilerGuardBuilder::build fail: {}", e)).unwrap();
+
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                drop(guard);
+
+                if start_time.elapsed() > test_duration {
+                    break;
+                }
+            }
+            
+            stopped_clone.store(true, Ordering::Relaxed);
+        });
+
+        // Create a lot of parking_lot rwlocks to fit int every bucket of parking_lot
+        loop {
+            let locks = (0..test_threads).map(|_| Arc::new(parking_lot::RwLock::new(()))).collect::<Vec<_>>();
+            
+            let handles = (0..test_threads).map(|i| {
+                let lock = &locks[i];
+
+                // Create two threads to lock the rwlock. Unlock the write lock will try to wake the
+                // read lock thread. Repeat it for several times.
+                std::thread::spawn({
+                    let lock = lock.clone();
+                    move || {
+                        for _ in 0..test_threads_repeat {
+                            let write_lock_guard = lock.write();
+
+                            let read_lock_thread = std::thread::spawn({
+                                let lock = lock.clone();
+                                move || {
+                                    // The read lock will be blocked until the write lock guard is dropped.
+                                    let read_lock_guard = lock.read();
+                                    drop(read_lock_guard)
+                                }
+                            });
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            drop(write_lock_guard);
+
+                            read_lock_thread.join().unwrap();
+                        }
+                    }
+                })
+            }).collect::<Vec<_>>();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            drop(locks);
+
+            if stopped.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+
+        t.join().unwrap();
+    }
 }
