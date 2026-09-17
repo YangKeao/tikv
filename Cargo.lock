@@ -8442,6 +8442,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidb_query_expr_ffi"
+version = "0.0.1"
+dependencies = [
+ "grpcio",
+ "openssl",
+ "protobuf 2.8.0",
+ "tidb_query_datatype",
+ "tidb_query_expr",
+ "tipb",
+ "tipb_helper",
+]
+
+[[package]]
 name = "tikv"
 version = "9.0.0-beta.2"
 dependencies = [

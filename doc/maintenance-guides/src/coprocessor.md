@@ -324,6 +324,35 @@ aggregation.
   their own lockfile. See `components/tidb_query_expr/STANDALONE.md` for the
   supported surface and build requirements.
 
+### Experimental C ABI ownership boundary
+
+`components/tidb_query_expr_ffi` adds a Linux cdylib wrapper for TiFlash/C++
+embedding without changing the original copying facade. The ABI v1 header owns
+its compatibility contract: compile-time context and serialized protobuf metadata,
+exclusive program handles, call-scoped foreign arrays/slices, owned result/error
+handles, bulk result/diagnostic views and matching frees. Only Int64/Float64/Bytes
+and NULL are admitted, including intermediate types. Decimal remains available in
+the Rust facade but is deliberately excluded from this ABI.
+
+The wrapper validates full descriptor shape and selection, gathers selected rows
+into original owned `Column` values, then calls unchanged `eval` with dense rows
+and no selection. Bytes use per-row slices so TiFlash string terminators need not
+be repacked before that owned copy. There is no borrowed evaluator or new kernel.
+NULL selection and explicit empty selection differ; duplicates/order and ignored
+unselected nonfinite values are preserved. Warnings/errors retain native codes;
+evaluation errors discard partial output and never permit silent fallback.
+
+Rust unwinding is contained and a panicked program is poisoned. Foreign pointer
+validity, allocation bounds, handle lifetime, synchronization and host memory
+limits remain caller obligations; alignment/size checks cannot turn invalid
+pointers into recoverable errors. Views expire when their owning handle is freed.
+The cdylib hides native archive symbols and defaults to private vendored OpenSSL,
+but deployment still requires export, unresolved-import and transitive shared
+library audits before coexistence with TiFlash gRPC/BoringSSL/libc++. Read
+`components/tidb_query_expr_ffi/README.md` and its header when reviewing any ABI,
+ownership, selection, panic, warning, admission or linking change. Move the FFI
+contract tests alongside such changes; keep `standalone.rs` semantics unchanged.
+
 ## Related Components
 
 - `src/server/service/kv.rs` is the RPC entry point.

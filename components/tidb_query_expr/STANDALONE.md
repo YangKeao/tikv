@@ -95,6 +95,17 @@ Facade admission/shape errors use code 1105; existing builder/evaluator errors
 retain their original code (including generic engine code 10000). A caller may choose native fallback on a
 compile/admission error, but must not silently fall back after evaluation starts.
 
+## Experimental C/C++ embedding
+
+[`tidb_query_expr_ffi`](../tidb_query_expr_ffi/README.md) provides a Linux cdylib
+C ABI for Int64/Float64/Bytes+NULL. Its header accepts call-scoped foreign arrays
+and per-row byte slices, validates their shape, and gathers selected rows into
+these original **owned** `Column` vectors before invoking unchanged `compile` /
+`eval`. It is not a borrowed evaluator. Results and diagnostics are owned handles
+with bulk views and matching free functions. Decimal is not admitted by that ABI.
+The ABI documentation specifies pointer obligations, panic containment, ownership,
+and native symbol/dependency audits needed before loading alongside TiFlash.
+
 ## Build and dependency contract
 
 The PoC uses the existing whole expression/datatype crates and their transitive

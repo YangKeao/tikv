@@ -1,0 +1,26 @@
+[package]
+name = "tidb_query_expr_ffi"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "Experimental copying C ABI for the existing TiKV expression facade"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["vendored-openssl"]
+# grpcio-sys must also discover openssl-sys's private static archive.
+vendored-openssl = ["openssl/vendored", "grpcio/openssl-vendored"]
+
+[dependencies]
+grpcio = { workspace = true }
+openssl = { workspace = true }
+protobuf = "2"
+tidb_query_expr = { workspace = true }
+tipb = { workspace = true }
+
+[dev-dependencies]
+tidb_query_datatype = { workspace = true }
+tipb_helper = { workspace = true }
