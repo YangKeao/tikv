@@ -312,6 +312,9 @@ aggregation.
   decoded vectors. Selection is validated and normalized to dense rows, including
   repeated indices, and batches are split at `BATCH_MAX_SIZE`. Empty batches
   bypass `eval_decoded` because that engine entry point requires positive rows.
+  Selected real values and serialized real constants must be finite: the
+  engine's NotNan wrapper accepts infinity, but operations producing NaN can
+  panic. Unselected nonfinite values are not converted.
 - Each evaluation returns dense owned output, native MySQL error codes/messages,
   retained warning details, and the total warning count across internal batches.
   Runtime errors must not trigger a silent retry in another evaluator.

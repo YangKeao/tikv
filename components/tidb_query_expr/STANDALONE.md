@@ -30,9 +30,14 @@ are not converted through UTF-8. The decimal text boundary does **not** preserve
 hidden storage-scale/result-fraction state from another engine's decimal
 representation, nor enforce schema precision on input values. Callers must
 restrict admission or normalize/test scale semantics; this is not a general
-cross-engine decimal compatibility guarantee. NaN cannot be represented by
-TiKV's Real and is rejected for both column conversion and serialized constants. Temporal, JSON, enum, set and vector types are not
-admitted, including intermediate expression types.
+cross-engine decimal compatibility guarantee. All nonfinite real values (NaN,
+positive infinity and negative infinity) are rejected for selected column values
+and serialized constants before entering kernels. `Real::new` alone is not a
+sufficient guard: it accepts infinity, but arithmetic such as `Inf * 0` or
+`Inf - Inf` can panic in the underlying NotNan operators. Unselected nonfinite
+column values are not converted and therefore remain permitted. Temporal, JSON,
+enum, set and vector types are not admitted, including intermediate expression
+types.
 
 Schema and expression messages are serialized tipb wire bytes so a prost caller
 does not share generated Rust types with the rust-protobuf engine. Each

@@ -80,6 +80,12 @@ impl Column {
             }
             (Self::Real(src), VectorValue::Real(dst)) => {
                 for &row in rows {
+                    // Real::new rejects NaN but accepts infinity. NotNan's
+                    // arithmetic can panic on Inf * 0 or Inf - Inf, so guard
+                    // all selected nonfinite inputs before entering kernels.
+                    if src[row].is_some_and(|value| !value.is_finite()) {
+                        return Err(Error::invalid("nonfinite real inputs are not supported"));
+                    }
                     dst.push(
                         src[row]
                             .map(Real::new)
@@ -420,13 +426,13 @@ fn validate_expr(expr: &Expr, schema: &[FieldType], depth: usize) -> Result<Eval
             if expr.get_val().len() != 8 {
                 return Err(Error::invalid("real payload must be eight bytes"));
             }
-            if expr
+            if !expr
                 .get_val()
                 .read_f64()
                 .map_err(|e| Error::invalid(e.to_string()))?
-                .is_nan()
+                .is_finite()
             {
-                return Err(Error::invalid("NaN constants are not supported"));
+                return Err(Error::invalid("nonfinite real constants are not supported"));
             }
         }
         ExprType::Bytes | ExprType::String if tp == EvalType::Bytes => {}

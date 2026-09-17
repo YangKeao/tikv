@@ -135,6 +135,95 @@ fn real_nullable_arithmetic_and_comparison() {
 }
 
 #[test]
+fn nonfinite_columns_return_errors_before_arithmetic() {
+    let ft: FieldType = FieldTypeTp::Double.into();
+    for sig in [ScalarFuncSig::MultiplyReal, ScalarFuncSig::MinusReal] {
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let mut expr = prepare(
+                E::scalar_func(sig, ft.clone())
+                    .push_child(E::column_ref(0, ft.clone()))
+                    .push_child(E::column_ref(1, ft.clone())),
+                &[ft.clone(), ft.clone()],
+                Context::default(),
+            );
+            let rhs = if sig == ScalarFuncSig::MultiplyReal {
+                0.0
+            } else {
+                value
+            };
+            // In particular, Inf * 0 and Inf - Inf must not reach NotNan's
+            // arithmetic operators, which panic when their result is NaN.
+            let result = expr.eval(
+                &[
+                    Column::Real(vec![Some(value)]),
+                    Column::Real(vec![Some(rhs)]),
+                ],
+                1,
+                None,
+            );
+            assert!(result.is_err(), "{sig:?} accepted {value:?}");
+        }
+    }
+}
+
+#[test]
+fn nonfinite_constants_are_rejected_at_compile_time() {
+    let ft: FieldType = FieldTypeTp::Double.into();
+    for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        let constant = E::constant_real(value).build();
+        let expressions = [
+            constant.clone(),
+            E::scalar_func(ScalarFuncSig::MultiplyReal, ft.clone())
+                .push_child(constant.clone())
+                .push_child(E::constant_real(0.0))
+                .build(),
+            E::scalar_func(ScalarFuncSig::MinusReal, ft.clone())
+                .push_child(constant.clone())
+                .push_child(constant)
+                .build(),
+        ];
+        for expression in expressions {
+            assert!(
+                PreparedExpression::compile(
+                    &expression.write_to_bytes().unwrap(),
+                    &[],
+                    Context::default()
+                )
+                .is_err(),
+                "accepted nonfinite constant {value:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nonfinite_unselected_rows_are_not_converted() {
+    let ft: FieldType = FieldTypeTp::Double.into();
+    let mut expr = prepare(
+        E::scalar_func(ScalarFuncSig::MultiplyReal, ft.clone())
+            .push_child(E::column_ref(0, ft.clone()))
+            .push_child(E::constant_real(0.0)),
+        &[ft],
+        Context::default(),
+    );
+    let columns = [Column::Real(vec![
+        Some(f64::INFINITY),
+        Some(2.0),
+        Some(f64::NEG_INFINITY),
+        Some(f64::NAN),
+        None,
+    ])];
+    assert_eq!(
+        expr.eval(&columns, 5, Some(&[1, 4, 1])).unwrap().column,
+        Column::Real(vec![Some(0.0), None, Some(0.0)])
+    );
+    assert_eq!(
+        expr.eval(&columns, 5, Some(&[])).unwrap().column,
+        Column::Real(vec![])
+    );
+}
+
+#[test]
 fn bytes_are_copied_without_utf8_conversion() {
     let ft: FieldType = FieldTypeTp::VarChar.into();
     let expr = E::scalar_func(ScalarFuncSig::Concat, ft.clone())
