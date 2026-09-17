@@ -22,7 +22,7 @@ fn nullable_nested_numeric_selection_and_reuse() {
             .push_child(E::column_ref(0, ft.clone()))
             .push_child(E::constant_int(-5)),
     );
-    let mut prepared = prepare(expr, &[ft.clone()], Context::default());
+    let mut prepared = prepare(expr, std::slice::from_ref(&ft), Context::default());
     let input = [Column::Int(vec![Some(2), None, Some(9), Some(-3)])];
     let result = prepared.eval(&input, 4, Some(&[3, 1, 0, 3])).unwrap();
     assert_eq!(
@@ -117,7 +117,7 @@ fn real_nullable_arithmetic_and_comparison() {
                     .push_child(E::constant_real(2.0)),
             )
             .push_child(E::constant_real(4.0)),
-        &[ft.clone()],
+        std::slice::from_ref(&ft),
         Context::default(),
     );
     assert_eq!(
@@ -127,11 +127,9 @@ fn real_nullable_arithmetic_and_comparison() {
         Column::Int(vec![Some(1), None, Some(0)])
     );
     let mut identity = prepare(E::column_ref(0, ft.clone()), &[ft], Context::default());
-    assert!(
-        identity
-            .eval(&[Column::Real(vec![Some(f64::NAN)])], 1, None)
-            .is_err()
-    );
+    identity
+        .eval(&[Column::Real(vec![Some(f64::NAN)])], 1, None)
+        .unwrap_err();
 }
 
 #[test]
@@ -161,7 +159,8 @@ fn nonfinite_columns_return_errors_before_arithmetic() {
                 1,
                 None,
             );
-            assert!(result.is_err(), "{sig:?} accepted {value:?}");
+            let failure = format!("{sig:?} accepted {value:?}");
+            result.expect_err(&failure);
         }
     }
 }
@@ -183,15 +182,13 @@ fn nonfinite_constants_are_rejected_at_compile_time() {
                 .build(),
         ];
         for expression in expressions {
-            assert!(
-                PreparedExpression::compile(
-                    &expression.write_to_bytes().unwrap(),
-                    &[],
-                    Context::default()
-                )
-                .is_err(),
-                "accepted nonfinite constant {value:?}"
-            );
+            let failure = format!("accepted nonfinite constant {value:?}");
+            PreparedExpression::compile(
+                &expression.write_to_bytes().unwrap(),
+                &[],
+                Context::default(),
+            )
+            .expect_err(&failure);
         }
     }
 }
@@ -229,7 +226,7 @@ fn bytes_are_copied_without_utf8_conversion() {
     let expr = E::scalar_func(ScalarFuncSig::Concat, ft.clone())
         .push_child(E::column_ref(0, ft.clone()))
         .push_child(E::constant_bytes(vec![0, 255]));
-    let mut prepared = prepare(expr, &[ft.clone()], Context::default());
+    let mut prepared = prepare(expr, std::slice::from_ref(&ft), Context::default());
     let input = [Column::Bytes(vec![
         Some(b"abc".to_vec()),
         None,
@@ -264,7 +261,7 @@ fn decimal_uses_existing_arithmetic_and_codec() {
         E::scalar_func(ScalarFuncSig::PlusDecimal, ft.clone())
             .push_child(E::column_ref(0, ft.clone()))
             .push_child(E::constant_decimal("0.25".parse().unwrap())),
-        &[ft.clone()],
+        std::slice::from_ref(&ft),
         Context::default(),
     );
     let result = prepared
@@ -290,15 +287,13 @@ fn decimal_uses_existing_arithmetic_and_codec() {
         values[2].as_ref().unwrap().parse::<Decimal>().unwrap(),
         "-2.00".parse::<Decimal>().unwrap()
     );
-    assert!(
-        prepared
-            .eval(
-                &[Column::Decimal(vec![Some("not-a-decimal".into())])],
-                1,
-                None
-            )
-            .is_err()
-    );
+    prepared
+        .eval(
+            &[Column::Decimal(vec![Some("not-a-decimal".into())])],
+            1,
+            None,
+        )
+        .unwrap_err();
 
     let mut context = Context::default();
     context.div_precision_increment = 6;
@@ -344,7 +339,7 @@ fn mysql_errors_and_warning_limit_across_batches() {
     let mut context = Context::default();
     context.flags = Flag::IN_SELECT_STMT.bits();
     context.max_warning_count = 2;
-    let mut warned = prepare(divide(), &[ft.clone()], context);
+    let mut warned = prepare(divide(), std::slice::from_ref(&ft), context);
     let rows = BATCH_MAX_SIZE + 1;
     let result = warned
         .eval(&[Column::Real(vec![Some(1.0); rows])], rows, None)
@@ -368,7 +363,7 @@ fn mysql_errors_and_warning_limit_across_batches() {
 
     let mut count_only = prepare(
         divide(),
-        &[ft.clone()],
+        std::slice::from_ref(&ft),
         Context {
             max_warning_count: 0,
             ..Context::default()
@@ -403,26 +398,18 @@ fn reject_schema_shape_and_malformed_expression_before_engine() {
     let ft: FieldType = FieldTypeTp::LongLong.into();
     let mut expr = prepare(
         E::column_ref(0, ft.clone()),
-        &[ft.clone()],
+        std::slice::from_ref(&ft),
         Context::default(),
     );
-    assert!(expr.eval(&[], 0, None).is_err());
-    assert!(expr.eval(&[Column::Int(vec![None])], 2, None).is_err());
-    assert!(expr.eval(&[Column::Real(vec![None])], 1, None).is_err());
-    assert!(
-        expr.eval(&[Column::Int(vec![None])], 1, Some(&[1]))
-            .is_err()
-    );
+    expr.eval(&[], 0, None).unwrap_err();
+    expr.eval(&[Column::Int(vec![None])], 2, None).unwrap_err();
+    expr.eval(&[Column::Real(vec![None])], 1, None).unwrap_err();
+    expr.eval(&[Column::Int(vec![None])], 1, Some(&[1]))
+        .unwrap_err();
     let schema = vec![ft.write_to_bytes().unwrap()];
     let reject = |expr: Expr| {
-        assert!(
-            PreparedExpression::compile(
-                &expr.write_to_bytes().unwrap(),
-                &schema,
-                Context::default()
-            )
-            .is_err()
-        );
+        PreparedExpression::compile(&expr.write_to_bytes().unwrap(), &schema, Context::default())
+            .unwrap_err();
     };
     reject(E::column_ref(1, ft.clone()).build());
     reject(E::column_ref(usize::MAX, ft.clone()).build());
@@ -459,8 +446,8 @@ fn reject_schema_shape_and_malformed_expression_before_engine() {
     let mut malformed = E::constant_int(1).build();
     malformed.mut_field_type().set_tp(12345);
     reject(malformed);
-    assert!(PreparedExpression::compile(&[255], &schema, Context::default()).is_err());
-    assert!(PreparedExpression::compile(&[], &schema, Context::default()).is_err());
+    PreparedExpression::compile(&[255], &schema, Context::default()).unwrap_err();
+    PreparedExpression::compile(&[], &schema, Context::default()).unwrap_err();
 }
 
 #[test]
@@ -490,7 +477,7 @@ fn unsigned_bits_and_context_validation() {
         time_zone_offset: i64::MAX,
         ..Context::default()
     };
-    assert!(context.config().is_ok());
+    context.config().unwrap();
     assert_eq!(
         Context {
             time_zone_offset: i64::MAX,
@@ -501,20 +488,16 @@ fn unsigned_bits_and_context_validation() {
         .code,
         1298
     );
-    assert!(
-        Context {
-            div_precision_increment: 31,
-            ..Context::default()
-        }
-        .config()
-        .is_err()
-    );
-    assert!(
-        Context {
-            max_warning_count: usize::MAX,
-            ..Context::default()
-        }
-        .config()
-        .is_err()
-    );
+    Context {
+        div_precision_increment: 31,
+        ..Context::default()
+    }
+    .config()
+    .unwrap_err();
+    Context {
+        max_warning_count: usize::MAX,
+        ..Context::default()
+    }
+    .config()
+    .unwrap_err();
 }

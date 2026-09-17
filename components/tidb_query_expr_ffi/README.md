@@ -1,12 +1,14 @@
-# Copying TiKV expression C ABI (experimental, Linux ELF)
+# TiKV expression C ABIs (experimental, Linux ELF)
 
-This crate adds a **C ABI, not an evaluator**, around the original
-[`PreparedExpression`](../tidb_query_expr/src/standalone.rs). It does not modify
-that facade, borrow engine inputs, implement SQL kernels, start a server, perform
-RPC, or embed a second process. This is an opt-in PoC, not a supported general SQL
-or cross-version ABI. TiFlash integration belongs to the separate TiFlash tree.
+This crate adds **C ABIs, not SQL kernels**, around the original
+[`PreparedExpression`](../tidb_query_expr/src/standalone.rs). The original copying
+ABI v1 remains unchanged and available. An additive, separately bootstrapped
+borrowed ABI lends native TiFlash inputs to original kernel loaders and writes
+numeric results directly to caller storage. Neither path starts a server,
+performs RPC, or embeds another process. This is an opt-in PoC, not a supported
+general SQL or cross-version ABI. TiFlash integration belongs to its own tree.
 
-## Interface and ownership
+## Original copying interface and ownership
 
 [`include/tikv_expr.h`](include/tikv_expr.h) is the canonical ABI v1 contract.
 Include it from C or C++; only native-endian C scalars, pointers, counts and opaque
@@ -101,6 +103,56 @@ The ABI does not provide an allocation quota; logically huge but structurally
 valid batches can exhaust memory. Never silently retry in another evaluator after
 evaluation starts; compile-time admission is the only permitted fallback boundary.
 
+## Additive native borrowed ABI
+
+Resolve and call `tikv_expr_borrowed_abi_version` **before passing any new
+struct**. Only version 1 is supported. After normal copying-ABI compilation,
+`tikv_expr_program_supports_borrowed` checks the actual original generated kernel
+loaders and numeric output admission; zero means choose fallback before eval.
+Programs and poison state are shared by both eval entry points.
+
+`tikv_expr_borrowed_column` lends native aligned i64/f64 arrays; no packed numeric
+copy is made. Optional native byte NULL maps accept any nonzero byte, including
+255. Native ColumnString lends chars and u64 END offsets directly: offsets are
+strictly increasing, each row includes its terminal NUL, final offset equals
+chars length. The borrowed SQL value excludes only that terminal byte. Empty
+strings/embedded NULs are preserved, with no per-row slice array or payload
+packing. NULL/unselected row terminators are validated too. BROADCAST descriptors
+store exactly one row even when logical row_count=0; repeated/selected logical
+indices resolve directly to that row without expansion.
+
+`tikv_expr_borrowed_output` points to caller-owned numeric and NULL-map arrays,
+with capacities measured in logical output rows, not physical stored input rows.
+Int64 and Float64 output match compiled types. UInt8 accepts only Int 0/1;
+UInt64 accepts only nonnegative Int (for native ABS storage). Conversion failures
+are runtime failures: partial output is discarded, never replayed. NULL numeric
+slots receive zero, null bytes are canonical 0/1. The map is required even for
+nonnullable output, so an O(rows) caller scratch map remains. Byte-output programs
+are rejected before kernels; LENGTH remains supported because its output is Int.
+
+Foreign payloads are never retained or modified. There is no owned facade input
+or output vector; original kernels still own intermediate and per-batch output
+`VectorValue`s, and Rust allocates descriptors, stack state and diagnostics. This
+is borrowed input/direct sink, not a zero-allocation engine or SIMD rewrite.
+Packed/bitmap borrowed Rust API compatibility is preserved separately.
+
+Every shape/selection/output capacity/alignment/size/address/overlap check and
+selected REAL domain check runs before the first payload write or kernel.
+Output ranges (full declared capacities) cannot overlap inputs, descriptors,
+selection or each other. Handle and handle-slot alias/lifetime obligations remain
+the caller's responsibility. Handle slots initialize separately before validation;
+no-write guarantees concern output payloads. Allocation validity cannot be proved
+by pointer arithmetic. On later engine/sink failure all partial output must be
+discarded. C++ exceptions never cross this interface (there are no callbacks).
+
+Successful borrowed evaluation returns an independent owned diagnostics handle,
+not an owned result column. Its bulk view reuses warning descriptors/counts and
+expires at `tikv_expr_diagnostics_free`. Errors use the original owned error API.
+Warnings preserve native codes/caps and fresh call state. Rust unwind containment
+poisons the same program for both copying and borrowed APIs; aborted/invalid
+memory operations remain unrecoverable. Existing copying status/layout/export
+contracts are not changed.
+
 ## Linking: prefer a private cdylib over staticlib
 
 The facade transitively builds TiKV native gRPC, OpenSSL and C++ utilities. A
@@ -118,7 +170,7 @@ isolated artifact. Vendoring increases initial compilation cost.
 
 **Export hiding alone is not proof of isolation.** Before integrating each build:
 
-- inspect `nm -D --defined-only`/`readelf --dyn-syms`: only the nine `tikv_expr_*`
+- inspect `nm -D --defined-only`/`readelf --dyn-syms`: only the fourteen `tikv_expr_*`
   API functions may be defined exported symbols (allow ELF version markers only
   after explicit review); in particular no gRPC/OpenSSL/abseil/C++ exports;
 - inspect `readelf -d`: no `libssl`, `libcrypto`, gRPC, protobuf or abseil shared
@@ -134,7 +186,7 @@ isolated artifact. Vendoring increases initial compilation cost.
   Do not introduce broad `-Bsymbolic` without dependency-specific review.
 
 `python3 components/tidb_query_expr_ffi/audit_elf.py /path/to/libtidb_query_expr_ffi.so`
-checks the exact nine-symbol export set, direct shared dependencies and known
+checks the exact fourteen-symbol export set (nine copying plus five borrowed), direct shared dependencies and known
 native import families, prints all undefined imports for review, and enforces its
 own <=1 GiB AS limit. It fails closed on unexpected exports/direct dependencies.
 It does not certify transitive runtime isolation or replace the real TiFlash
@@ -171,7 +223,7 @@ checked separately within the lightweight limit after coordinating native
 compiler use with the parent.
 
 `tests/header_smoke.c` can be compiled as C11 and C++17 against the built cdylib;
-it checks public layouts and all nine exported entry points' basic ownership/error
+it checks public layouts and all fourteen exported entry points' basic ownership/error
 contracts. Keep assertions enabled. This smoke test is not a replacement for the
 embedding TiFlash executable's real expression/parity and coexistence tests.
 
@@ -189,7 +241,7 @@ that target runs global checks/tool installations, `scripts/clippy-all` drops
 arguments and adds server test features, and `scripts/clippy` hardcodes
 `--workspace --no-default-features`. Adding `-p` does not narrow a workspace-wide
 selection. For this resource-bounded PoC, the parent approved a focused exception:
-`cargo clippy --locked -p tidb_query_expr_ffi --all-targets --no-deps -j1`, with
+`cargo clippy --locked -p tidb_query_codegen -p tidb_query_expr -p tidb_query_expr_ffi --all-targets --no-deps -j1`, with
 **all exact `CLIPPY_LINTS` flags from `scripts/clippy`**, root `clippy.toml` (set
 `CLIPPY_CONF_DIR` to the workspace root), the pinned toolchain/environment and the
 same coordinated memory guard. Keep this crate's default vendored-OpenSSL
@@ -202,13 +254,61 @@ vendored native feature graph, use the guarded command:
 cargo test --locked -p tidb_query_expr -p tidb_query_expr_ffi --lib -j1 -- --test-threads=1
 ```
 
-Always invoke Cargo from this copying worktree. Shared target directories may
-contain old borrowed-branch test executables; never run those cached executables
-directly and mistake their results for copying-source coverage.
+Always invoke Cargo from this `tikv-tiflash` worktree with its dedicated target
+directory. Seeded target caches may contain executables from other branches;
+never run those cached executables directly and mistake their results for
+current-source coverage.
 
-### Observed validation on the development host
+### Borrowed branch validation
 
-Using nightly-2026-08-22, the coordinated guard and `-j1`:
+The parent-approved, locked single-job regression command selecting
+`tidb_query_codegen`, `tidb_query_expr`, and `tidb_query_expr_ffi` passed 21, 437,
+and 24 tests respectively (482 total), including a final post-lint-fix rerun.
+This preserves copying and packed/bitmap coverage plus eight native-layout tests
+and eleven new C ABI tests. The corrected session-tracking guard sampled peak
+session RSS 1026.4 MiB on the final run (initial run 1503.6 MiB), within 6144 MiB
+RSS / 8192 MiB per-process AS limits and 8192 MiB host reserve. Log:
+`expression-reuse/logs/tikv-tiflash-borrowed-tests-final.log`. Upstream unused feature,
+deprecated constant and nom/procinfo future-incompatibility notices remain.
+No full TiKV server build or TiFlash executable parity is implied by Rust tests.
+
+The final isolated-target optimized cdylib build passed (sampled session peak
+1662.9 MiB; initial build 1666.0 MiB). ELF audit found exactly fourteen exports and no detected private native
+imports/dependencies; direct and local transitive loader lists contained only
+loader/libc/libm/libgcc_s/libstdc++. C11 and C++17 header/link smokes passed with
+`-Wall -Wextra -Werror`. The focused **all-three-crate** all-targets Clippy
+exception above passed with every repository lint flag and no owned-crate warning
+(869.7 MiB sampled session peak; existing nom future notice only). Closing this
+coverage gap required test-only baseline hygiene in `standalone/tests.rs`:
+14 Result-state assertions became `unwrap`/`unwrap_err`/`expect_err`, and seven
+single-schema clones became `slice::from_ref`, preserving all cases and pass/fail
+semantics. Equivalent borrowed/codegen test fixes and overflow-safe bitmap
+`div_ceil(8)` remove newly introduced/ported lint findings. The first all-crate
+failure log is retained; no lint was suppressed. Logs share prefix
+`expression-reuse/logs/tikv-tiflash-borrowed-` with `release-final.log`,
+`audit-smoke-final.log`, and `clippy-all-final.log`. The narrow audit/smoke guard was 1024 MiB
+RSS/AS with the same 8192 MiB host reserve; its 0.8 MiB final sampled peak (1.1
+MiB initial) is not a claim to have captured brief compiler peaks.
+
+New release SHA256:
+`e1f527637011a8c22a490e90042d2b2a0c4669195eb1109f2128f19bb22521cb`.
+The original copying release SHA256 remained unchanged before/after validation:
+`24ff6c1e1e718ac39deee00fb1119d293b50c23df614753cad6feb4a547f032d`.
+These are local build/link checks, not deployment-baseline compatibility or real
+TiFlash coexistence guarantees. Full `make clippy` was not run.
+
+### Historical copying-only validation (not borrowed validation)
+
+The following observations apply to the prior copying-only commit `da38d16`,
+NOT the new borrowed source/artifact. Borrowed builds must use a separate
+`CARGO_TARGET_DIR=/home/agent/tidb/expression-reuse/target-tikv-tiflash-borrowed`
+and never overwrite the copying reports' release library. The current parent
+coordinates every build through the session-tracking guard at
+`/home/agent/tidb/expression-reuse/tiflash/programs/tikv-expression-poc/limited-run.py`;
+older process-group-only guard reports do not establish descendant-session bounds.
+No validation of the new source is claimed by these historical results.
+
+Using nightly-2026-08-22, the then-current guard and `-j1`:
 
 - all 420 original copying expression tests and 13 ABI tests passed together
   from this worktree (final cached build/test peak group RSS 760.3 MiB);

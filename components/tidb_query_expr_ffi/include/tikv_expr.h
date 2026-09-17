@@ -135,6 +135,103 @@ void tikv_expr_program_free(tikv_expr_program *program);
 void tikv_expr_result_free(tikv_expr_result *result);
 void tikv_expr_error_free(tikv_expr_error *error);
 
+/* Additive borrowed ABI: resolve/query this symbol BEFORE passing new structs.
+ * The copying ABI above remains version 1 and unchanged. */
+#define TIKV_EXPR_BORROWED_ABI_VERSION 1u
+#define TIKV_EXPR_UINT8 4u  /* Output only: checked Int value 0 or 1. */
+#define TIKV_EXPR_UINT64 5u /* Output only: checked nonnegative Int value. */
+#define TIKV_EXPR_BROADCAST 1u
+uint32_t tikv_expr_borrowed_abi_version(void);
+/* Returns 1 for supported original borrowed kernels with numeric output; 0
+ * otherwise (including NULL/poisoned program). Same exclusive handle contract. */
+uint32_t tikv_expr_program_supports_borrowed(const tikv_expr_program *program);
+
+typedef struct tikv_expr_borrowed_column {
+    uint32_t struct_size;
+    uint32_t type;
+    uint32_t flags;
+    uint32_t reserved;             /* Must be zero. */
+    size_t len;                    /* Stored rows: row_count, or 1 if BROADCAST. */
+    const uint8_t *nulls;           /* NULL=no nulls; ANY nonzero byte=NULL. */
+    size_t nulls_len;               /* 0 if nulls=NULL, otherwise exactly len. */
+    const int64_t *ints;            /* len native aligned entries for INT64. */
+    const double *reals;            /* len native aligned entries for FLOAT64. */
+    const uint8_t *chars;           /* Native ColumnString storage, no packing. */
+    size_t chars_len;
+    const uint64_t *offsets;        /* len END offsets, including terminal NUL. */
+    size_t offsets_len;
+} tikv_expr_borrowed_column;
+
+typedef struct tikv_expr_borrowed_output {
+    uint32_t struct_size;
+    uint32_t type;
+    size_t capacity;               /* Writable numeric ELEMENTS, not bytes. */
+    uint8_t *nulls;                /* Required scratch map; receives only 0/1. */
+    size_t nulls_capacity;          /* Writable bytes. */
+    int64_t *ints;
+    double *reals;
+    uint8_t *uint8s;
+    uint64_t *uint64s;
+} tikv_expr_borrowed_output;
+
+typedef struct tikv_expr_diagnostics tikv_expr_diagnostics;
+typedef struct tikv_expr_diagnostics_view {
+    const tikv_expr_warning *warnings;
+    size_t warnings_len;
+    size_t warning_count;
+} tikv_expr_diagnostics_view;
+
+/* Borrowed ABI v1: structs must have exactly the declared struct_size; unknown
+ * flags/reserved bits are rejected. Input type is INT64/FLOAT64/BYTES. Unused
+ * typed pointers and associated lengths MUST be zero. Native byte null maps
+ * (not validity bitmaps) and single-row broadcasts require no conversion.
+ * BROADCAST requires len=1 even for zero logical rows, and maps every selected
+ * physical index to stored row 0. Selection indices still must be <row_count.
+ *
+ * BYTES: offsets_len=len; offsets are strictly increasing, each <=chars_len,
+ * final offset equals chars_len (zero stored rows require chars_len=0), and
+ * chars[offset-1] is NUL for EVERY stored row, including NULL/unselected rows.
+ * The first row starts at 0; later rows start at the preceding END offset.
+ * Exactly the final NUL is excluded from the borrowed value. Empty strings and
+ * embedded NULs are supported. Descriptors, offsets and terminators are validated
+ * for the entire layout; only selected non-NULL REAL values must be finite.
+ *
+ * Output type must match compiled numeric output, except INT64 may target the
+ * checked UINT8/UINT64 sinks above. Byte output is rejected before kernels.
+ * Both capacities must be >=logical output rows (selection.len, or row_count).
+ * Only the corresponding numeric pointer is non-NULL. NULL+zero capacity is
+ * permitted. All output numeric rows, including NULL rows, receive a value
+ * (zero for NULL); output nulls are canonical 0/1. Even nonnullable callers must
+ * supply the null map: this initial API retains O(rows) caller scratch storage.
+ *
+ * All counts, byte-size products and address additions must fit size_t/isize_t.
+ * Typed arrays must be naturally aligned, live, accessible and initialized for
+ * their declared lengths; writable output capacity must denote actual storage.
+ * Zero-length buffers are not read. All input memory remains immutable for the
+ * call; no foreign pointer is retained. Output ranges must be disjoint from each
+ * other and all input/descriptor/selection ranges; payload overlaps are rejected.
+ * Handles and output handle slots must additionally be valid and nonaliased
+ * with every other object/buffer; that remains a caller obligation.
+ *
+ * Layouts, types, selection, capacities, overlaps and selected REAL domains are
+ * validated before any kernel or payload write. out/out_error handle slots are
+ * initialized separately and are not covered by the no-payload-write guarantee.
+ * Original scalar kernels and Rust-owned intermediate vectors are reused, but
+ * no owned facade input/output column is made. On later kernel/sink failure,
+ * discard ALL partial output; NEVER replay in another evaluator. No C++ callback
+ * or exception crosses this ABI. Rust panic poisons the shared program for BOTH
+ * eval APIs. OOM/abort/invalid pointers are not catchable. On success *out owns
+ * diagnostics only, independent of inputs/output/program; on failure *out=NULL.
+ */
+uint32_t tikv_expr_eval_borrowed(tikv_expr_program *program,
+    const tikv_expr_borrowed_column *columns, size_t columns_len,
+    size_t row_count, const tikv_expr_selection *selection,
+    const tikv_expr_borrowed_output *output,
+    tikv_expr_diagnostics **out, tikv_expr_error **out_error);
+uint32_t tikv_expr_diagnostics_get_view(const tikv_expr_diagnostics *diagnostics,
+    tikv_expr_diagnostics_view *out);
+void tikv_expr_diagnostics_free(tikv_expr_diagnostics *diagnostics);
+
 #ifdef __cplusplus
 }
 #endif

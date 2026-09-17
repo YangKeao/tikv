@@ -1,9 +1,10 @@
 # Standalone RPN embedding PoC
 
 `tidb_query_expr::standalone` embeds the **existing** TiKV expression engine in
-process. It invokes `RpnExpressionBuilder::build_from_expr_tree` once, then
-`RpnExpression::eval_decoded` for each nonempty internal batch. It does not
-reimplement any scalar functions, extract a second engine, or call a TiKV server.
+process. It invokes `RpnExpressionBuilder::build_from_expr_tree` once; the original
+copying API invokes `RpnExpression::eval_decoded` for each nonempty internal batch.
+The additive borrowed path below reuses the original scalar kernels. Neither path
+reimplements scalar functions, extracts a second engine, or calls a TiKV server.
 
 ## API
 
@@ -101,10 +102,53 @@ compile/admission error, but must not silently fall back after evaluation starts
 C ABI for Int64/Float64/Bytes+NULL. Its header accepts call-scoped foreign arrays
 and per-row byte slices, validates their shape, and gathers selected rows into
 these original **owned** `Column` vectors before invoking unchanged `compile` /
-`eval`. It is not a borrowed evaluator. Results and diagnostics are owned handles
+`eval`. This original C entry point is not a borrowed evaluator. Results and diagnostics are owned handles
 with bulk views and matching free functions. Decimal is not admitted by that ABI.
 The ABI documentation specifies pointer obligations, panic containment, ownership,
 and native symbol/dependency audits needed before loading alongside TiFlash.
+
+## Additive borrowed-input path
+
+The source of the packed borrowed evaluator is commit `521ac733` from the
+separate borrowed PoC branch, ported without replacing the copying API above.
+`PreparedExpression::supports_borrowed()` admits only explicitly opted-in original
+kernels and Int/Real/Bytes types. `eval_borrowed(columns, row_count, selection,
+sink)` returns owned `Diagnostics`; its `ScalarRef` callback values borrow only
+for that callback. References are never retained by the program.
+
+Existing `ColumnRef::Int/Real` use potentially unaligned native-endian packed
+bytes plus LSB-first validity bitmap (1=valid). Existing `ColumnRef::Bytes` uses
+packed payload plus signed start offsets (`rows+1`) and the same bitmap. These
+variants and their validation/tests remain compatible.
+
+Additional `NativeInt`, `NativeReal`, and `NativeBytes` variants consume native
+numeric slices, optional byte NULL maps (ANY nonzero=NULL), and ColumnString
+chars plus u64 END offsets. End offsets include exactly one terminal NUL per row;
+only that final byte is removed from the borrowed slice, so embedded NUL and
+empty strings work without packing. Native offsets must be strictly increasing,
+in bounds, and end at chars length; every row's terminator is checked, including
+NULL/unselected rows. Native `broadcast=true` requires exactly one stored row,
+even with zero logical rows, and indexes it without expansion. Otherwise stored
+count equals physical row count. Selection remains indexed against logical batch
+rows, permits repeats, and distinguishes None from an explicit empty slice.
+
+All shapes, selection indices and selected non-NULL REAL domains are checked
+before any kernel/sink callback. The original compiled RPN ordering and kernel
+specializations are reused: generated `#[rpn_fn(borrowed)]` loaders make scalar
+primitive temporaries or borrowed byte arguments and call the original scalar
+function. Kernel bodies and original `eval_decoded`/`fn_ptr` remain unchanged.
+Original `VectorValue` intermediates/output batches remain Rust-owned; there is
+no owned facade input/output column. This is not fully zero-allocation execution.
+Opted-in kernels are arithmetic, numeric comparisons, Int/Real ABS and LENGTH;
+unmarked/writer/vararg/custom-metadata kernels remain copying-only.
+
+A later kernel or sink error can follow writes from earlier internal batches.
+Callers must discard all partial output and never silently replay. Empty output
+validates layouts but invokes neither kernels nor sink. The safe Rust API still
+supports borrowed byte output; the additive C borrowed API intentionally admits
+only numeric output (including LENGTH) into caller-owned buffers. See the C
+header's separate version bootstrap, native layouts, checked UInt8/UInt64 sinks,
+NULL scratch map, owned diagnostics/errors, and shared-program poison contract.
 
 ## Build and dependency contract
 

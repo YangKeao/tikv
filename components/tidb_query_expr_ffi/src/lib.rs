@@ -1,6 +1,6 @@
 // Copyright 2026 TiKV Project Authors. Licensed under Apache-2.0.
 
-//! Linux C ABI for the original **copying** standalone expression facade.
+//! Linux C ABIs for copying and native borrowed standalone expressions.
 //!
 //! The complete unsafe caller contract is in `include/tikv_expr.h`. Structural
 //! checks do not prove arbitrary foreign pointers are accessible. No SQL
@@ -165,6 +165,7 @@ pub struct ErrorView {
 pub struct Program {
     prepared: PreparedExpression,
     schema_types: Vec<u32>,
+    output_type: u32,
     poisoned: bool,
 }
 
@@ -560,6 +561,7 @@ pub unsafe extern "C" fn tikv_expr_compile(
         out.write(Box::into_raw(Box::new(Program {
             prepared,
             schema_types,
+            output_type: abi_type(tree.get_field_type())?,
             poisoned: false,
         })));
         Ok(())
@@ -693,6 +695,9 @@ pub unsafe extern "C" fn tikv_expr_result_free(result: *mut ResultHandle) {
 pub unsafe extern "C" fn tikv_expr_error_free(error: *mut ErrorHandle) {
     free_handle(error);
 }
+
+mod borrowed;
+pub use borrowed::*;
 
 #[cfg(test)]
 mod tests;

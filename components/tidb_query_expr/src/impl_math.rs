@@ -222,7 +222,7 @@ impl Floor for FloorIntToInt {
     }
 }
 
-#[rpn_fn]
+#[rpn_fn(borrowed)]
 #[inline]
 fn abs_int(arg: &Int) -> Result<Option<Int>> {
     match arg.checked_abs() {
@@ -231,13 +231,13 @@ fn abs_int(arg: &Int) -> Result<Option<Int>> {
     }
 }
 
-#[rpn_fn]
+#[rpn_fn(borrowed)]
 #[inline]
 fn abs_uint(arg: &Int) -> Result<Option<Int>> {
     Ok(Some(arg.to_owned()))
 }
 
-#[rpn_fn]
+#[rpn_fn(borrowed)]
 #[inline]
 fn abs_real(arg: &Real) -> Result<Option<Real>> {
     Ok(Some(num_traits::Signed::abs(arg)))

@@ -30,6 +30,11 @@ EXPORTS = {
     "tikv_expr_program_free",
     "tikv_expr_result_free",
     "tikv_expr_error_free",
+    "tikv_expr_borrowed_abi_version",
+    "tikv_expr_program_supports_borrowed",
+    "tikv_expr_eval_borrowed",
+    "tikv_expr_diagnostics_get_view",
+    "tikv_expr_diagnostics_free",
 }
 # These are shared platform ABI/runtime dependencies, NOT privately isolated.
 SYSTEM_NEEDED = {

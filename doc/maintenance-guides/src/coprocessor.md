@@ -353,6 +353,38 @@ library audits before coexistence with TiFlash gRPC/BoringSSL/libc++. Read
 ownership, selection, panic, warning, admission or linking change. Move the FFI
 contract tests alongside such changes; keep `standalone.rs` semantics unchanged.
 
+### Additive TiFlash-native borrowed expression ABI
+
+The packed borrowed source from `521ac733` is ported alongside copying ABI v1;
+existing packed/bitmap variants and copying exports remain available. The new
+`src/standalone/borrowed.rs` traverses the same compiled RPN order and generated
+`#[rpn_fn(borrowed)]` loaders call original scalar functions, not reimplemented
+SQL. Original `VectorValue` intermediates remain engine-owned.
+
+`types/borrowed.rs` additionally supports native numeric slices, byte NULL maps
+(any nonzero=NULL), ColumnString chars plus terminal-NUL-inclusive u64 END offsets,
+and single-row broadcast storage. No input payload is packed, copied, expanded,
+retained or mutated. Every layout/selection/selected REAL is validated before
+kernels or output callbacks; native string terminators are checked for all rows.
+The packed safe Rust API still supports borrowed byte output.
+
+The additive C ABI in `tidb_query_expr_ffi/src/borrowed.rs` uses its own version
+bootstrap before new structs and a program support probe. Only numeric outputs
+are exposed into caller-owned buffers: Int64/Float64, checked Int-to-UInt8 (0/1),
+and checked Int-to-UInt64 (nonnegative). Output null maps are mandatory, including
+nonnullable scratch. Capacity, alignment, checked range arithmetic and payload
+alias rejection precede all writes; caller still owns pointer provenance/lifetime
+and handle-slot disjointness. Layout/domain validation errors likewise leave
+payload untouched. Handle-slot initialization is separate from payload writes.
+Later errors discard partial output with no replay. Diagnostics/errors remain
+owned handles; an unwind poisons the shared program for copying and borrowed.
+
+Review native-layout/null/broadcast/selection tests, direct-sink prevalidation and
+partial-error tests, original-kernel differential tests, header C/C++ smoke and
+exact fourteen-export ELF audit together. Private vendored native archives and
+linker hiding are unchanged. Coordinate builds through the parent resource guard
+and a separate target directory; never overwrite the historical copying cdylib.
+
 ## Related Components
 
 - `src/server/service/kv.rs` is the RPC entry point.

@@ -12,7 +12,7 @@ use tidb_query_datatype::{
     expr::EvalContext,
 };
 
-#[rpn_fn(nullable)]
+#[rpn_fn(nullable, borrowed)]
 #[inline]
 pub fn compare<C: Comparer>(lhs: Option<&C::T>, rhs: Option<&C::T>) -> Result<Option<i64>> {
     C::compare(lhs, rhs)

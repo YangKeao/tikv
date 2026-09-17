@@ -700,3 +700,5 @@ fn panic_is_contained_and_program_poisoned() {
         );
     }
 }
+
+mod borrowed;

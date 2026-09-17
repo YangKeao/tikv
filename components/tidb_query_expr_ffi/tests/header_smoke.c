@@ -18,6 +18,11 @@ ABI_ASSERT(sizeof(tikv_expr_selection) == 16, "selection layout");
 ABI_ASSERT(sizeof(tikv_expr_warning) == 24, "warning layout");
 ABI_ASSERT(sizeof(tikv_expr_result_view) == 72, "result view layout");
 ABI_ASSERT(sizeof(tikv_expr_error_view) == 24, "error view layout");
+ABI_ASSERT(sizeof(tikv_expr_borrowed_column) == 88, "borrowed column layout");
+ABI_ASSERT(sizeof(tikv_expr_borrowed_output) == 64, "borrowed output layout");
+ABI_ASSERT(sizeof(tikv_expr_diagnostics_view) == 24, "diagnostics layout");
+ABI_ASSERT(offsetof(tikv_expr_borrowed_column, offsets) == 72, "END offsets pointer");
+ABI_ASSERT(offsetof(tikv_expr_borrowed_output, uint64s) == 56, "UInt64 output pointer");
 ABI_ASSERT(offsetof(tikv_expr_context, timezone_name) == 24, "timezone offset");
 ABI_ASSERT(offsetof(tikv_expr_column, strings) == 40, "strings offset");
 #endif
@@ -50,6 +55,21 @@ int main(void)
     tikv_expr_error_free(error);
     assert(tikv_expr_result_get_view(NULL, &result_view) == TIKV_EXPR_INVALID_ARGUMENT);
     assert(result_view.column.len == 0 && result_view.warning_count == 0);
+    {
+        tikv_expr_diagnostics *diagnostics = NULL;
+        tikv_expr_diagnostics_view diagnostics_view;
+        assert(tikv_expr_borrowed_abi_version() == TIKV_EXPR_BORROWED_ABI_VERSION);
+        assert(tikv_expr_program_supports_borrowed(NULL) == 0);
+        error = NULL;
+        assert(tikv_expr_eval_borrowed(NULL, NULL, 0, 0, NULL, NULL,
+                                     &diagnostics, &error) == TIKV_EXPR_INVALID_ARGUMENT);
+        assert(diagnostics == NULL && error != NULL);
+        tikv_expr_error_free(error);
+        assert(tikv_expr_diagnostics_get_view(NULL, &diagnostics_view)
+               == TIKV_EXPR_INVALID_ARGUMENT);
+        assert(diagnostics_view.warnings == NULL && diagnostics_view.warning_count == 0);
+        tikv_expr_diagnostics_free(NULL);
+    }
     tikv_expr_program_free(NULL);
     tikv_expr_result_free(NULL);
     tikv_expr_error_free(NULL);
