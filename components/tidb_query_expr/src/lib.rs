@@ -23,6 +23,7 @@ extern crate tidb_query_common;
 #[cfg(test)]
 extern crate test;
 
+pub mod standalone;
 pub mod types;
 
 pub mod impl_arithmetic;

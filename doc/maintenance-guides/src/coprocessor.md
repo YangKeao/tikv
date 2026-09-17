@@ -292,6 +292,35 @@ Companion docs:
 - Snapshot wait:
   request time spent between scheduling and obtaining the storage snapshot
 
+## In-Process Expression Embedding PoC
+
+`components/tidb_query_expr/src/standalone.rs` is a separate, copying embedding
+boundary around the existing RPN builder and `eval_decoded`, not a new
+coprocessor request or another kernel implementation. It does not initialize a
+server, snapshot, read pool, resource admission, or tracker. The embedding caller
+owns scheduling, memory limits, cancellation, and statement-level warning
+aggregation.
+
+- `PreparedExpression::compile` accepts serialized tipb `Expr` and `FieldType`
+  messages to avoid exposing rust-protobuf types to prost consumers. It fixes
+  the schema and evaluation context for the lifetime of the compiled program.
+- A restricted signature/type admission check validates expression metadata,
+  arity and column offsets before the existing builder and kernels are entered.
+  Add tests and extend this check when admitting additional signatures; do not
+  assume all engine mappers safely accept malformed expression trees.
+- Nullable integer, real, byte-string and decimal owned columns are copied into
+  decoded vectors. Selection is validated and normalized to dense rows, including
+  repeated indices, and batches are split at `BATCH_MAX_SIZE`. Empty batches
+  bypass `eval_decoded` because that engine entry point requires positive rows.
+- Each evaluation returns dense owned output, native MySQL error codes/messages,
+  retained warning details, and the total warning count across internal batches.
+  Runtime errors must not trigger a silent retry in another evaluator.
+- Consumers do not inherit TiKV's workspace lockfile or root Cargo patches.
+  Protocol dependency revisions are pinned in the workspace manifest for this
+  boundary; consumers must apply compatible root protobuf/raft patches and keep
+  their own lockfile. See `components/tidb_query_expr/STANDALONE.md` for the
+  supported surface and build requirements.
+
 ## Related Components
 
 - `src/server/service/kv.rs` is the RPC entry point.

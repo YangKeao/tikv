@@ -380,8 +380,10 @@ grpcio = { version = "0.10.4", default-features = false, features = [
 grpcio-health = { version = "0.10.4", default-features = false, features = [
   "protobuf-codec",
 ] }
-tipb = { git = "https://github.com/pingcap/tipb.git" }
-kvproto = { git = "https://github.com/pingcap/kvproto.git" }
+# Consumers of the expression crate do not inherit this workspace's lockfile.
+# Keep protocol versions aligned with the engine and its grpcio 0.10 dependency.
+tipb = { git = "https://github.com/pingcap/tipb.git", rev = "5f9928e91afe4ac82c770cc9cd5fb2c804a7555e" }
+kvproto = { git = "https://github.com/pingcap/kvproto.git", rev = "623e58e60fa95c26b356cc6b9c266b0418a08710" }
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
 tokio-timer = { git = "https://github.com/tikv/tokio", branch = "tokio-timer-hotfix" }
 tokio-executor = { git = "https://github.com/tikv/tokio", branch = "tokio-timer-hotfix" }
