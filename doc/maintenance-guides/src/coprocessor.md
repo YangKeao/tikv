@@ -318,6 +318,25 @@ aggregation.
 - Each evaluation returns dense owned output, native MySQL error codes/messages,
   retained warning details, and the total warning count across internal batches.
   Runtime errors must not trigger a silent retry in another evaluator.
+- `standalone/borrowed.rs` adds an opt-in `eval_borrowed` boundary alongside the
+  unchanged copying API. `ColumnRef` lends native-endian, potentially unaligned
+  numeric bytes or byte payloads/offsets plus 1=valid bitmaps. Shapes, selection
+  and every selected real value are validated before any kernel or output sink.
+  Primitive values are safely loaded into stack temporaries; payload columns,
+  selection vectors and validity metadata are not gathered/materialized.
+- `types/borrowed.rs` traverses the same compiled RPN nodes and retains owned
+  `VectorValue` intermediates. Only explicitly opted-in `rpn_fn(borrowed)` kernels
+  get a generated loader; it calls their original scalar body. Never opt in a
+  specialized/custom evaluator whose scalar body is semantically different.
+  No borrowed value is cached or retained in the prepared program. The caller
+  must retain input read guards through evaluation and avoid output lock aliases.
+- Borrowed output is delivered synchronously to a lifetime-scoped scalar sink;
+  `Diagnostics` contains warnings but no owned result column. Later batches or
+  the sink may fail after earlier callbacks: callers must discard partial
+  destination output, without native replay. Kernel allocations and destination
+  writes remain; this is removal of boundary payload materialization, not an
+  end-to-end zero-copy guarantee. `supports_borrowed` checks capability before
+  execution; unmarked kernels and decimal input/intermediate types are excluded.
 - Consumers do not inherit TiKV's workspace lockfile or root Cargo patches.
   Protocol dependency revisions are pinned in the workspace manifest for this
   boundary; consumers must apply compatible root protobuf/raft patches and keep

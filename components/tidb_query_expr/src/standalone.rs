@@ -490,5 +490,10 @@ fn validate_signature(
     Ok(())
 }
 
+mod borrowed;
+pub use borrowed::{Diagnostics, ScalarRef};
+
+pub use crate::types::borrowed::ColumnRef;
+
 #[cfg(test)]
 mod tests;

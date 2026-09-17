@@ -88,7 +88,7 @@ pub fn oct_string(s: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
     Ok(writer.write(Some(format!("{:o}", r as i64).into_bytes())))
 }
 
-#[rpn_fn]
+#[rpn_fn(borrowed)]
 #[inline]
 pub fn length(arg: BytesRef) -> Result<Option<i64>> {
     Ok(Some(arg.len() as i64))

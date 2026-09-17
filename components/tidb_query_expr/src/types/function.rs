@@ -43,6 +43,10 @@ pub struct RpnFnMeta {
     /// The metadata constructor of the RPN function.
     pub metadata_expr_ptr: fn(expr: &mut Expr) -> Result<Box<dyn Any + Send>>,
 
+    /// Optional safe packed-input loader generated for explicitly opted-in
+    /// ordinary kernels. It does not replace the native vectorized evaluator.
+    pub borrowed_fn_ptr: Option<super::borrowed::BorrowedFn>,
+
     #[allow(clippy::type_complexity)]
     /// The RPN function.
     pub fn_ptr: fn(

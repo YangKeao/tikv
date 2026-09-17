@@ -41,7 +41,7 @@ types.
 
 Schema and expression messages are serialized tipb wire bytes so a prost caller
 does not share generated Rust types with the rust-protobuf engine. Each
-ColumnRef's FieldType must equal its corresponding schema FieldType, including
+expression ColumnRef node's FieldType must equal its schema FieldType, including
 its protobuf presence bits. Callers should serialize both from the same field
 metadata. The expression must supply its kind and FieldType. Compilation
 validates exact function argument/return eval types and arity, column offsets,
@@ -94,6 +94,79 @@ discarded; native engine MySQL error code/message are preserved in `Error`.
 Facade admission/shape errors use code 1105; existing builder/evaluator errors
 retain their original code (including generic engine code 10000). A caller may choose native fallback on a
 compile/admission error, but must not silently fall back after evaluation starts.
+
+## Borrowed packed-input API
+
+The copying `eval` API remains unchanged as the baseline. The optional
+`supports_borrowed()` / `eval_borrowed` path removes **bulk input payload
+materialization** and the owned facade output column. It is not end-to-end
+zero-copy: scalar values must be loaded, kernel results/intermediates are still
+owned `VectorValue`s, and the caller writes results to its output storage.
+
+```rust,ignore
+use tidb_query_expr::standalone::{ColumnRef, ScalarRef};
+
+assert!(program.supports_borrowed());
+let inputs = [ColumnRef::Int {
+    values: &packed_native_endian_bytes,
+    validity: &valid_bits, // LSB-first, 1 = non-NULL
+}];
+let diagnostics = program.eval_borrowed(&inputs, physical_rows, selection, |value| {
+    match value {
+        ScalarRef::Null => output.append_null(),
+        ScalarRef::Int(value) => output.append_int(value),
+        ScalarRef::Real(value) => output.append_real(value),
+        ScalarRef::Bytes(value) => output.append_bytes(value),
+    }
+    Ok(())
+})?;
+```
+
+`ColumnRef::Int` and `Real` borrow native-endian packed 8-byte values and a
+validity bitmap. `Bytes` additionally borrows `offsets: &[i64]`; payloads retain
+their byte identity (including invalid UTF-8/NUL). Unaligned numeric buffers are
+supported with `from_ne_bytes`, without unsafe casts or materializing a numeric
+column. Length/offset/selection checks and a scan of **all selected REAL values**
+happen before any kernel or sink call. Byte offsets must contain rows+1
+nonnegative, nondecreasing in-bounds positions. Empty selections invoke no sink.
+Selection, offsets and validity stay borrowed; rows are not densely gathered.
+
+`Diagnostics` contains retained warnings and total warning count. The sink is
+higher-ranked over its temporary `ScalarRef` lifetime: it cannot keep a borrowed
+result reference after returning. The evaluator retains no input references
+between calls. Callers holding backing-store read guards must keep them alive
+for the whole call and avoid attempting writes to aliased locked storage in the
+sink (detach output or choose the copying path before acquiring guards).
+
+A runtime or sink error can occur **after callbacks from earlier internal
+batches**. The caller must discard/reset its partial output, not replay the
+expression natively. Warnings on a failed call are discarded, matching the
+copying facade's failure contract.
+
+### Kernel reuse and limits
+
+The same compiled `RpnExpressionNode` sequence and selected kernel specialization
+are traversed in the same expression-major order. A separate borrowed stack
+holds input views, references to constants, and original owned generated
+vectors. Only explicitly marked `#[rpn_fn(borrowed)]` ordinary scalar kernels
+have an optional generated loader. That loader creates stack-local primitive
+holders / borrowed byte arguments and calls the **original scalar function**;
+there is no handwritten SQL-arithmetic dispatcher and no kernel body change.
+The original `fn_ptr`, `ArgConstructor`, and `eval_decoded` paths are unchanged.
+
+Currently opted in: arithmetic/arithmetic_with_ctx, numeric comparisons,
+integer/real ABS (including unsigned ABS), and byte LENGTH. The standalone
+signature whitelist still applies. Decimal/other input or intermediate types,
+varargs, writers, metadata-based/custom evaluators and unmarked functions are
+not admitted to this path. An explicit macro opt-in must not be applied to a
+kernel whose scalar body differs semantically from its specialized evaluator.
+`supports_borrowed()` declines unsupported programs before execution.
+
+Tests cover exact input-pointer preservation for byte column output, unaligned
+numeric input, NULLs and duplicate/reordered selections, large split batches,
+constant broadcast, full preflight before sinks, invalid metadata, eager nested
+overflow under NULL parents, warning caps, sink cancellation, and partial output
+on late runtime failure. Differential checks use the unchanged copying API.
 
 ## Build and dependency contract
 

@@ -8,13 +8,13 @@ use tidb_query_datatype::{
     expr::EvalContext,
 };
 
-#[rpn_fn]
+#[rpn_fn(borrowed)]
 #[inline]
 pub fn arithmetic<A: ArithmeticOp>(lhs: &A::T, rhs: &A::T) -> Result<Option<A::T>> {
     A::calc(lhs, rhs)
 }
 
-#[rpn_fn(capture = [ctx])]
+#[rpn_fn(borrowed, capture = [ctx])]
 #[inline]
 pub fn arithmetic_with_ctx<A: ArithmeticOpWithCtx>(
     ctx: &mut EvalContext,

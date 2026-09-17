@@ -248,6 +248,9 @@ struct RpnFnAttr {
     /// Whether or not to use writer / guard pattern.
     writer: bool,
 
+    /// Generate a safe packed-input loader for this ordinary scalar kernel.
+    borrowed: bool,
+
     /// The maximum accepted arguments, which will be checked by the validator.
     ///
     /// Only varg or raw_varg function accepts a range of number of arguments.
@@ -278,6 +281,7 @@ impl Default for RpnFnAttr {
             is_raw_varg: false,
             nullable: true,
             writer: false,
+            borrowed: false,
             max_args: None,
             min_args: None,
             extra_validator: None,
@@ -294,6 +298,7 @@ impl parse::Parse for RpnFnAttr {
         let mut is_raw_varg = false;
         let mut nullable = false;
         let mut writer = false;
+        let mut borrowed = false;
         let mut max_args = None;
         let mut min_args = None;
         let mut extra_validator = None;
@@ -361,6 +366,9 @@ impl parse::Parse for RpnFnAttr {
                         "writer" => {
                             writer = true;
                         }
+                        "borrowed" => {
+                            borrowed = true;
+                        }
                         _ => {
                             return Err(Error::new_spanned(
                                 path,
@@ -413,11 +421,25 @@ impl parse::Parse for RpnFnAttr {
             ));
         }
 
+        if borrowed
+            && (is_varg
+                || is_raw_varg
+                || writer
+                || metadata_type.is_some()
+                || metadata_mapper.is_some())
+        {
+            return Err(Error::new_spanned(
+                config_items,
+                "borrowed requires an ordinary kernel without writer or metadata",
+            ));
+        }
+
         Ok(Self {
             is_varg,
             is_raw_varg,
             nullable,
             writer,
+            borrowed,
             max_args,
             min_args,
             extra_validator,
@@ -1179,6 +1201,7 @@ impl VargsRpnFn {
                     metadata_expr_ptr: init_metadata #ty_generics_turbofish,
                     validator_ptr: validate #ty_generics_turbofish,
                     fn_ptr: run #ty_generics_turbofish,
+                    borrowed_fn_ptr: None,
                 }
             }
         }
@@ -1320,6 +1343,7 @@ impl RawVargsRpnFn {
                     metadata_expr_ptr: init_metadata #ty_generics_turbofish,
                     validator_ptr: validate #ty_generics_turbofish,
                     fn_ptr: run #ty_generics_turbofish,
+                    borrowed_fn_ptr: None,
                 }
             }
         }
@@ -1335,6 +1359,7 @@ struct NormalRpnFn {
     metadata_mapper: Option<TokenStream>,
     nullable: bool,
     writer: bool,
+    borrowed: bool,
     item_fn: ItemFn,
     fn_trait_ident: Ident,
     evaluator_ident: Ident,
@@ -1405,6 +1430,7 @@ impl NormalRpnFn {
             metadata_mapper: attr.metadata_mapper,
             nullable: attr.nullable,
             writer: attr.writer,
+            borrowed: attr.borrowed,
             item_fn,
             fn_trait_ident,
             evaluator_ident,
@@ -1688,6 +1714,50 @@ impl NormalRpnFn {
         }
     }
 
+    fn generate_borrowed_loader(&self) -> TokenStream {
+        if !self.borrowed {
+            return quote! {};
+        }
+        let (impl_generics, ty_generics, where_clause) = self.item_fn.sig.generics.split_for_impl();
+        let turbofish = ty_generics.as_turbofish();
+        let fn_ident = &self.item_fn.sig.ident;
+        let captures = &self.captures;
+        let result_type = &self.ret_type;
+        let mut loads = Vec::new();
+        let mut call_args = Vec::new();
+        for (index, ty) in self.arg_types_anonymous.iter().enumerate() {
+            let holder = Ident::new(&format!("holder_{index}"), Span::call_site());
+            let arg = Ident::new(&format!("value_{index}"), Span::call_site());
+            loads.push(quote! {
+                let #holder = args[#index].scalar(row);
+                let #arg = <#ty as EvaluableRef>::borrow_scalar_value_ref(#holder.as_scalar_ref());
+            });
+            if !self.nullable {
+                loads
+                    .push(quote! { let Some(#arg) = #arg else { result.push_null(); continue; }; });
+            }
+            call_args.push(arg);
+        }
+        quote! {
+            fn run_borrowed #impl_generics (
+                ctx: &mut tidb_query_datatype::expr::EvalContext,
+                output_rows: usize,
+                args: &[crate::types::borrowed::BorrowedStackNode<'_>],
+                extra: &mut crate::RpnFnCallExtra<'_>,
+                metadata: &(dyn std::any::Any + Send),
+            ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> #where_clause {
+                use tidb_query_datatype::codec::data_type::{ChunkedVec, EvaluableRef, EvaluableRet};
+                let _ = (&ctx, &extra, &metadata);
+                let mut result = <#result_type as EvaluableRet>::ChunkedType::with_capacity(output_rows);
+                for row in 0..output_rows {
+                    #(#loads)*
+                    result.push(#fn_ident #turbofish (#(#captures,)* #(#call_args),*)?);
+                }
+                Ok(<#result_type as EvaluableRet>::cast_chunk_into_vector_value(result))
+            }
+        }
+    }
+
     fn generate_constructor(&self) -> TokenStream {
         let constructor_ident = Ident::new(
             &format!("{}_fn_meta", &self.item_fn.sig.ident),
@@ -1695,6 +1765,12 @@ impl NormalRpnFn {
         );
         let (impl_generics, ty_generics, where_clause) = self.item_fn.sig.generics.split_for_impl();
         let ty_generics_turbofish = ty_generics.as_turbofish();
+        let borrowed_loader = self.generate_borrowed_loader();
+        let borrowed_ptr = if self.borrowed {
+            quote! { Some(run_borrowed #ty_generics_turbofish) }
+        } else {
+            quote! { None }
+        };
         let evaluator_ident = &self.evaluator_ident;
         let mut evaluator =
             quote! { #evaluator_ident #ty_generics_turbofish (std::marker::PhantomData) };
@@ -1732,6 +1808,8 @@ impl NormalRpnFn {
                     #evaluator.eval(Null, ctx, output_rows, args, extra, metadata)
                 }
 
+                #borrowed_loader
+
                 #init_metadata_fn
 
                 #validator_fn
@@ -1741,6 +1819,7 @@ impl NormalRpnFn {
                     metadata_expr_ptr: init_metadata #ty_generics_turbofish,
                     validator_ptr: validate #ty_generics_turbofish,
                     fn_ptr: run #ty_generics_turbofish,
+                    borrowed_fn_ptr: #borrowed_ptr,
                 }
             }
         }
@@ -1933,6 +2012,7 @@ mod tests_normal {
                     metadata_expr_ptr: init_metadata,
                     validator_ptr: validate,
                     fn_ptr: run,
+                    borrowed_fn_ptr: None,
                 }
             }
         };
@@ -2109,6 +2189,7 @@ mod tests_normal {
                     metadata_expr_ptr: init_metadata::<A, B>,
                     validator_ptr: validate::<A, B>,
                     fn_ptr: run::<A, B>,
+                    borrowed_fn_ptr: None,
                 }
             }
         };
@@ -2137,6 +2218,7 @@ mod tests_normal {
                 captures: vec![parse_str("ctx").unwrap()],
                 nullable: true,
                 writer: false,
+                borrowed: false,
             },
             item_fn,
         )
@@ -2206,6 +2288,7 @@ mod tests_normal {
                 captures: Vec::new(),
                 nullable: false,
                 writer: false,
+                borrowed: false,
             },
             item_fn,
         )
@@ -2404,6 +2487,32 @@ mod tests_normal {
         let parsed_type = x.get_type_with_lifetime(quote! { 'arg_ });
         let expected = quote! { &'arg_ Int };
         assert_eq!(expected.to_string(), parsed_type.to_string());
+    }
+
+    #[test]
+    fn test_borrowed_attribute_rejects_unsupported_evaluator_shapes() {
+        for attr in [
+            "borrowed, varg",
+            "borrowed, nullable, raw_varg",
+            "borrowed, writer",
+            "borrowed, metadata_type = Int",
+        ] {
+            assert!(syn::parse_str::<RpnFnAttr>(attr).is_err(), "{attr}");
+        }
+        let attr = syn::parse_str::<RpnFnAttr>("borrowed, nullable").unwrap();
+        assert!(attr.borrowed);
+        let item = syn::parse_str::<ItemFn>(
+            "fn original(a: Option<&Int>) -> Result<Option<Int>> { Ok(a.copied()) }",
+        )
+        .unwrap();
+        let generated = NormalRpnFn::new(attr, item)
+            .unwrap()
+            .generate_constructor()
+            .to_string();
+        assert!(generated.contains("run_borrowed"));
+        assert!(generated.contains("holder_0"));
+        assert!(generated.contains("original (value_0)"));
+        assert!(generated.contains("borrowed_fn_ptr : Some"));
     }
 
     #[test]
