@@ -78,6 +78,9 @@ fn get_cast_fn_rpn_meta(
             }
         }
         (EvalType::Enum, EvalType::Int) => cast_enum_as_int_fn_meta(),
+        // `Set` is input-only: no builtin returns one, but every integer builtin
+        // accepts one. Its native value is the selection bit mask.
+        (EvalType::Set, EvalType::Int) => cast_set_as_int_fn_meta(),
 
         //  any as real
         (EvalType::Int, EvalType::Real) => {

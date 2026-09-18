@@ -3,13 +3,13 @@
 //! Copying, in-process embedding of the existing TiKV RPN engine.
 //!
 //! The wire boundary uses serialized tipb messages, not protobuf Rust types, so
-//! callers using prost can embed this rust-protobuf engine. All nine usable
-//! engine eval types and the existing builder's scalar signatures are
-//! available. This preserves TiKV's eager RPN semantics, including conditional
-//! children. It does not run a server, perform storage IO, or implement SQL
-//! kernels. Compilation builds RPN once. Evaluation copies selected rows into
-//! decoded TiKV columns and copies results back, splitting batches at the
-//! engine's batch limit.
+//! callers using prost can embed this rust-protobuf engine. Every engine eval
+//! type, including the input-only `Set`, and the existing builder's scalar
+//! signatures are available. This preserves TiKV's eager RPN semantics,
+//! including conditional children. It does not run a server, perform storage
+//! IO, or implement SQL kernels. Compilation builds RPN once. Evaluation copies
+//! selected rows into decoded TiKV columns and copies results back, splitting
+//! batches at the engine's batch limit.
 
 use std::{
     collections::HashMap,
@@ -20,7 +20,7 @@ use std::{
 use codec::prelude::NumberDecoder;
 use tidb_query_common::error::ErrorInner;
 pub use tidb_query_datatype::codec::data_type::{
-    DateTime, Decimal, Duration, Enum, Json, VectorFloat32,
+    DateTime, Decimal, Duration, Enum, Json, Set, VectorFloat32,
 };
 use tidb_query_datatype::{
     EvalType, FieldTypeTp,
@@ -32,7 +32,7 @@ use tidb_query_datatype::{
 };
 use tipb::{Expr, ExprType, FieldType, ScalarFuncSig};
 
-use crate::{BATCH_MAX_SIZE, RpnExpression, RpnExpressionBuilder};
+use crate::{BATCH_MAX_SIZE, RpnExpression, RpnExpressionBuilder, RpnExpressionNode};
 mod safety;
 mod values;
 pub use values::{
@@ -68,6 +68,10 @@ pub enum Column {
     Duration(Vec<Option<Duration>>),
     Json(Vec<Option<Json>>),
     Enum(Vec<Option<Enum>>),
+    /// A MySQL `SET` value: a `u64` bit mask plus the comma-joined names of the
+    /// selected elements. Like `Enum` this is input-only at the wire boundary;
+    /// the name bytes are preserved verbatim (element names need not be UTF-8).
+    Set(Vec<Option<Set>>),
     VectorFloat32(Vec<Option<VectorFloat32>>),
 }
 
@@ -83,6 +87,7 @@ impl Column {
             Self::Duration(v) => v.len(),
             Self::Json(v) => v.len(),
             Self::Enum(v) => v.len(),
+            Self::Set(v) => v.len(),
             Self::VectorFloat32(v) => v.len(),
         }
     }
@@ -101,6 +106,7 @@ impl Column {
             Self::Duration(_) => EvalType::Duration,
             Self::Json(_) => EvalType::Json,
             Self::Enum(_) => EvalType::Enum,
+            Self::Set(_) => EvalType::Set,
             Self::VectorFloat32(_) => EvalType::VectorFloat32,
         }
     }
@@ -115,8 +121,8 @@ impl Column {
             EvalType::Duration => Self::Duration(Vec::new()),
             EvalType::Json => Self::Json(Vec::new()),
             EvalType::Enum => Self::Enum(Vec::new()),
+            EvalType::Set => Self::Set(Vec::new()),
             EvalType::VectorFloat32 => Self::VectorFloat32(Vec::new()),
-            EvalType::Set => unreachable!("Set has no engine codec"),
         }
     }
 
@@ -180,6 +186,11 @@ impl Column {
                     dst.push(src[row].clone());
                 }
             }
+            (Self::Set(src), VectorValue::Set(dst)) => {
+                for &row in rows {
+                    dst.push(src[row].clone());
+                }
+            }
             (Self::VectorFloat32(src), VectorValue::VectorFloat32(dst)) => {
                 for &row in rows {
                     if let Some(value) = &src[row] {
@@ -203,6 +214,7 @@ impl Column {
             (Self::Duration(dst), ScalarValueRef::Duration(v)) => dst.push(v.copied()),
             (Self::Json(dst), ScalarValueRef::Json(v)) => dst.push(v.map(|v| v.to_owned())),
             (Self::Enum(dst), ScalarValueRef::Enum(v)) => dst.push(v.map(|v| v.to_owned())),
+            (Self::Set(dst), ScalarValueRef::Set(v)) => dst.push(v.map(|v| v.to_owned())),
             (Self::VectorFloat32(dst), ScalarValueRef::VectorFloat32(v)) => {
                 dst.push(v.map(|v| v.to_owned()))
             }
@@ -401,6 +413,43 @@ impl PreparedExpression {
         })
     }
 
+    /// Whether any node of the compiled program is a kernel registered with a
+    /// lazy implementation.
+    ///
+    /// This answers "is this program lazy at all", not "is this program *safe*
+    /// to run under MySQL's short-circuit semantics": a program can contain one
+    /// lazy node and one eager node of a different lazy-sensitive family. Use
+    /// [`Self::eager_lazy_risk`] for the sound admission test.
+    pub fn has_lazy_nodes(&self) -> bool {
+        self.expression.as_ref().iter().any(|node| match node {
+            RpnExpressionNode::FnCall { func_meta, .. } => func_meta.lazy_fn_ptr.is_some(),
+            _ => false,
+        })
+    }
+
+    /// Kernel names of nodes that implement a lazy-sensitive SQL construct but
+    /// were dispatched to a kernel without a lazy implementation.
+    ///
+    /// An empty result is the sound signal that the embedder may relax its
+    /// shape gate: every lazy-sensitive node in the program (if any) is
+    /// actually lazy. A nonempty result lists the offending kernel names in
+    /// first-occurrence order, without duplicates, so the caller can record a
+    /// fallback reason. Constants and column references can never contribute.
+    pub fn eager_lazy_risk(&self) -> Vec<&'static str> {
+        let mut risk = Vec::new();
+        for node in self.expression.as_ref() {
+            if let RpnExpressionNode::FnCall { func_meta, .. } = node {
+                if func_meta.lazy_fn_ptr.is_none()
+                    && crate::LAZY_SENSITIVE_KERNELS.contains(&func_meta.name)
+                    && !risk.contains(&func_meta.name)
+                {
+                    risk.push(func_meta.name);
+                }
+            }
+        }
+        risk
+    }
+
     /// Creates fresh execution state bound to this program's fixed
     /// configuration. Reuse it across calls on one thread to avoid reallocating
     /// the warning and selection scratch; create one per concurrent evaluator.
@@ -539,17 +588,6 @@ fn field_type(ft: &FieldType) -> Result<EvalType, Error> {
     let raw = FieldTypeTp::from_i32(ft.get_tp())
         .ok_or_else(|| Error::invalid(format!("unknown field type {}", ft.get_tp())))?;
     let tp = EvalType::try_from(raw).map_err(|e| Error::invalid(e.to_string()))?;
-    // TEMPORARY: `tidb_query_datatype` now maps `FieldTypeTp::Set` to
-    // `EvalType::Set`, but the standalone facade has no `Column::Set` variant
-    // and `Column::empty` would hit its `unreachable!("Set has no engine
-    // codec")` arm. Refuse the type at the boundary instead of admitting a
-    // program that cannot be evaluated. Delete this check together with the
-    // `Column::Set` variant once it exists.
-    if tp == EvalType::Set {
-        return Err(Error::invalid(
-            "Set is not supported by the standalone facade",
-        ));
-    }
     if matches!(tp, EvalType::DateTime | EvalType::Duration)
         && !(-1..=6).contains(&ft.get_decimal())
     {

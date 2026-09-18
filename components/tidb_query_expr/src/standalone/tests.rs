@@ -448,7 +448,13 @@ fn reject_schema_shape_and_malformed_expression_before_engine() {
             .push_child(E::constant_int(2))
             .build(),
     );
-    reject(E::constant_null(FieldTypeTp::Set).build());
+    // `Set` used to be refused at this boundary. It is now a carried input
+    // type, so a NULL Set constant compiles and evaluates to a Set column.
+    let mut null_set = prepare(E::constant_null(FieldTypeTp::Set), &[], Context::default());
+    assert_eq!(
+        null_set.eval(&[], 1, None).unwrap().column,
+        Column::Set(vec![None])
+    );
     let mut malformed = E::constant_int(1).build();
     malformed.set_val(vec![0]);
     reject(malformed);
@@ -625,4 +631,158 @@ fn compiled_program_evaluates_concurrently_from_two_threads() {
     for worker in workers {
         worker.join().unwrap();
     }
+}
+
+/// A `SET` column is a first-class carried input: `Column::Set` is copied into
+/// `VectorValue::Set`, evaluated, and copied back into `Column::Set`. The
+/// element name bytes are preserved verbatim, including non-UTF8 names, because
+/// `Set`'s equality only compares the bit mask.
+#[test]
+fn set_column_roundtrip_null_empty_selection_multielement_and_non_utf8_names() {
+    let mut set_ft: FieldType = FieldTypeTp::Set.into();
+    set_ft.set_elems(protobuf::RepeatedField::from_vec(vec![
+        "a".to_owned(),
+        "b".to_owned(),
+        "c".to_owned(),
+    ]));
+    let mut identity = prepare(
+        E::column_ref(0, set_ft.clone()),
+        std::slice::from_ref(&set_ft),
+        Context::default(),
+    );
+    let input = Column::Set(vec![
+        None,
+        // Empty element selection: bit mask zero, name forced empty.
+        Some(Set::new(b"ignored".to_vec(), 0)),
+        // Multi-element, declaration order.
+        Some(Set::new(b"a,c".to_vec(), 0b101)),
+        // Non-UTF8 element names must survive unchanged.
+        Some(Set::new(vec![0xff, 0xfe], 0b011)),
+    ]);
+    let output = identity
+        .eval(std::slice::from_ref(&input), 4, None)
+        .unwrap();
+    assert_eq!(output.warning_count, 0);
+    assert_eq!(output.column, input);
+    let Column::Set(values) = &output.column else {
+        panic!("expected a Set column")
+    };
+    assert_eq!(values[0], None);
+    assert_eq!(values[1].as_ref().unwrap().name(), b"");
+    assert_eq!(values[1].as_ref().unwrap().value(), 0);
+    assert_eq!(values[2].as_ref().unwrap().name(), b"a,c");
+    assert_eq!(values[3].as_ref().unwrap().name(), &[0xff, 0xfe]);
+
+    // An empty selection produces an empty typed column without entering the
+    // engine; a reordered/repeated selection follows selection order.
+    assert_eq!(
+        identity
+            .eval(std::slice::from_ref(&input), 4, Some(&[]))
+            .unwrap()
+            .column,
+        Column::Set(vec![])
+    );
+    assert_eq!(
+        identity
+            .eval(std::slice::from_ref(&input), 4, Some(&[3, 0, 3]))
+            .unwrap()
+            .column,
+        Column::Set(vec![input_set(&input, 3), None, input_set(&input, 3)])
+    );
+
+    // The `(Set, Int)` cast consumes a Set column: the numeric value is the
+    // selection bit mask. The engine keys casts off the field types, so the
+    // wire signature only needs to be one the dispatcher admits.
+    let mut cast = prepare(
+        E::scalar_func(ScalarFuncSig::CastStringAsInt, FieldTypeTp::LongLong)
+            .push_child(E::column_ref(0, set_ft.clone())),
+        std::slice::from_ref(&set_ft),
+        Context::default(),
+    );
+    assert_eq!(
+        cast.eval(std::slice::from_ref(&input), 4, None)
+            .unwrap()
+            .column,
+        Column::Int(vec![None, Some(0), Some(0b101), Some(0b011)])
+    );
+}
+
+/// Helper for the repeated-selection assertion: clone one `Set` out of a
+/// `Column::Set` input.
+fn input_set(column: &Column, row: usize) -> Option<Set> {
+    let Column::Set(values) = column else {
+        panic!("expected a Set column")
+    };
+    values[row].clone()
+}
+
+/// `has_lazy_nodes` is a presence check; `eager_lazy_risk` is the sound
+/// admission signal. A program can mix a lazily dispatched control node with an
+/// eager node of a lazy-sensitive family that is not registered yet.
+#[test]
+fn eager_lazy_risk_reports_only_unregistered_lazy_sensitive_kernels() {
+    let ft: FieldType = FieldTypeTp::LongLong.into();
+    let eager = prepare(
+        E::scalar_func(ScalarFuncSig::PlusInt, ft.clone())
+            .push_child(E::column_ref(0, ft.clone()))
+            .push_child(E::constant_int(1)),
+        std::slice::from_ref(&ft),
+        Context::default(),
+    );
+    assert!(!eager.has_lazy_nodes());
+    assert!(eager.eager_lazy_risk().is_empty());
+
+    let lazy = prepare(
+        E::scalar_func(ScalarFuncSig::IfInt, ft.clone())
+            .push_child(E::constant_int(1))
+            .push_child(E::constant_int(7))
+            .push_child(E::constant_int(9)),
+        &[],
+        Context::default(),
+    );
+    assert!(lazy.has_lazy_nodes());
+    assert!(lazy.eager_lazy_risk().is_empty());
+
+    let unregistered = prepare(
+        E::scalar_func(ScalarFuncSig::Elt, FieldTypeTp::VarChar)
+            .push_child(E::constant_int(1))
+            .push_child(E::constant_bytes(b"a".to_vec())),
+        &[],
+        Context::default(),
+    );
+    assert!(!unregistered.has_lazy_nodes());
+    assert_eq!(unregistered.eager_lazy_risk(), vec!["elt"]);
+
+    // The signal is not specific to `ELT`: every not-yet-lazy family in
+    // `LAZY_SENSITIVE_KERNELS` is reported by its kernel name.
+    for (sig, name) in [
+        (ScalarFuncSig::FieldInt, "field"),
+        (ScalarFuncSig::GreatestInt, "greatest_int"),
+        (ScalarFuncSig::LeastInt, "least_int"),
+    ] {
+        let program = prepare(
+            E::scalar_func(sig, FieldTypeTp::LongLong)
+                .push_child(E::constant_int(1))
+                .push_child(E::constant_int(1)),
+            &[],
+            Context::default(),
+        );
+        assert!(!program.has_lazy_nodes());
+        assert_eq!(program.eager_lazy_risk(), vec![name]);
+    }
+
+    let mixed = prepare(
+        E::scalar_func(ScalarFuncSig::IfString, FieldTypeTp::VarChar)
+            .push_child(E::constant_int(1))
+            .push_child(
+                E::scalar_func(ScalarFuncSig::Elt, FieldTypeTp::VarChar)
+                    .push_child(E::constant_int(1))
+                    .push_child(E::constant_bytes(b"a".to_vec())),
+            )
+            .push_child(E::constant_bytes(b"b".to_vec())),
+        &[],
+        Context::default(),
+    );
+    assert!(mixed.has_lazy_nodes());
+    assert_eq!(mixed.eager_lazy_risk(), vec!["elt"]);
 }

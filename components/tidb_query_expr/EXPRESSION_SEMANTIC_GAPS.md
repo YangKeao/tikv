@@ -66,8 +66,13 @@ their unused branches here:
   `AddTime*Null` and `NullTimeDiff` forms that Go answers without evaluating
   arguments at all.
 
-Status: **guarded** by the embedder (only leaf arguments are admitted), but the
-engine itself is still eager. See issue
+Status: the Tier 1 control/logical families (`If*`, `IfNull*`, `Coalesce*`,
+`CaseWhen*`, `LogicalAnd/Or/Xor`) are now dispatched to lazy kernels; the
+Tier 2/3 families above remain eager. The facade answers "is this program safe
+to admit" with `PreparedExpression::has_lazy_nodes()` (presence) and
+`eager_lazy_risk()` (the sound signal: kernel names of lazy-sensitive nodes
+dispatched eagerly), so an embedder can admit a non-leaf lazy shape only when
+the risk list is empty (see `SHORT_CIRCUIT_DESIGN.md` §11). See issue
 [pingcap/tidb#70156](https://github.com/pingcap/tidb/issues/70156): it is an
 open proposal whose TiKV work item is "introduce short-circuit expression
 nodes whose child expressions are evaluated on demand instead of eagerly"; the
@@ -107,5 +112,8 @@ rollout switch it mentions does not exist in either checkout yet.
 ## 6. Not yet investigated
 
 * Collation coverage beyond `binary` / `utf8mb4` / `latin1` / `gbk`.
-* `Set` / `Geometry` / array column types (no native type or codec support).
+* `Geometry` / array column types (no native type or codec support). `Set` now
+  has a native type, codec and `Column::Set` facade carrier, so identity and
+  `CAST(set AS SIGNED)` (the selection bit mask) are covered; Set string
+  conversion, comparison and aggregation are not.
 * The `eager` interaction between window functions and the expression engine.
