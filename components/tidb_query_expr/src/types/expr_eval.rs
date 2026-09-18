@@ -269,6 +269,44 @@ impl RpnExpression {
         input_logical_rows: &'a [usize],
         output_rows: usize,
     ) -> Result<RpnStackNode<'a>> {
+        self.eval_decoded_impl::<false>(
+            ctx,
+            schema,
+            input_physical_columns,
+            input_logical_rows,
+            output_rows,
+        )
+    }
+
+    /// Standalone-only safety boundary. Finite inputs do not guarantee finite
+    /// kernel outputs (e.g. vector distance or rounding can overflow). Reject
+    /// every nonfinite REAL before another kernel consumes it via NotNan
+    /// arithmetic. This is not fallback and leaves the normal evaluator intact.
+    pub(crate) fn eval_decoded_with_finite_reals<'a>(
+        &'a self,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        input_physical_columns: &'a LazyBatchColumnVec,
+        input_logical_rows: &'a [usize],
+        output_rows: usize,
+    ) -> Result<RpnStackNode<'a>> {
+        self.eval_decoded_impl::<true>(
+            ctx,
+            schema,
+            input_physical_columns,
+            input_logical_rows,
+            output_rows,
+        )
+    }
+
+    fn eval_decoded_impl<'a, const CHECK_FINITE_REALS: bool>(
+        &'a self,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        input_physical_columns: &'a LazyBatchColumnVec,
+        input_logical_rows: &'a [usize],
+        output_rows: usize,
+    ) -> Result<RpnStackNode<'a>> {
         assert!(output_rows > 0);
         assert!(output_rows <= BATCH_MAX_SIZE);
         let mut stack = Vec::with_capacity(self.len());
@@ -319,6 +357,22 @@ impl RpnExpression {
                         },
                         field_type: ret_field_type,
                     });
+                }
+            }
+            if CHECK_FINITE_REALS {
+                let produced = stack.last().unwrap();
+                if matches!(produced.get_logical_scalar_ref(0), ScalarValueRef::Real(_)) {
+                    for row in 0..output_rows {
+                        if let ScalarValueRef::Real(Some(value)) =
+                            produced.get_logical_scalar_ref(row)
+                        {
+                            if !value.is_finite() {
+                                return Err(other_err!(
+                                    "standalone evaluation produced a nonfinite REAL"
+                                ));
+                            }
+                        }
+                    }
                 }
             }
         }

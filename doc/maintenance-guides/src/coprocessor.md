@@ -304,22 +304,54 @@ aggregation.
 - `PreparedExpression::compile` accepts serialized tipb `Expr` and `FieldType`
   messages to avoid exposing rust-protobuf types to prost consumers. It fixes
   the schema and evaluation context for the lifetime of the compiled program.
-- A restricted signature/type admission check validates expression metadata,
-  arity and column offsets before the existing builder and kernels are entered.
-  Add tests and extend this check when admitting additional signatures; do not
-  assume all engine mappers safely accept malformed expression trees.
-- Nullable integer, real, byte-string and decimal owned columns are copied into
-  decoded vectors. Selection is validated and normalized to dense rows, including
+- The scalar signature whitelist has been removed. Original mapper, validators
+  and metadata builders remain authoritative (510 mapped signatures at the
+  borrowed baseline). Generic metadata/shape validation plus focused safeguards
+  protect trusted-plan gaps: ToBinary/LIKE mapper arity, regexp raw-varg types,
+  enum constant indices and malformed binary JSON. Do not assume native builders
+  safely accept arbitrary malformed trees. Enum name lookup exposes wire numbers,
+  not a support claim; compile the complete expression to check capability.
+- All nine usable eval types have owned input/output: integer, real, bytes,
+  exact native Decimal, DateTime, Duration, Json, Enum and VectorFloat32. Set has
+  no engine codec and remains unsupported. `standalone/values.rs` supplies checked
+  decimal/Time chunk and binary JSON transport around existing codecs. Decimal
+  preserves stored/result fractions independently; never format it through text
+  or invoke the unsafe native chunk decoder on unvalidated bool/header bytes.
+  Go's zero-digit zero is normalized to a one-digit zero (retaining result scale)
+  because native shift assumes at least one storage word. A zero-digit header
+  with nonzero word storage is rejected.
+  Native JSON/vector public mutable payloads are revalidated on selected ingress.
+- RPN children remain eager, including IF/CASE/COALESCE and logical operators.
+  Consumers requiring lazy semantics must retain unsafe trees natively before
+  evaluation; there is no lazy rewrite or runtime fallback. Metadata initialization
+  can fail at compile time (constant regex/unit, cast metadata); compile-time
+  warnings are rejected explicitly rather than silently dropped.
+- Selection is validated and normalized to dense rows, including
   repeated indices, and batches are split at `BATCH_MAX_SIZE`. Empty batches
   bypass `eval_decoded` because that engine entry point requires positive rows.
   Selected real values and serialized real constants must be finite: the
   engine's NotNan wrapper accepts infinity, but operations producing NaN can
   panic. Unselected nonfinite values are not converted.
+- `types/expr_eval.rs::eval_decoded_with_finite_reals` is a standalone-only
+  checked entry factoring the original evaluator loop. Every produced REAL is
+  checked before the next node: finite vector/round inputs can still produce
+  infinity. The normal `eval_decoded` const-generic path has checks disabled;
+  kernels and stock engine semantics are unchanged. Nonfinite intermediate/root
+  errors are not a replay opportunity.
+- `standalone/safety.rs` preflights ROUND/TRUNCATE digit literals and selected
+  input columns within signed -308..=308 / unsigned 0..=308. Derived digit
+  expressions are rejected before building, since checking them would require
+  speculative execution. Selected digit columns are checked for the entire batch
+  before kernels; borrowed evaluation declines these guarded-column programs.
+  REAL metadata flen/decimal must be -1 or 0..=254, with flen>=decimal when both
+  specified, guarding trusted float conversion assertions/underflow. These are
+  facade safety subsets rather than changes to SQL kernels.
 - Each evaluation returns dense owned output, native MySQL error codes/messages,
   retained warning details, and the total warning count across internal batches.
   Runtime errors must not trigger a silent retry in another evaluator.
 - `standalone/borrowed.rs` adds an opt-in `eval_borrowed` boundary alongside the
-  unchanged copying API. `ColumnRef` lends native-endian, potentially unaligned
+  copying API. Borrowed admission remains explicitly opt-in despite broader
+  copying support. `ColumnRef` lends native-endian, potentially unaligned
   numeric bytes or byte payloads/offsets plus 1=valid bitmaps. Shapes, selection
   and every selected real value are validated before any kernel or output sink.
   Primitive values are safely loaded into stack temporaries; payload columns,

@@ -3,28 +3,58 @@
 //! Copying, in-process embedding of the existing TiKV RPN engine.
 //!
 //! The wire boundary uses serialized tipb messages, not protobuf Rust types, so
-//! callers using prost can embed this rust-protobuf engine. This PoC accepts
-//! integer, real, byte-string and decimal columns and a deliberately restricted
-//! scalar signature set (see `validate_signature`). It does not run a server,
-//! perform storage IO, or implement any SQL kernels. Compilation builds RPN
-//! once. Evaluation copies selected rows into decoded TiKV columns and copies
-//! results back, splitting batches at the engine's batch limit.
+//! callers using prost can embed this rust-protobuf engine. All nine usable
+//! engine eval types and the existing builder's scalar signatures are
+//! available. This preserves TiKV's eager RPN semantics, including conditional
+//! children. It does not run a server, perform storage IO, or implement SQL
+//! kernels. Compilation builds RPN once. Evaluation copies selected rows into
+//! decoded TiKV columns and copies results back, splitting batches at the
+//! engine's batch limit.
 
-use std::{fmt, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{Arc, OnceLock},
+};
 
 use codec::prelude::NumberDecoder;
 use tidb_query_common::error::ErrorInner;
+pub use tidb_query_datatype::codec::data_type::{
+    DateTime, Decimal, Duration, Enum, Json, VectorFloat32,
+};
 use tidb_query_datatype::{
-    EvalType,
+    EvalType, FieldTypeTp,
     codec::{
         batch::LazyBatchColumnVec,
-        data_type::{ChunkedVec, Decimal, Real, ScalarValueRef, VectorValue},
+        data_type::{ChunkedVec, Real, ScalarValueRef, VectorFloat32Ref, VectorValue},
     },
     expr::{EvalConfig, EvalContext, Flag, SqlMode},
 };
 use tipb::{Expr, ExprType, FieldType, ScalarFuncSig};
 
 use crate::{BATCH_MAX_SIZE, RpnExpression, RpnExpressionBuilder};
+mod safety;
+mod values;
+pub use values::{
+    date_time_from_chunk, date_time_to_chunk, decimal_from_chunk, decimal_to_chunk,
+    json_from_binary, json_to_binary,
+};
+
+/// Resolve a name in the engine's tipb enum, not a promise of RPN support.
+/// Compile the complete expression to check its signature, types and metadata.
+pub fn scalar_function_signature(name: &str) -> Option<i32> {
+    use protobuf::ProtobufEnum;
+    static SIGNATURES: OnceLock<HashMap<String, i32>> = OnceLock::new();
+    SIGNATURES
+        .get_or_init(|| {
+            ScalarFuncSig::values()
+                .iter()
+                .map(|sig| (format!("{sig:?}"), sig.value()))
+                .collect()
+        })
+        .get(name)
+        .copied()
+}
 
 /// Owned nullable values. Unsigned integers use their `i64` bit representation;
 /// unsignedness, decimal scale, charset and collation live in the input schema.
@@ -33,7 +63,12 @@ pub enum Column {
     Int(Vec<Option<i64>>),
     Real(Vec<Option<f64>>),
     Bytes(Vec<Option<Vec<u8>>>),
-    Decimal(Vec<Option<String>>),
+    Decimal(Vec<Option<Decimal>>),
+    DateTime(Vec<Option<DateTime>>),
+    Duration(Vec<Option<Duration>>),
+    Json(Vec<Option<Json>>),
+    Enum(Vec<Option<Enum>>),
+    VectorFloat32(Vec<Option<VectorFloat32>>),
 }
 
 impl Column {
@@ -44,6 +79,11 @@ impl Column {
             Self::Real(v) => v.len(),
             Self::Bytes(v) => v.len(),
             Self::Decimal(v) => v.len(),
+            Self::DateTime(v) => v.len(),
+            Self::Duration(v) => v.len(),
+            Self::Json(v) => v.len(),
+            Self::Enum(v) => v.len(),
+            Self::VectorFloat32(v) => v.len(),
         }
     }
 
@@ -57,6 +97,11 @@ impl Column {
             Self::Real(_) => EvalType::Real,
             Self::Bytes(_) => EvalType::Bytes,
             Self::Decimal(_) => EvalType::Decimal,
+            Self::DateTime(_) => EvalType::DateTime,
+            Self::Duration(_) => EvalType::Duration,
+            Self::Json(_) => EvalType::Json,
+            Self::Enum(_) => EvalType::Enum,
+            Self::VectorFloat32(_) => EvalType::VectorFloat32,
         }
     }
 
@@ -66,7 +111,12 @@ impl Column {
             EvalType::Real => Self::Real(Vec::new()),
             EvalType::Bytes => Self::Bytes(Vec::new()),
             EvalType::Decimal => Self::Decimal(Vec::new()),
-            _ => unreachable!("validated standalone type"),
+            EvalType::DateTime => Self::DateTime(Vec::new()),
+            EvalType::Duration => Self::Duration(Vec::new()),
+            EvalType::Json => Self::Json(Vec::new()),
+            EvalType::Enum => Self::Enum(Vec::new()),
+            EvalType::VectorFloat32 => Self::VectorFloat32(Vec::new()),
+            EvalType::Set => unreachable!("Set has no engine codec"),
         }
     }
 
@@ -101,13 +151,41 @@ impl Column {
             }
             (Self::Decimal(src), VectorValue::Decimal(dst)) => {
                 for &row in rows {
-                    dst.push(
-                        src[row]
-                            .as_ref()
-                            .map(|s| s.parse::<Decimal>())
-                            .transpose()
-                            .map_err(Error::from)?,
-                    );
+                    dst.push(src[row]);
+                }
+            }
+            (Self::DateTime(src), VectorValue::DateTime(dst)) => {
+                for &row in rows {
+                    if let Some(value) = src[row] {
+                        values::validate_time(value)?;
+                    }
+                    dst.push(src[row]);
+                }
+            }
+            (Self::Duration(src), VectorValue::Duration(dst)) => {
+                for &row in rows {
+                    dst.push(src[row]);
+                }
+            }
+            (Self::Json(src), VectorValue::Json(dst)) => {
+                for &row in rows {
+                    if let Some(value) = &src[row] {
+                        values::validate_json(value)?;
+                    }
+                    dst.push(src[row].clone());
+                }
+            }
+            (Self::Enum(src), VectorValue::Enum(dst)) => {
+                for &row in rows {
+                    dst.push(src[row].clone());
+                }
+            }
+            (Self::VectorFloat32(src), VectorValue::VectorFloat32(dst)) => {
+                for &row in rows {
+                    if let Some(value) = &src[row] {
+                        VectorFloat32Ref::new(&value.value)?;
+                    }
+                    dst.push(src[row].clone());
                 }
             }
             _ => unreachable!("matching column type"),
@@ -120,8 +198,13 @@ impl Column {
             (Self::Int(dst), ScalarValueRef::Int(v)) => dst.push(v.copied()),
             (Self::Real(dst), ScalarValueRef::Real(v)) => dst.push(v.map(|v| v.into_inner())),
             (Self::Bytes(dst), ScalarValueRef::Bytes(v)) => dst.push(v.map(<[u8]>::to_vec)),
-            (Self::Decimal(dst), ScalarValueRef::Decimal(v)) => {
-                dst.push(v.map(ToString::to_string))
+            (Self::Decimal(dst), ScalarValueRef::Decimal(v)) => dst.push(v.copied()),
+            (Self::DateTime(dst), ScalarValueRef::DateTime(v)) => dst.push(v.copied()),
+            (Self::Duration(dst), ScalarValueRef::Duration(v)) => dst.push(v.copied()),
+            (Self::Json(dst), ScalarValueRef::Json(v)) => dst.push(v.map(|v| v.to_owned())),
+            (Self::Enum(dst), ScalarValueRef::Enum(v)) => dst.push(v.map(|v| v.to_owned())),
+            (Self::VectorFloat32(dst), ScalarValueRef::VectorFloat32(v)) => {
+                dst.push(v.map(|v| v.to_owned()))
             }
             _ => return Err(Error::invalid("RPN output type differs from declared type")),
         }
@@ -255,6 +338,7 @@ pub struct PreparedExpression {
     input_types: Vec<EvalType>,
     output_type: EvalType,
     config: Arc<EvalConfig>,
+    fractional_digit_columns: Vec<safety::DigitColumn>,
 }
 
 impl PreparedExpression {
@@ -274,6 +358,8 @@ impl PreparedExpression {
             .collect::<Result<_, _>>()?;
         let input_types = schema.iter().map(field_type).collect::<Result<_, _>>()?;
         let output_type = validate_expr(&tree, &schema, 0)?;
+        let mut fractional_digit_columns = Vec::new();
+        safety::collect_digit_columns(&tree, &mut fractional_digit_columns)?;
         let config = context.config()?;
         let mut ctx = EvalContext::new(config.clone());
         let expression = RpnExpressionBuilder::build_from_expr_tree(tree, &mut ctx, schema.len())?;
@@ -288,6 +374,7 @@ impl PreparedExpression {
             input_types,
             output_type,
             config,
+            fractional_digit_columns,
         })
     }
 
@@ -315,6 +402,12 @@ impl PreparedExpression {
         if selection.is_some_and(|rows| rows.iter().any(|&row| row >= row_count)) {
             return Err(Error::invalid("selection index out of bounds"));
         }
+        safety::validate_digit_columns(
+            &self.fractional_digit_columns,
+            columns,
+            row_count,
+            selection,
+        )?;
         let mut ctx = EvalContext::new(self.config.clone());
         let mut output = Column::empty(self.output_type);
         let output_rows = selection.map_or(row_count, <[usize]>::len);
@@ -330,7 +423,7 @@ impl PreparedExpression {
                 .collect::<Result<Vec<_>, _>>()?
                 .into();
             let dense: Vec<usize> = (0..rows.len()).collect();
-            let result = self.expression.eval_decoded(
+            let result = self.expression.eval_decoded_with_finite_reals(
                 &mut ctx,
                 &self.schema,
                 &decoded,
@@ -360,13 +453,23 @@ impl PreparedExpression {
 fn field_type(ft: &FieldType) -> Result<EvalType, Error> {
     // Match raw wire values before using accessors: unknown values must not be
     // silently interpreted as the default MySQL type.
-    let tp = match ft.get_tp() {
-        1 | 2 | 3 | 8 | 9 | 13 => EvalType::Int,
-        4 | 5 => EvalType::Real,
-        15 | 249..=254 => EvalType::Bytes,
-        246 => EvalType::Decimal,
-        other => return Err(Error::invalid(format!("unsupported field type {other}"))),
-    };
+    let raw = FieldTypeTp::from_i32(ft.get_tp())
+        .ok_or_else(|| Error::invalid(format!("unknown field type {}", ft.get_tp())))?;
+    let tp = EvalType::try_from(raw).map_err(|e| Error::invalid(e.to_string()))?;
+    if matches!(tp, EvalType::DateTime | EvalType::Duration)
+        && !(-1..=6).contains(&ft.get_decimal())
+    {
+        return Err(Error::invalid(
+            "temporal fractional precision must be -1..=6",
+        ));
+    }
+    if tp == EvalType::Real
+        && (!(-1..=254).contains(&ft.get_flen())
+            || !(-1..=254).contains(&ft.get_decimal())
+            || (ft.get_flen() >= 0 && ft.get_decimal() >= 0 && ft.get_flen() < ft.get_decimal()))
+    {
+        return Err(Error::invalid("unsafe REAL precision or scale metadata"));
+    }
     if tp == EvalType::Decimal
         && (!(-1..=30).contains(&ft.get_decimal()) || !(-1..=65).contains(&ft.get_flen()))
     {
@@ -410,7 +513,11 @@ fn validate_expr(expr: &Expr, schema: &[FieldType], depth: usize) -> Result<Eval
                 .iter()
                 .map(|c| validate_expr(c, schema, depth + 1))
                 .collect::<Result<Vec<_>, _>>()?;
-            validate_signature(expr.get_sig(), &args, tp)?;
+            validate_builder_safety(expr, &args)?;
+            // Keep the mapper and generated/handwritten validators authoritative.
+            // Do not initialize metadata here: IN mutates children during build.
+            let meta = crate::map_expr_node_to_rpn_func(expr)?;
+            (meta.validator_ptr)(expr)?;
         }
         ExprType::Null => {
             if !expr.get_val().is_empty() {
@@ -435,6 +542,46 @@ fn validate_expr(expr: &Expr, schema: &[FieldType], depth: usize) -> Result<Eval
                 return Err(Error::invalid("nonfinite real constants are not supported"));
             }
         }
+        ExprType::MysqlTime if tp == EvalType::DateTime => {
+            if expr.get_val().len() != 8 {
+                return Err(Error::invalid("time payload must be eight bytes"));
+            }
+        }
+        ExprType::MysqlDuration if tp == EvalType::Duration => {
+            if expr.get_val().len() != 8 {
+                return Err(Error::invalid("duration payload must be eight bytes"));
+            }
+        }
+        ExprType::MysqlEnum if tp == EvalType::Enum => {
+            if expr.get_val().len() != 8 {
+                return Err(Error::invalid("enum payload must be eight bytes"));
+            }
+            let value = expr
+                .get_val()
+                .read_u64()
+                .map_err(|e| Error::invalid(e.to_string()))?;
+            if value > expr.get_field_type().get_elems().len() as u64 {
+                return Err(Error::invalid(
+                    "enum constant index exceeds declared elements",
+                ));
+            }
+        }
+        ExprType::MysqlBit if tp == EvalType::Int => {
+            if expr.get_val().len() > 8 {
+                return Err(Error::invalid("bit payload exceeds eight bytes"));
+            }
+        }
+        ExprType::MysqlJson if tp == EvalType::Json => {
+            json_from_binary(expr.get_val())?;
+        }
+        ExprType::TiDbVectorFloat32 if tp == EvalType::VectorFloat32 => {
+            use tidb_query_datatype::codec::mysql::VectorFloat32Decoder;
+            let mut data = expr.get_val();
+            data.read_vector_float32()?;
+            if !data.is_empty() {
+                return Err(Error::invalid("trailing vector payload"));
+            }
+        }
         ExprType::Bytes | ExprType::String if tp == EvalType::Bytes => {}
         ExprType::MysqlDecimal if tp == EvalType::Decimal => {
             // Existing decimal decoder checks the encoded payload itself.
@@ -451,41 +598,53 @@ fn validate_expr(expr: &Expr, schema: &[FieldType], depth: usize) -> Result<Eval
     Ok(tp)
 }
 
-// Admission, not SQL implementation. Checking exact arity and eval types before
-// mapping is important: some existing mappers index child metadata directly.
-fn validate_signature(
-    sig: ScalarFuncSig,
-    args: &[EvalType],
-    result: EvalType,
-) -> Result<(), Error> {
-    use EvalType::{Bytes as B, Decimal as D, Int as I, Real as R};
+// Safety gaps in trusted-plan mappers/validators, NOT a signature whitelist.
+fn validate_builder_safety(expr: &Expr, args: &[EvalType]) -> Result<(), Error> {
+    use EvalType::{Bytes, Int};
     use ScalarFuncSig::*;
-    let (input, output, arity): (EvalType, EvalType, usize) = match sig {
-        PlusInt | MinusInt | MultiplyInt | ModInt | IntDivideInt => (I, I, 2),
-        PlusReal | MinusReal | MultiplyReal | DivideReal | ModReal => (R, R, 2),
-        PlusDecimal | MinusDecimal | MultiplyDecimal | DivideDecimal | ModDecimal => (D, D, 2),
-        LtInt | LeInt | GtInt | GeInt | EqInt | NeInt | NullEqInt => (I, I, 2),
-        LtReal | LeReal | GtReal | GeReal | EqReal | NeReal | NullEqReal => (R, I, 2),
-        LtDecimal | LeDecimal | GtDecimal | GeDecimal | EqDecimal | NeDecimal | NullEqDecimal => {
-            (D, I, 2)
+    if !expr.has_sig() {
+        return Err(Error::invalid("scalar function has no signature"));
+    }
+    match expr.get_sig() {
+        ToBinary if args.len() != 1 => return Err(Error::invalid("ToBinary requires one child")),
+        LikeSig if args.len() != 3 => return Err(Error::invalid("LIKE requires three children")),
+        RegexpSig | RegexpUtf8Sig | RegexpLikeSig | RegexpSubstrSig | RegexpInStrSig
+        | RegexpReplaceSig => {
+            // raw_varg's generated validator checks arity but does not check
+            // types. These kernels call as_bytes/as_int, which panic on mismatch.
+            let sig = expr.get_sig();
+            for (i, &actual) in args.iter().enumerate() {
+                let expected = match sig {
+                    RegexpSig | RegexpUtf8Sig | RegexpLikeSig => Bytes,
+                    RegexpSubstrSig => {
+                        if i < 2 || i == 4 {
+                            Bytes
+                        } else {
+                            Int
+                        }
+                    }
+                    RegexpInStrSig => {
+                        if i < 2 || i == 5 {
+                            Bytes
+                        } else {
+                            Int
+                        }
+                    }
+                    RegexpReplaceSig => {
+                        if i < 3 || i == 5 {
+                            Bytes
+                        } else {
+                            Int
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                if actual != expected {
+                    return Err(Error::invalid("invalid regexp argument type"));
+                }
+            }
         }
-        AbsInt | AbsUInt | UnaryMinusInt | UnaryNotInt | IntIsNull => (I, I, 1),
-        AbsReal | UnaryMinusReal => (R, R, 1),
-        AbsDecimal | UnaryMinusDecimal => (D, D, 1),
-        RealIsNull => (R, I, 1),
-        DecimalIsNull => (D, I, 1),
-        Length | BitLength | Ascii | StringIsNull => (B, I, 1),
-        Concat if !args.is_empty() => (B, B, args.len()),
-        _ => {
-            return Err(Error::invalid(format!(
-                "unsupported standalone signature {sig:?}"
-            )));
-        }
-    };
-    if args.len() != arity || args.iter().any(|tp| *tp != input) || result != output {
-        return Err(Error::invalid(format!(
-            "invalid standalone signature {sig:?}: argument or return type/arity"
-        )));
+        _ => {}
     }
     Ok(())
 }
@@ -495,5 +654,9 @@ pub use borrowed::{Diagnostics, ScalarRef};
 
 pub use crate::types::borrowed::ColumnRef;
 
+#[cfg(test)]
+mod coverage_tests;
+#[cfg(test)]
+mod safety_tests;
 #[cfg(test)]
 mod tests;

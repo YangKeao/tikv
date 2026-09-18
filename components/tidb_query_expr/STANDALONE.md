@@ -2,7 +2,8 @@
 
 `tidb_query_expr::standalone` embeds the **existing** TiKV expression engine in
 process. It invokes `RpnExpressionBuilder::build_from_expr_tree` once, then
-`RpnExpression::eval_decoded` for each nonempty internal batch. It does not
+a checked entry to the original `RpnExpression::eval_decoded` loop for each
+nonempty internal batch. It does not
 reimplement any scalar functions, extract a second engine, or call a TiKV server.
 
 ## API
@@ -22,22 +23,72 @@ let output = program.eval(
 )?;
 ```
 
-`Column` contains nullable `Int(i64)`, `Real(f64)`, `Bytes(Vec<u8>)` or
-`Decimal(String)` vectors. Unsigned integers use their `i64` bit representation;
-FieldType metadata carries unsignedness. Decimal strings are parsed with TiKV's
-existing decimal codec and results are formatted by that codec. Byte strings
-are not converted through UTF-8. The decimal text boundary does **not** preserve
-hidden storage-scale/result-fraction state from another engine's decimal
-representation, nor enforce schema precision on input values. Callers must
-restrict admission or normalize/test scale semantics; this is not a general
-cross-engine decimal compatibility guarantee. All nonfinite real values (NaN,
-positive infinity and negative infinity) are rejected for selected column values
-and serialized constants before entering kernels. `Real::new` alone is not a
-sufficient guard: it accepts infinity, but arithmetic such as `Inf * 0` or
-`Inf - Inf` can panic in the underlying NotNan operators. Unselected nonfinite
-column values are not converted and therefore remain permitted. Temporal, JSON,
-enum, set and vector types are not admitted, including intermediate expression
-types.
+`Column` has nullable vectors for all nine usable engine types: `Int(i64)`,
+`Real(f64)`, `Bytes(Vec<u8>)`, `Decimal(Decimal)`, `DateTime(DateTime)`,
+`Duration(Duration)`, `Json(Json)`, `Enum(Enum)`, and `VectorFloat32(VectorFloat32)`.
+Native value types are re-exported from `standalone`; no generated protobuf type
+is exposed. Unsigned integers retain their `i64` bits; FieldType carries flags,
+collation, temporal kind, precision and scale. Byte strings are not UTF-8 converted.
+`Set` exists in EvalType but is not supported by the engine's FieldType conversion
+or codecs, so it remains rejected (as do Geometry and unsupported SQL types).
+
+**Breaking PoC change:** Decimal uses native values, not strings. This preserves
+all decimal words, stored fraction and result fraction independently: e.g. division
+can retain more digits than Display prints. Neither inputs nor outputs round-trip
+through text or f64. Native inputs are assumed to represent the supplied SQL
+schema; the facade does not apply SQL casts or enforce declared decimal scale.
+
+Checked transport helpers use the existing engine codecs:
+
+- `decimal_from_chunk(&[u8]) -> Result<Decimal, Error>` and
+  `decimal_to_chunk(&Decimal) -> Result<Vec<u8>, Error>` preserve the native-endian
+  40-byte TiDB/TiKV decimal layout (including both fraction fields). Decode checks
+  header/word invariants and Rust bool validity **before** the engine's trusted
+  unsafe chunk decoder. Never call that decoder directly on untrusted bytes.
+  One representation exception is intentional: Go's zero-digit default zero
+  becomes TiKV's one-integer-digit zero, preserving result scale. TiKV's native
+  shift routine assumes at least one word and otherwise underflows. Zero-digit
+  headers containing nonzero word storage are rejected; ordinary decimal headers
+  and hidden scales are unchanged.
+- `date_time_from_chunk` / `date_time_to_chunk` use the eight-byte little-endian
+  native Time chunk. They preserve wall time, type and FSP without timezone
+  conversion. This differs from serialized `MysqlTime` constants, whose packed
+  timestamp decoding applies the compilation context timezone.
+- `json_from_binary` / `json_to_binary` use a type byte plus the engine's binary
+  payload. They preserve number tags, opaque data and temporal values. Structural
+  validation bounds nesting at 64 and checks lengths, tags, offsets, sorted keys,
+  nonoverlapping forward payloads, UTF-8 strings and finite numbers before native
+  JSON access. Raw engine JSON constructors/decoders trust their inputs.
+
+These are version-pinned embedding representations, not stable or portable ABIs.
+All selected REAL values/constants must be finite (NotNan alone accepts infinity
+and can panic on Inf*0). Selected native JSON/vector values are revalidated because
+those types expose mutable payload bytes. DateTime components are range checked;
+SQL zero dates and invalid calendar dates remain representable. Unselected values
+are not converted or validated.
+
+Finite inputs do **not** guarantee finite intermediates: vector distance between
+`[3e38]` and `[-3e38]`, or `ROUND(f64::MAX,-308)`, can produce infinity. The
+standalone-only checked evaluator rejects every nonfinite REAL produced by a node
+before another kernel can consume it (e.g. multiply by zero would panic in NotNan).
+It also rejects nonfinite root results. The ordinary engine `eval_decoded` path
+and all kernels remain unchanged. These runtime errors must not trigger replay.
+
+ROUND/TRUNCATE fractional-digit arguments have an additional pre-execution safety
+contract: signed values must be within `[-308,308]`, unsigned values within
+`[0,308]`; NULL is allowed. Constants are checked during compilation. A direct
+integer input column is allowed and all selected digit values are checked across
+the whole caller batch before any kernel runs. Derived digit expressions are
+rejected at compilation: checking them would require speculative evaluation.
+This covers RoundWithFracInt/Dec/Real and TruncateInt/Uint/Real/Decimal. Even finite
+zero with a large positive exponent can otherwise panic on `0*Inf`; very negative
+exponents can panic on `0/0`. Guarded digit columns remain ineligible for borrowed
+evaluation. This is a conservative safety subset, not a new SQL implementation.
+
+REAL FieldType flen/decimal must each be `-1` (unspecified) or `0..=254`, with
+`flen >= decimal` when both are specified. These limits guard the trusted float
+cast routine's assertions and unsigned subtraction; they describe facade safety,
+not global MySQL metadata legality.
 
 Schema and expression messages are serialized tipb wire bytes so a prost caller
 does not share generated Rust types with the rust-protobuf engine. Each
@@ -50,22 +101,54 @@ wire messages and unsupported expressions return errors before evaluation.
 
 ### Admitted functions
 
-The source's `validate_signature` is the authoritative admission list:
+There is no facade scalar signature whitelist. `map_expr_node_to_rpn_func` and
+its generated/handwritten validators, followed by the original metadata builders,
+are authoritative. At baseline `521ac733` the mapper lists **510 signatures**:
 
-- Int: Plus, Minus, Multiply, Mod, IntDivide, comparisons including NullEq, Abs,
-  unsigned Abs, unary minus/not, IsNull.
-- Real: Plus, Minus, Multiply, Divide, Mod, comparisons including NullEq, Abs,
-  unary minus, IsNull.
-- Decimal: Plus, Minus, Multiply, Divide, Mod, comparisons including NullEq,
-  Abs, unary minus, IsNull.
-- Bytes: Length, BitLength, Ascii, IsNull, Concat.
-- Typed NULL, integer/unsigned integer, real, bytes/string and decimal constants;
-  column references.
+| Kernel module | Signatures |
+| --- | ---: |
+| arithmetic | 25 |
+| cast | 53 |
+| compare | 83 |
+| compare_in | 7 |
+| control | 21 |
+| encryption | 8 |
+| json | 22 |
+| vec | 7 |
+| like | 1 |
+| regexp | 6 |
+| math | 47 |
+| miscellaneous | 19 |
+| op | 36 |
+| other | 1 |
+| string | 61 |
+| time | 113 |
 
-This is deliberately smaller than the engine's own supported function set.
-Admission is not proof of parity with another evaluator's SQL semantics. In
-particular, an embedding caller controls whether to allow unsigned operations
-or context-sensitive arithmetic in its own opt-in SQL dispatch policy.
+This is a mapper inventory, **not** proof every enum member or arbitrary metadata
+shape is supported, nor proof of semantic parity with another SQL evaluator.
+`scalar_function_signature(name)` resolves the engine enum to its wire number
+without requiring a consumer's proto enum to be expanded. A returned number does
+not establish support: compile the complete expression to check actual capability.
+Normal constant kinds (including MysqlTime/Duration/Json/Enum/Bit and vector),
+typed NULLs and column references use the existing builder.
+
+The boundary supplements trusted-plan assumptions, rather than replacing kernel
+validators: ToBinary/LIKE mapper arity guards, regexp raw-varg argument types,
+column/schema equality, payload checks, enum index bounds and metadata ranges.
+Cast InUnionMetadata remains in Expr.val; IN retains original hash extraction and
+child mutation; regex constants are precompiled; date arithmetic and TimestampDiff
+retain their constant-unit metadata requirements. Unknown signatures are errors.
+
+**Evaluation remains TiKV eager RPN.** There are only Constant, ColumnRef and
+FnCall nodes, not lazy branch nodes. All IF/IFNULL/CASE/COALESCE/AND/OR children
+are evaluated before the parent kernel. An unreachable overflowing branch still
+errors, and unreachable warning-producing/volatile expressions still run. Consumers
+requiring lazy semantics must keep the whole unsafe tree in their native evaluator,
+or establish safety before compilation; this facade neither rewrites kernels nor
+silently retries after evaluation starts. Volatile functions such as RAND, UUID,
+RandomBytes and SYSDATE preserve their existing TiKV behavior, not another engine's
+statement/session state. Constant metadata errors (e.g. invalid regex) occur during
+compilation even for empty input or otherwise unreachable branches.
 
 ### Context and results
 
@@ -97,7 +180,7 @@ compile/admission error, but must not silently fall back after evaluation starts
 
 ## Borrowed packed-input API
 
-The copying `eval` API remains unchanged as the baseline. The optional
+The copying `eval` call shape remains unchanged (its Column type surface expanded). The optional
 `supports_borrowed()` / `eval_borrowed` path removes **bulk input payload
 materialization** and the owned facade output column. It is not end-to-end
 zero-copy: scalar values must be loaded, kernel results/intermediates are still
@@ -155,8 +238,8 @@ there is no handwritten SQL-arithmetic dispatcher and no kernel body change.
 The original `fn_ptr`, `ArgConstructor`, and `eval_decoded` paths are unchanged.
 
 Currently opted in: arithmetic/arithmetic_with_ctx, numeric comparisons,
-integer/real ABS (including unsigned ABS), and byte LENGTH. The standalone
-signature whitelist still applies. Decimal/other input or intermediate types,
+integer/real ABS (including unsigned ABS), and byte LENGTH. Removing the copying
+API's whitelist does not opt additional kernels into borrowed loaders. Decimal/other input or intermediate types,
 varargs, writers, metadata-based/custom evaluators and unmarked functions are
 not admitted to this path. An explicit macro opt-in must not be applied to a
 kernel whose scalar body differs semantically from its specialized evaluator.
@@ -194,7 +277,7 @@ and GCC 16, legacy gRPC/abseil dependencies require these environment flags:
 ```sh
 export CMAKE_POLICY_VERSION_MINIMUM=3.5
 export CXXFLAGS='-include cstdint -std=c++17'
-cargo +nightly-2026-08-22 test -p tidb_query_expr --lib standalone::tests -j 4
+cargo +nightly-2026-08-22 test -p tidb_query_expr --lib standalone -j1 -- --test-threads=1
 ```
 
 These flags are native dependency compatibility workarounds, not kernel or
@@ -202,3 +285,13 @@ expression behavior changes. A normal older supported TiKV build environment
 may not need them. The standalone tests cover actual RPN nullable numeric
 operations, selection normalization, split/empty batches, bytes and decimal
 conversions, MySQL errors, bounded warnings, and malformed/unsupported input.
+Coverage tests also exercise all nine type identities/NULLs/split selections,
+every mapped kernel family, exact hidden decimal scale, temporal/binary JSON
+transport, eager unreachable-branch errors and compile-time regex errors. Bounded
+native red witnesses demonstrate mapper/JSON panics and missing regexp validator
+type checks while the public boundary rejects the same requests. The malformed
+bool decimal test only invokes checked ingress, never the unsafe native decoder.
+
+On shared development hosts use one heavy command globally, `-j1`, serial tests,
+and an external process-tree RSS/address-space/host-reserve guard. The development
+run used `limited-run.py --rss-mib 6144 --as-mib 8192 --min-available-mib 8192`.

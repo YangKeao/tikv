@@ -6,7 +6,11 @@ use tipb_helper::ExprDefBuilder as E;
 
 use super::*;
 
-fn prepare(expr: impl Into<Expr>, schema: &[FieldType], context: Context) -> PreparedExpression {
+pub(super) fn prepare(
+    expr: impl Into<Expr>,
+    schema: &[FieldType],
+    context: Context,
+) -> PreparedExpression {
     let schema = schema
         .iter()
         .map(|ft| ft.write_to_bytes().unwrap())
@@ -270,9 +274,9 @@ fn decimal_uses_existing_arithmetic_and_codec() {
     let result = prepared
         .eval(
             &[Column::Decimal(vec![
-                Some("1.50".into()),
+                Some("1.50".parse().unwrap()),
                 None,
-                Some("-2.25".into()),
+                Some("-2.25".parse().unwrap()),
             ])],
             3,
             None,
@@ -281,24 +285,10 @@ fn decimal_uses_existing_arithmetic_and_codec() {
     let Column::Decimal(values) = result.column else {
         panic!("expected decimals")
     };
-    assert_eq!(
-        values[0].as_ref().unwrap().parse::<Decimal>().unwrap(),
-        "1.75".parse::<Decimal>().unwrap()
-    );
+    assert_eq!(values[0].unwrap(), "1.75".parse::<Decimal>().unwrap());
     assert_eq!(values[1], None);
-    assert_eq!(
-        values[2].as_ref().unwrap().parse::<Decimal>().unwrap(),
-        "-2.00".parse::<Decimal>().unwrap()
-    );
-    assert!(
-        prepared
-            .eval(
-                &[Column::Decimal(vec![Some("not-a-decimal".into())])],
-                1,
-                None
-            )
-            .is_err()
-    );
+    assert_eq!(values[2].unwrap(), "-2.00".parse::<Decimal>().unwrap());
+    assert!("not-a-decimal".parse::<Decimal>().is_err());
 
     let mut context = Context::default();
     context.div_precision_increment = 6;
@@ -310,12 +300,22 @@ fn decimal_uses_existing_arithmetic_and_codec() {
         context,
     );
     let result = divide
-        .eval(&[Column::Decimal(vec![Some("1".into())])], 1, None)
+        .eval(
+            &[Column::Decimal(vec![Some("1".parse().unwrap())])],
+            1,
+            None,
+        )
         .unwrap();
     let Column::Decimal(values) = result.column else {
         panic!("expected decimals")
     };
-    assert!(values[0].as_ref().unwrap().starts_with("0.333333"));
+    assert!(
+        values[0]
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .starts_with("0.333333")
+    );
 }
 
 #[test]
@@ -448,8 +448,7 @@ fn reject_schema_shape_and_malformed_expression_before_engine() {
             .push_child(E::constant_int(2))
             .build(),
     );
-    reject(E::scalar_func(ScalarFuncSig::Rand, FieldTypeTp::Double).build());
-    reject(E::constant_null(FieldTypeTp::Json).build());
+    reject(E::constant_null(FieldTypeTp::Set).build());
     let mut malformed = E::constant_int(1).build();
     malformed.set_val(vec![0]);
     reject(malformed);

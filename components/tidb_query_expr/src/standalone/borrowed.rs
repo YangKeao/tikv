@@ -31,7 +31,8 @@ impl PreparedExpression {
     /// Unsupported kernels/types remain available through the original copying
     /// API; callers must choose their fallback before invoking evaluation.
     pub fn supports_borrowed(&self) -> bool {
-        supported(self.output_type)
+        self.fractional_digit_columns.is_empty()
+            && supported(self.output_type)
             && self.input_types.iter().copied().all(supported)
             && self.expression.as_ref().iter().all(|node| match node {
                 RpnExpressionNode::Constant { value, .. } => supported(value.eval_type()),
