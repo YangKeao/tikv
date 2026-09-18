@@ -191,10 +191,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use tidb_query_datatype::FieldTypeTp;
-    use tikv_util::buffer_vec::BufferVec;
     use tipb_helper::ExprDefBuilder;
 
     use super::{super::AggrFunction, *};
@@ -253,23 +250,34 @@ mod tests {
 
         let mut result = [VectorValue::with_capacity(0, EvalType::Set)];
 
-        let mut buf = BufferVec::new();
-        buf.push("我好强啊");
-        buf.push("我太强啦");
-        let buf = Arc::new(buf);
-
-        update!(state, &mut ctx, Some(SetRef::new(&buf, 0b11))).unwrap();
+        update!(
+            state,
+            &mut ctx,
+            Some(SetRef::new("我好强啊,我太强啦".as_bytes(), &0b11))
+        )
+        .unwrap();
         state.push_result(&mut ctx, &mut result[..]).unwrap();
         assert_eq!(
             result[0].to_set_vec(),
-            vec![Some(Set::new(buf.clone(), 0b11))]
+            vec![Some(Set::new(
+                "我好强啊,我太强啦".as_bytes().to_vec(),
+                0b11
+            ))]
         );
 
-        update!(state, &mut ctx, Some(SetRef::new(&buf, 0b10))).unwrap();
+        update!(
+            state,
+            &mut ctx,
+            Some(SetRef::new("我太强啦".as_bytes(), &0b10))
+        )
+        .unwrap();
         state.push_result(&mut ctx, &mut result[..]).unwrap();
         assert_eq!(
             result[0].to_set_vec(),
-            vec![Some(Set::new(buf.clone(), 0b11)), Some(Set::new(buf, 0b11))]
+            vec![
+                Some(Set::new("我好强啊,我太强啦".as_bytes().to_vec(), 0b11)),
+                Some(Set::new("我好强啊,我太强啦".as_bytes().to_vec(), 0b11))
+            ]
         );
     }
 

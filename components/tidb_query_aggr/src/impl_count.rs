@@ -135,10 +135,7 @@ impl super::AggrFunctionState for AggrFnStateCount {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use tidb_query_datatype::EvalType;
-    use tikv_util::buffer_vec::BufferVec;
 
     use super::{super::AggrFunction, *};
 
@@ -205,12 +202,12 @@ mod tests {
 
         let mut result = [VectorValue::with_capacity(0, EvalType::Int)];
 
-        let mut buf = BufferVec::new();
-        buf.push("我好强啊");
-        buf.push("我太强啦");
-        let buf = Arc::new(buf);
-
-        update!(state, &mut ctx, Some(SetRef::new(&buf, 0b11))).unwrap();
+        update!(
+            state,
+            &mut ctx,
+            Some(SetRef::new("我好强啊,我太强啦".as_bytes(), &0b11))
+        )
+        .unwrap();
 
         result[0].clear();
         state.push_result(&mut ctx, &mut result).unwrap();

@@ -337,7 +337,17 @@ impl ScalarValueRef<'_> {
             }
             // TODO: we should implement enum/set encode
             ScalarValueRef::Enum(_) => unimplemented!(),
-            ScalarValueRef::Set(_) => unimplemented!(),
+            ScalarValueRef::Set(val) => {
+                match val {
+                    None => {
+                        output.write_evaluable_datum_null()?;
+                    }
+                    Some(val) => {
+                        output.write_evaluable_datum_set_uint(*val)?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -377,7 +387,7 @@ impl ScalarValueRef<'_> {
         field_type: &FieldType,
     ) -> crate::codec::Result<Ordering> {
         Ok(match_template! {
-            TT = [Real, Decimal, DateTime, Duration, Json, Enum, VectorFloat32],
+            TT = [Real, Decimal, DateTime, Duration, Json, Enum, Set, VectorFloat32],
             match (self, other) {
                 (ScalarValueRef::TT(v1), ScalarValueRef::TT(v2)) => v1.cmp(v2),
                 (ScalarValueRef::Int(v1), ScalarValueRef::Int(v2)) => compare_int(&v1.cloned(), &v2.cloned(), field_type),

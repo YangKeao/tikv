@@ -1634,7 +1634,6 @@ mod tests {
         },
         expr::{EvalConfig, EvalContext, Flag},
     };
-    use tikv_util::buffer_vec::BufferVec;
     use tipb::ScalarFuncSig;
 
     use super::Result;
@@ -2269,14 +2268,10 @@ mod tests {
     fn test_set_as_int() {
         // TODO: we need to test None case here.
 
-        let mut buf = BufferVec::new();
-        buf.push("我好强啊");
-        buf.push("我太强啦");
-
         let cs = vec![
             // (input, expect)
-            (SetRef::new(&buf, 0b01), 1),
-            (SetRef::new(&buf, 0b11), 3),
+            (SetRef::new("我好强啊".as_bytes(), &0b01), 1),
+            (SetRef::new("我好强啊,我太强啦".as_bytes(), &0b11), 3),
         ];
 
         for (input, expect) in cs {

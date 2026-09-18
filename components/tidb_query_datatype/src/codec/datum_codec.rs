@@ -14,7 +14,8 @@ use crate::{
         Error, Result, datum,
         mysql::{
             DecimalDecoder, DecimalEncoder, DurationDecoder, EnumDecoder, EnumEncoder, JsonDecoder,
-            JsonEncoder, TimeDecoder, VectorFloat32Decoder, VectorFloat32Encoder,
+            JsonEncoder, SetDecoder, SetEncoder, TimeDecoder, VectorFloat32Decoder,
+            VectorFloat32Encoder,
         },
     },
     expr::EvalContext,
@@ -32,6 +33,7 @@ pub trait DatumPayloadDecoder:
     + DecimalDecoder
     + JsonDecoder
     + EnumDecoder
+    + SetDecoder
     + VectorFloat32Decoder
 {
     #[inline]
@@ -157,6 +159,24 @@ pub trait DatumPayloadDecoder:
             Error::InvalidDataType("Failed to decode datum payload as enum".to_owned())
         })
     }
+
+    #[inline]
+    fn read_datum_payload_set_compact_bytes(&mut self, field_type: &FieldType) -> Result<Set> {
+        self.read_set_compact_bytes(field_type)
+            .map_err(|_| Error::InvalidDataType("Failed to decode datum payload as set".to_owned()))
+    }
+
+    #[inline]
+    fn read_datum_payload_set_uint(&mut self, field_type: &FieldType) -> Result<Set> {
+        self.read_set_uint(field_type)
+            .map_err(|_| Error::InvalidDataType("Failed to decode datum payload as set".to_owned()))
+    }
+
+    #[inline]
+    fn read_datum_payload_set_var_uint(&mut self, field_type: &FieldType) -> Result<Set> {
+        self.read_set_var_uint(field_type)
+            .map_err(|_| Error::InvalidDataType("Failed to decode datum payload as set".to_owned()))
+    }
 }
 
 impl<T: BufferReader> DatumPayloadDecoder for T {}
@@ -170,6 +190,7 @@ pub trait DatumPayloadEncoder:
     + JsonEncoder
     + DecimalEncoder
     + EnumEncoder
+    + SetEncoder
     + VectorFloat32Encoder
 {
     #[inline]
@@ -234,6 +255,13 @@ pub trait DatumPayloadEncoder:
     fn write_datum_payload_enum_uint(&mut self, v: EnumRef<'_>) -> Result<()> {
         self.write_enum_uint(v).map_err(|_| {
             Error::InvalidDataType("Failed to encode datum payload from enum".to_owned())
+        })
+    }
+
+    #[inline]
+    fn write_datum_payload_set_uint(&mut self, v: SetRef<'_>) -> Result<()> {
+        self.write_set_uint(v).map_err(|_| {
+            Error::InvalidDataType("Failed to encode datum payload from set".to_owned())
         })
     }
 }
@@ -320,6 +348,12 @@ pub trait DatumFlagAndPayloadEncoder: BufferWriter + DatumPayloadEncoder {
         self.write_datum_payload_enum_uint(val)?;
         Ok(())
     }
+
+    fn write_datum_set_uint(&mut self, val: SetRef<'_>) -> Result<()> {
+        self.write_u8(datum::UINT_FLAG)?;
+        self.write_datum_payload_set_uint(val)?;
+        Ok(())
+    }
 }
 
 impl<T: BufferWriter> DatumFlagAndPayloadEncoder for T {}
@@ -381,6 +415,11 @@ pub trait EvaluableDatumEncoder: DatumFlagAndPayloadEncoder {
     #[inline]
     fn write_evaluable_datum_enum_uint(&mut self, val: EnumRef<'_>) -> Result<()> {
         self.write_datum_enum_uint(val)
+    }
+
+    #[inline]
+    fn write_evaluable_datum_set_uint(&mut self, val: SetRef<'_>) -> Result<()> {
+        self.write_datum_set_uint(val)
     }
 }
 
@@ -601,6 +640,28 @@ pub fn decode_enum_datum(mut raw_datum: &[u8], field_type: &FieldType) -> Result
     }
 }
 
+pub fn decode_set_datum(mut raw_datum: &[u8], field_type: &FieldType) -> Result<Option<Set>> {
+    if raw_datum.is_empty() {
+        return Err(Error::InvalidDataType(
+            "Failed to decode datum flag".to_owned(),
+        ));
+    }
+    let flag = raw_datum[0];
+    raw_datum = &raw_datum[1..];
+    match flag {
+        datum::NIL_FLAG => Ok(None),
+        datum::COMPACT_BYTES_FLAG => Ok(Some(
+            raw_datum.read_datum_payload_set_compact_bytes(field_type)?,
+        )),
+        datum::UINT_FLAG => Ok(Some(raw_datum.read_datum_payload_set_uint(field_type)?)),
+        datum::VAR_UINT_FLAG => Ok(Some(raw_datum.read_datum_payload_set_var_uint(field_type)?)),
+        _ => Err(Error::InvalidDataType(format!(
+            "Unsupported datum flag {} for Set vector",
+            flag
+        ))),
+    }
+}
+
 pub trait RawDatumDecoder<T> {
     fn decode(self, field_type: &FieldType, ctx: &mut EvalContext) -> Result<Option<T>>;
 }
@@ -664,7 +725,78 @@ impl RawDatumDecoder<Enum> for &[u8] {
 }
 
 impl RawDatumDecoder<Set> for &[u8] {
-    fn decode(self, _field_type: &FieldType, _ctx: &mut EvalContext) -> Result<Option<Set>> {
-        unimplemented!()
+    fn decode(self, field_type: &FieldType, _ctx: &mut EvalContext) -> Result<Option<Set>> {
+        decode_set_datum(self, field_type)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set_field_type() -> FieldType {
+        let mut field_type = FieldType::new();
+        field_type.set_tp(FieldTypeTp::Set as i32);
+        field_type.set_elems(protobuf::RepeatedField::from_slice(&[
+            String::from("a"),
+            String::from("b"),
+            String::from("c"),
+        ]));
+        field_type
+    }
+
+    #[test]
+    fn test_decode_set_datum() {
+        let field_type = set_field_type();
+        let mut ctx = EvalContext::default();
+
+        // NULL.
+        assert_eq!(
+            decode_set_datum(&[datum::NIL_FLAG], &field_type).unwrap(),
+            None
+        );
+
+        // UINT payload, empty selection.
+        let mut raw = vec![datum::UINT_FLAG];
+        raw.write_u64(0).unwrap();
+        assert_eq!(
+            decode_set_datum(&raw, &field_type).unwrap(),
+            Some(Set::new(vec![], 0))
+        );
+
+        // UINT payload, multi-element selection.
+        let mut raw = vec![datum::UINT_FLAG];
+        raw.write_u64(0b101).unwrap();
+        let decoded = decode_set_datum(&raw, &field_type).unwrap().unwrap();
+        assert_eq!(decoded.value(), 0b101);
+        assert_eq!(decoded.name(), b"a,c");
+
+        // VAR_UINT payload.
+        let mut raw = vec![datum::VAR_UINT_FLAG];
+        raw.write_var_u64(0b011).unwrap();
+        let decoded = decode_set_datum(&raw, &field_type).unwrap().unwrap();
+        assert_eq!(decoded.value(), 0b011);
+        assert_eq!(decoded.name(), b"a,b");
+
+        // COMPACT_BYTES payload: [varint len][varint value].
+        let mut payload = Vec::new();
+        payload.write_var_u64(0b110).unwrap();
+        let mut raw = vec![datum::COMPACT_BYTES_FLAG];
+        raw.write_var_i64(payload.len() as i64).unwrap();
+        raw.extend_from_slice(&payload);
+        let decoded = decode_set_datum(&raw, &field_type).unwrap().unwrap();
+        assert_eq!(decoded.name(), b"b,c");
+
+        // The `RawDatumDecoder` entry point.
+        let decoded: Option<Set> = (&raw[..]).decode(&field_type, &mut ctx).unwrap();
+        assert_eq!(decoded.unwrap().value(), 0b110);
+
+        // A bit beyond the declared elements is refused, not truncated.
+        let mut raw = vec![datum::UINT_FLAG];
+        raw.write_u64(0b1000).unwrap();
+        assert!(decode_set_datum(&raw, &field_type).is_err());
+
+        // A truncated datum is refused.
+        assert!(decode_set_datum(&[], &field_type).is_err());
     }
 }

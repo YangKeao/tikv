@@ -314,6 +314,9 @@ impl Evaluable for Int {
             ScalarValue::Enum(x) => x
                 .as_ref()
                 .map(|x| unsafe { retain_lifetime_transmute::<u64, i64>(x.value_ref()) }),
+            ScalarValue::Set(x) => x
+                .as_ref()
+                .map(|x| unsafe { retain_lifetime_transmute::<u64, i64>(x.value_ref()) }),
             other => panic!(
                 "Cannot cast {} scalar value into {}",
                 other.eval_type(),
@@ -329,6 +332,9 @@ impl Evaluable for Int {
             ScalarValueRef::Enum(x) => {
                 x.map(|x| unsafe { retain_lifetime_transmute::<u64, i64>(x.value_ref()) })
             }
+            ScalarValueRef::Set(x) => {
+                x.map(|x| unsafe { retain_lifetime_transmute::<u64, i64>(x.value_ref()) })
+            }
             other => panic!(
                 "Cannot cast {} scalar value into {}",
                 other.eval_type(),
@@ -342,6 +348,7 @@ impl Evaluable for Int {
         match v {
             VectorValue::Int(x) => x,
             VectorValue::Enum(x) => x.as_vec_int(),
+            VectorValue::Set(x) => x.as_vec_int(),
             other => panic!(
                 "Cannot cast {} scalar value into {}",
                 other.eval_type(),
@@ -457,6 +464,7 @@ impl<'a> EvaluableRef<'a> for BytesRef<'a> {
         match v {
             ScalarValue::Bytes(x) => x.as_ref().map(|x| x.as_slice()),
             ScalarValue::Enum(x) => x.as_ref().map(|x| x.name()),
+            ScalarValue::Set(x) => x.as_ref().map(|x| x.name()),
             other => panic!(
                 "Cannot cast {} scalar value into {}",
                 other.eval_type(),
@@ -470,6 +478,7 @@ impl<'a> EvaluableRef<'a> for BytesRef<'a> {
         match v {
             ScalarValueRef::Bytes(x) => x,
             ScalarValueRef::Enum(x) => x.map(|x| x.name()),
+            ScalarValueRef::Set(x) => x.map(|x| x.name()),
             other => panic!(
                 "Cannot cast {} scalar value into {}",
                 other.eval_type(),
@@ -483,6 +492,7 @@ impl<'a> EvaluableRef<'a> for BytesRef<'a> {
         match v {
             VectorValue::Bytes(x) => x,
             VectorValue::Enum(x) => x.as_vec_bytes(),
+            VectorValue::Set(x) => x.as_vec_bytes(),
             other => panic!(
                 "Cannot cast {} scalar value into {}",
                 other.eval_type(),
@@ -817,5 +827,30 @@ mod tests {
                 Err(_) => assert!(expected.is_none(), "{} to bool should fail", f,),
             }
         }
+    }
+
+    #[test]
+    fn test_set_hybrid_borrows() {
+        let set = Set::new(b"a,c".to_vec(), 0b101);
+        let scalar = ScalarValue::Set(Some(set.clone()));
+
+        // The Int carrier reads the bit mask, the Bytes carrier reads the
+        // comma-joined name.
+        assert_eq!(scalar.as_int(), Some(&0b101i64));
+        assert_eq!(scalar.as_bytes(), Some(b"a,c".as_slice()));
+
+        let mut vec = ChunkedVecSet::with_capacity(2);
+        vec.push(Some(set));
+        vec.push(None);
+        let vector = VectorValue::Set(vec);
+
+        let ints: &ChunkedVecSized<Int> = Int::borrow_vector_value(&vector);
+        assert_eq!(ints.get_option_ref(0), Some(&0b101i64));
+        assert_eq!(ints.get_option_ref(1), None);
+
+        let names: &ChunkedVecBytes =
+            <BytesRef<'_> as EvaluableRef<'_>>::borrow_vector_value(&vector);
+        assert_eq!(names.get(0), Some(b"a,c".as_slice()));
+        assert_eq!(names.get(1), None);
     }
 }

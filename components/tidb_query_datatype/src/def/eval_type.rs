@@ -79,9 +79,8 @@ impl std::convert::TryFrom<crate::FieldTypeTp> for EvalType {
             | crate::FieldTypeTp::String
             | crate::FieldTypeTp::Null => EvalType::Bytes,
             crate::FieldTypeTp::Enum => EvalType::Enum,
+            crate::FieldTypeTp::Set => EvalType::Set,
             _ => {
-                // TODO: we need to handle FieldTypeTp::{Set} after we implement encode
-                // and decode.
                 return Err(crate::DataTypeError::UnsupportedType {
                     name: tp.to_string(),
                 });
@@ -119,7 +118,7 @@ mod tests {
             (Json, Some(EvalType::Json)),
             (NewDecimal, Some(EvalType::Decimal)),
             (Enum, Some(EvalType::Enum)),
-            (Set, None),
+            (Set, Some(EvalType::Set)),
             (TinyBlob, Some(EvalType::Bytes)),
             (MediumBlob, Some(EvalType::Bytes)),
             (LongBlob, Some(EvalType::Bytes)),

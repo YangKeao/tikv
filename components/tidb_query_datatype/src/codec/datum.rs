@@ -1026,7 +1026,10 @@ pub trait DatumEncoder:
                 }
                 // TODO: implement datum write here.
                 Datum::Enum(_) => unimplemented!(),
-                Datum::Set(_) => unimplemented!(),
+                Datum::Set(ref s) => {
+                    self.write_u8(UINT_FLAG)?;
+                    self.write_u64(s.value())?;
+                }
             }
         }
         Ok(())
@@ -1073,7 +1076,7 @@ pub fn approximate_size(values: &[Datum], comparable: bool) -> usize {
                 Datum::VectorFloat32(ref v) => v.as_ref().encoded_len(),
                 // TODO: implement here after we implement datum write
                 Datum::Enum(_) => unimplemented!(),
-                Datum::Set(_) => unimplemented!(),
+                Datum::Set(_) => number::U64_SIZE,
             }
         })
         .sum()

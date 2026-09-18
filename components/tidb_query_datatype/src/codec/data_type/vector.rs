@@ -280,8 +280,7 @@ impl VectorValue {
                 size
             }
             VectorValue::Enum(_) => logical_rows.len() * 9,
-            // TODO: implement here after we implement set encoding
-            VectorValue::Set(_) => unimplemented!(),
+            VectorValue::Set(_) => logical_rows.len() * 9,
         }
     }
 
@@ -353,8 +352,21 @@ impl VectorValue {
                 }
                 size
             }
-            // TODO: implement here after we implement set encoding
-            VectorValue::Set(_) => unimplemented!(),
+            VectorValue::Set(vec) => {
+                let mut size = logical_rows.len() * 9 + 10;
+                for idx in logical_rows {
+                    let el = vec.get_option_ref(*idx);
+                    match el {
+                        Some(v) => {
+                            size += 8 /* Offset */ + v.len();
+                        }
+                        None => {
+                            size += 8;
+                        }
+                    }
+                }
+                size
+            }
         }
     }
 
@@ -470,8 +482,17 @@ impl VectorValue {
                 }
                 Ok(())
             }
-            // TODO: implement set encoding
-            VectorValue::Set(_) => unimplemented!(),
+            VectorValue::Set(ref vec) => {
+                match &vec.get_option_ref(row_index) {
+                    None => {
+                        output.write_evaluable_datum_null()?;
+                    }
+                    Some(ref val) => {
+                        output.write_evaluable_datum_set_uint(*val)?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 

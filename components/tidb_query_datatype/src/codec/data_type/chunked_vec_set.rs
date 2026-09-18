@@ -1,43 +1,53 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::Arc;
-
-use tikv_util::buffer_vec::BufferVec;
-
 use super::{ChunkRef, ChunkedVec, Set, SetRef, UnsafeRefInto, bit_vec::BitVec};
-use crate::impl_chunked_vec_common;
+use crate::{
+    codec::data_type::{ChunkedVecBytes, ChunkedVecSized, Int, retain_lifetime_transmute},
+    impl_chunked_vec_common,
+};
 
-/// `ChunkedVecSet` stores set in a compact way.
+/// `ChunkedVecSet` is a vector storing `Option<Set>`.
 ///
 /// Inside `ChunkedVecSet`:
-/// - `data` stores the real set data.
-/// - `bitmap` indicates if an element at given index is null.
-/// - `value` is slice for set value bitmap which up to 64 bits.
+/// - `values` stores the set bit masks.
+/// - `names` stores the comma-joined element names of the sets.
 ///
 /// # Notes
 ///
-/// Make sure operating `bitmap` and `value` together to prevent different
-/// stored representation issue
-///
-/// TODO: add way to set set column data
-/// TODO: code fot set/enum looks nearly the same, considering refactor them
-/// using macro
+/// `values` and `names` both maintain a duplicated bitmap.
+/// We are not able to store the data in a more compact form
+/// because we have to borrow the reference of `ChunkedVecSized<Int>`
+/// and `ChunkedVecBytes`. The borrowed reference should have the same
+/// lifetime with `ChunkedVecSet` which cannot be achieved if we don't
+/// store the owned data in struct fields.
 #[derive(Debug, Clone)]
 pub struct ChunkedVecSet {
-    data: Arc<BufferVec>,
-    bitmap: BitVec,
-    value: Vec<u64>,
+    values: ChunkedVecSized<Int>,
+    names: ChunkedVecBytes,
 }
 
 impl ChunkedVecSet {
     #[inline]
     pub fn get(&self, idx: usize) -> Option<SetRef<'_>> {
         assert!(idx < self.len());
-        if self.bitmap.get(idx) {
-            Some(SetRef::new(&self.data, self.value[idx]))
+        if let Some(value) = self.values.get_option_ref(idx) {
+            let name = self.names.get(idx).unwrap();
+            Some(SetRef::new(name, unsafe {
+                retain_lifetime_transmute(value)
+            }))
         } else {
             None
         }
+    }
+
+    #[inline]
+    pub fn as_vec_int(&self) -> &ChunkedVecSized<Int> {
+        &self.values
+    }
+
+    #[inline]
+    pub fn as_vec_bytes(&self) -> &ChunkedVecBytes {
+        &self.names
     }
 }
 
@@ -46,52 +56,52 @@ impl ChunkedVec<Set> for ChunkedVecSet {
 
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            data: Arc::new(BufferVec::new()),
-            bitmap: BitVec::with_capacity(capacity),
-            value: Vec::with_capacity(capacity),
+            values: ChunkedVecSized::<Int>::with_capacity(capacity),
+            names: ChunkedVecBytes::with_capacity(capacity),
         }
     }
 
     #[inline]
     fn push_data(&mut self, value: Set) {
-        self.bitmap.push(true);
-        self.value.push(value.value());
+        self.values.push_data(value.value() as i64);
+        self.names.push_data_ref(value.name());
     }
 
     #[inline]
     fn push_null(&mut self) {
-        self.bitmap.push(false);
-        self.value.push(0);
+        self.values.push_null();
+        self.names.push_null();
     }
 
     fn len(&self) -> usize {
-        self.value.len()
+        self.values.len()
     }
 
     fn truncate(&mut self, len: usize) {
         if len < self.len() {
-            self.bitmap.truncate(len);
-            self.value.truncate(len);
+            self.values.truncate(len);
+            self.names.truncate(len);
         }
     }
 
     fn capacity(&self) -> usize {
-        self.bitmap.capacity().max(self.value.capacity())
+        self.values.capacity().max(self.names.capacity())
     }
 
     fn append(&mut self, other: &mut Self) {
-        self.value.append(&mut other.value);
-        self.bitmap.append(&mut other.bitmap);
+        self.values.append(&mut other.values);
+        self.names.append(&mut other.names);
     }
 
     fn to_vec(&self) -> Vec<Option<Set>> {
         let mut x = Vec::with_capacity(self.len());
         for i in 0..self.len() {
-            x.push(if self.bitmap.get(i) {
-                Some(Set::new(self.data.clone(), self.value[i]))
+            if let Some(value) = self.values.get_option_ref(i) {
+                let name = self.names.get(i).unwrap().to_vec();
+                x.push(Some(Set::new(name, *value as u64)));
             } else {
-                None
-            });
+                x.push(None);
+            }
         }
         x
     }
@@ -99,20 +109,15 @@ impl ChunkedVec<Set> for ChunkedVecSet {
 
 impl PartialEq for ChunkedVecSet {
     fn eq(&self, other: &Self) -> bool {
-        if self.data.len() != other.data.len() {
-            return false;
-        }
-        for idx in 0..self.data.len() {
-            if self.data[idx] != other.data[idx] {
-                return false;
-            }
-        }
-
-        if !self.bitmap.eq(&other.bitmap) {
+        if self.values.len() != other.values.len() {
             return false;
         }
 
-        if !self.value.eq(&other.value) {
+        if !self.values.eq(&other.values) {
+            return false;
+        }
+
+        if !self.names.eq(&other.names) {
             return false;
         }
 
@@ -127,7 +132,7 @@ impl<'a> ChunkRef<'a, SetRef<'a>> for &'a ChunkedVecSet {
     }
 
     fn get_bit_vec(self) -> &'a BitVec {
-        &self.bitmap
+        self.values.get_bit_vec()
     }
 
     #[inline]
@@ -153,44 +158,47 @@ mod tests {
     use super::*;
 
     fn setup() -> ChunkedVecSet {
-        let mut x: ChunkedVecSet = ChunkedVecSet::with_capacity(0);
-
-        // FIXME: we need a set_data here, but for now, we set directly
-        let mut buf = BufferVec::new();
-        buf.push("我好强啊");
-        buf.push("我强爆啊");
-        buf.push("我成功了");
-        x.data = Arc::new(buf);
-
-        x
+        ChunkedVecSet::with_capacity(0)
     }
 
     #[test]
     fn test_basics() {
         let mut x = setup();
         x.push(None);
-        x.push(Some(Set::new(x.data.clone(), 2)));
+        x.push(Some(Set::new("b,c".as_bytes().to_vec(), 0b110)));
         x.push(None);
-        x.push(Some(Set::new(x.data.clone(), 1)));
-        x.push(Some(Set::new(x.data.clone(), 3)));
+        x.push(Some(Set::new("a".as_bytes().to_vec(), 0b001)));
+        x.push(Some(Set::new("a,b".as_bytes().to_vec(), 0b011)));
 
         assert_eq!(x.get(0), None);
-        assert_eq!(x.get(1), Some(SetRef::new(&x.data, 2)));
+        assert_eq!(x.get(1), Some(SetRef::new(b"b,c", &0b110)));
         assert_eq!(x.get(2), None);
-        assert_eq!(x.get(3), Some(SetRef::new(&x.data, 1)));
-        assert_eq!(x.get(4), Some(SetRef::new(&x.data, 3)));
+        assert_eq!(x.get(3), Some(SetRef::new(b"a", &0b001)));
+        assert_eq!(x.get(4), Some(SetRef::new(b"a,b", &0b011)));
         assert_eq!(x.len(), 5);
         assert!(!x.is_empty());
+    }
+
+    #[test]
+    fn test_push_populates_names() {
+        // The element name must be installed by `push_data`, not only by tests
+        // assigning the backing field directly.
+        let mut x = setup();
+        x.push(Some(Set::new("a,c".as_bytes().to_vec(), 0b101)));
+
+        assert_eq!(x.get(0).unwrap().name(), b"a,c");
+        assert_eq!(x.as_vec_bytes().get(0).unwrap(), b"a,c");
+        assert_eq!(*x.as_vec_int().get_option_ref(0).unwrap(), 0b101);
     }
 
     #[test]
     fn test_truncate() {
         let mut x = setup();
         x.push(None);
-        x.push(Some(Set::new(x.data.clone(), 2)));
+        x.push(Some(Set::new("b,c".as_bytes().to_vec(), 0b110)));
         x.push(None);
-        x.push(Some(Set::new(x.data.clone(), 1)));
-        x.push(Some(Set::new(x.data.clone(), 3)));
+        x.push(Some(Set::new("a".as_bytes().to_vec(), 0b001)));
+        x.push(Some(Set::new("a,b".as_bytes().to_vec(), 0b011)));
 
         x.truncate(100);
         assert_eq!(x.len(), 5);
@@ -198,7 +206,7 @@ mod tests {
         x.truncate(3);
         assert_eq!(x.len(), 3);
         assert_eq!(x.get(0), None);
-        assert_eq!(x.get(1), Some(SetRef::new(&x.data, 2)));
+        assert_eq!(x.get(1), Some(SetRef::new(b"b,c", &0b110)));
         assert_eq!(x.get(2), None);
 
         x.truncate(1);
@@ -213,21 +221,34 @@ mod tests {
     fn test_append() {
         let mut x = setup();
         x.push(None);
-        x.push(Some(Set::new(x.data.clone(), 2)));
+        x.push(Some(Set::new("b,c".as_bytes().to_vec(), 0b110)));
 
         let mut y = setup();
         y.push(None);
-        y.push(Some(Set::new(x.data.clone(), 1)));
-        y.push(Some(Set::new(x.data.clone(), 3)));
+        y.push(Some(Set::new("a".as_bytes().to_vec(), 0b001)));
+        y.push(Some(Set::new("a,b".as_bytes().to_vec(), 0b011)));
 
         x.append(&mut y);
         assert_eq!(x.len(), 5);
         assert!(y.is_empty());
 
         assert_eq!(x.get(0), None);
-        assert_eq!(x.get(1), Some(SetRef::new(&x.data, 2)));
+        assert_eq!(x.get(1), Some(SetRef::new(b"b,c", &0b110)));
         assert_eq!(x.get(2), None);
-        assert_eq!(x.get(3), Some(SetRef::new(&x.data, 1)));
-        assert_eq!(x.get(4), Some(SetRef::new(&x.data, 3)));
+        assert_eq!(x.get(3), Some(SetRef::new(b"a", &0b001)));
+        assert_eq!(x.get(4), Some(SetRef::new(b"a,b", &0b011)));
+    }
+
+    #[test]
+    fn test_to_vec() {
+        let values = vec![
+            None,
+            Some(Set::new("b".as_bytes().to_vec(), 0b010)),
+            None,
+            Some(Set::new("a,b".as_bytes().to_vec(), 0b011)),
+        ];
+        let x = ChunkedVecSet::from(values.clone());
+        assert_eq!(x.to_vec(), values);
+        assert_eq!(x, ChunkedVecSet::from(values));
     }
 }

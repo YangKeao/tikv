@@ -25,6 +25,7 @@ use crate::{
             },
             enums::{Enum, EnumDatumPayloadChunkEncoder, EnumDecoder, EnumEncoder, EnumRef},
             json::{Json, JsonDatumPayloadChunkEncoder, JsonDecoder, JsonEncoder, JsonRef},
+            set::{Set, SetDatumPayloadChunkEncoder, SetDecoder, SetEncoder, SetRef},
             time::{Time, TimeDatumPayloadChunkEncoder, TimeDecoder, TimeEncoder},
             vector::{
                 VectorFloat32, VectorFloat32DatumPayloadChunkEncoder, VectorFloat32Decoder,
@@ -144,7 +145,11 @@ impl Column {
                     col.append_enum_datum(&raw_datums[row_index], field_type)?
                 }
             }
-            EvalType::Set => unimplemented!(),
+            EvalType::Set => {
+                for &row_index in logical_rows {
+                    col.append_set_datum(&raw_datums[row_index], field_type)?
+                }
+            }
         }
 
         Ok(col)
@@ -303,7 +308,16 @@ impl Column {
                     }
                 }
             }
-            VectorValue::Set(_) => unimplemented!(),
+            VectorValue::Set(vec) => {
+                for &row_index in logical_rows {
+                    match vec.get_option_ref(row_index) {
+                        None => {
+                            col.append_null();
+                        }
+                        Some(val) => col.append_set(val)?,
+                    }
+                }
+            }
         }
         Ok(col)
     }
@@ -336,13 +350,8 @@ impl Column {
             FieldTypeTp::Json => Datum::Json(self.get_json(idx)?),
             FieldTypeTp::TiDbVectorFloat32 => Datum::VectorFloat32(self.get_vector_float32(idx)?),
             FieldTypeTp::Enum => Datum::Enum(self.get_enum(idx)?),
+            FieldTypeTp::Set => Datum::Set(self.get_set(idx)?),
             FieldTypeTp::Bit => Datum::Bytes(self.get_bytes(idx).to_vec()),
-            FieldTypeTp::Set => {
-                return Err(box_err!(
-                    "get datum with {} is not supported yet.",
-                    field_type.tp()
-                ));
-            }
             FieldTypeTp::VarChar
             | FieldTypeTp::VarString
             | FieldTypeTp::String
@@ -376,6 +385,7 @@ impl Column {
             Datum::Dur(v) => self.append_duration(*v),
             Datum::Time(v) => self.append_time(*v),
             Datum::Json(ref v) => self.append_json(v.as_ref()),
+            Datum::Set(ref v) => self.append_set(v.as_ref()),
             _ => Err(box_err!("unsupported datum {:?}", data)),
         }
     }
@@ -998,12 +1008,67 @@ impl Column {
     }
 
     /// Get the enum datum of the row in the column.
+    ///
+    /// Enum columns are variable-length (`[u64 LE value][name bytes]`), so the
+    /// cell must be sliced with `var_offsets` rather than `idx * fixed_len`.
     #[inline]
     pub fn get_enum(&self, idx: usize) -> Result<Enum> {
-        let start = idx * self.fixed_len;
-        let end = start + self.fixed_len;
+        let start = self.var_offsets[idx];
+        let end = self.var_offsets[idx + 1];
         let mut data = &self.data[start..end];
         data.read_enum_from_chunk()
+    }
+
+    // Append a Set datum to the column
+    #[inline]
+    pub fn append_set(&mut self, s: SetRef<'_>) -> Result<()> {
+        self.data.write_set_to_chunk(s.value(), s.name())?;
+        self.finished_append_var();
+        Ok(())
+    }
+
+    pub fn append_set_datum(&mut self, src_datum: &[u8], field_type: &FieldType) -> Result<()> {
+        if src_datum.is_empty() {
+            return Err(Error::InvalidDataType(
+                "Failed to decode datum flag".to_owned(),
+            ));
+        }
+        let flag = src_datum[0];
+        let raw_datum = &src_datum[1..];
+        match flag {
+            datum::NIL_FLAG => self.append_null(),
+            datum::COMPACT_BYTES_FLAG => {
+                self.data
+                    .write_set_to_chunk_by_datum_payload_compact_bytes(raw_datum, field_type)?;
+                self.finished_append_var();
+            }
+            datum::UINT_FLAG => {
+                self.data
+                    .write_set_to_chunk_by_datum_payload_uint(raw_datum, field_type)?;
+                self.finished_append_var();
+            }
+            datum::VAR_UINT_FLAG => {
+                self.data
+                    .write_set_to_chunk_by_datum_payload_var_uint(raw_datum, field_type)?;
+                self.finished_append_var();
+            }
+            _ => {
+                return Err(Error::InvalidDataType(format!(
+                    "Unsupported datum flag {} for Set vector",
+                    flag
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the set datum of the row in the column.
+    #[inline]
+    pub fn get_set(&self, idx: usize) -> Result<Set> {
+        let start = self.var_offsets[idx];
+        let end = self.var_offsets[idx + 1];
+        let mut data = &self.data[start..end];
+        data.read_set_from_chunk()
     }
 
     /// Return the total rows in the column.
@@ -1081,7 +1146,10 @@ mod tests {
     use tipb::FieldType;
 
     use super::*;
-    use crate::codec::datum::Datum;
+    use crate::codec::{
+        data_type::{ChunkedVec, ChunkedVecSet},
+        datum::Datum,
+    };
 
     #[test]
     fn test_column_i64() {
@@ -1217,5 +1285,146 @@ mod tests {
         ];
         let data = vec![Datum::Null, Datum::Bytes(b"xxx".to_vec())];
         test_colum_datum(fields, data);
+    }
+
+    fn set_field_type() -> FieldType {
+        let mut field_type = FieldType::new();
+        field_type.set_tp(FieldTypeTp::Set as i32);
+        field_type.set_elems(protobuf::RepeatedField::from_slice(&[
+            String::from("a"),
+            String::from("b"),
+            String::from("c"),
+        ]));
+        field_type
+    }
+
+    #[test]
+    fn test_column_set() {
+        let field_type = set_field_type();
+
+        let mut column = Column::new(FieldTypeTp::Set, 4);
+        column.append_null();
+        // Empty selection.
+        column.append_set(SetRef::new(b"", &0)).unwrap();
+        // Multi-element selection.
+        column.append_set(SetRef::new(b"a,c", &0b101)).unwrap();
+        // Non-UTF8 element name bytes must survive unchanged.
+        column
+            .append_set(SetRef::new(&[0xff, 0xfe], &0b011))
+            .unwrap();
+
+        assert_eq!(column.len(), 4);
+        assert_eq!(column.get_datum(0, &field_type).unwrap(), Datum::Null);
+        assert_eq!(
+            column.get_datum(1, &field_type).unwrap(),
+            Datum::Set(Set::new(vec![], 0))
+        );
+        assert_eq!(
+            column.get_datum(2, &field_type).unwrap(),
+            Datum::Set(Set::new(b"a,c".to_vec(), 0b101))
+        );
+        assert_eq!(
+            column.get_datum(3, &field_type).unwrap(),
+            Datum::Set(Set::new(vec![0xff, 0xfe], 0b011))
+        );
+
+        // Round-trip through `append_datum`.
+        let expected = vec![
+            Datum::Null,
+            Datum::Set(Set::new(vec![], 0)),
+            Datum::Set(Set::new(b"a,c".to_vec(), 0b101)),
+            Datum::Set(Set::new(vec![0xff, 0xfe], 0b011)),
+        ];
+        let mut column2 = Column::new(FieldTypeTp::Set, expected.len());
+        for datum in &expected {
+            column2.append_datum(datum).unwrap();
+        }
+        assert_eq!(column2.get_datum(0, &field_type).unwrap(), Datum::Null);
+        for idx in 1..expected.len() {
+            assert_eq!(
+                &column2.get_datum(idx, &field_type).unwrap(),
+                &expected[idx]
+            );
+            // The named variants must also agree on the raw name bytes.
+            assert_eq!(
+                column2.get_set(idx).unwrap().name(),
+                column.get_set(idx).unwrap().name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_column_set_from_raw_datums_and_vector() {
+        let field_type = set_field_type();
+
+        let mut raw_datums = BufferVec::new();
+        raw_datums.push([datum::NIL_FLAG]);
+        // Empty selection, UINT payload (big-endian u64).
+        raw_datums.push([datum::UINT_FLAG, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // Multi-element selection a,c (bits 0 and 2).
+        raw_datums.push([datum::UINT_FLAG, 0, 0, 0, 0, 0, 0, 0, 5]);
+
+        let mut ctx = EvalContext::default();
+        let col = Column::from_raw_datums(&field_type, &raw_datums, &[0, 1, 2], &mut ctx).unwrap();
+        assert_eq!(col.len(), 3);
+        assert_eq!(col.get_datum(0, &field_type).unwrap(), Datum::Null);
+        assert_eq!(
+            col.get_datum(1, &field_type).unwrap(),
+            Datum::Set(Set::new(vec![], 0))
+        );
+        assert_eq!(
+            col.get_datum(2, &field_type).unwrap(),
+            Datum::Set(Set::new(b"a,c".to_vec(), 5))
+        );
+
+        let mut vec = ChunkedVecSet::with_capacity(3);
+        vec.push(None);
+        vec.push(Some(Set::new(vec![], 0)));
+        vec.push(Some(Set::new(b"a,c".to_vec(), 5)));
+        let vector = VectorValue::Set(vec);
+        let col = Column::from_vector_value(&field_type, &vector, &[0, 1, 2]).unwrap();
+        assert_eq!(col.len(), 3);
+        assert_eq!(col.get_datum(0, &field_type).unwrap(), Datum::Null);
+        assert_eq!(
+            col.get_datum(1, &field_type).unwrap(),
+            Datum::Set(Set::new(vec![], 0))
+        );
+        assert_eq!(
+            col.get_datum(2, &field_type).unwrap(),
+            Datum::Set(Set::new(b"a,c".to_vec(), 5))
+        );
+    }
+
+    #[test]
+    fn test_column_enum_get_datum_var_len() {
+        // Regression: `get_enum` sliced the var-length column with
+        // `idx * fixed_len`, so every row read from offset 0 (an empty slice)
+        // and failed. It must use `var_offsets` like the other var-length
+        // readers.
+        let mut field_type = FieldType::new();
+        field_type.set_tp(FieldTypeTp::Enum as i32);
+        field_type.set_elems(protobuf::RepeatedField::from_slice(&[
+            String::from("a"),
+            String::from("b"),
+            String::from("c"),
+        ]));
+
+        let mut column = Column::new(FieldTypeTp::Enum, 3);
+        column.append_enum(EnumRef::new(b"a", &1)).unwrap();
+        column.append_enum(EnumRef::new(b"b", &2)).unwrap();
+        column.append_enum(EnumRef::new(b"c", &3)).unwrap();
+
+        assert_eq!(
+            column.get_datum(0, &field_type).unwrap(),
+            Datum::Enum(Enum::new(b"a".to_vec(), 1))
+        );
+        assert_eq!(
+            column.get_datum(1, &field_type).unwrap(),
+            Datum::Enum(Enum::new(b"b".to_vec(), 2))
+        );
+        assert_eq!(
+            column.get_datum(2, &field_type).unwrap(),
+            Datum::Enum(Enum::new(b"c".to_vec(), 3))
+        );
     }
 }

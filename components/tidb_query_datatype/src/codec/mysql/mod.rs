@@ -43,7 +43,7 @@ pub use self::{
         Json, JsonDatumPayloadChunkEncoder, JsonDecoder, JsonEncoder, JsonType, ModifyType,
         PathExpression, parse_json_path_expr,
     },
-    set::{Set, SetRef},
+    set::{Set, SetDatumPayloadChunkEncoder, SetDecoder, SetEncoder, SetRef},
     time::{Time, TimeDecoder, TimeEncoder, TimeType, Tz},
     vector::{VectorFloat32, VectorFloat32Decoder, VectorFloat32Encoder, VectorFloat32Ref},
 };

@@ -557,13 +557,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use tidb_query_datatype::{
         EvalType, FieldTypeAccessor, FieldTypeTp,
         codec::batch::{LazyBatchColumn, LazyBatchColumnVec},
     };
-    use tikv_util::buffer_vec::BufferVec;
     use tipb_helper::ExprDefBuilder;
 
     use super::*;
@@ -658,28 +655,52 @@ mod tests {
 
         let mut result = [VectorValue::with_capacity(0, EvalType::Set)];
 
-        let mut buf = BufferVec::new();
-        buf.push("B - 我好强啊");
-        buf.push("A - 我太强啦");
-        let buf = Arc::new(buf);
-
         state.push_result(&mut ctx, &mut result).unwrap();
         assert_eq!(result[0].to_set_vec(), &[None]);
 
-        update!(state, &mut ctx, Some(SetRef::new(&buf, 0b01))).unwrap();
+        update!(
+            state,
+            &mut ctx,
+            Some(SetRef::new("B - 我好强啊".as_bytes(), &0b01))
+        )
+        .unwrap();
         result[0].clear();
         state.push_result(&mut ctx, &mut result).unwrap();
         assert_eq!(
             result[0].to_set_vec(),
-            vec![Some(Set::new(buf.clone(), 0b01))]
+            vec![Some(Set::new("B - 我好强啊".as_bytes().to_vec(), 0b01))]
         );
 
-        update!(state, &mut ctx, Some(SetRef::new(&buf, 0b01))).unwrap();
-        update!(state, &mut ctx, Some(SetRef::new(&buf, 0b10))).unwrap();
-        update!(state, &mut ctx, Some(SetRef::new(&buf, 0b11))).unwrap();
+        update!(
+            state,
+            &mut ctx,
+            Some(SetRef::new("B - 我好强啊".as_bytes(), &0b01))
+        )
+        .unwrap();
+        update!(
+            state,
+            &mut ctx,
+            Some(SetRef::new("A - 我太强啦".as_bytes(), &0b10))
+        )
+        .unwrap();
+        update!(
+            state,
+            &mut ctx,
+            Some(SetRef::new(
+                "B - 我好强啊,A - 我太强啦".as_bytes(),
+                &0b11
+            ))
+        )
+        .unwrap();
         result[0].clear();
         state.push_result(&mut ctx, &mut result).unwrap();
-        assert_eq!(result[0].to_set_vec(), vec![Some(Set::new(buf, 0b11))]);
+        assert_eq!(
+            result[0].to_set_vec(),
+            vec![Some(Set::new(
+                "B - 我好强啊,A - 我太强啦".as_bytes().to_vec(),
+                0b11
+            ))]
+        );
     }
 
     #[test]
