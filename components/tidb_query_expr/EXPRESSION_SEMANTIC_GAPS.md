@@ -130,7 +130,7 @@ surfaced automatically rather than silently:
 
 | # | Area | Native | Engine | Handling |
 | --- | --- | --- | --- | --- |
-| 20 | `COT` | `0.6420926159343308` | `0.6420926159343306` (Go's `math.Cot`) | native port bug; `cot` stays native until the port is fixed |
+| 20 | `COT` | `0.6420926159343308` (`0x1.48c05d04e1cfep-1`) | `0.6420926159343306` (`0x1.48c05d04e1cfdp-1`) | the ENGINE is the one that differs. Go's `COT` is `1/math.Tan(x)` (`pkg/expression/builtin_math.go`, `builtinCotSig.evalReal`), and Go's pure-Go `math.Tan(1)` is `0x1.5574077246549021p+0` while libm's is `0x1.5574077246549023p+0`, one ULP above, so the reciprocal lands one ULP below Go. This port's `go_trig::go_tan` is a transcreation of Go's `Tan` and its `COT` is Go-exact, so `cot` stays native for the correct answer; matching Go in the engine would need Go's `Tan`, not libm's. Pinned by `math_fn::tests::cot_matches_go_and_libm_tan_does_not` |
 | 21 | `CRC32` | `Datum::UInt(2501908538)` | `Datum::Int(2501908538)` | FIXED: the TiDB port declared CRC32 signed while Go marks it UNSIGNED; the declaration now carries `UNSIGNED|BINARY` and `crc32` is admitted |
 | 22 | `OCT` over a binary literal | reads the bit value (`b'11111111'` -> `377`) | takes the string path (`0`) | `oct` excluded |
 | 23 | `GREATEST`/`LEAST` over a non-binary collation | folds case/accents through the derived collation | compares bytes (`utf8mb4_general_ci`: native `B`, engine `a`) | string shapes require binary arguments |
@@ -139,7 +139,10 @@ surfaced automatically rather than silently:
 | 26 | binary/bit literal in a numeric context | numeric (`b'1' + 0` -> 1) | bytes (`0`) | those constants declined |
 | 27 | `ROUND`/`TRUNCATE` with a computed digit | `round(5, -100)` is `0`, `round(1.2345, '2')` is `1.23` | compile refusal "ROUND/TRUNCATE fractional digits require an integer literal or input column" | the row-12 panic guard needs the digit as a literal or column; the rewriter's constant is not folded and `-100` is `unaryminus(100)`, so these stay native. An embedder-side constant fold of the digit, or a runtime digit check inside the kernel, is the way in |
 
-Items 23-24 are worth an upstream look: they are a collation-semantics
-difference, not a wording one. Items 21 and 26 are representation choices the
+Item 20 is worth an upstream look for the opposite reason the older text
+claimed: the engine's answer is the one that differs from Go, by one ULP, and
+the fix would be to use Go's `Tan` rather than the system libm. Items 23-24 are
+worth an upstream look too: they are a collation-semantics difference, not a
+wording one. Items 21 and 26 are representation choices the
 adapter could carry differently if the enum-style hybrid were extended to
 binary literals.
