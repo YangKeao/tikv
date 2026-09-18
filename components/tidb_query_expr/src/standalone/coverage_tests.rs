@@ -231,12 +231,33 @@ fn original_kernel_family_smoke() {
 }
 
 #[test]
-fn eager_branch_errors_and_compile_time_metadata_errors_are_preserved() {
+fn lazy_branch_errors_are_skipped_and_needed_branch_errors_abort() {
+    // The condition selects the true branch, so the overflowing false branch is
+    // never entered and cannot abort the batch.
     let expr = call(
         ScalarFuncSig::IfInt,
         FieldTypeTp::LongLong,
         vec![
             integer(1),
+            integer(7),
+            call(
+                ScalarFuncSig::PlusInt,
+                FieldTypeTp::LongLong,
+                vec![integer(i64::MAX), integer(1)],
+            ),
+        ],
+    );
+    let mut prepared = prepare(expr, &[], Context::default());
+    assert_eq!(
+        prepared.eval(&[], 1, None).unwrap().column,
+        Column::Int(vec![Some(7)])
+    );
+    // The same branch is needed once the condition is false, so the batch fails.
+    let expr = call(
+        ScalarFuncSig::IfInt,
+        FieldTypeTp::LongLong,
+        vec![
+            integer(0),
             integer(7),
             call(
                 ScalarFuncSig::PlusInt,

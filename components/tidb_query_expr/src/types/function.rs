@@ -137,8 +137,15 @@ impl RpnFnMeta {
     /// The generated `name`, `validator_ptr`, `metadata_expr_ptr` and `fn_ptr`
     /// are preserved, so the signature is still validated and its metadata
     /// still built at compile time; only evaluation becomes pull-style.
+    ///
+    /// A lazy program cannot be scheduled by the borrowed facade, which
+    /// evaluates every child eagerly before calling its kernel. Clearing
+    /// `borrowed_fn_ptr` here makes `supports_borrowed()` refuse such a program
+    /// structurally, rather than leaving a kernel that the borrowed path would
+    /// silently run with already-evaluated children.
     pub const fn with_lazy(mut self, f: LazyFn) -> Self {
         self.lazy_fn_ptr = Some(f);
+        self.borrowed_fn_ptr = None;
         self
     }
 }

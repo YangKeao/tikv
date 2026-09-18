@@ -597,13 +597,21 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::NullEqDuration => compare_fn_meta::<BasicComparer<Duration, CmpOpNullEq>>(),
         ScalarFuncSig::NullEqJson => compare_json_fn_meta::<CmpOpNullEq>(),
         ScalarFuncSig::NullEqVectorFloat32 => compare_vector_float32_fn_meta::<CmpOpNullEq>(),
-        ScalarFuncSig::CoalesceInt => coalesce_fn_meta::<Int>(),
-        ScalarFuncSig::CoalesceReal => coalesce_fn_meta::<Real>(),
-        ScalarFuncSig::CoalesceString => coalesce_bytes_fn_meta(),
-        ScalarFuncSig::CoalesceDecimal => coalesce_fn_meta::<Decimal>(),
-        ScalarFuncSig::CoalesceTime => coalesce_fn_meta::<DateTime>(),
-        ScalarFuncSig::CoalesceDuration => coalesce_fn_meta::<Duration>(),
-        ScalarFuncSig::CoalesceJson => coalesce_json_fn_meta(),
+        ScalarFuncSig::CoalesceInt => coalesce_fn_meta::<Int>().with_lazy(lazy_coalesce::<Int>),
+        ScalarFuncSig::CoalesceReal => coalesce_fn_meta::<Real>().with_lazy(lazy_coalesce::<Real>),
+        ScalarFuncSig::CoalesceString => {
+            coalesce_bytes_fn_meta().with_lazy(lazy_coalesce_bytes)
+        }
+        ScalarFuncSig::CoalesceDecimal => {
+            coalesce_fn_meta::<Decimal>().with_lazy(lazy_coalesce::<Decimal>)
+        }
+        ScalarFuncSig::CoalesceTime => {
+            coalesce_fn_meta::<DateTime>().with_lazy(lazy_coalesce::<DateTime>)
+        }
+        ScalarFuncSig::CoalesceDuration => {
+            coalesce_fn_meta::<Duration>().with_lazy(lazy_coalesce::<Duration>)
+        }
+        ScalarFuncSig::CoalesceJson => coalesce_json_fn_meta().with_lazy(lazy_coalesce_json),
         // impl_compare_in
         ScalarFuncSig::InInt => compare_in_int_type_by_hash_fn_meta(),
         ScalarFuncSig::InReal => compare_in_by_hash_fn_meta::<NormalInByHash::<Real>>(),
@@ -613,31 +621,56 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::InDuration => compare_in_by_hash_fn_meta::<NormalInByHash::<Duration>>(),
         ScalarFuncSig::InJson => compare_in_by_compare_json_fn_meta(),
         // impl_control
-        // `IfNullInt` is the first signature with a lazy kernel: `rhs` is only
-        // entered for rows whose `lhs` is NULL. The generated eager meta keeps
-        // its validator, metadata and `fn_ptr`; only `borrowed_fn_ptr` stays
-        // `None` so the borrowed facade refuses the lazy program.
+        // The control-flow signatures are lazy: `IF`, `IFNULL`, `COALESCE` and
+        // `CASE` enter only the branch a row selects, so a skipped branch
+        // cannot error, warn or draw RNG. The generated eager meta still
+        // supplies the validator, metadata and `fn_ptr` fallback; `with_lazy`
+        // clears `borrowed_fn_ptr` so the borrowed facade refuses the program.
         ScalarFuncSig::IfNullInt => if_null_fn_meta::<Int>().with_lazy(lazy_if_null::<Int>),
-        ScalarFuncSig::IfNullReal => if_null_fn_meta::<Real>(),
-        ScalarFuncSig::IfNullString => if_null_bytes_fn_meta(),
-        ScalarFuncSig::IfNullDecimal => if_null_fn_meta::<Decimal>(),
-        ScalarFuncSig::IfNullTime => if_null_fn_meta::<DateTime>(),
-        ScalarFuncSig::IfNullDuration => if_null_fn_meta::<Duration>(),
-        ScalarFuncSig::IfNullJson => if_null_json_fn_meta(),
-        ScalarFuncSig::IfInt => if_condition_fn_meta::<Int>(),
-        ScalarFuncSig::IfReal => if_condition_fn_meta::<Real>(),
-        ScalarFuncSig::IfDecimal => if_condition_fn_meta::<Decimal>(),
-        ScalarFuncSig::IfTime => if_condition_fn_meta::<DateTime>(),
-        ScalarFuncSig::IfString => if_condition_bytes_fn_meta(),
-        ScalarFuncSig::IfDuration => if_condition_fn_meta::<Duration>(),
-        ScalarFuncSig::IfJson => if_condition_json_fn_meta(),
-        ScalarFuncSig::CaseWhenInt => case_when_fn_meta::<Int>(),
-        ScalarFuncSig::CaseWhenReal => case_when_fn_meta::<Real>(),
-        ScalarFuncSig::CaseWhenString => case_when_bytes_fn_meta(),
-        ScalarFuncSig::CaseWhenDecimal => case_when_fn_meta::<Decimal>(),
-        ScalarFuncSig::CaseWhenTime => case_when_fn_meta::<DateTime>(),
-        ScalarFuncSig::CaseWhenDuration => case_when_fn_meta::<Duration>(),
-        ScalarFuncSig::CaseWhenJson => case_when_json_fn_meta(),
+        ScalarFuncSig::IfNullReal => if_null_fn_meta::<Real>().with_lazy(lazy_if_null::<Real>),
+        ScalarFuncSig::IfNullString => {
+            if_null_bytes_fn_meta().with_lazy(lazy_if_null_bytes)
+        }
+        ScalarFuncSig::IfNullDecimal => {
+            if_null_fn_meta::<Decimal>().with_lazy(lazy_if_null::<Decimal>)
+        }
+        ScalarFuncSig::IfNullTime => {
+            if_null_fn_meta::<DateTime>().with_lazy(lazy_if_null::<DateTime>)
+        }
+        ScalarFuncSig::IfNullDuration => {
+            if_null_fn_meta::<Duration>().with_lazy(lazy_if_null::<Duration>)
+        }
+        ScalarFuncSig::IfNullJson => if_null_json_fn_meta().with_lazy(lazy_if_null_json),
+        ScalarFuncSig::IfInt => if_condition_fn_meta::<Int>().with_lazy(lazy_if::<Int>),
+        ScalarFuncSig::IfReal => if_condition_fn_meta::<Real>().with_lazy(lazy_if::<Real>),
+        ScalarFuncSig::IfDecimal => {
+            if_condition_fn_meta::<Decimal>().with_lazy(lazy_if::<Decimal>)
+        }
+        ScalarFuncSig::IfTime => {
+            if_condition_fn_meta::<DateTime>().with_lazy(lazy_if::<DateTime>)
+        }
+        ScalarFuncSig::IfString => if_condition_bytes_fn_meta().with_lazy(lazy_if_bytes),
+        ScalarFuncSig::IfDuration => {
+            if_condition_fn_meta::<Duration>().with_lazy(lazy_if::<Duration>)
+        }
+        ScalarFuncSig::IfJson => if_condition_json_fn_meta().with_lazy(lazy_if_json),
+        ScalarFuncSig::CaseWhenInt => case_when_fn_meta::<Int>().with_lazy(lazy_case_when::<Int>),
+        ScalarFuncSig::CaseWhenReal => {
+            case_when_fn_meta::<Real>().with_lazy(lazy_case_when::<Real>)
+        }
+        ScalarFuncSig::CaseWhenString => {
+            case_when_bytes_fn_meta().with_lazy(lazy_case_when_bytes)
+        }
+        ScalarFuncSig::CaseWhenDecimal => {
+            case_when_fn_meta::<Decimal>().with_lazy(lazy_case_when::<Decimal>)
+        }
+        ScalarFuncSig::CaseWhenTime => {
+            case_when_fn_meta::<DateTime>().with_lazy(lazy_case_when::<DateTime>)
+        }
+        ScalarFuncSig::CaseWhenDuration => {
+            case_when_fn_meta::<Duration>().with_lazy(lazy_case_when::<Duration>)
+        }
+        ScalarFuncSig::CaseWhenJson => case_when_json_fn_meta().with_lazy(lazy_case_when_json),
         // impl_encryption
         ScalarFuncSig::UncompressedLength => uncompressed_length_fn_meta(),
         ScalarFuncSig::Md5 => md5_fn_meta(),
@@ -777,9 +810,9 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::RealIsFalseWithNull => real_is_false_fn_meta::<KeepNullOn>(),
         ScalarFuncSig::DecimalIsFalse => decimal_is_false_fn_meta::<KeepNullOff>(),
         ScalarFuncSig::DecimalIsFalseWithNull => decimal_is_false_fn_meta::<KeepNullOn>(),
-        ScalarFuncSig::LogicalAnd => logical_and_fn_meta(),
-        ScalarFuncSig::LogicalOr => logical_or_fn_meta(),
-        ScalarFuncSig::LogicalXor => logical_xor_fn_meta(),
+        ScalarFuncSig::LogicalAnd => logical_and_fn_meta().with_lazy(lazy_logical_and),
+        ScalarFuncSig::LogicalOr => logical_or_fn_meta().with_lazy(lazy_logical_or),
+        ScalarFuncSig::LogicalXor => logical_xor_fn_meta().with_lazy(lazy_logical_xor),
         ScalarFuncSig::UnaryNotInt => unary_not_int_fn_meta(),
         ScalarFuncSig::UnaryNotReal => unary_not_real_fn_meta(),
         ScalarFuncSig::UnaryNotDecimal => unary_not_decimal_fn_meta(),

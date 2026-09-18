@@ -1,8 +1,15 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::any::Any;
+
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
-use tidb_query_datatype::codec::{Error, data_type::*};
+use tidb_query_datatype::{
+    codec::{Error, data_type::*},
+    expr::EvalContext,
+};
+
+use crate::{LazyChildren, RpnFnCallExtra};
 
 #[rpn_fn(nullable)]
 #[inline]
@@ -35,6 +42,133 @@ pub fn logical_xor(arg0: Option<&i64>, arg1: Option<&i64>) -> Result<Option<i64>
         (Some(arg0), Some(arg1)) => Some(((*arg0 == 0) ^ (*arg1 == 0)) as i64),
         _ => None,
     })
+}
+
+/// Reads one operand out of a dense child vector; `None` is SQL NULL.
+#[inline]
+fn read_int(value: &VectorValue, row: usize) -> Option<i64> {
+    <Int as Evaluable>::borrow_scalar_value_ref(value.get_scalar_ref(row)).copied()
+}
+
+/// Builds the same `VectorValue::Int` the eager kernels return.
+#[inline]
+fn int_vector(values: Vec<Option<i64>>) -> VectorValue {
+    <Int as EvaluableRet>::cast_chunk_into_vector_value(
+        <<Int as EvaluableRet>::ChunkedType as ChunkedVec<Int>>::from_vec(values),
+    )
+}
+
+/// Lazy three-valued `AND`.
+///
+/// `lhs` is evaluated for every row. Go's `builtinLogicAndSig.evalInt`
+/// (`pkg/expression/builtin_op.go`) returns without touching the rhs only when
+/// `lhs` is a *non-NULL zero*; a NULL lhs still evaluates the rhs because
+/// `AND(NULL, FALSE)` is FALSE. Rows that skipped the rhs are merged with an
+/// explicit truth table.
+pub fn lazy_logical_and(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    let all_rows: Vec<usize> = (0..output_rows).collect();
+    let lhs = children.eval(ctx, 0, &all_rows)?;
+
+    let mut output = vec![None; output_rows];
+    let mut need: Vec<usize> = Vec::new();
+    for row in 0..output_rows {
+        match read_int(&lhs, row) {
+            Some(0) => output[row] = Some(0),
+            _ => need.push(row),
+        }
+    }
+
+    if !need.is_empty() {
+        let rhs = children.eval(ctx, 1, &need)?;
+        for (index, &row) in need.iter().enumerate() {
+            output[row] = match (read_int(&lhs, row), read_int(&rhs, index)) {
+                (_, Some(0)) => Some(0),
+                (Some(_), Some(_)) => Some(1),
+                _ => None,
+            };
+        }
+    }
+
+    Ok(int_vector(output))
+}
+
+/// Lazy three-valued `OR`.
+///
+/// Go's `builtinLogicOrSig.evalInt` returns without touching the rhs only when
+/// `lhs` is a *non-NULL nonzero*; a NULL lhs still evaluates the rhs because
+/// `OR(NULL, TRUE)` is TRUE.
+pub fn lazy_logical_or(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    let all_rows: Vec<usize> = (0..output_rows).collect();
+    let lhs = children.eval(ctx, 0, &all_rows)?;
+
+    let mut output = vec![None; output_rows];
+    let mut need: Vec<usize> = Vec::new();
+    for row in 0..output_rows {
+        match read_int(&lhs, row) {
+            Some(value) if value != 0 => output[row] = Some(1),
+            _ => need.push(row),
+        }
+    }
+
+    if !need.is_empty() {
+        let rhs = children.eval(ctx, 1, &need)?;
+        for (index, &row) in need.iter().enumerate() {
+            output[row] = match (read_int(&lhs, row), read_int(&rhs, index)) {
+                (_, Some(value)) if value != 0 => Some(1),
+                (Some(_), Some(_)) => Some(0),
+                _ => None,
+            };
+        }
+    }
+
+    Ok(int_vector(output))
+}
+
+/// Lazy two-valued `XOR` (NULL if either operand is NULL).
+///
+/// Go's `builtinLogicXorSig.evalInt` returns on a NULL lhs without evaluating
+/// the rhs, so this is the only logical operand that is skipped for NULL.
+pub fn lazy_logical_xor(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    let all_rows: Vec<usize> = (0..output_rows).collect();
+    let lhs = children.eval(ctx, 0, &all_rows)?;
+
+    let mut output = vec![None; output_rows];
+    let mut need: Vec<usize> = Vec::new();
+    for row in 0..output_rows {
+        if read_int(&lhs, row).is_some() {
+            need.push(row);
+        }
+    }
+
+    if !need.is_empty() {
+        let rhs = children.eval(ctx, 1, &need)?;
+        for (index, &row) in need.iter().enumerate() {
+            output[row] = match (read_int(&lhs, row), read_int(&rhs, index)) {
+                (Some(lhs), Some(rhs)) => Some(((lhs == 0) ^ (rhs == 0)) as i64),
+                _ => None,
+            };
+        }
+    }
+
+    Ok(int_vector(output))
 }
 
 #[rpn_fn(nullable)]
@@ -281,13 +415,60 @@ fn right_shift(lhs: Option<&Int>, rhs: Option<&Int>) -> Result<Option<Int>> {
 #[cfg(test)]
 mod tests {
     use tidb_query_datatype::{
-        FieldTypeFlag, FieldTypeTp, builder::FieldTypeBuilder, codec::mysql::TimeType,
+        EvalType, FieldTypeFlag, FieldTypeTp,
+        builder::FieldTypeBuilder,
+        codec::{
+            batch::{LazyBatchColumn, LazyBatchColumnVec},
+            mysql::TimeType,
+        },
         expr::EvalContext,
     };
-    use tipb::ScalarFuncSig;
+    use tipb::{FieldType, ScalarFuncSig};
+    use tipb_helper::ExprDefBuilder;
 
     use super::*;
-    use crate::test_util::RpnFnScalarEvaluator;
+    use crate::{RpnExpression, RpnExpressionBuilder, test_util::RpnFnScalarEvaluator};
+
+    fn decoded_int_column(values: impl IntoIterator<Item = Option<i64>>) -> LazyBatchColumn {
+        let values: Vec<Option<i64>> = values.into_iter().collect();
+        let mut column = LazyBatchColumn::decoded_with_capacity_and_tp(values.len(), EvalType::Int);
+        for value in values {
+            column.mut_decoded().push_int(value);
+        }
+        column
+    }
+
+    fn build_binary(sig: ScalarFuncSig, lhs: ExprDefBuilder, rhs: ExprDefBuilder) -> RpnExpression {
+        RpnExpressionBuilder::build_from_expr_tree(
+            ExprDefBuilder::scalar_func(sig, FieldTypeTp::LongLong)
+                .push_child(lhs)
+                .push_child(rhs)
+                .build(),
+            &mut EvalContext::default(),
+            2,
+        )
+        .unwrap()
+    }
+
+    fn unary_minus(child: ExprDefBuilder) -> ExprDefBuilder {
+        ExprDefBuilder::scalar_func(ScalarFuncSig::UnaryMinusInt, FieldTypeTp::LongLong)
+            .push_child(child)
+    }
+
+    fn eval_int(
+        expr: &RpnExpression,
+        schema: &[FieldType],
+        columns: &mut LazyBatchColumnVec,
+        rows: &[usize],
+    ) -> Vec<Option<i64>> {
+        let mut ctx = EvalContext::default();
+        expr.eval(&mut ctx, schema, columns, rows, rows.len())
+            .unwrap()
+            .vector_value()
+            .unwrap()
+            .as_ref()
+            .to_int_vec()
+    }
 
     #[test]
     fn test_logical_and() {
@@ -796,5 +977,205 @@ mod tests {
                 .unwrap();
             assert_eq!(output, expected);
         }
+    }
+
+    /// Hand-computed MySQL three-valued logic over the nine `{0, 1, NULL}`
+    /// operand pairs; the lazy kernels must reproduce the eager tables exactly.
+    #[test]
+    fn test_lazy_logical_three_valued_logic() {
+        let lhs_values = [
+            Some(0),
+            Some(0),
+            Some(0),
+            Some(1),
+            Some(1),
+            Some(1),
+            None,
+            None,
+            None,
+        ];
+        let rhs_values = [
+            Some(0),
+            Some(1),
+            None,
+            Some(0),
+            Some(1),
+            None,
+            Some(0),
+            Some(1),
+            None,
+        ];
+        let cases = vec![
+            (
+                ScalarFuncSig::LogicalAnd,
+                vec![
+                    Some(0),
+                    Some(0),
+                    Some(0),
+                    Some(0),
+                    Some(1),
+                    None,
+                    Some(0),
+                    None,
+                    None,
+                ],
+            ),
+            (
+                ScalarFuncSig::LogicalOr,
+                vec![
+                    Some(0),
+                    Some(1),
+                    None,
+                    Some(1),
+                    Some(1),
+                    Some(1),
+                    None,
+                    Some(1),
+                    None,
+                ],
+            ),
+            (
+                ScalarFuncSig::LogicalXor,
+                vec![
+                    Some(0),
+                    Some(1),
+                    None,
+                    Some(1),
+                    Some(0),
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+            ),
+        ];
+
+        for (sig, expected) in cases {
+            let expr = build_binary(
+                sig,
+                ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong),
+                ExprDefBuilder::column_ref(1, FieldTypeTp::LongLong),
+            );
+            let schema = [FieldTypeTp::LongLong.into(), FieldTypeTp::LongLong.into()];
+            let mut columns = LazyBatchColumnVec::from(vec![
+                decoded_int_column(lhs_values),
+                decoded_int_column(rhs_values),
+            ]);
+            let rows: Vec<usize> = (0..9).collect();
+            assert_eq!(
+                eval_int(&expr, &schema, &mut columns, &rows),
+                expected,
+                "{sig:?}"
+            );
+        }
+    }
+
+    /// A reduced, permuted selection still maps each result position back to
+    /// the right physical row of both operands.
+    #[test]
+    fn test_lazy_logical_respects_permuted_logical_rows() {
+        let expr = build_binary(
+            ScalarFuncSig::LogicalAnd,
+            ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong),
+            ExprDefBuilder::column_ref(1, FieldTypeTp::LongLong),
+        );
+        let schema = [FieldTypeTp::LongLong.into(), FieldTypeTp::LongLong.into()];
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([Some(0), Some(1), None]),
+            decoded_int_column([Some(1), Some(1), Some(1)]),
+        ]);
+        assert_eq!(
+            eval_int(&expr, &schema, &mut columns, &[2, 0, 1]),
+            [None, Some(0), Some(1)]
+        );
+    }
+
+    /// `AND`: a non-NULL zero lhs skips the rhs, so `-i64::MIN` is never
+    /// entered for that row; the mirror layout needs it and aborts.
+    #[test]
+    fn test_lazy_logical_and_skips_false_lhs() {
+        let expr = build_binary(
+            ScalarFuncSig::LogicalAnd,
+            ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong),
+            unary_minus(ExprDefBuilder::column_ref(1, FieldTypeTp::LongLong)),
+        );
+        let schema = [FieldTypeTp::LongLong.into(), FieldTypeTp::LongLong.into()];
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([Some(0), Some(1)]),
+            decoded_int_column([Some(i64::MIN), Some(1)]),
+        ]);
+        assert_eq!(
+            eval_int(&expr, &schema, &mut columns, &[0, 1]),
+            [Some(0), Some(1)]
+        );
+
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([Some(1), Some(0)]),
+            decoded_int_column([Some(i64::MIN), Some(1)]),
+        ]);
+        let mut ctx = EvalContext::default();
+        assert!(
+            expr.eval(&mut ctx, &schema, &mut columns, &[0, 1], 2)
+                .is_err()
+        );
+    }
+
+    /// `OR`: a non-NULL nonzero lhs skips the rhs; the mirror layout needs it.
+    #[test]
+    fn test_lazy_logical_or_skips_true_lhs() {
+        let expr = build_binary(
+            ScalarFuncSig::LogicalOr,
+            ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong),
+            unary_minus(ExprDefBuilder::column_ref(1, FieldTypeTp::LongLong)),
+        );
+        let schema = [FieldTypeTp::LongLong.into(), FieldTypeTp::LongLong.into()];
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([Some(1), Some(0)]),
+            decoded_int_column([Some(i64::MIN), Some(1)]),
+        ]);
+        assert_eq!(
+            eval_int(&expr, &schema, &mut columns, &[0, 1]),
+            [Some(1), Some(1)]
+        );
+
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([Some(0), Some(1)]),
+            decoded_int_column([Some(i64::MIN), Some(1)]),
+        ]);
+        let mut ctx = EvalContext::default();
+        assert!(
+            expr.eval(&mut ctx, &schema, &mut columns, &[0, 1], 2)
+                .is_err()
+        );
+    }
+
+    /// `XOR` is the one logical operand skipped for a NULL lhs (Go returns
+    /// immediately), so the same child is only entered for the non-NULL row.
+    #[test]
+    fn test_lazy_logical_xor_skips_null_lhs() {
+        let expr = build_binary(
+            ScalarFuncSig::LogicalXor,
+            ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong),
+            unary_minus(ExprDefBuilder::column_ref(1, FieldTypeTp::LongLong)),
+        );
+        let schema = [FieldTypeTp::LongLong.into(), FieldTypeTp::LongLong.into()];
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([None, Some(1)]),
+            decoded_int_column([Some(i64::MIN), Some(0)]),
+        ]);
+        assert_eq!(
+            eval_int(&expr, &schema, &mut columns, &[0, 1]),
+            [None, Some(1)]
+        );
+
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([Some(0), None]),
+            decoded_int_column([Some(i64::MIN), Some(0)]),
+        ]);
+        let mut ctx = EvalContext::default();
+        assert!(
+            expr.eval(&mut ctx, &schema, &mut columns, &[0, 1], 2)
+                .is_err()
+        );
     }
 }

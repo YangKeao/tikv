@@ -195,6 +195,14 @@ impl RpnExpression {
                     let mut extra = RpnFnCallExtra {
                         ret_field_type: field_type,
                     };
+                    // A lazy kernel must never reach here: it needs unevaluated
+                    // children, while this loop has already materialized them
+                    // and `borrowed_fn_ptr` is cleared for lazy metas. The
+                    // facade refuses lazy programs through `supports_borrowed`.
+                    debug_assert!(
+                        func_meta.lazy_fn_ptr.is_none(),
+                        "borrowed evaluation cannot schedule a lazy kernel"
+                    );
                     let evaluate = func_meta
                         .borrowed_fn_ptr
                         .expect("borrowed function support validated");

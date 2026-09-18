@@ -539,6 +539,17 @@ fn field_type(ft: &FieldType) -> Result<EvalType, Error> {
     let raw = FieldTypeTp::from_i32(ft.get_tp())
         .ok_or_else(|| Error::invalid(format!("unknown field type {}", ft.get_tp())))?;
     let tp = EvalType::try_from(raw).map_err(|e| Error::invalid(e.to_string()))?;
+    // TEMPORARY: `tidb_query_datatype` now maps `FieldTypeTp::Set` to
+    // `EvalType::Set`, but the standalone facade has no `Column::Set` variant
+    // and `Column::empty` would hit its `unreachable!("Set has no engine
+    // codec")` arm. Refuse the type at the boundary instead of admitting a
+    // program that cannot be evaluated. Delete this check together with the
+    // `Column::Set` variant once it exists.
+    if tp == EvalType::Set {
+        return Err(Error::invalid(
+            "Set is not supported by the standalone facade",
+        ));
+    }
     if matches!(tp, EvalType::DateTime | EvalType::Duration)
         && !(-1..=6).contains(&ft.get_decimal())
     {
