@@ -31,6 +31,65 @@ use tipb::{Expr, FieldType};
 
 use super::{RpnStackNode, expr_eval::LogicalRows};
 
+/// A lazy RPN kernel.
+///
+/// Unlike [`RpnFnMeta::fn_ptr`], a lazy kernel receives its children
+/// *unevaluated* and decides for itself, per row, which children to enter. It
+/// is how MySQL short-circuit signatures (`IF`, `IFNULL`, `COALESCE`, `CASE`,
+/// `AND`, `OR`, ...) reproduce "a skipped branch cannot error, warn or draw
+/// RNG" only as a signature-driven marker; no node kind and no wire change are
+/// involved.
+///
+/// The lazy kernel keeps the generated eager `validator_ptr` and
+/// `metadata_expr_ptr`, so build-time checking and metadata construction are
+/// unchanged. It must keep `borrowed_fn_ptr: None`, otherwise the borrowed
+/// facade would eagerly enter children it cannot schedule lazily.
+pub type LazyFn = fn(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    extra: &mut RpnFnCallExtra<'_>,
+    metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue>;
+
+/// Access to the unevaluated children of one lazy RPN call.
+///
+/// A child is only ever entered through [`LazyChildren::eval`]. A child that no
+/// `eval` call names has its whole subtree skipped, so its kernels never run,
+/// `ctx.warnings` stays untouched and `ctx.handle_invalid_time_error` is not
+/// called. Positions are indices into the *current* call's row space
+/// (`0..output_rows`), never physical rows of the input batch.
+///
+/// `len` deliberately has no `is_empty` counterpart: this is the argument
+/// interface of a kernel, not a collection, and kernels test the operand count
+/// they were compiled for.
+#[allow(clippy::len_without_is_empty)]
+pub trait LazyChildren<'a> {
+    /// Number of children of the lazy call (its RPN `args_len`).
+    fn len(&self) -> usize;
+
+    /// Field type of child `arg`: the `FnCall`/`Constant` node's declared type,
+    /// or `schema[offset]` for a `ColumnRef` child.
+    fn field_type(&self, arg: usize) -> &FieldType;
+
+    /// Fast path for a `Constant` child, which needs no evaluation.
+    fn scalar_value(&self, arg: usize) -> Option<&ScalarValue>;
+
+    /// Evaluates child `arg` over exactly `positions` and returns a fresh dense
+    /// owned vector of `positions.len()` elements in the same order. An empty
+    /// `positions` returns an empty typed vector without entering the child
+    /// subtree (the evaluator forbids a zero-row recursive call).
+    ///
+    /// Each `(arg, positions)` pair must be requested at most once per call:
+    /// a repeated request would replay warnings and RNG draws.
+    fn eval(
+        &mut self,
+        ctx: &mut EvalContext,
+        arg: usize,
+        positions: &[usize],
+    ) -> Result<VectorValue>;
+}
+
 /// Metadata of an RPN function.
 #[derive(Clone, Copy)]
 pub struct RpnFnMeta {
@@ -48,6 +107,11 @@ pub struct RpnFnMeta {
     /// ordinary kernels. It does not replace the native vectorized evaluator.
     pub borrowed_fn_ptr: Option<super::borrowed::BorrowedFn>,
 
+    /// `Some` iff the signature must see unevaluated children. The eager
+    /// `fn_ptr` is still present and is the fallback whenever the evaluator
+    /// does not take the lazy path.
+    pub lazy_fn_ptr: Option<LazyFn>,
+
     #[allow(clippy::type_complexity)]
     /// The RPN function.
     pub fn_ptr: fn(
@@ -64,6 +128,18 @@ pub struct RpnFnMeta {
 impl std::fmt::Debug for RpnFnMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name)
+    }
+}
+
+impl RpnFnMeta {
+    /// Attaches a lazy kernel to a generated eager meta.
+    ///
+    /// The generated `name`, `validator_ptr`, `metadata_expr_ptr` and `fn_ptr`
+    /// are preserved, so the signature is still validated and its metadata
+    /// still built at compile time; only evaluation becomes pull-style.
+    pub const fn with_lazy(mut self, f: LazyFn) -> Self {
+        self.lazy_fn_ptr = Some(f);
+        self
     }
 }
 

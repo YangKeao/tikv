@@ -613,7 +613,11 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::InDuration => compare_in_by_hash_fn_meta::<NormalInByHash::<Duration>>(),
         ScalarFuncSig::InJson => compare_in_by_compare_json_fn_meta(),
         // impl_control
-        ScalarFuncSig::IfNullInt => if_null_fn_meta::<Int>(),
+        // `IfNullInt` is the first signature with a lazy kernel: `rhs` is only
+        // entered for rows whose `lhs` is NULL. The generated eager meta keeps
+        // its validator, metadata and `fn_ptr`; only `borrowed_fn_ptr` stays
+        // `None` so the borrowed facade refuses the lazy program.
+        ScalarFuncSig::IfNullInt => if_null_fn_meta::<Int>().with_lazy(lazy_if_null::<Int>),
         ScalarFuncSig::IfNullReal => if_null_fn_meta::<Real>(),
         ScalarFuncSig::IfNullString => if_null_bytes_fn_meta(),
         ScalarFuncSig::IfNullDecimal => if_null_fn_meta::<Decimal>(),

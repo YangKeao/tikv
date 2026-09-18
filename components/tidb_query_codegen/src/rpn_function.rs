@@ -1202,6 +1202,7 @@ impl VargsRpnFn {
                     validator_ptr: validate #ty_generics_turbofish,
                     fn_ptr: run #ty_generics_turbofish,
                     borrowed_fn_ptr: None,
+                    lazy_fn_ptr: None,
                 }
             }
         }
@@ -1344,6 +1345,7 @@ impl RawVargsRpnFn {
                     validator_ptr: validate #ty_generics_turbofish,
                     fn_ptr: run #ty_generics_turbofish,
                     borrowed_fn_ptr: None,
+                    lazy_fn_ptr: None,
                 }
             }
         }
@@ -1820,6 +1822,7 @@ impl NormalRpnFn {
                     validator_ptr: validate #ty_generics_turbofish,
                     fn_ptr: run #ty_generics_turbofish,
                     borrowed_fn_ptr: #borrowed_ptr,
+                    lazy_fn_ptr: None,
                 }
             }
         }
@@ -2013,6 +2016,7 @@ mod tests_normal {
                     validator_ptr: validate,
                     fn_ptr: run,
                     borrowed_fn_ptr: None,
+                    lazy_fn_ptr: None,
                 }
             }
         };
@@ -2190,6 +2194,7 @@ mod tests_normal {
                     validator_ptr: validate::<A, B>,
                     fn_ptr: run::<A, B>,
                     borrowed_fn_ptr: None,
+                    lazy_fn_ptr: None,
                 }
             }
         };

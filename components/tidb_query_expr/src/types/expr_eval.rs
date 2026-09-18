@@ -5,13 +5,14 @@ pub use tidb_query_datatype::codec::data_type::{
     BATCH_MAX_SIZE, IDENTICAL_LOGICAL_ROWS, LogicalRows,
 };
 use tidb_query_datatype::{
+    EvalType, FieldTypeAccessor,
     codec::{batch::LazyBatchColumnVec, data_type::*},
     expr::EvalContext,
 };
 use tipb::FieldType;
 
 use super::{
-    RpnFnCallExtra,
+    LazyChildren, RpnFnCallExtra,
     expr::{RpnExpression, RpnExpressionNode},
 };
 
@@ -336,78 +337,296 @@ impl RpnExpression {
         output_rows: usize,
         stack: &mut Vec<RpnStackNode<'a>>,
     ) -> Result<RpnStackNode<'a>> {
-        stack.clear();
+        assert!(!self.is_empty());
         assert!(output_rows > 0);
         assert!(output_rows <= BATCH_MAX_SIZE);
+        // The program is exactly the subtree rooted at its last node. The old
+        // flat loop rejected a program with unused nodes through
+        // `assert_eq!(stack.len(), 1)`; keep that rejection now that only the
+        // root subtree is walked.
+        assert_eq!(
+            self.subtree_start(self.len() - 1),
+            0,
+            "RPN expression contains nodes outside the root's subtree"
+        );
+        stack.clear();
+        let node = self.eval_subtree::<CHECK_FINITE_REALS>(
+            self.len() - 1,
+            ctx,
+            schema,
+            input_physical_columns,
+            input_logical_rows,
+            output_rows,
+            stack,
+        )?;
+        debug_assert!(stack.is_empty());
+        Ok(node)
+    }
 
-        for node in self.as_ref() {
-            match node {
-                RpnExpressionNode::Constant { value, field_type } => {
-                    stack.push(RpnStackNode::Scalar { value, field_type });
-                }
-                RpnExpressionNode::ColumnRef { offset } => {
-                    let field_type = &schema[*offset];
-                    let decoded_physical_column = input_physical_columns[*offset].decoded();
-                    assert_eq!(input_logical_rows.len(), output_rows);
-                    stack.push(RpnStackNode::Vector {
-                        value: RpnStackNodeVectorValue::Ref {
-                            physical_value: decoded_physical_column,
-                            logical_rows: input_logical_rows,
-                        },
-                        field_type,
-                    });
-                }
-                RpnExpressionNode::FnCall {
-                    func_meta,
-                    args_len,
-                    field_type: ret_field_type,
-                    metadata,
-                } => {
-                    // Suppose that we have function call `Foo(A, B, C)`, the RPN nodes looks like
-                    // `[A, B, C, Foo]`.
-                    // Now we receives a function call `Foo`, so there are `[A, B, C]` in the stack
-                    // as the last several elements. We will directly use the last N (N = number of
-                    // arguments) elements in the stack as function arguments.
-                    assert!(stack.len() >= *args_len);
-                    let stack_slice_begin = stack.len() - *args_len;
-                    let stack_slice = &stack[stack_slice_begin..];
-                    let mut call_extra = RpnFnCallExtra { ret_field_type };
-                    let ret = (func_meta.fn_ptr)(
-                        ctx,
-                        output_rows,
-                        stack_slice,
-                        &mut call_extra,
-                        &**metadata,
-                    )?;
-                    stack.truncate(stack_slice_begin);
-                    stack.push(RpnStackNode::Vector {
-                        value: RpnStackNodeVectorValue::Generated {
-                            physical_value: ret,
-                        },
-                        field_type: ret_field_type,
-                    });
+    /// Evaluates the subtree whose last (root) node is `root`.
+    ///
+    /// `scratch` is call-scoped storage for the argument nodes of eager
+    /// kernels; it is left exactly as deep as it was on entry. A lazy `FnCall`
+    /// never uses it: its children are pulled through [`ChildHandle`].
+    ///
+    /// The explicit context/schema/columns/rows parameters keep the evaluator
+    /// allocation-free and mirror the entry points' borrows; bundling them
+    /// would only add a struct that outlives every call.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_subtree<'x, const CHECK_FINITE_REALS: bool>(
+        &'x self,
+        root: usize,
+        ctx: &mut EvalContext,
+        schema: &'x [FieldType],
+        input_physical_columns: &'x LazyBatchColumnVec,
+        input_logical_rows: &'x [usize],
+        output_rows: usize,
+        scratch: &mut Vec<RpnStackNode<'x>>,
+    ) -> Result<RpnStackNode<'x>> {
+        assert!(output_rows > 0 && output_rows <= BATCH_MAX_SIZE);
+
+        let node = match &self[root] {
+            RpnExpressionNode::Constant { value, field_type } => {
+                RpnStackNode::Scalar { value, field_type }
+            }
+            RpnExpressionNode::ColumnRef { offset } => {
+                assert_eq!(input_logical_rows.len(), output_rows);
+                RpnStackNode::Vector {
+                    value: RpnStackNodeVectorValue::Ref {
+                        physical_value: input_physical_columns[*offset].decoded(),
+                        logical_rows: input_logical_rows,
+                    },
+                    field_type: &schema[*offset],
                 }
             }
-            if CHECK_FINITE_REALS {
-                let produced = stack.last().unwrap();
-                if matches!(produced.get_logical_scalar_ref(0), ScalarValueRef::Real(_)) {
-                    for row in 0..output_rows {
-                        if let ScalarValueRef::Real(Some(value)) =
-                            produced.get_logical_scalar_ref(row)
-                        {
-                            if !value.is_finite() {
-                                return Err(other_err!(
-                                    "standalone evaluation produced a nonfinite REAL"
-                                ));
-                            }
-                        }
+            RpnExpressionNode::FnCall {
+                func_meta,
+                args_len,
+                field_type: ret_field_type,
+                metadata,
+            } => {
+                // Suppose that we have function call `Foo(A, B, C)`, the RPN nodes looks like
+                // `[A, B, C, Foo]`. The children are the contiguous subtrees that
+                // immediately precede `Foo`; `args_len` alone determines their roots,
+                // so no cached plan or extra node field is needed.
+                let roots = self.child_roots(root, *args_len);
+                let mut call_extra = RpnFnCallExtra { ret_field_type };
+                let ret = match func_meta.lazy_fn_ptr {
+                    Some(lazy) => {
+                        let mut children = ChildHandle::<CHECK_FINITE_REALS> {
+                            expr: self,
+                            schema,
+                            cols: input_physical_columns,
+                            logical_rows: input_logical_rows,
+                            roots: &roots,
+                            selection: Vec::new(),
+                        };
+                        (lazy)(
+                            ctx,
+                            output_rows,
+                            &mut children,
+                            &mut call_extra,
+                            &**metadata,
+                        )?
                     }
+                    None => {
+                        let stack_slice_begin = scratch.len();
+                        for &child_root in &roots {
+                            let child = self.eval_subtree::<CHECK_FINITE_REALS>(
+                                child_root,
+                                ctx,
+                                schema,
+                                input_physical_columns,
+                                input_logical_rows,
+                                output_rows,
+                                scratch,
+                            )?;
+                            scratch.push(child);
+                        }
+                        let ret = (func_meta.fn_ptr)(
+                            ctx,
+                            output_rows,
+                            &scratch[stack_slice_begin..],
+                            &mut call_extra,
+                            &**metadata,
+                        )?;
+                        scratch.truncate(stack_slice_begin);
+                        ret
+                    }
+                };
+                RpnStackNode::Vector {
+                    value: RpnStackNodeVectorValue::Generated {
+                        physical_value: ret,
+                    },
+                    field_type: ret_field_type,
+                }
+            }
+        };
+
+        if CHECK_FINITE_REALS {
+            ensure_finite_real_node(&node, output_rows)?;
+        }
+        Ok(node)
+    }
+
+    /// Node index of each child subtree of the `FnCall` at `func_call_index`,
+    /// in argument order.
+    fn child_roots(&self, func_call_index: usize, args_len: usize) -> Vec<usize> {
+        assert!(
+            func_call_index >= args_len,
+            "RPN FnCall has {} arguments but only {} preceding nodes",
+            args_len,
+            func_call_index
+        );
+        let mut roots = vec![0; args_len];
+        if args_len == 0 {
+            // Nullary calls have no preceding nodes; computing `fc - 1` here
+            // would underflow when the call is the root node.
+            return roots;
+        }
+        let mut root = func_call_index - 1;
+        for index in (0..args_len).rev() {
+            roots[index] = root;
+            if index > 0 {
+                root = self.subtree_start(root) - 1;
+            }
+        }
+        roots
+    }
+
+    /// First node index of the subtree whose last node is `root`.
+    fn subtree_start(&self, root: usize) -> usize {
+        let mut pending = 1usize;
+        let mut index = root;
+        loop {
+            pending -= 1;
+            if let RpnExpressionNode::FnCall { args_len, .. } = &self[index] {
+                pending += *args_len;
+            }
+            if pending == 0 {
+                return index;
+            }
+            assert!(
+                index > 0,
+                "RPN expression is not a well-formed post-order program"
+            );
+            index -= 1;
+        }
+    }
+}
+
+/// Rejects a nonfinite REAL produced by an *executed* node under the standalone
+/// checked entry. A node skipped by a lazy kernel is never materialized as a
+/// stack node and never reaches this check.
+fn ensure_finite_real_node(node: &RpnStackNode<'_>, output_rows: usize) -> Result<()> {
+    if matches!(node.get_logical_scalar_ref(0), ScalarValueRef::Real(_)) {
+        for row in 0..output_rows {
+            if let ScalarValueRef::Real(Some(value)) = node.get_logical_scalar_ref(row) {
+                if !value.is_finite() {
+                    return Err(other_err!(
+                        "standalone evaluation produced a nonfinite REAL"
+                    ));
                 }
             }
         }
+    }
+    Ok(())
+}
 
-        assert_eq!(stack.len(), 1);
-        Ok(stack.pop().unwrap())
+/// The same check for an owned dense vector materialized at a lazy boundary.
+/// The child has no stack node of its own, so [`ChildHandle::eval`] applies it
+/// directly.
+fn ensure_finite_real_vector(value: &VectorValue, output_rows: usize) -> Result<()> {
+    if let VectorValue::Real(column) = value {
+        for row in 0..output_rows {
+            if let Some(value) = column.get_option_ref(row) {
+                if !value.is_finite() {
+                    return Err(other_err!(
+                        "standalone evaluation produced a nonfinite REAL"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Materializes the unevaluated children of one lazy RPN call.
+///
+/// It never hands out a borrow into a temporary selection:
+/// [`LazyChildren::eval`] returns an owned dense [`VectorValue`], so the
+/// child's stack nodes (which may be `Ref` nodes over the local selection)
+/// cannot escape this call.
+struct ChildHandle<'e, 's, 'r, const CHECK_FINITE_REALS: bool> {
+    expr: &'e RpnExpression,
+    schema: &'s [FieldType],
+    cols: &'s LazyBatchColumnVec,
+    logical_rows: &'s [usize],
+    roots: &'r [usize],
+    selection: Vec<usize>,
+}
+
+impl<'e, 's, 'r, 'a, const CHECK_FINITE_REALS: bool> LazyChildren<'a>
+    for ChildHandle<'e, 's, 'r, CHECK_FINITE_REALS>
+{
+    fn len(&self) -> usize {
+        self.roots.len()
+    }
+
+    fn field_type(&self, arg: usize) -> &FieldType {
+        match &self.expr[self.roots[arg]] {
+            RpnExpressionNode::Constant { field_type, .. }
+            | RpnExpressionNode::FnCall { field_type, .. } => field_type,
+            RpnExpressionNode::ColumnRef { offset } => &self.schema[*offset],
+        }
+    }
+
+    fn scalar_value(&self, arg: usize) -> Option<&ScalarValue> {
+        match &self.expr[self.roots[arg]] {
+            RpnExpressionNode::Constant { value, .. } => Some(value),
+            _ => None,
+        }
+    }
+
+    fn eval(
+        &mut self,
+        ctx: &mut EvalContext,
+        arg: usize,
+        positions: &[usize],
+    ) -> Result<VectorValue> {
+        if positions.is_empty() {
+            // `eval_subtree` asserts `output_rows > 0`; an empty request can
+            // never enter the child, so return an empty vector of its type.
+            let eval_type = EvalType::try_from(self.field_type(arg).as_accessor().tp())
+                .map_err(|e| other_err!("lazy child has an invalid field type: {}", e))?;
+            return Ok(VectorValue::with_capacity(0, eval_type));
+        }
+        self.selection.clear();
+        self.selection.extend(
+            positions
+                .iter()
+                .map(|&position| self.logical_rows[position]),
+        );
+        // A lazy boundary materializes immediately, so the child's own node
+        // stack stays local to this call and never escapes.
+        let mut local_stack: Vec<RpnStackNode<'_>> = Vec::new();
+        let node = self.expr.eval_subtree::<CHECK_FINITE_REALS>(
+            self.roots[arg],
+            ctx,
+            self.schema,
+            self.cols,
+            &self.selection,
+            positions.len(),
+            &mut local_stack,
+        )?;
+        let value = match node {
+            RpnStackNode::Scalar { value, .. } => VectorValue::from_scalar(value, positions.len()),
+            RpnStackNode::Vector { value, .. } => value.take_vector_value()?,
+        };
+        if CHECK_FINITE_REALS {
+            ensure_finite_real_vector(&value, positions.len())?;
+        }
+        Ok(value)
     }
 }
 
