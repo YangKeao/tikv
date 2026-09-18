@@ -100,7 +100,7 @@ rollout switch it mentions does not exist in either checkout yet.
 
 | # | Area | Symptom | Status |
 | --- | --- | --- | --- |
-| 12 | `RoundWithFrac*`, `Truncate*` | `TRUNCATE(0.0, 309)` / `ROUND(1.0, -400)` build `Inf`/`NaN` internally and unwrap `Real::new` | guarded (digit preflight) |
+| 12 | `RoundWithFrac*`, `Truncate*` | `TRUNCATE(0.0, 309)` / `ROUND(1.0, -400)` build `Inf`/`NaN` internally and unwrap `Real::new` | guarded (digit preflight). The preflight must see the digit as an `Int64`/`Uint64` literal or an input column, so a digit that is a computed node -- including the `CastStringAsInt` a rewriter inserts over `round(x, '2')` -- is refused at compile time; pass `TIKV_EXPR_DEBUG_COMPILE=1` to print the refused program |
 | 13 | real arithmetic over produced `Inf` | `ROUND(f64::MAX, -308) * 0` panics in `NotNan` | guarded (checked RPN entry) |
 | 14 | `VecL2Distance`, `VecL2Norm`, vector inner products | finite inputs overflow to `Inf`, a following node panics | guarded (checked RPN entry) |
 | 15 | `CastStringAsReal` | `flen=1, decimal=2` underflows `truncate_f64`; `flen=255` asserts | guarded (Real metadata preflight) |
@@ -137,6 +137,7 @@ surfaced automatically rather than silently:
 | 24 | `FIND_IN_SET` over a non-binary collation | collation- and padding-aware (`2`) | bytewise (`1`) | string shapes require binary arguments |
 | 25 | `LAST_DAY` over an implicit temporal cast | `2024-03-31` | `ExternalEngine` error "unsupported TiKV temporal value shape" | FIXED: the kernel returns `DateTime` kind for a DATE-declared result; the TiDB bridge now rebuilds the declared DATE the way Go's DATE decoder drops the time part, so the implicit cast, `last_day`, `date` and `month` are admitted |
 | 26 | binary/bit literal in a numeric context | numeric (`b'1' + 0` -> 1) | bytes (`0`) | those constants declined |
+| 27 | `ROUND`/`TRUNCATE` with a computed digit | `round(5, -100)` is `0`, `round(1.2345, '2')` is `1.23` | compile refusal "ROUND/TRUNCATE fractional digits require an integer literal or input column" | the row-12 panic guard needs the digit as a literal or column; the rewriter's constant is not folded and `-100` is `unaryminus(100)`, so these stay native. An embedder-side constant fold of the digit, or a runtime digit check inside the kernel, is the way in |
 
 Items 23-24 are worth an upstream look: they are a collation-semantics
 difference, not a wording one. Items 21 and 26 are representation choices the
