@@ -25,6 +25,18 @@ and the server's `eval_decoded` path is unchanged.
 | 1 | `UuidVersion`, `UuidTimestamp` (`impl_miscellaneous.rs`) | accepts malformed UUID strings and returns a value | raises error 1411 `Incorrect string value ... for function uuid_version` | avoided | enrolled mysql replay: `expression/uuid` diverged only with the engine enabled |
 | 2 | `Ord` (`impl_string.rs`) | `ORD(NULL)` returns 0 | returns NULL | guarded | native `test_ord` pins `(None, ..., Some(0))`; the adapter wraps with a leaf-only `IF(StringIsNull(x), NULL, ORD(x))` |
 | 3 | `GreatestInt` / `LeastInt` (`impl_compare.rs`) | compares raw `i64`, ignoring the unsigned flag | orders `UInt` values above `i64::MAX` correctly | guarded | differential matrix: `greatest(uint)` / `least(uint)` diverged |
+| 4 | `IsIPv4`, `IsIPv6`, `IsIPv4Compat`, `IsIPv4Mapped` (`impl_miscellaneous.rs`) | returns 0 for a NULL input (the kernels return `Some(0)` for `None`) | returns NULL | guarded | new differential fixture `IS_IPV4(NULL)`: native `Null`, engine `Int(0)`; the adapter now wraps with a leaf-only `IF(StringIsNull(x), NULL, kernel(x))` |
+| 5 | `FromDays` (`impl_time.rs`) | `FROM_DAYS(1)` yields the zero date `0000-00-00` | returns NULL | avoided | differential fixture: native `Null`, engine `Date(0,0,0)`; valid inputs such as `FROM_DAYS(739000)` agree, so the admission row was changed to `Excluded` |
+| 6 | `JsonArrayAppend` (`impl_json.rs`) | appending an array value through a nested path appends the array's *elements* | appends the array itself | avoided | `JSON_ARRAY_APPEND('[1,2,3]', '$[0]', '[9]')`: native `[[1, [9]], 2, 3]`, engine `[[1, 9], 2, 3]`; scalar values through `$`/`$[0]` agree, so the admission row was changed to `Excluded` |
+
+A second class surfaced while adding fixtures: names the engine lowers but the
+*Rust* evaluator has no implementation for, so no differential baseline can be
+built (`casewhen` — the parser normalizes it to `case`; `position` — the
+rewriter emits `locate`; `rlike` — native implements `regexp` only;
+`json_memberof` — native implements `JSON_MEMBER_OF`; `isfalse_with_null` —
+native implements `isfalse`/`istrue_with_null`; the bare `cast` name — the
+rewriter emits `cast_signed`/`cast_decimal`/...). These are native coverage
+gaps, not engine divergences, and they do not block the engine.
 
 ### Suggested upstream fix
 
@@ -35,6 +47,10 @@ and the server's `eval_decoded` path is unchanged.
 3. Make the integer comparison mappers use the unsigned-aware comparers that
    already exist for `Eq`/`Lt` (`compare_fn_meta::<UintIntComparer<_>>` style),
    or dispatch `GreatestInt`/`LeastInt` by signedness like `plus_mapper`.
+4. Return `None`/NULL from the `is_ipv4`/`is_ipv6`/compat/mapped kernels when
+   the argument is NULL, so the embedder's NULL mask can be removed.
+5. Decide `FROM_DAYS`'s out-of-range result (zero date versus NULL) and make
+   the JSON array-append path append the array value rather than its elements.
 
 
 ## 2. Lazy / eager control flow
