@@ -1,6 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp::Ordering, iter, str};
+use std::{any::Any, cmp::Ordering, iter, str};
 
 use bstr::ByteSlice;
 use memchr::memmem;
@@ -8,10 +8,15 @@ use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::{
     codec::{collation::*, data_type::*},
+    expr::EvalContext,
     *,
 };
 
-use crate::impl_math::i64_to_usize;
+use crate::{
+    LazyChildren, RpnFnCallExtra,
+    impl_math::i64_to_usize,
+    lazy_util::{BytesElem, GenericElem, LazyValue, int_at, null_output},
+};
 
 const SPACE: u8 = 0o40u8;
 const MAX_BLOB_WIDTH: i32 = 16_777_216; // FIXME: Should be isize
@@ -714,6 +719,158 @@ fn elt_validator(expr: &tipb::Expr) -> Result<()> {
         super::function::validate_expr_return_type(child, EvalType::Bytes)?;
     }
     Ok(())
+}
+
+/// Lazy `ELT(index, str1, str2, ...)`.
+///
+/// Child 0 is evaluated for every row. Each string argument is then requested
+/// only for the rows whose index selects it, so exactly one argument subtree is
+/// entered per row; rows with a NULL or out-of-range index are NULL and enter
+/// nothing. Go's `builtinEltSig.evalString`
+/// (`pkg/expression/builtin_string.go`) reads `b.args[idx]` only after the
+/// range check, so this matches it.
+pub fn lazy_elt(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    let child_count = children.len();
+    let all_rows: Vec<usize> = (0..output_rows).collect();
+    let indices = children.eval(ctx, 0, &all_rows)?;
+
+    let mut output = null_output::<Bytes>(output_rows);
+    // `buckets[k]` holds the rows whose index selects argument `k`.
+    let mut buckets: Vec<Vec<usize>> = (0..child_count).map(|_| Vec::new()).collect();
+    for row in 0..output_rows {
+        if let Some(index) = int_at(&indices, row) {
+            if index >= 1 && (index as usize) < child_count {
+                buckets[index as usize].push(row);
+            }
+        }
+    }
+
+    for arg in 1..child_count {
+        if buckets[arg].is_empty() {
+            continue;
+        }
+        let values = children.eval(ctx, arg, &buckets[arg])?;
+        for (position, &row) in buckets[arg].iter().enumerate() {
+            output[row] = BytesElem::read(&values, position);
+        }
+    }
+
+    Ok(BytesElem::build(output))
+}
+
+/// Lazy `FIELD(target, candidate0, ...)` for the `PartialEq` element types
+/// (`Int`, `Real`).
+///
+/// Child 0 is evaluated for every row and a NULL target yields 0 without
+/// entering any candidate. Candidate `k` is requested only for the rows that
+/// have not matched candidates `1..k`, so the first match per row wins and a
+/// later candidate never runs for that row. Go's `builtinField*Sig.evalInt`
+/// (`pkg/expression/builtin_string.go`) returns on the first match.
+fn lazy_field_impl<T: LazyValue>(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+) -> Result<VectorValue>
+where
+    T::Value: PartialEq,
+{
+    let child_count = children.len();
+    let all_rows: Vec<usize> = (0..output_rows).collect();
+    let target = children.eval(ctx, 0, &all_rows)?;
+    let targets: Vec<Option<T::Value>> =
+        (0..output_rows).map(|row| T::read(&target, row)).collect();
+
+    let mut output = vec![Some(0); output_rows];
+    let mut active: Vec<usize> = (0..output_rows)
+        .filter(|&row| targets[row].is_some())
+        .collect();
+
+    let mut arg = 1;
+    while arg < child_count && !active.is_empty() {
+        let values = children.eval(ctx, arg, &active)?;
+        let mut still = Vec::new();
+        for (position, &row) in active.iter().enumerate() {
+            let value = T::read(&values, position);
+            if value.as_ref() == targets[row].as_ref() {
+                output[row] = Some(arg as i64);
+            } else {
+                still.push(row);
+            }
+        }
+        active = still;
+        arg += 1;
+    }
+
+    Ok(GenericElem::<Int>::build(output))
+}
+
+pub fn lazy_field<T>(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue>
+where
+    T: Evaluable + EvaluableRet + PartialEq,
+{
+    lazy_field_impl::<GenericElem<T>>(ctx, output_rows, children)
+}
+
+/// Collation-aware `FIELD` for `Bytes`, mirroring the eager `field_bytes`
+/// kernel's `Collator::sort_compare` equality (a comparison error counts as a
+/// non-match, exactly as the eager `_ => continue` does).
+pub fn lazy_field_bytes<C: Collator>(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    let child_count = children.len();
+    let all_rows: Vec<usize> = (0..output_rows).collect();
+    let target = children.eval(ctx, 0, &all_rows)?;
+    let targets: Vec<Option<Bytes>> = (0..output_rows)
+        .map(|row| BytesElem::read(&target, row))
+        .collect();
+
+    let mut output = vec![Some(0); output_rows];
+    let mut active: Vec<usize> = (0..output_rows)
+        .filter(|&row| targets[row].is_some())
+        .collect();
+
+    let mut arg = 1;
+    while arg < child_count && !active.is_empty() {
+        let values = children.eval(ctx, arg, &active)?;
+        let mut still = Vec::new();
+        for (position, &row) in active.iter().enumerate() {
+            let candidate = BytesElem::read(&values, position);
+            let matched = match (targets[row].as_ref(), candidate.as_ref()) {
+                (Some(target), Some(candidate)) => {
+                    matches!(
+                        C::sort_compare(target, candidate, false),
+                        Ok(Ordering::Equal)
+                    )
+                }
+                _ => false,
+            };
+            if matched {
+                output[row] = Some(arg as i64);
+            } else {
+                still.push(row);
+            }
+        }
+        active = still;
+        arg += 1;
+    }
+
+    Ok(GenericElem::<Int>::build(output))
 }
 
 #[rpn_fn(writer)]
@@ -4870,5 +5027,164 @@ mod tests {
                 .unwrap();
             assert_eq!(output, exp);
         }
+    }
+
+    use tidb_query_datatype::{
+        Collation, EvalType,
+        codec::{
+            batch::{LazyBatchColumn, LazyBatchColumnVec},
+            data_type::Bytes,
+        },
+        expr::EvalContext,
+    };
+    use tipb_helper::ExprDefBuilder;
+
+    use crate::{RpnExpression, RpnExpressionBuilder};
+
+    /// `-i64::MIN`, which overflows only when it is actually entered.
+    fn overflowing_int_child() -> ExprDefBuilder {
+        ExprDefBuilder::scalar_func(ScalarFuncSig::UnaryMinusInt, FieldTypeTp::LongLong)
+            .push_child(ExprDefBuilder::constant_int(i64::MIN))
+    }
+
+    /// A `Bytes`-typed child that fails only when entered: `JSON_UNQUOTE` of
+    /// invalid UTF-8 returns an error.
+    fn failing_bytes_child() -> ExprDefBuilder {
+        ExprDefBuilder::scalar_func(ScalarFuncSig::JsonUnquoteSig, FieldTypeTp::VarChar)
+            .push_child(ExprDefBuilder::constant_bytes(vec![0xff, 0xfe]))
+    }
+
+    fn build_expr(node: ExprDefBuilder, max_columns: usize) -> RpnExpression {
+        RpnExpressionBuilder::build_from_expr_tree(
+            node.build(),
+            &mut EvalContext::default(),
+            max_columns,
+        )
+        .unwrap()
+    }
+
+    fn decoded_int_column(values: impl IntoIterator<Item = Option<i64>>) -> LazyBatchColumn {
+        let values: Vec<Option<i64>> = values.into_iter().collect();
+        let mut column = LazyBatchColumn::decoded_with_capacity_and_tp(values.len(), EvalType::Int);
+        for value in values {
+            column.mut_decoded().push_int(value);
+        }
+        column
+    }
+
+    fn decoded_bytes_column(values: impl IntoIterator<Item = Option<Bytes>>) -> LazyBatchColumn {
+        let values: Vec<Option<Bytes>> = values.into_iter().collect();
+        let mut column =
+            LazyBatchColumn::decoded_with_capacity_and_tp(values.len(), EvalType::Bytes);
+        for value in values {
+            column.mut_decoded().push_bytes(value);
+        }
+        column
+    }
+
+    /// `ELT(Col0, b"ok", <failing bytes>)`: each row enters exactly the
+    /// argument its index selects, so the failing third argument never runs for
+    /// a row that selects argument 1 (or an out-of-range index).
+    #[test]
+    fn test_lazy_elt_enters_only_the_selected_argument() {
+        let expr = build_expr(
+            ExprDefBuilder::scalar_func(ScalarFuncSig::Elt, FieldTypeTp::VarChar)
+                .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong))
+                .push_child(ExprDefBuilder::constant_bytes(b"ok".to_vec()))
+                .push_child(failing_bytes_child()),
+            1,
+        );
+        let schema = [FieldTypeTp::LongLong.into()];
+        let mut columns =
+            LazyBatchColumnVec::from(vec![decoded_int_column([Some(1), Some(0), Some(3)])]);
+        let mut ctx = EvalContext::default();
+        let result = expr
+            .eval(&mut ctx, &schema, &mut columns, &[0, 1, 2], 3)
+            .unwrap();
+        assert_eq!(
+            result.vector_value().unwrap().as_ref().to_bytes_vec(),
+            [Some(b"ok".to_vec()), None, None]
+        );
+
+        // Selecting argument 2 enters the failing child and aborts the batch.
+        let mut columns = LazyBatchColumnVec::from(vec![decoded_int_column([Some(2)])]);
+        let mut ctx = EvalContext::default();
+        assert!(
+            expr.eval(&mut ctx, &schema, &mut columns, &[0], 1).is_err(),
+            "the selected argument must still be entered"
+        );
+    }
+
+    /// `FIELD(Col0, Col1, -i64::MIN)`: a row that matches `Col1` never enters
+    /// the overflowing third argument.
+    #[test]
+    fn test_lazy_field_stops_at_first_match() {
+        let expr = build_expr(
+            ExprDefBuilder::scalar_func(ScalarFuncSig::FieldInt, FieldTypeTp::LongLong)
+                .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong))
+                .push_child(ExprDefBuilder::column_ref(1, FieldTypeTp::LongLong))
+                .push_child(overflowing_int_child()),
+            2,
+        );
+        let schema = [FieldTypeTp::LongLong.into(), FieldTypeTp::LongLong.into()];
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([Some(5), Some(5)]),
+            decoded_int_column([Some(5), Some(5)]),
+        ]);
+        let mut ctx = EvalContext::default();
+        let result = expr
+            .eval(&mut ctx, &schema, &mut columns, &[0, 1], 2)
+            .unwrap();
+        assert_eq!(
+            result.vector_value().unwrap().as_ref().to_int_vec(),
+            [Some(1), Some(1)]
+        );
+
+        // A row without a match has to enter the overflowing child.
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([Some(5)]),
+            decoded_int_column([Some(6)]),
+        ]);
+        let mut ctx = EvalContext::default();
+        assert!(expr.eval(&mut ctx, &schema, &mut columns, &[0], 1).is_err());
+    }
+
+    /// `FIELD(target, candidate, <failing bytes>)` for the collation-aware
+    /// `Bytes` kernel: the first match also stops the scan.
+    #[test]
+    fn test_lazy_field_bytes_stops_at_first_match() {
+        // `field_bytes` returns `Int`; `map_field_string_sig` only reads the
+        // collation off this same field type.
+        let ret_field_type = FieldTypeBuilder::new()
+            .tp(FieldTypeTp::Long)
+            .collation(Collation::Utf8Mb4Bin)
+            .build();
+        let expr = build_expr(
+            ExprDefBuilder::scalar_func(ScalarFuncSig::FieldString, ret_field_type)
+                .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::VarChar))
+                .push_child(ExprDefBuilder::column_ref(1, FieldTypeTp::VarChar))
+                .push_child(failing_bytes_child()),
+            2,
+        );
+        let schema = [FieldTypeTp::VarChar.into(), FieldTypeTp::VarChar.into()];
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_bytes_column([Some(b"a".to_vec()), Some(b"a".to_vec())]),
+            decoded_bytes_column([Some(b"a".to_vec()), Some(b"a".to_vec())]),
+        ]);
+        let mut ctx = EvalContext::default();
+        let result = expr
+            .eval(&mut ctx, &schema, &mut columns, &[0, 1], 2)
+            .unwrap();
+        assert_eq!(
+            result.vector_value().unwrap().as_ref().to_int_vec(),
+            [Some(1), Some(1)]
+        );
+
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_bytes_column([Some(b"a".to_vec())]),
+            decoded_bytes_column([Some(b"b".to_vec())]),
+        ]);
+        let mut ctx = EvalContext::default();
+        assert!(expr.eval(&mut ctx, &schema, &mut columns, &[0], 1).is_err());
     }
 }

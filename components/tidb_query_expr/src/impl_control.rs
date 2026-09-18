@@ -6,7 +6,10 @@ use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::{codec::data_type::*, expr::EvalContext};
 
-use crate::{LazyChildren, RpnFnCallExtra};
+use crate::{
+    LazyChildren, RpnFnCallExtra,
+    lazy_util::{BytesElem, GenericElem, JsonElem, LazyValue, int_at, null_output},
+};
 
 #[rpn_fn(nullable)]
 #[inline]
@@ -15,89 +18,6 @@ fn if_null<T: Evaluable + EvaluableRet>(lhs: Option<&T>, rhs: Option<&T>) -> Res
         return Ok(lhs.cloned());
     }
     Ok(rhs.cloned())
-}
-
-/// How a lazy control kernel reads one element of a child's dense result and
-/// rebuilds an output vector of the same concrete type.
-///
-/// Every control kernel moves values from the child vectors it pulls into one
-/// output vector, so the two ends must share a representation. `GenericElem`
-/// covers every `Evaluable + EvaluableRet` type; `Bytes` and `Json` are
-/// owned-result types without an `Evaluable` impl and get their own adapters.
-trait LazyValue {
-    /// The owned element type the kernel moves between child and output.
-    type Value;
-
-    fn read(value: &VectorValue, row: usize) -> Option<Self::Value>;
-    fn build(values: Vec<Option<Self::Value>>) -> VectorValue;
-}
-
-struct GenericElem<T>(std::marker::PhantomData<T>);
-
-impl<T: Evaluable + EvaluableRet> LazyValue for GenericElem<T> {
-    type Value = T;
-
-    #[inline]
-    fn read(value: &VectorValue, row: usize) -> Option<T> {
-        <T as Evaluable>::borrow_scalar_value_ref(value.get_scalar_ref(row)).cloned()
-    }
-
-    #[inline]
-    fn build(values: Vec<Option<T>>) -> VectorValue {
-        let chunked = <<T as EvaluableRet>::ChunkedType as ChunkedVec<T>>::from_vec(values);
-        T::cast_chunk_into_vector_value(chunked)
-    }
-}
-
-struct BytesElem;
-
-impl LazyValue for BytesElem {
-    type Value = Bytes;
-
-    #[inline]
-    fn read(value: &VectorValue, row: usize) -> Option<Bytes> {
-        let value: Option<BytesRef> =
-            EvaluableRef::borrow_scalar_value_ref(value.get_scalar_ref(row));
-        value.map(|x| x.to_vec())
-    }
-
-    #[inline]
-    fn build(values: Vec<Option<Bytes>>) -> VectorValue {
-        VectorValue::from(ChunkedVecBytes::from_vec(values))
-    }
-}
-
-struct JsonElem;
-
-impl LazyValue for JsonElem {
-    type Value = Json;
-
-    #[inline]
-    fn read(value: &VectorValue, row: usize) -> Option<Json> {
-        let value: Option<JsonRef> =
-            EvaluableRef::borrow_scalar_value_ref(value.get_scalar_ref(row));
-        value.map(|x| x.to_owned())
-    }
-
-    #[inline]
-    fn build(values: Vec<Option<Json>>) -> VectorValue {
-        VectorValue::from(ChunkedVecJson::from_vec(values))
-    }
-}
-
-/// A dense `rows`-element output vector of NULLs; unlike `vec![None; rows]` it
-/// does not require `T: Clone`.
-fn null_output<T>(rows: usize) -> Vec<Option<T>> {
-    let mut output = Vec::with_capacity(rows);
-    output.resize_with(rows, || None);
-    output
-}
-
-/// Reads one `Int` operand (a condition or a boolean operand) out of a dense
-/// child result. `None` is SQL NULL.
-#[inline]
-fn int_at(value: &VectorValue, row: usize) -> Option<i64> {
-    <Int as Evaluable>::borrow_scalar_value_ref(value.get_scalar_ref(row)).copied()
 }
 
 /// Lazy `IFNULL(lhs, rhs)`.

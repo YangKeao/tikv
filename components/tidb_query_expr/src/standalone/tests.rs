@@ -743,22 +743,23 @@ fn eager_lazy_risk_reports_only_unregistered_lazy_sensitive_kernels() {
     assert!(lazy.has_lazy_nodes());
     assert!(lazy.eager_lazy_risk().is_empty());
 
-    let unregistered = prepare(
+    // The Tier 2 families are lazy now, so their nodes are not a risk even
+    // though their names were once in `LAZY_SENSITIVE_KERNELS`.
+    let elt = prepare(
         E::scalar_func(ScalarFuncSig::Elt, FieldTypeTp::VarChar)
             .push_child(E::constant_int(1))
             .push_child(E::constant_bytes(b"a".to_vec())),
         &[],
         Context::default(),
     );
-    assert!(!unregistered.has_lazy_nodes());
-    assert_eq!(unregistered.eager_lazy_risk(), vec!["elt"]);
+    assert!(elt.has_lazy_nodes());
+    assert!(elt.eager_lazy_risk().is_empty());
 
-    // The signal is not specific to `ELT`: every not-yet-lazy family in
-    // `LAZY_SENSITIVE_KERNELS` is reported by its kernel name.
-    for (sig, name) in [
-        (ScalarFuncSig::FieldInt, "field"),
-        (ScalarFuncSig::GreatestInt, "greatest_int"),
-        (ScalarFuncSig::LeastInt, "least_int"),
+    for sig in [
+        ScalarFuncSig::FieldInt,
+        ScalarFuncSig::GreatestInt,
+        ScalarFuncSig::LeastInt,
+        ScalarFuncSig::IntervalInt,
     ] {
         let program = prepare(
             E::scalar_func(sig, FieldTypeTp::LongLong)
@@ -767,22 +768,40 @@ fn eager_lazy_risk_reports_only_unregistered_lazy_sensitive_kernels() {
             &[],
             Context::default(),
         );
-        assert!(!program.has_lazy_nodes());
-        assert_eq!(program.eager_lazy_risk(), vec![name]);
+        assert!(program.has_lazy_nodes(), "{sig:?} must be lazy");
+        assert!(
+            program.eager_lazy_risk().is_empty(),
+            "{sig:?} must not be reported as an eager risk"
+        );
     }
 
+    // The still-eager Tier 3 `AddTime*Null` kernels are reported by name.
+    let unregistered = prepare(
+        E::scalar_func(ScalarFuncSig::AddTimeDateTimeNull, FieldTypeTp::DateTime)
+            .push_child(E::constant_null(FieldTypeTp::DateTime))
+            .push_child(E::constant_null(FieldTypeTp::DateTime)),
+        &[],
+        Context::default(),
+    );
+    assert!(!unregistered.has_lazy_nodes());
+    assert_eq!(
+        unregistered.eager_lazy_risk(),
+        vec!["add_time_datetime_null"]
+    );
+
+    // A mixed program keeps reporting the eager Tier 3 node next to a lazy one.
     let mixed = prepare(
-        E::scalar_func(ScalarFuncSig::IfString, FieldTypeTp::VarChar)
-            .push_child(E::constant_int(1))
+        E::scalar_func(ScalarFuncSig::AddTimeDateTimeNull, FieldTypeTp::DateTime)
             .push_child(
-                E::scalar_func(ScalarFuncSig::Elt, FieldTypeTp::VarChar)
+                E::scalar_func(ScalarFuncSig::IfTime, FieldTypeTp::DateTime)
                     .push_child(E::constant_int(1))
-                    .push_child(E::constant_bytes(b"a".to_vec())),
+                    .push_child(E::constant_null(FieldTypeTp::DateTime))
+                    .push_child(E::constant_null(FieldTypeTp::DateTime)),
             )
-            .push_child(E::constant_bytes(b"b".to_vec())),
+            .push_child(E::constant_null(FieldTypeTp::DateTime)),
         &[],
         Context::default(),
     );
     assert!(mixed.has_lazy_nodes());
-    assert_eq!(mixed.eager_lazy_risk(), vec!["elt"]);
+    assert_eq!(mixed.eager_lazy_risk(), vec!["add_time_datetime_null"]);
 }

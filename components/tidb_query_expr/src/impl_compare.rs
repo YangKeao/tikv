@@ -1,6 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    any::Any,
     cmp::{Ordering, max, min},
     str,
 };
@@ -10,6 +11,11 @@ use tidb_query_common::Result;
 use tidb_query_datatype::{
     codec::{Error, collation::Collator, data_type::*, mysql::Time},
     expr::EvalContext,
+};
+
+use crate::{
+    LazyChildren, RpnFnCallExtra,
+    lazy_util::{BytesElem, GenericElem, LazyValue, null_output},
 };
 
 #[rpn_fn(nullable, borrowed)]
@@ -545,6 +551,322 @@ where
             Ok(Some(res.to_owned()))
         }
     }
+}
+
+/// Lazy `GREATEST`/`LEAST` for the `Ord` element types (`Int`, `Real`,
+/// `Decimal`, `DateTime`, `Duration`, `Bytes`).
+///
+/// Child 0 is evaluated for every row; each later child is requested only for
+/// the rows that have not seen a NULL yet, so a row stops at its first NULL
+/// argument and never enters a later child's subtree. Go's
+/// `builtinGreatest*Sig.eval*` / `builtinLeast*Sig.eval*`
+/// (`pkg/expression/builtin_compare.go`) return as soon as an argument is NULL.
+fn lazy_extremum_impl<T: LazyValue>(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    greatest: bool,
+) -> Result<VectorValue>
+where
+    T::Value: Ord,
+{
+    let child_count = children.len();
+    let all_rows: Vec<usize> = (0..output_rows).collect();
+    let first = children.eval(ctx, 0, &all_rows)?;
+
+    let mut output = null_output::<T::Value>(output_rows);
+    // `extremes[row]` is the running extremum. A row whose entry is `None`
+    // either has not been initialized (greatest) or has already seen a NULL
+    // argument; only rows that saw a non-NULL argument stay `active`.
+    let mut extremes: Vec<Option<T::Value>> =
+        (0..output_rows).map(|row| T::read(&first, row)).collect();
+    let mut active: Vec<usize> = (0..output_rows)
+        .filter(|&row| extremes[row].is_some())
+        .collect();
+
+    let mut arg = 1;
+    while arg < child_count && !active.is_empty() {
+        let values = children.eval(ctx, arg, &active)?;
+        let mut still = Vec::new();
+        for (position, &row) in active.iter().enumerate() {
+            match T::read(&values, position) {
+                None => extremes[row] = None,
+                Some(value) => {
+                    match extremes[row].take() {
+                        None => extremes[row] = Some(value),
+                        Some(current) => {
+                            let take = if greatest {
+                                value > current
+                            } else {
+                                value < current
+                            };
+                            extremes[row] = Some(if take { value } else { current });
+                        }
+                    }
+                    still.push(row);
+                }
+            }
+        }
+        active = still;
+        arg += 1;
+    }
+
+    for &row in &active {
+        output[row] = extremes[row].take();
+    }
+    Ok(T::build(output))
+}
+
+pub fn lazy_greatest<T>(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue>
+where
+    T: Evaluable + EvaluableRet + Ord,
+{
+    lazy_extremum_impl::<GenericElem<T>>(ctx, output_rows, children, true)
+}
+
+pub fn lazy_least<T>(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue>
+where
+    T: Evaluable + EvaluableRet + Ord,
+{
+    lazy_extremum_impl::<GenericElem<T>>(ctx, output_rows, children, false)
+}
+
+pub fn lazy_greatest_bytes(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    lazy_extremum_impl::<BytesElem>(ctx, output_rows, children, true)
+}
+
+pub fn lazy_least_bytes(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    lazy_extremum_impl::<BytesElem>(ctx, output_rows, children, false)
+}
+
+/// Converts one `Bytes` element for the `CmpStringAsDate`/`CmpStringAsTime`
+/// extremum, mirroring the eager kernels' `str::from_utf8` + `parse_date` /
+/// `parse_datetime` steps. A failure goes through
+/// `EvalContext::handle_invalid_time_error`, so a non-strict context records a
+/// warning and yields `None` (NULL) while a strict one aborts the batch.
+fn parse_cmp_string_as_time(
+    ctx: &mut EvalContext,
+    value: &[u8],
+    as_date: bool,
+) -> Result<Option<Time>> {
+    let text = match str::from_utf8(value) {
+        Ok(text) => text,
+        Err(err) => {
+            ctx.handle_invalid_time_error(Error::Encoding(err))?;
+            return Ok(None);
+        }
+    };
+    let parsed = if as_date {
+        Time::parse_date(ctx, text)
+    } else {
+        Time::parse_datetime(ctx, text, Time::parse_fsp(text), true)
+    };
+    match parsed {
+        Ok(time) => Ok(Some(time)),
+        Err(_) => {
+            ctx.handle_invalid_time_error(Error::invalid_time_format(text))?;
+            Ok(None)
+        }
+    }
+}
+
+/// Lazy `GREATEST`/`LEAST` for the `CmpStringAsDate`/`CmpStringAsTime`
+/// signatures. As in the eager kernels, every element is parsed to a `Time`,
+/// compared as a `Time`, and the winner is rendered with `Time::to_string`.
+fn lazy_cmp_string_extremum_impl(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    greatest: bool,
+    as_date: bool,
+) -> Result<VectorValue> {
+    let child_count = children.len();
+    // Go initializes the running LEAST value to the greatest representable
+    // time so the first parsed argument always replaces it; GREATEST starts
+    // uninitialized. TiKV's eager `least_cmp_string_as_*` does the same.
+    let initial = if greatest {
+        None
+    } else if as_date {
+        Some(Time::parse_date(ctx, "9999-12-31")?)
+    } else {
+        Some(Time::parse_datetime(ctx, "9999-12-31 23:59:59", 0, true)?)
+    };
+
+    let mut output = null_output::<Bytes>(output_rows);
+    let mut extremes: Vec<Option<Time>> = vec![initial; output_rows];
+    let mut active: Vec<usize> = (0..output_rows).collect();
+
+    let mut arg = 0;
+    while arg < child_count && !active.is_empty() {
+        let values = children.eval(ctx, arg, &active)?;
+        let mut still = Vec::new();
+        for (position, &row) in active.iter().enumerate() {
+            let parsed = match BytesElem::read(&values, position) {
+                None => None,
+                Some(bytes) => parse_cmp_string_as_time(ctx, &bytes, as_date)?,
+            };
+            match parsed {
+                // A NULL or unparsable argument yields NULL and drops the row
+                // before any later argument is requested for it.
+                None => extremes[row] = None,
+                Some(time) => {
+                    match extremes[row].take() {
+                        None => extremes[row] = Some(time),
+                        Some(current) => {
+                            let take = if greatest {
+                                time > current
+                            } else {
+                                time < current
+                            };
+                            extremes[row] = Some(if take { time } else { current });
+                        }
+                    }
+                    still.push(row);
+                }
+            }
+        }
+        active = still;
+        arg += 1;
+    }
+
+    for &row in &active {
+        output[row] = extremes[row]
+            .take()
+            .map(|time| time.to_string().into_bytes());
+    }
+    Ok(BytesElem::build(output))
+}
+
+pub fn lazy_greatest_cmp_string_as_time(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    lazy_cmp_string_extremum_impl(ctx, output_rows, children, true, false)
+}
+
+pub fn lazy_least_cmp_string_as_time(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    lazy_cmp_string_extremum_impl(ctx, output_rows, children, false, false)
+}
+
+pub fn lazy_greatest_cmp_string_as_date(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    lazy_cmp_string_extremum_impl(ctx, output_rows, children, true, true)
+}
+
+pub fn lazy_least_cmp_string_as_date(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    lazy_cmp_string_extremum_impl(ctx, output_rows, children, false, true)
+}
+
+/// Lazy `INTERVAL(target, boundary0, ...)`.
+///
+/// Go's `builtinInterval*Sig.evalInt` (`pkg/expression/builtin_compare.go`)
+/// returns `-1` for a NULL target without touching `args[1..]`. The lazy
+/// kernel evaluates child 0 for every row, defaults each NULL target to `-1`,
+/// and requests the boundary children only over the rows that actually have a
+/// target; a batch whose targets are all NULL never enters them. For rows with
+/// a target it reproduces the eager binary search over `args[1..]` exactly
+/// (including NULL boundaries, which order below `Some`).
+fn lazy_interval_impl<T: LazyValue>(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+) -> Result<VectorValue>
+where
+    T::Value: Ord,
+{
+    let child_count = children.len();
+    let all_rows: Vec<usize> = (0..output_rows).collect();
+    let target = children.eval(ctx, 0, &all_rows)?;
+    let targets: Vec<Option<T::Value>> =
+        (0..output_rows).map(|row| T::read(&target, row)).collect();
+
+    let mut output: Vec<Option<Int>> = vec![Some(-1); output_rows];
+    let active: Vec<usize> = (0..output_rows)
+        .filter(|&row| targets[row].is_some())
+        .collect();
+
+    if !active.is_empty() {
+        let mut columns: Vec<VectorValue> = Vec::with_capacity(child_count.saturating_sub(1));
+        for arg in 1..child_count {
+            columns.push(children.eval(ctx, arg, &active)?);
+        }
+        for (position, &row) in active.iter().enumerate() {
+            let boundaries: Vec<Option<T::Value>> = columns
+                .iter()
+                .map(|column| T::read(column, position))
+                .collect();
+            output[row] = Some(match boundaries.binary_search(&targets[row]) {
+                Ok(found) => found as i64 + 1,
+                Err(insert) => insert as i64,
+            });
+        }
+    }
+
+    Ok(GenericElem::<Int>::build(output))
+}
+
+pub fn lazy_interval_int(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    lazy_interval_impl::<GenericElem<Int>>(ctx, output_rows, children)
+}
+
+pub fn lazy_interval_real(
+    ctx: &mut EvalContext,
+    output_rows: usize,
+    children: &mut dyn LazyChildren<'_>,
+    _extra: &mut RpnFnCallExtra<'_>,
+    _metadata: &(dyn Any + Send + Sync),
+) -> Result<VectorValue> {
+    lazy_interval_impl::<GenericElem<Real>>(ctx, output_rows, children)
 }
 
 #[cfg(test)]
@@ -1914,5 +2236,168 @@ mod tests {
         let ints_min = do_get_extremum(&ints_ref, min);
         assert_eq!(ints_max.unwrap(), None);
         assert_eq!(ints_min.unwrap(), None);
+    }
+
+    use tidb_query_datatype::{
+        EvalType,
+        codec::batch::{LazyBatchColumn, LazyBatchColumnVec},
+    };
+    use tipb_helper::ExprDefBuilder;
+
+    use crate::{RpnExpression, RpnExpressionBuilder};
+
+    /// `-i64::MIN`, which overflows only when it is actually entered.
+    fn overflowing_int_child() -> ExprDefBuilder {
+        ExprDefBuilder::scalar_func(ScalarFuncSig::UnaryMinusInt, FieldTypeTp::LongLong)
+            .push_child(ExprDefBuilder::constant_int(i64::MIN))
+    }
+
+    /// A `Bytes`-typed child that fails only when entered: `JSON_UNQUOTE` of
+    /// invalid UTF-8 returns an error.
+    fn failing_bytes_child() -> ExprDefBuilder {
+        ExprDefBuilder::scalar_func(ScalarFuncSig::JsonUnquoteSig, FieldTypeTp::VarChar)
+            .push_child(ExprDefBuilder::constant_bytes(vec![0xff, 0xfe]))
+    }
+
+    fn build_expr(node: ExprDefBuilder, max_columns: usize) -> RpnExpression {
+        RpnExpressionBuilder::build_from_expr_tree(
+            node.build(),
+            &mut EvalContext::default(),
+            max_columns,
+        )
+        .unwrap()
+    }
+
+    fn decoded_int_column(values: impl IntoIterator<Item = Option<i64>>) -> LazyBatchColumn {
+        let values: Vec<Option<i64>> = values.into_iter().collect();
+        let mut column = LazyBatchColumn::decoded_with_capacity_and_tp(values.len(), EvalType::Int);
+        for value in values {
+            column.mut_decoded().push_int(value);
+        }
+        column
+    }
+
+    /// `GREATEST(Col0, -i64::MIN)`: a NULL first argument stops the row before
+    /// the overflowing second child is entered.
+    #[test]
+    fn test_lazy_greatest_skips_after_null() {
+        let expr = build_expr(
+            ExprDefBuilder::scalar_func(ScalarFuncSig::GreatestInt, FieldTypeTp::LongLong)
+                .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong))
+                .push_child(overflowing_int_child()),
+            1,
+        );
+        let schema = [FieldTypeTp::LongLong.into()];
+        let mut columns = LazyBatchColumnVec::from(vec![decoded_int_column([None, None])]);
+        let mut ctx = EvalContext::default();
+        let result = expr
+            .eval(&mut ctx, &schema, &mut columns, &[0, 1], 2)
+            .unwrap();
+        assert_eq!(
+            result.vector_value().unwrap().as_ref().to_int_vec(),
+            [None, None]
+        );
+
+        // A non-NULL first argument needs the second child and overflows.
+        let mut columns = LazyBatchColumnVec::from(vec![decoded_int_column([Some(1)])]);
+        let mut ctx = EvalContext::default();
+        assert!(expr.eval(&mut ctx, &schema, &mut columns, &[0], 1).is_err());
+    }
+
+    /// `LEAST(Col0, Col1, -i64::MIN)`: once an argument is NULL the row is
+    /// finished, so the overflowing third child is never entered.
+    #[test]
+    fn test_lazy_least_skips_after_null() {
+        let expr = build_expr(
+            ExprDefBuilder::scalar_func(ScalarFuncSig::LeastInt, FieldTypeTp::LongLong)
+                .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong))
+                .push_child(ExprDefBuilder::column_ref(1, FieldTypeTp::LongLong))
+                .push_child(overflowing_int_child()),
+            2,
+        );
+        let schema = [FieldTypeTp::LongLong.into(), FieldTypeTp::LongLong.into()];
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([Some(1), Some(1)]),
+            decoded_int_column([None, None]),
+        ]);
+        let mut ctx = EvalContext::default();
+        let result = expr
+            .eval(&mut ctx, &schema, &mut columns, &[0, 1], 2)
+            .unwrap();
+        assert_eq!(
+            result.vector_value().unwrap().as_ref().to_int_vec(),
+            [None, None]
+        );
+
+        let mut columns = LazyBatchColumnVec::from(vec![
+            decoded_int_column([Some(1)]),
+            decoded_int_column([Some(2)]),
+        ]);
+        let mut ctx = EvalContext::default();
+        assert!(expr.eval(&mut ctx, &schema, &mut columns, &[0], 1).is_err());
+    }
+
+    /// `GREATEST(CmpStringAsTime(NULL), <failing bytes>)`: a NULL argument
+    /// stops the row before the failing later child.
+    #[test]
+    fn test_lazy_greatest_cmp_string_as_time_skips_after_null() {
+        let expr = build_expr(
+            ExprDefBuilder::scalar_func(
+                ScalarFuncSig::GreatestCmpStringAsTime,
+                FieldTypeTp::VarChar,
+            )
+            .push_child(ExprDefBuilder::constant_null(FieldTypeTp::VarChar))
+            .push_child(failing_bytes_child()),
+            0,
+        );
+        let mut columns = LazyBatchColumnVec::empty();
+        let mut ctx = EvalContext::default();
+        let result = expr.eval(&mut ctx, &[], &mut columns, &[0], 1).unwrap();
+        assert_eq!(
+            result.vector_value().unwrap().as_ref().to_bytes_vec(),
+            [None]
+        );
+
+        // A non-NULL first argument enters the failing child.
+        let expr = build_expr(
+            ExprDefBuilder::scalar_func(
+                ScalarFuncSig::GreatestCmpStringAsTime,
+                FieldTypeTp::VarChar,
+            )
+            .push_child(ExprDefBuilder::constant_bytes(
+                b"2012-12-12 12:00:39".to_vec(),
+            ))
+            .push_child(failing_bytes_child()),
+            0,
+        );
+        let mut columns = LazyBatchColumnVec::empty();
+        let mut ctx = EvalContext::default();
+        assert!(expr.eval(&mut ctx, &[], &mut columns, &[0], 1).is_err());
+    }
+
+    /// `INTERVAL(Col0, -i64::MIN)`: a NULL target returns -1 without entering
+    /// the boundary arguments; a non-NULL target does enter them.
+    #[test]
+    fn test_lazy_interval_skips_boundaries_for_null_target() {
+        let expr = build_expr(
+            ExprDefBuilder::scalar_func(ScalarFuncSig::IntervalInt, FieldTypeTp::LongLong)
+                .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong))
+                .push_child(overflowing_int_child()),
+            1,
+        );
+        let schema = [FieldTypeTp::LongLong.into()];
+        let mut columns = LazyBatchColumnVec::from(vec![decoded_int_column([None, None])]);
+        let mut ctx = EvalContext::default();
+        let result = expr
+            .eval(&mut ctx, &schema, &mut columns, &[0, 1], 2)
+            .unwrap();
+        assert_eq!(
+            result.vector_value().unwrap().as_ref().to_int_vec(),
+            [Some(-1), Some(-1)]
+        );
+
+        let mut columns = LazyBatchColumnVec::from(vec![decoded_int_column([Some(1)])]);
+        let mut ctx = EvalContext::default();
+        assert!(expr.eval(&mut ctx, &schema, &mut columns, &[0], 1).is_err());
     }
 }
