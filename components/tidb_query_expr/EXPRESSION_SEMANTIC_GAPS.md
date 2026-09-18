@@ -116,4 +116,8 @@ rollout switch it mentions does not exist in either checkout yet.
   has a native type, codec and `Column::Set` facade carrier, so identity and
   `CAST(set AS SIGNED)` (the selection bit mask) are covered; Set string
   conversion, comparison and aggregation are not.
+* Fixed while wiring `Set`: `validate_expr_return_type` accepted `Enum` in an
+  `Int`/`Bytes` parameter slot but not `Set`, so a string kernel called with a
+  `Set` column (`LENGTH(set_col)`) failed validation even though the hybrid
+  codec supports it. Both carriers are now accepted.
 * The `eager` interaction between window functions and the expression engine.
