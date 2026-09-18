@@ -121,3 +121,24 @@ rollout switch it mentions does not exist in either checkout yet.
   `Set` column (`LENGTH(set_col)`) failed validation even though the hybrid
   codec supports it. Both carriers are now accepted.
 * The `eager` interaction between window functions and the expression engine.
+
+## 7. Found by dual-running the Go source-port corpus
+
+The TiDB adapter now evaluates every constant expression in the 33 source-port
+test files natively AND through the engine and requires agreement, so these
+surfaced automatically rather than silently:
+
+| # | Area | Native | Engine | Handling |
+| --- | --- | --- | --- | --- |
+| 20 | `COT` | `0.6420926159343308` | `0.6420926159343306` (Go's `math.Cot`) | native port bug; `cot` stays native until the port is fixed |
+| 21 | `CRC32` | `Datum::UInt(2501908538)` | `Datum::Int(2501908538)` | result-kind difference; `crc32` excluded |
+| 22 | `OCT` over a binary literal | reads the bit value (`b'11111111'` -> `377`) | takes the string path (`0`) | `oct` excluded |
+| 23 | `GREATEST`/`LEAST` over a non-binary collation | folds case/accents through the derived collation | compares bytes (`utf8mb4_general_ci`: native `B`, engine `a`) | string shapes require binary arguments |
+| 24 | `FIND_IN_SET` over a non-binary collation | collation- and padding-aware (`2`) | bytewise (`1`) | string shapes require binary arguments |
+| 25 | `LAST_DAY` over an implicit temporal cast | `2024-03-31` | `ExternalEngine` error "unsupported TiKV temporal value shape" | temporal constants declined before evaluation; `last_day` excluded |
+| 26 | binary/bit literal in a numeric context | numeric (`b'1' + 0` -> 1) | bytes (`0`) | those constants declined |
+
+Items 23-25 are worth an upstream look: they are an error-versus-value or
+collation-semantics difference, not a wording one. Items 21 and 26 are
+representation choices the adapter could carry differently if the enum-style
+hybrid were extended to binary literals.
