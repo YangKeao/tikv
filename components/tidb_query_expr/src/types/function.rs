@@ -360,7 +360,13 @@ pub fn validate_expr_return_type(expr: &Expr, et: EvalType) -> Result<()> {
         Ok(())
     } else {
         match (et, received_et) {
-            (EvalType::Int, EvalType::Enum) | (EvalType::Bytes, EvalType::Enum) => Ok(()),
+            // ENUM and SET are hybrid carriers: their codec borrows the Int bit
+            // mask or the Bytes name, so a parameter declared Int or Bytes
+            // accepts them exactly as those carriers do.
+            (EvalType::Int, EvalType::Enum)
+            | (EvalType::Bytes, EvalType::Enum)
+            | (EvalType::Int, EvalType::Set)
+            | (EvalType::Bytes, EvalType::Set) => Ok(()),
             _ => Err(other_err!("Expect `{}`, received `{}`", et, received_et)),
         }
     }
