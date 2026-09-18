@@ -743,3 +743,46 @@ that no longer exists after the shareable-program change (it is
 its `LazyFn` metadata parameter omits `+ Sync`, which `RpnFnMeta` now requires.
 The irregular-program rejection (`subtree_start(len-1) == 0`) is preserved,
 because the recursive walk would otherwise ignore unused nodes.
+
+---
+
+## 11. How the embedder learns what is lazy
+
+The TiDB adapter refuses non-leaf lazy shapes today (`Shape::LazyTail`,
+`Shape::IfThree`, `Shape::AllLeaves` in
+`rust/crates/tidb-expr/src/tikv/admission.rs`) precisely because TiKV evaluated
+children eagerly: a leaf can be evaluated eagerly without changing SQL
+semantics, a nested call cannot. Relaxing that boundary needs a capability
+signal, because a successful `compile` says nothing about laziness — an eager
+kernel and a lazy kernel for the same signature compile identically, and
+running the eager one would execute a branch MySQL never enters.
+
+`supports_lazy()` (step 7) answers "does this program contain a lazy kernel",
+which is necessary but not sufficient: a program can contain one lazy node and
+one eager node of a *different* lazy-sensitive family, and the shape gate is
+per SQL name, not per node.
+
+The sound signal is therefore *absence of eager risk*:
+
+    impl PreparedExpression {
+        /// Kernel names of nodes that are lazy-sensitive SQL constructs but
+        /// were dispatched to a kernel with no `lazy_fn_ptr`.
+        pub fn eager_lazy_risk(&self) -> Vec<&'static str>;
+    }
+
+`RpnExpression` nodes do not carry the signature (`types/expr.rs`), but every
+`FnCall` node carries its `RpnFnMeta`, and the meta's `name` field is the
+generated kernel name, so the walk can classify a node without the wire
+signature. The engine keeps one const list of lazy-sensitive kernel names next
+to the dispatcher (`if_null`, `coalesce`, `case_when`, `logical_and`,
+`logical_or`, `logical_xor`, the `if` kernel, and the Tier 2 names as they are
+registered), and a unit test asserts that every dispatch arm whose signature
+belongs to the control families is registered with `.with_lazy`, so a new
+eager control kernel cannot be added while the embedder believes the family is
+lazy.
+
+The adapter then changes in one place: a lazy shape is permitted, the tree is
+compiled, and the result is accepted only if `eager_lazy_risk()` is empty;
+otherwise the expression stays native with a recorded `FallbackReason`. This
+makes TiDB's coverage follow the engine automatically as more families become
+lazy, instead of requiring a hand-maintained list to be kept in step.
