@@ -406,6 +406,22 @@ pub fn add_time_datetime_null(_arg0: &DateTime, _arg1: &DateTime) -> Result<Opti
     Ok(None)
 }
 
+/// Lazy `AddTime*Null`: the signature is DEFINED to answer NULL, so it never
+/// looks at its arguments. The eager kernels above take `&DateTime` (declared
+/// non-nullable), so they evaluate both children and can surface an error or
+/// warning MySQL never reaches; this form enters no child at all.
+pub fn lazy_add_time_null<T: crate::lazy_util::LazyValue>(
+    _ctx: &mut EvalContext,
+    output_rows: usize,
+    _children: &mut dyn crate::LazyChildren<'_>,
+    _extra: &mut crate::RpnFnCallExtra<'_>,
+    _metadata: &(dyn std::any::Any + Send + Sync),
+) -> Result<VectorValue> {
+    Ok(T::build(crate::lazy_util::null_output::<T::Value>(
+        output_rows,
+    )))
+}
+
 #[rpn_fn()]
 #[inline]
 pub fn add_time_duration_null(_arg0: &DateTime, _arg1: &DateTime) -> Result<Option<Duration>> {

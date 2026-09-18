@@ -479,9 +479,6 @@ pub(crate) const LAZY_SENSITIVE_KERNELS: &[&str] = &[
     "logical_or",
     "logical_xor",
     // Tier 3 null-shortcut time kernels; still eagerly dispatched today.
-    "add_time_datetime_null",
-    "add_time_duration_null",
-    "add_time_string_null",
 ];
 
 #[rustfmt::skip]
@@ -973,9 +970,12 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::AddDatetimeAndDuration => add_datetime_and_duration_fn_meta(),
         ScalarFuncSig::AddDatetimeAndString => add_datetime_and_string_fn_meta(),
         ScalarFuncSig::AddDateAndString => add_date_and_string_fn_meta(),
-        ScalarFuncSig::AddTimeDateTimeNull => add_time_datetime_null_fn_meta(),
-        ScalarFuncSig::AddTimeDurationNull => add_time_duration_null_fn_meta(),
-        ScalarFuncSig::AddTimeStringNull => add_time_string_null_fn_meta(),
+        ScalarFuncSig::AddTimeDateTimeNull => add_time_datetime_null_fn_meta()
+            .with_lazy(lazy_add_time_null::<lazy_util::GenericElem<DateTime>>),
+        ScalarFuncSig::AddTimeDurationNull => add_time_duration_null_fn_meta()
+            .with_lazy(lazy_add_time_null::<lazy_util::GenericElem<Duration>>),
+        ScalarFuncSig::AddTimeStringNull => add_time_string_null_fn_meta()
+            .with_lazy(lazy_add_time_null::<lazy_util::BytesElem>),
         ScalarFuncSig::SubDatetimeAndDuration => sub_datetime_and_duration_fn_meta(),
         ScalarFuncSig::SubDatetimeAndString => sub_datetime_and_string_fn_meta(),
         ScalarFuncSig::FromDays => from_days_fn_meta(),

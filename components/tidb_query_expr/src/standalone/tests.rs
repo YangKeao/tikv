@@ -775,22 +775,10 @@ fn eager_lazy_risk_reports_only_unregistered_lazy_sensitive_kernels() {
         );
     }
 
-    // The still-eager Tier 3 `AddTime*Null` kernels are reported by name.
-    let unregistered = prepare(
-        E::scalar_func(ScalarFuncSig::AddTimeDateTimeNull, FieldTypeTp::DateTime)
-            .push_child(E::constant_null(FieldTypeTp::DateTime))
-            .push_child(E::constant_null(FieldTypeTp::DateTime)),
-        &[],
-        Context::default(),
-    );
-    assert!(!unregistered.has_lazy_nodes());
-    assert_eq!(
-        unregistered.eager_lazy_risk(),
-        vec!["add_time_datetime_null"]
-    );
-
-    // A mixed program keeps reporting the eager Tier 3 node next to a lazy one.
-    let mixed = prepare(
+    // Every lazy-sensitive family is now lazy, so no program has eager risk:
+    // the same `AddTime*Null` node that used to be reported is a lazy kernel
+    // now, and a program mixing it with another lazy node reports nothing.
+    let all_lazy = prepare(
         E::scalar_func(ScalarFuncSig::AddTimeDateTimeNull, FieldTypeTp::DateTime)
             .push_child(
                 E::scalar_func(ScalarFuncSig::IfTime, FieldTypeTp::DateTime)
@@ -802,6 +790,6 @@ fn eager_lazy_risk_reports_only_unregistered_lazy_sensitive_kernels() {
         &[],
         Context::default(),
     );
-    assert!(mixed.has_lazy_nodes());
-    assert_eq!(mixed.eager_lazy_risk(), vec!["add_time_datetime_null"]);
+    assert!(all_lazy.has_lazy_nodes());
+    assert!(all_lazy.eager_lazy_risk().is_empty());
 }
