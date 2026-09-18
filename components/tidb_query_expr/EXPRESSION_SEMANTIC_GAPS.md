@@ -131,7 +131,7 @@ surfaced automatically rather than silently:
 | # | Area | Native | Engine | Handling |
 | --- | --- | --- | --- | --- |
 | 20 | `COT` | `0.6420926159343308` | `0.6420926159343306` (Go's `math.Cot`) | native port bug; `cot` stays native until the port is fixed |
-| 21 | `CRC32` | `Datum::UInt(2501908538)` | `Datum::Int(2501908538)` | result-kind difference; `crc32` excluded |
+| 21 | `CRC32` | `Datum::UInt(2501908538)` | `Datum::Int(2501908538)` | FIXED: the TiDB port declared CRC32 signed while Go marks it UNSIGNED; the declaration now carries `UNSIGNED|BINARY` and `crc32` is admitted |
 | 22 | `OCT` over a binary literal | reads the bit value (`b'11111111'` -> `377`) | takes the string path (`0`) | `oct` excluded |
 | 23 | `GREATEST`/`LEAST` over a non-binary collation | folds case/accents through the derived collation | compares bytes (`utf8mb4_general_ci`: native `B`, engine `a`) | string shapes require binary arguments |
 | 24 | `FIND_IN_SET` over a non-binary collation | collation- and padding-aware (`2`) | bytewise (`1`) | string shapes require binary arguments |
