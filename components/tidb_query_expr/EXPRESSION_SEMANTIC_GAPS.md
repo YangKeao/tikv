@@ -135,10 +135,10 @@ surfaced automatically rather than silently:
 | 22 | `OCT` over a binary literal | reads the bit value (`b'11111111'` -> `377`) | takes the string path (`0`) | `oct` excluded |
 | 23 | `GREATEST`/`LEAST` over a non-binary collation | folds case/accents through the derived collation | compares bytes (`utf8mb4_general_ci`: native `B`, engine `a`) | string shapes require binary arguments |
 | 24 | `FIND_IN_SET` over a non-binary collation | collation- and padding-aware (`2`) | bytewise (`1`) | string shapes require binary arguments |
-| 25 | `LAST_DAY` over an implicit temporal cast | `2024-03-31` | `ExternalEngine` error "unsupported TiKV temporal value shape" | temporal constants declined before evaluation; `last_day` excluded |
+| 25 | `LAST_DAY` over an implicit temporal cast | `2024-03-31` | `ExternalEngine` error "unsupported TiKV temporal value shape" | FIXED: the kernel returns `DateTime` kind for a DATE-declared result; the TiDB bridge now rebuilds the declared DATE the way Go's DATE decoder drops the time part, so the implicit cast, `last_day`, `date` and `month` are admitted |
 | 26 | binary/bit literal in a numeric context | numeric (`b'1' + 0` -> 1) | bytes (`0`) | those constants declined |
 
-Items 23-25 are worth an upstream look: they are an error-versus-value or
-collation-semantics difference, not a wording one. Items 21 and 26 are
-representation choices the adapter could carry differently if the enum-style
-hybrid were extended to binary literals.
+Items 23-24 are worth an upstream look: they are a collation-semantics
+difference, not a wording one. Items 21 and 26 are representation choices the
+adapter could carry differently if the enum-style hybrid were extended to
+binary literals.
