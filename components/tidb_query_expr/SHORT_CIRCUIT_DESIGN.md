@@ -713,3 +713,33 @@ run; `AND`/`OR` agree with the eager kernels on all non-error rows and with Go's
   signatures.
 * No new type support (e.g. `CoalesceVectorFloat32`/`GreatestVectorFloat32`,
   which TiKV does not dispatch today).
+
+---
+
+## 10. Corrections applied during implementation
+
+Steps 1-2 (lazy plumbing plus `IfNullInt`) found two errors in this design.
+They are recorded here so the remaining steps do not repeat them; the code and
+its tests are the authority.
+
+1. **`child_roots` underflow for nullary calls.** The sketch's
+   `let mut r = fc - 1;` runs before the loop, so an `args_len == 0` call
+   underflows `usize`. Sixteen existing tests failed with `attempt to subtract
+   with overflow` (nullary kernels such as `pi`, `rand`, `uuid`, the
+   `*_any_value` family, `json_array`/`json_object`, `coalesce`,
+   `null_time_diff`, and the standalone coverage tests). Fixed with an early
+   return when `args_len == 0`.
+
+2. **The finite-Real check must cover every executed node, not just calls.**
+   The sketch places `CHECK_FINITE_REALS` in the `FnCall` branch, but the old
+   flat loop also checked `Constant` and `ColumnRef` nodes. Keeping the check
+   only in the call branch would have changed step 1's behavior. Every executed
+   node is checked, a materialized lazy child is re-checked, and a skipped
+   branch is never checked because it is never entered.
+
+Two smaller corrections: the design cites an `eval_decoded_with_finite_reals`
+that no longer exists after the shareable-program change (it is
+`eval_decoded_with_finite_reals_into`, taking a caller-owned RPN stack), and
+its `LazyFn` metadata parameter omits `+ Sync`, which `RpnFnMeta` now requires.
+The irregular-program rejection (`subtree_start(len-1) == 0`) is preserved,
+because the recursive walk would otherwise ignore unused nodes.
