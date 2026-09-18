@@ -21,15 +21,17 @@ use tipb::{Expr, ExprType, FieldType};
 
 pub trait InByHash {
     type Key: EvaluableRet + Extract + Eq;
-    type StoreKey: 'static + Hash + Eq + Sized + Send;
+    type StoreKey: 'static + Hash + Eq + Sized + Send + Sync;
 
     fn map(key: Self::Key) -> Result<Self::StoreKey>;
     fn map_ref(key: &Self::Key) -> Result<&Self::StoreKey>;
 }
 
-pub struct NormalInByHash<K: EvaluableRet + Extract + Hash + Eq + Sized + Send>(PhantomData<K>);
+pub struct NormalInByHash<K: EvaluableRet + Extract + Hash + Eq + Sized + Send + Sync>(
+    PhantomData<K>,
+);
 
-impl<K: EvaluableRet + Extract + Hash + Eq + Sized> InByHash for NormalInByHash<K> {
+impl<K: EvaluableRet + Extract + Hash + Eq + Sized + Sync> InByHash for NormalInByHash<K> {
     type Key = K;
     type StoreKey = K;
 

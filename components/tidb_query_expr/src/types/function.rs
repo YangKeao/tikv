@@ -40,8 +40,9 @@ pub struct RpnFnMeta {
     /// Validator against input expression tree.
     pub validator_ptr: fn(expr: &Expr) -> Result<()>,
 
-    /// The metadata constructor of the RPN function.
-    pub metadata_expr_ptr: fn(expr: &mut Expr) -> Result<Box<dyn Any + Send>>,
+    /// The metadata constructor of the RPN function. Metadata is immutable
+    /// after compilation, so it must be shareable (`Sync`) with the program.
+    pub metadata_expr_ptr: fn(expr: &mut Expr) -> Result<Box<dyn Any + Send + Sync>>,
 
     /// Optional safe packed-input loader generated for explicitly opted-in
     /// ordinary kernels. It does not replace the native vectorized evaluator.
@@ -56,7 +57,7 @@ pub struct RpnFnMeta {
         args: &[RpnStackNode<'_>],
         // Uncommon arguments are grouped together
         extra: &mut RpnFnCallExtra<'_>,
-        metadata: &(dyn Any + Send),
+        metadata: &(dyn Any + Send + Sync),
     ) -> Result<VectorValue>,
 }
 
@@ -208,7 +209,7 @@ pub trait Evaluator<'a> {
         output_rows: usize,
         args: &'a [RpnStackNode<'a>],
         extra: &mut RpnFnCallExtra<'_>,
-        metadata: &(dyn Any + Send),
+        metadata: &(dyn Any + Send + Sync),
     ) -> Result<VectorValue>;
 }
 
@@ -237,7 +238,7 @@ impl<'a, A: EvaluableRef<'a>, E: Evaluator<'a>> Evaluator<'a> for ArgConstructor
         output_rows: usize,
         args: &'a [RpnStackNode<'a>],
         extra: &mut RpnFnCallExtra<'_>,
-        metadata: &(dyn Any + Send),
+        metadata: &(dyn Any + Send + Sync),
     ) -> Result<VectorValue> {
         match &args[self.arg_index] {
             RpnStackNode::Scalar { value, .. } => {

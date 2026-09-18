@@ -216,5 +216,5 @@ pub type BorrowedFn = fn(
     usize,
     &[BorrowedStackNode<'_>],
     &mut RpnFnCallExtra<'_>,
-    &(dyn std::any::Any + Send),
+    &(dyn std::any::Any + Send + Sync),
 ) -> Result<VectorValue>;

@@ -517,3 +517,112 @@ fn unsigned_bits_and_context_validation() {
         .is_err()
     );
 }
+
+/// Reusing one [`ExecutionState`] across calls must reset warnings and rebind
+/// to whichever program is being evaluated.
+#[test]
+fn execution_state_reuse_resets_warnings_and_rebinds_context() {
+    let ft: FieldType = FieldTypeTp::Double.into();
+    let divide = prepare(
+        E::scalar_func(ScalarFuncSig::DivideReal, ft.clone())
+            .push_child(E::column_ref(0, ft.clone()))
+            .push_child(E::constant_real(0.0)),
+        &[ft],
+        Context {
+            flags: Flag::IN_SELECT_STMT.bits(),
+            max_warning_count: 2,
+            ..Context::default()
+        },
+    );
+    let rows = BATCH_MAX_SIZE + 1;
+    let mut state = divide.execution_state();
+    let first = divide
+        .eval_with_state(
+            &mut state,
+            &[Column::Real(vec![Some(1.0); rows])],
+            rows,
+            None,
+        )
+        .unwrap();
+    assert_eq!(first.warning_count, rows);
+    assert_eq!(first.warnings.len(), 2);
+
+    // The same state starts the next call warning-fresh.
+    let second = divide
+        .eval_with_state(&mut state, &[Column::Real(vec![None])], 1, None)
+        .unwrap();
+    assert_eq!(second.column, Column::Real(vec![None]));
+    assert_eq!(second.warning_count, 0);
+    assert!(second.warnings.is_empty());
+
+    // A state created by another program is rebound to this program's config.
+    let other = prepare(E::constant_int(9), &[], Context::default());
+    assert_eq!(
+        other
+            .eval_with_state(&mut state, &[], 1, None)
+            .unwrap()
+            .column,
+        Column::Int(vec![Some(9)])
+    );
+    let third = divide
+        .eval_with_state(&mut state, &[Column::Real(vec![Some(1.0)])], 1, None)
+        .unwrap();
+    assert_eq!(third.warning_count, 1);
+    assert_eq!(third.warnings.len(), 1);
+}
+
+/// Milestone A acceptance: one compiled program is evaluated concurrently from
+/// two threads and every result equals the single-threaded run. Sharing the
+/// `Arc<PreparedExpression>` across `thread::spawn` also proves `Send + Sync`.
+#[test]
+fn compiled_program_evaluates_concurrently_from_two_threads() {
+    use std::sync::{Arc, Barrier};
+
+    let ft: FieldType = FieldTypeTp::LongLong.into();
+    let expr = E::scalar_func(ScalarFuncSig::AbsInt, ft.clone()).push_child(
+        E::scalar_func(ScalarFuncSig::PlusInt, ft.clone())
+            .push_child(E::column_ref(0, ft.clone()))
+            .push_child(E::constant_int(9)),
+    );
+    let program = Arc::new(prepare(expr, &[ft], Context::default()));
+    let rows = BATCH_MAX_SIZE + 37;
+    let input = Column::Int(
+        (0..rows)
+            .map(|row| {
+                if row % 7 == 0 {
+                    None
+                } else {
+                    Some(row as i64 - 500)
+                }
+            })
+            .collect(),
+    );
+    let selection = (0..rows).rev().collect::<Vec<_>>();
+    let expected = program
+        .eval_shared(&[input.clone()], rows, Some(&selection))
+        .unwrap();
+
+    let barrier = Arc::new(Barrier::new(3));
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let program = Arc::clone(&program);
+            let input = input.clone();
+            let selection = selection.clone();
+            let expected = expected.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..8 {
+                    let got = program
+                        .eval_shared(&[input.clone()], rows, Some(&selection))
+                        .unwrap();
+                    assert_eq!(got, expected);
+                }
+            })
+        })
+        .collect();
+    barrier.wait();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+}

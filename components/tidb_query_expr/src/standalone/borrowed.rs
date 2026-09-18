@@ -59,8 +59,27 @@ impl PreparedExpression {
     /// may follow earlier successful callbacks; the caller must discard
     /// partial output and must never replay the batch natively. No
     /// references are retained by self.
+    ///
+    /// This mutable-receiver form is kept for existing callers; use
+    /// [`Self::eval_borrowed_shared`] to evaluate a compiled program shared
+    /// across threads.
     pub fn eval_borrowed<F>(
         &mut self,
+        columns: &[ColumnRef<'_>],
+        row_count: usize,
+        selection: Option<&[usize]>,
+        sink: F,
+    ) -> Result<Diagnostics, Error>
+    where
+        F: for<'a> FnMut(ScalarRef<'a>) -> Result<(), Error>,
+    {
+        self.eval_borrowed_shared(columns, row_count, selection, sink)
+    }
+
+    /// Shared (`&self`) form of [`Self::eval_borrowed`]. All scratch is created
+    /// inside the call, so one compiled program can serve several threads.
+    pub fn eval_borrowed_shared<F>(
+        &self,
         columns: &[ColumnRef<'_>],
         row_count: usize,
         selection: Option<&[usize]>,

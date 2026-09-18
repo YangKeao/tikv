@@ -330,6 +330,29 @@ pub struct EvalOutput {
     pub warning_count: usize,
 }
 
+/// Mutable per-call execution state for a [`PreparedExpression`].
+///
+/// The compiled program is immutable and shareable; this struct carries the
+/// scratch that changes during one evaluation: the [`EvalContext`] (which owns
+/// the warning buffer) and the reusable selection/dense row buffers. The RPN
+/// stack, decoded input columns and the output column are allocated inside each
+/// call because they borrow call-scoped inputs; they are never stored in the
+/// program.
+///
+/// A single state must not be used by two evaluations at once, but one compiled
+/// program can serve any number of states (for example one per worker thread).
+#[derive(Debug)]
+pub struct ExecutionState {
+    ctx: EvalContext,
+    selection_scratch: Vec<usize>,
+    dense_scratch: Vec<usize>,
+}
+
+/// The compiled program is immutable after compilation, and evaluation only
+/// needs `&self` plus caller-owned scratch. This fails to compile if a future
+/// change reintroduces per-execution or thread-affine state into it.
+static_assertions::assert_impl_all!(PreparedExpression: Send, Sync);
+
 /// An RPN program and its fixed schema/context. No kernels are reimplemented.
 #[derive(Debug)]
 pub struct PreparedExpression {
@@ -378,13 +401,54 @@ impl PreparedExpression {
         })
     }
 
-    /// Evaluates one independent batch with fresh warnings. Every physical
-    /// column must contain exactly `row_count` values, even if not referenced.
-    /// Selection indices may repeat or be unordered; only selected values are
-    /// converted. Empty selection/batch returns an empty typed column without
-    /// invoking the engine. Errors discard partial output, without fallback.
+    /// Creates fresh execution state bound to this program's fixed
+    /// configuration. Reuse it across calls on one thread to avoid reallocating
+    /// the warning and selection scratch; create one per concurrent evaluator.
+    pub fn execution_state(&self) -> ExecutionState {
+        ExecutionState {
+            ctx: EvalContext::new(self.config.clone()),
+            selection_scratch: Vec::new(),
+            dense_scratch: Vec::new(),
+        }
+    }
+
+    /// Evaluates one independent batch with fresh warnings, allocating fresh
+    /// execution state per call. Kept for callers that hold the program
+    /// mutably; prefer [`Self::eval_shared`] or [`Self::eval_with_state`]
+    /// when the compiled program is shared.
     pub fn eval(
         &mut self,
+        columns: &[Column],
+        row_count: usize,
+        selection: Option<&[usize]>,
+    ) -> Result<EvalOutput, Error> {
+        self.eval_shared(columns, row_count, selection)
+    }
+
+    /// Evaluates one independent batch through `&self`, so the same compiled
+    /// program can run on several threads concurrently. Each call owns fresh
+    /// scratch. Every physical column must contain exactly `row_count` values,
+    /// even if not referenced. Selection indices may repeat or be unordered;
+    /// only selected values are converted. Empty selection/batch returns an
+    /// empty typed column without invoking the engine. Errors discard partial
+    /// output, without fallback.
+    pub fn eval_shared(
+        &self,
+        columns: &[Column],
+        row_count: usize,
+        selection: Option<&[usize]>,
+    ) -> Result<EvalOutput, Error> {
+        let mut state = self.execution_state();
+        self.eval_with_state(&mut state, columns, row_count, selection)
+    }
+
+    /// Evaluates one independent batch through `&self` using caller-owned
+    /// execution state. The warning state is reset at the start of every call,
+    /// so reusing a state never leaks warnings across batches. See
+    /// [`Self::eval_shared`] for the input contract.
+    pub fn eval_with_state(
+        &self,
+        state: &mut ExecutionState,
         columns: &[Column],
         row_count: usize,
         selection: Option<&[usize]>,
@@ -408,39 +472,58 @@ impl PreparedExpression {
             row_count,
             selection,
         )?;
-        let mut ctx = EvalContext::new(self.config.clone());
+        // Reusing caller state must not carry warnings into this call. When the
+        // state already belongs to this program, clear the warning buffer in
+        // place; otherwise rebind the context to this program's configuration.
+        if Arc::ptr_eq(&state.ctx.cfg, &self.config) {
+            state.ctx.warnings.warning_cnt = 0;
+            state.ctx.warnings.warnings.clear();
+        } else {
+            state.ctx = EvalContext::new(self.config.clone());
+        }
         let mut output = Column::empty(self.output_type);
         let output_rows = selection.map_or(row_count, <[usize]>::len);
         for start in (0..output_rows).step_by(BATCH_MAX_SIZE) {
             let end = output_rows.min(start.saturating_add(BATCH_MAX_SIZE));
-            let rows: Vec<usize> = match selection {
-                Some(rows) => rows[start..end].to_vec(),
-                None => (start..end).collect(),
-            };
+            state.selection_scratch.clear();
+            match selection {
+                Some(rows) => state.selection_scratch.extend_from_slice(&rows[start..end]),
+                None => state.selection_scratch.extend(start..end),
+            }
+            let rows_len = state.selection_scratch.len();
             let decoded: LazyBatchColumnVec = columns
                 .iter()
-                .map(|c| c.copy_rows(&rows))
+                .map(|c| c.copy_rows(&state.selection_scratch))
                 .collect::<Result<Vec<_>, _>>()?
                 .into();
-            let dense: Vec<usize> = (0..rows.len()).collect();
-            let result = self.expression.eval_decoded_with_finite_reals(
-                &mut ctx,
+            // The caller batch is copied densely in selection order, so the
+            // evaluator's logical rows are the dense indices, not the original
+            // physical selection indices.
+            state.dense_scratch.clear();
+            state.dense_scratch.extend(0..rows_len);
+            // The RPN stack borrows the expression and this batch's inputs, so
+            // it is call-scoped scratch rather than program state.
+            let mut stack = Vec::new();
+            let result = self.expression.eval_decoded_with_finite_reals_into(
+                &mut state.ctx,
                 &self.schema,
                 &decoded,
-                &dense,
-                rows.len(),
+                &state.dense_scratch,
+                rows_len,
+                &mut stack,
             )?;
-            for row in 0..rows.len() {
+            for row in 0..rows_len {
                 output.push_result(result.get_logical_scalar_ref(row))?;
             }
         }
         Ok(EvalOutput {
             column: output,
-            warning_count: ctx.warnings.warning_cnt,
-            warnings: ctx
+            warning_count: state.ctx.warnings.warning_cnt,
+            warnings: state
+                .ctx
                 .warnings
                 .warnings
-                .into_iter()
+                .iter()
                 .map(|w| Warning {
                     code: w.get_code(),
                     message: w.get_msg().to_owned(),

@@ -282,20 +282,29 @@ impl RpnExpression {
     /// kernel outputs (e.g. vector distance or rounding can overflow). Reject
     /// every nonfinite REAL before another kernel consumes it via NotNan
     /// arithmetic. This is not fallback and leaves the normal evaluator intact.
-    pub(crate) fn eval_decoded_with_finite_reals<'a>(
+    ///
+    /// The per-call RPN stack scratch is taken from the caller. The stack holds
+    /// references into `self` and the inputs, so it is inherently call-scoped
+    /// and cannot be stored in the compiled program; supplying it explicitly
+    /// only makes the execution-state split visible at the facade.
+    /// `eval_decoded` keeps allocating its own stack and its behavior is
+    /// unchanged.
+    pub(crate) fn eval_decoded_with_finite_reals_into<'a>(
         &'a self,
         ctx: &mut EvalContext,
         schema: &'a [FieldType],
         input_physical_columns: &'a LazyBatchColumnVec,
         input_logical_rows: &'a [usize],
         output_rows: usize,
+        stack: &mut Vec<RpnStackNode<'a>>,
     ) -> Result<RpnStackNode<'a>> {
-        self.eval_decoded_impl::<true>(
+        self.eval_decoded_into::<true>(
             ctx,
             schema,
             input_physical_columns,
             input_logical_rows,
             output_rows,
+            stack,
         )
     }
 
@@ -307,9 +316,29 @@ impl RpnExpression {
         input_logical_rows: &'a [usize],
         output_rows: usize,
     ) -> Result<RpnStackNode<'a>> {
+        let mut stack = Vec::with_capacity(self.len());
+        self.eval_decoded_into::<CHECK_FINITE_REALS>(
+            ctx,
+            schema,
+            input_physical_columns,
+            input_logical_rows,
+            output_rows,
+            &mut stack,
+        )
+    }
+
+    fn eval_decoded_into<'a, const CHECK_FINITE_REALS: bool>(
+        &'a self,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        input_physical_columns: &'a LazyBatchColumnVec,
+        input_logical_rows: &'a [usize],
+        output_rows: usize,
+        stack: &mut Vec<RpnStackNode<'a>>,
+    ) -> Result<RpnStackNode<'a>> {
+        stack.clear();
         assert!(output_rows > 0);
         assert!(output_rows <= BATCH_MAX_SIZE);
-        let mut stack = Vec::with_capacity(self.len());
 
         for node in self.as_ref() {
             match node {
@@ -378,7 +407,7 @@ impl RpnExpression {
         }
 
         assert_eq!(stack.len(), 1);
-        Ok(stack.into_iter().next().unwrap())
+        Ok(stack.pop().unwrap())
     }
 }
 

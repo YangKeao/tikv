@@ -174,7 +174,7 @@
 //!         output_rows: usize,
 //!         args: &[RpnStackNode<'_>],
 //!         extra: &mut RpnFnCallExtra<'_>,
-//!         metadata: &(dyn Any + Send),
+//!         metadata: &(dyn Any + Send + Sync),
 //!     ) -> Result<VectorValue> {
 //!         let (regex, arg) = self.extract(0);
 //!         let regex = build_regex(regex);
@@ -792,22 +792,22 @@ fn generate_init_metadata_fn(
         (Some(metadata_type), Some(metadata_mapper)) => quote! {
             crate::types::function::extract_metadata_from_val::<#metadata_type>(expr.get_val())
                 .and_then(|metadata| #metadata_mapper(expr, metadata))
-                .map(|metadata| Box::new(metadata) as Box<(dyn std::any::Any + std::marker::Send + 'static)>)
+                .map(|metadata| Box::new(metadata) as Box<(dyn std::any::Any + std::marker::Send + std::marker::Sync + 'static)>)
         },
         (Some(metadata_type), None) => quote! {
             crate::types::function::extract_metadata_from_val::<#metadata_type>(expr.get_val())
                 .map_err(|e| other_err!("Decode metadata failed: {}", e))
-                .map(|metadata| Box::new(metadata) as Box<(dyn std::any::Any + std::marker::Send + 'static)>)
+                .map(|metadata| Box::new(metadata) as Box<(dyn std::any::Any + std::marker::Send + std::marker::Sync + 'static)>)
         },
         (None, Some(metadata_mapper)) => quote! {
             #metadata_mapper(expr)
-                .map(|metadata| Box::new(metadata) as Box<(dyn std::any::Any + std::marker::Send + 'static)>)
+                .map(|metadata| Box::new(metadata) as Box<(dyn std::any::Any + std::marker::Send + std::marker::Sync + 'static)>)
         },
         (None, None) => quote! { Ok(Box::new(())) },
     };
     quote! {
         fn init_metadata #impl_generics (expr: &mut ::tipb::Expr)
-            -> Result<Box<dyn std::any::Any + Send>> #where_clause {
+            -> Result<Box<dyn std::any::Any + Send + Sync>> #where_clause {
             #fn_body
         }
     }
@@ -1173,7 +1173,7 @@ impl VargsRpnFn {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> #where_clause {
                     #downcast_metadata
                     crate::function::#varg_buf.with(|vargs_buf| {
@@ -1307,7 +1307,7 @@ impl RawVargsRpnFn {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> #where_clause {
                     #downcast_metadata
                     crate::function::RAW_VARG_PARAM_BUF.with(|mut vargs_buf| {
@@ -1464,7 +1464,7 @@ impl NormalRpnFn {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue>;
             }
         }
@@ -1487,7 +1487,7 @@ impl NormalRpnFn {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     unreachable!()
                 }
@@ -1665,7 +1665,7 @@ impl NormalRpnFn {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     #downcast_metadata
                     let arg = &self;
@@ -1706,7 +1706,7 @@ impl NormalRpnFn {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     #fn_trait_ident #ty_generics_turbofish::eval(def, ctx, output_rows, args, extra, metadata)
                 }
@@ -1744,7 +1744,7 @@ impl NormalRpnFn {
                 output_rows: usize,
                 args: &[crate::types::borrowed::BorrowedStackNode<'_>],
                 extra: &mut crate::RpnFnCallExtra<'_>,
-                metadata: &(dyn std::any::Any + Send),
+                metadata: &(dyn std::any::Any + Send + Sync),
             ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> #where_clause {
                 use tidb_query_datatype::codec::data_type::{ChunkedVec, EvaluableRef, EvaluableRet};
                 let _ = (&ctx, &extra, &metadata);
@@ -1802,7 +1802,7 @@ impl NormalRpnFn {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> #where_clause {
                     use crate::function::{ArgConstructor, Evaluator, Null};
                     #evaluator.eval(Null, ctx, output_rows, args, extra, metadata)
@@ -1880,7 +1880,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue>;
             }
         };
@@ -1898,7 +1898,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     unreachable!()
                 }
@@ -1926,7 +1926,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     let arg = &self;
                     let mut result = <Decimal as EvaluableRet>::ChunkedType::with_capacity(output_rows);
@@ -1959,7 +1959,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     Foo_Fn::eval(def, ctx, output_rows, args, extra, metadata)
                 }
@@ -1979,7 +1979,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     use crate::function::{ArgConstructor, Evaluator, Null};
                     <ArgConstructor<&'_ Real, _>>::new(
@@ -1988,7 +1988,7 @@ mod tests_normal {
                     )
                     .eval(Null, ctx, output_rows, args, extra, metadata)
                 }
-                fn init_metadata(expr: &mut ::tipb::Expr) -> Result<Box<dyn std::any::Any + Send>> {
+                fn init_metadata(expr: &mut ::tipb::Expr) -> Result<Box<dyn std::any::Any + Send + Sync>> {
                     Ok(Box::new(()))
                 }
                 fn validate(expr: &tipb::Expr) -> tidb_query_common::Result<()> {
@@ -2046,7 +2046,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue>;
             }
         };
@@ -2067,7 +2067,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     unreachable!()
                 }
@@ -2094,7 +2094,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     let arg = &self;
                     let mut result = <B as EvaluableRet>::ChunkedType::with_capacity(output_rows);
@@ -2131,7 +2131,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     Foo_Fn::<A, B>::eval(def, ctx, output_rows, args, extra, metadata)
                 }
@@ -2154,7 +2154,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue>
                 where
                     B: N<A>
@@ -2163,7 +2163,7 @@ mod tests_normal {
                     <ArgConstructor<&'_ A::X, _>>::new(0usize, Foo_Evaluator::<A, B>(std::marker::PhantomData))
                         .eval(Null, ctx, output_rows, args, extra, metadata)
                 }
-                fn init_metadata<A: M, B>(expr: &mut ::tipb::Expr) -> Result<Box<dyn std::any::Any + Send>>
+                fn init_metadata<A: M, B>(expr: &mut ::tipb::Expr) -> Result<Box<dyn std::any::Any + Send + Sync>>
                 where
                     B: N<A>
                 {
@@ -2246,7 +2246,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     let arg = &self;
                     let mut result = <Decimal as EvaluableRet>::ChunkedType::with_capacity(output_rows);
@@ -2308,7 +2308,7 @@ mod tests_normal {
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    metadata: &(dyn std::any::Any + Send),
+                    metadata: &(dyn std::any::Any + Send + Sync),
                 ) -> tidb_query_common::Result<tidb_query_datatype::codec::data_type::VectorValue> {
                     let arg = &self;
                     let mut result = <Decimal as EvaluableRet>::ChunkedType::with_capacity(output_rows);

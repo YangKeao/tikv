@@ -22,7 +22,7 @@ pub struct RpnFnScalarEvaluator {
     rpn_expr_builder: RpnExpressionBuilder,
     return_field_type: Option<FieldType>,
     context: Option<EvalContext>,
-    metadata: Option<Box<dyn Any + Send>>,
+    metadata: Option<Box<dyn Any + Send + Sync>>,
 }
 
 impl RpnFnScalarEvaluator {
@@ -99,7 +99,7 @@ impl RpnFnScalarEvaluator {
 
     /// Sets the metadata to use during evaluation.
     #[must_use]
-    pub fn metadata(mut self, metadata: Box<dyn Any + Send>) -> Self {
+    pub fn metadata(mut self, metadata: Box<dyn Any + Send + Sync>) -> Self {
         self.metadata = Some(metadata);
         self
     }

@@ -11,17 +11,56 @@ reimplement any scalar functions, extract a second engine, or call a TiKV server
 ```rust,ignore
 use tidb_query_expr::standalone::{Column, Context, PreparedExpression};
 
-let mut program = PreparedExpression::compile(
+// Compile once. `PreparedExpression` is `Send + Sync` (asserted at compile
+// time) and evaluation only needs `&self`, so one program can be shared across
+// threads.
+let program = PreparedExpression::compile(
     &serialized_tipb_expr,
     &serialized_tipb_field_types, // &[Vec<u8>], one FieldType per input column
     Context { flags: 1 << 5, ..Context::default() }, // IN_SELECT_STMT
 )?;
-let output = program.eval(
+let output = program.eval_shared(
     &[Column::Int(vec![Some(10), None, Some(30)])],
     3,                         // physical row count, also for zero-column batches
     Some(&[2, 0, 2]),           // optional selection, repeats allowed
 )?;
 ```
+
+`eval`, `eval_shared` and `eval_with_state` compute the same result. `eval`
+keeps the original `&mut self` receiver for existing callers; it is a thin
+wrapper over `eval_shared(&self, ..)`, which allocates fresh scratch per call.
+
+## Shared compiled form and execution state
+
+The facade separates the immutable compiled program from the mutable scratch a
+single evaluation needs:
+
+- **Compiled program** (`PreparedExpression`): the RPN nodes, metadata, schema,
+  eval types, fixed `EvalConfig` and preflight guards. Compilation is the only
+  place that builds metadata and decodes constants. There is no per-execution
+  or thread-affine state, so it is `Send + Sync`; a compile-time
+  `assert_impl_all!(PreparedExpression: Send, Sync)` fails the build if that
+  ever regresses. It can live behind an `Arc` and be evaluated concurrently.
+- **Execution state** (`ExecutionState`): mutable scratch owned per evaluator.
+  It carries an `EvalContext` (the warning buffer) and a reusable row-selection
+  buffer. `PreparedExpression::execution_state()` binds one to the program's
+  fixed configuration; `eval_with_state(&self, &mut ExecutionState, ..)` resets
+  the warning state at the start of every call so reuse never leaks warnings
+  between batches. One state must not be used by two evaluations at once, but
+  one program can serve any number of states (for example one per worker).
+
+The RPN stack, the decoded input columns and the output column are allocated
+inside each call because they borrow call-scoped inputs; they are not, and
+cannot be, stored in the compiled program. This is why `eval_shared` allocates
+scratch per call while `eval_with_state` only lets the caller amortize the
+warning and selection buffers. The checked evaluator exposes
+`eval_decoded_with_finite_reals_into`, which takes that call-scoped RPN stack
+from the caller. The stock server path (`eval_decoded`) still allocates its own
+stack and is behaviorally unchanged.
+
+The borrowed API follows the same split: `eval_borrowed(&mut self, ..)` is kept
+for existing callers and `eval_borrowed_shared(&self, ..)` evaluates a shared
+program.
 
 `Column` has nullable vectors for all nine usable engine types: `Int(i64)`,
 `Real(f64)`, `Bytes(Vec<u8>)`, `Decimal(Decimal)`, `DateTime(DateTime)`,
