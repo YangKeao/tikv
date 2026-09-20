@@ -121,6 +121,13 @@ rollout switch it mentions does not exist in either checkout yet.
   `Set` column (`LENGTH(set_col)`) failed validation even though the hybrid
   codec supports it. Both carriers are now accepted.
 * The `eager` interaction between window functions and the expression engine.
+  `WindowExec` drains all child rows, but its native paths still demand partition,
+  RANGE and LAG/LEAD expressions only at the current comparison/target. A naive
+  retained `EvaluatorSuite::eval_chunk` cache would run an expression for every
+  row and surface a later-row error before an earlier frame/key short-circuit.
+  The TiDB adapter therefore keeps these paths native until the engine exposes a
+  selected-row/lazy vector interface; this is a semantic-ordering guard, not a
+  performance fallback.
 
 ## 7. Found by dual-running the Go source-port corpus
 
