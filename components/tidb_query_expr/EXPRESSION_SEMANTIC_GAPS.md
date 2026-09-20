@@ -292,16 +292,31 @@ rollout switch it mentions does not exist in either checkout yet.
   deferred/parameter input, matching LongLong signedness, <=8 payload bytes;
   signed values additionally require <=i64::MAX. Tests prove 84 engine rows,
   exact Int/UInt kinds, empty/repeated selections and one retained compilation.
-  Root/lazy literal forwarding, generic/real/decimal casts and BIT are not newly
-  admitted. No dedicated runtime literal-kind carrier exists yet.
+  BinaryLiteral root/lazy forwarding and generic/real/decimal casts remain
+  declined. No dedicated runtime literal-kind carrier exists yet.
 - Provenance matters independently of binary collation. Focused RED reproduced
   ordinary bytes b"1" cast to signed as native 1 versus engine 49. TiDB now
   refuses non-null ordinary binary-collated constants for integer CAST rather
-  than selecting the literal kernel. Other implicit coercion contexts are not
-  covered by this fix. Another test bypasses only adapter admission to reproduce
+  than selecting the literal kernel. Follow-up RED also reproduced implicit
+  sqrt: 1 versus 7, plus: 1 versus 49, shift: 2 versus 562949953421312, and LEFT:
+  one character versus four. Synthesized CastStringAsInt/Real are now guarded
+  by signature+constant shape in the common node builder AND catalog
+  substitution, not a list of consumer names. Only source-AST-validated direct
+  literal casts bypass that guard. Trusted child subtrees are not reclassified
+  by wire equality; an ordinary String can serialize identically to a literal.
+  This closes unsafe admission, not the engine's missing provenance contract.
+  Another test bypasses only adapter admission to reproduce
   signed 8-byte 0xff: native saturates to i64::MAX without warning, engine returns
   -1. This current-native discrepancy is guarded, not declared Go-correct or
   fixed. High-bit unsigned literal casts are separately proven exact.
+
+- Canonical BIT constants are admitted only as roots: matching BIT metadata,
+  width 1..64, exactly ceil(width/8) bytes and no high bits outside the width.
+  Existing MysqlBit decoding and the typed bridge preserve Datum::Bit and its
+  leading zeros. Tests cover widths 1/8/9/16/25/64, high-bit/full-u64 values,
+  both unsigned flags, NULL, projection, empty/repeated selections and retained
+  programs (108 selected engine rows). Wrong widths, padding, kinds, deferred/
+  parameter values and all non-null literal BIT consumers remain declined.
 
 ## 7. Found by dual-running the Go source-port corpus
 
