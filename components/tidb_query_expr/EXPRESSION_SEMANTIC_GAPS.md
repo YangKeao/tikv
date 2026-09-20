@@ -237,6 +237,19 @@ rollout switch it mentions does not exist in either checkout yet.
   results remain unknown selectivity (the NULL probe retains its special rule),
   not native replay. This is not an engine-only/native-deletion claim.
 
+- UPDATE scalar/physical inputs and the expression after DML Apply now share
+  retained programs, but bind fresh row data per execution. Tests pin cache reuse,
+  physical selection, missing physical input and overflow recovery. Scalar
+  assignment results preserve binary-literal kinds; admission is still declined
+  for those literals. Apply evaluation order is unchanged.
+- Sparse partition dependencies previously bypassed mandatory engine dispatch;
+  empty dependency rows could panic through the dense helper. Red/green tests
+  cover both, plus integer conversion and engine errors. Partition helpers now
+  use the scalar facade with original indexes and explicit virtual empty rows.
+  Programs remain temporary across bounds; the old general eval_row_values
+  helper still needs its own empty-input/caller audit. Neither change removes
+  native fallback or proves engine-only coverage.
+
 ## 7. Found by dual-running the Go source-port corpus
 
 The TiDB adapter now evaluates every constant expression in the 33 source-port
