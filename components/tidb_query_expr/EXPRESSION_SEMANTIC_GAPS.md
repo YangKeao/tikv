@@ -125,8 +125,11 @@ rollout switch it mentions does not exist in either checkout yet.
   current comparison/target. TiDB partition/order keys now use retained suites
   with a single-row selection at each original left/right demand point. Tests
   assert engine receipts, cache reuse, skipped later-key errors and restoration
-  of the dense buffer after errors. RANGE and value/LAG/LEAD expressions remain
-  native until similarly routed. A naive whole-chunk result cache would surface
+  of the dense buffer after errors. FIRST/LAST/NTH_VALUE and LAG/LEAD
+  argument/default reads now use the same single-row selection helper, with
+  native-versus-engine emission tests for missing targets and skipped defaults.
+  RANGE expressions remain native until similarly routed. A naive whole-chunk
+  result cache would surface
   later-row errors before an earlier frame/key short-circuit; avoiding that is a
   semantic-ordering guard, not a performance fallback. The no-wire-change
   per-input-column table (`physical_value` plus an ordered/repeatable
