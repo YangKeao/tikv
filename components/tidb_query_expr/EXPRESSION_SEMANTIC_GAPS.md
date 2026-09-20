@@ -127,7 +127,12 @@ rollout switch it mentions does not exist in either checkout yet.
   row and surface a later-row error before an earlier frame/key short-circuit.
   The TiDB adapter therefore keeps these paths native until the engine exposes a
   selected-row/lazy vector interface; this is a semantic-ordering guard, not a
-  performance fallback.
+  performance fallback. The proposed no-wire-change fix is a per-input-column
+  selected-row table (`physical_value` plus an ordered/repeatable `logical_rows`
+  slice) threaded through `eval_decoded_into`, `eval_subtree` and `ChildHandle`.
+  The legacy shared-selection API can wrap that table; lazy child materialization
+  continues to own its dense boundary value. This also represents join left/right
+  rows without concatenating their columns.
 
 ## 7. Found by dual-running the Go source-port corpus
 
