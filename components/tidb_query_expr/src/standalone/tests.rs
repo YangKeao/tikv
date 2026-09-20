@@ -469,6 +469,82 @@ fn reject_schema_shape_and_malformed_expression_before_engine() {
 }
 
 #[test]
+fn temporal_literal_packing_preserves_values_and_rejects_warnings() {
+    let value = DateTime::parse_timestamp(
+        &mut EvalContext::default(),
+        "2024-03-14 12:34:56.123456",
+        6,
+        false,
+    )
+    .unwrap();
+    for (offset, day, hour) in [
+        (0, 14, 12),
+        (28800, 14, 4),
+        (-43200, 15, 0),
+        (50400, 13, 22),
+    ] {
+        let context = Context {
+            time_zone_offset: offset,
+            ..Context::default()
+        };
+        let packed = context.pack_time_literal(&value).unwrap();
+        let ymd = ((2024_u64 * 13 + 3) << 5) | day;
+        let hms = (hour << 12) | (34 << 6) | 56;
+        assert_eq!(packed, (((ymd << 17) | hms) << 24) | 123456);
+        let mut ft: FieldType = FieldTypeTp::Timestamp.into();
+        ft.as_mut_accessor().set_decimal(6);
+        let mut expr = Expr::default();
+        expr.set_tp(ExprType::MysqlTime);
+        expr.set_val(packed.to_be_bytes().to_vec());
+        expr.set_field_type(ft);
+        let mut program = prepare(expr, &[], context);
+        assert_eq!(
+            program.eval(&[], 1, None).unwrap().column,
+            Column::DateTime(vec![Some(value)])
+        );
+    }
+    let zero =
+        DateTime::parse_timestamp(&mut EvalContext::default(), "0000-00-00 00:00:00", 6, false)
+            .unwrap();
+    assert_eq!(Context::default().pack_time_literal(&zero).unwrap(), 0);
+    assert!(
+        Context {
+            sql_mode: SqlMode::NO_ZERO_DATE.bits(),
+            max_warning_count: 0,
+            ..Context::default()
+        }
+        .pack_time_literal(&zero)
+        .is_err()
+    );
+    assert!(
+        Context {
+            time_zone_offset: i64::MAX,
+            ..Context::default()
+        }
+        .pack_time_literal(&value)
+        .is_err()
+    );
+    assert!(
+        Context {
+            time_zone_offset: 86400,
+            ..Context::default()
+        }
+        .pack_time_literal(&value)
+        .is_err()
+    );
+    assert_eq!(
+        Context {
+            time_zone_name: Some("UTC".into()),
+            time_zone_offset: i64::MAX,
+            ..Context::default()
+        }
+        .pack_time_literal(&value)
+        .unwrap(),
+        Context::default().pack_time_literal(&value).unwrap()
+    );
+}
+
+#[test]
 fn unsigned_bits_and_context_validation() {
     let mut ft: FieldType = FieldTypeTp::LongLong.into();
     ft.as_mut_accessor().set_flag(FieldTypeFlag::UNSIGNED);

@@ -251,6 +251,27 @@ impl Default for Context {
 }
 
 impl Context {
+    /// Encode a typed temporal value using the engine's session timezone rules.
+    /// The returned MysqlTime payload is packed UTC for TIMESTAMP, wall fields
+    /// otherwise. Reject warnings or any loss of wall fields, kind or FSP on
+    /// decode. This preserves values, not a host dialect's DST-fold choice;
+    /// callers with different fold semantics must constrain their admission.
+    pub fn pack_time_literal(&self, value: &DateTime) -> Result<u64, Error> {
+        values::validate_time(*value)?;
+        let mut ctx = EvalContext::new(self.config()?);
+        let packed = value.to_packed_u64(&mut ctx)?;
+        let decoded =
+            DateTime::from_packed_u64(&mut ctx, packed, value.get_time_type(), value.fsp() as i8)?;
+        if ctx.warnings.warning_cnt != 0
+            || date_time_to_chunk(&decoded)? != date_time_to_chunk(value)?
+        {
+            return Err(Error::invalid(
+                "time literal cannot round-trip without warnings",
+            ));
+        }
+        Ok(packed)
+    }
+
     fn config(&self) -> Result<Arc<EvalConfig>, Error> {
         if self.div_precision_increment > 30 {
             return Err(Error::invalid("div_precision_increment must be in 0..=30"));
