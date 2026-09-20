@@ -159,7 +159,10 @@ rollout switch it mentions does not exist in either checkout yet.
   `JoinExec` datum/index-pair matching and scalar index-hash tasks also retain
   and share condition programs. Ordinary matching preserves NULL-immediate
   rejection (unlike anti-semi CNF continuation), and merge-key reselection
-  refreshes the residual cache. Other chunk/parallel/batch paths remain.
+  refreshes the residual cache. Serial chunk-backed and specialized/general
+  parallel residual probes now also share that cache at the original candidate
+  demand points; Next-loop tests prove engine rows and one compilation across
+  task windows. Index-bound native evaluation and other batch/filter work remain.
   Existing joined scratch-row copies still exist, and Join has not yet adopted
   the independent-column facade to eliminate them. Other `eval_bool` callers
   still construct temporary programs. A naive full-chunk cache remains forbidden.
