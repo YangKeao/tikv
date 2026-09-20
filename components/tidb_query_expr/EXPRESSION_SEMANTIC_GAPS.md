@@ -162,7 +162,11 @@ rollout switch it mentions does not exist in either checkout yet.
   refreshes the residual cache. Serial chunk-backed and specialized/general
   parallel residual probes now also share that cache at the original candidate
   demand points; Next-loop tests prove engine rows and one compilation across
-  task windows. Index-bound native evaluation and other batch/filter work remain.
+  task windows. Local index-lookup filters now also retain ordinary-match
+  programs shared with fork templates/rebuilt tasks. Tests cover local Next,
+  cache sharing, template isolation after filter replacement, and NULL/FALSE
+  skipping a later error; the new tests do not open remote cursors. Index-bound
+  native evaluation and other batch/filter work remain.
   Existing joined scratch-row copies still exist, and Join has not yet adopted
   the independent-column facade to eliminate them. Other `eval_bool` callers
   still construct temporary programs. A naive full-chunk cache remains forbidden.
