@@ -34,6 +34,16 @@ pub enum ColumnRef<'a> {
     },
 }
 
+/// A borrowed input paired with its own ordered physical-row selection.
+///
+/// `None` means the dense identity selection. A nonempty selection can repeat
+/// or reorder rows and is interpreted before the batch-local `start` offset.
+#[derive(Clone, Copy, Debug)]
+pub struct SelectedColumnRef<'a> {
+    pub column: ColumnRef<'a>,
+    pub selection: Option<&'a [usize]>,
+}
+
 impl<'a> ColumnRef<'a> {
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
@@ -173,6 +183,21 @@ impl RpnExpression {
         start: usize,
         rows: usize,
     ) -> Result<BorrowedStackNode<'a>> {
+        let inputs: Vec<SelectedColumnRef<'a>> = columns
+            .iter()
+            .copied()
+            .map(|column| SelectedColumnRef { column, selection })
+            .collect();
+        self.eval_borrowed_selected(ctx, &inputs, start, rows)
+    }
+
+    pub(crate) fn eval_borrowed_selected<'a>(
+        &'a self,
+        ctx: &mut EvalContext,
+        inputs: &[SelectedColumnRef<'a>],
+        start: usize,
+        rows: usize,
+    ) -> Result<BorrowedStackNode<'a>> {
         assert!(rows > 0 && rows <= super::BATCH_MAX_SIZE);
         let mut stack = Vec::with_capacity(self.len());
         for node in self.as_ref() {
@@ -180,11 +205,14 @@ impl RpnExpression {
                 RpnExpressionNode::Constant { value, .. } => {
                     stack.push(BorrowedStackNode::Constant(value))
                 }
-                RpnExpressionNode::ColumnRef { offset } => stack.push(BorrowedStackNode::Input {
-                    column: columns[*offset],
-                    selection,
-                    start,
-                }),
+                RpnExpressionNode::ColumnRef { offset } => {
+                    let input = inputs[*offset];
+                    stack.push(BorrowedStackNode::Input {
+                        column: input.column,
+                        selection: input.selection,
+                        start,
+                    });
+                }
                 RpnExpressionNode::FnCall {
                     func_meta,
                     args_len,

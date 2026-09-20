@@ -389,12 +389,6 @@ impl RpnExpression {
         stack: &mut Vec<RpnStackNode<'a>>,
     ) -> Result<RpnStackNode<'a>> {
         assert!(!self.is_empty());
-        assert_eq!(inputs.len(), schema.len());
-        assert!(
-            inputs
-                .iter()
-                .all(|input| input.logical_rows.len() == output_rows)
-        );
         assert!(output_rows > 0);
         assert!(output_rows <= BATCH_MAX_SIZE);
         // The program is exactly the subtree rooted at its last node. The old
