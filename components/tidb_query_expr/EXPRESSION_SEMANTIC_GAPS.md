@@ -120,6 +120,12 @@ rollout switch it mentions does not exist in either checkout yet.
   `Int`/`Bytes` parameter slot but not `Set`, so a string kernel called with a
   `Set` column (`LENGTH(set_col)`) failed validation even though the hybrid
   codec supports it. Both carriers are now accepted.
+* Fixed in TiDB's suite dispatch: a mandatory-engine context could still run
+  the native row-major branch (for example `getvar`). A regression first failed
+  because evaluation succeeded; the dispatch now records `NotAdmitted` and
+  returns a structured engine error before native user-variable/sequence side
+  effects. Optional-engine contexts retain the native path with a refusal
+  receipt. Row-major engine execution itself is still unsupported.
 * The `eager` interaction between window functions and the expression engine.
   `WindowExec` drains all child rows, but expressions are demanded only at the
   current comparison/target. TiDB partition/order keys now use retained suites
