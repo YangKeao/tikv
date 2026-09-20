@@ -16,6 +16,20 @@ use super::{
     expr::{RpnExpression, RpnExpressionNode},
 };
 
+/// One decoded input column read at an ordered logical-row selection.
+///
+/// Each input owns its selection so a caller can represent a window frame or
+/// join pair without copying and concatenating physical columns. Selections may
+/// repeat or reorder rows; all selected inputs of one evaluation have the same
+/// length.
+#[derive(Clone, Copy)]
+pub struct RpnSelectedColumn<'a> {
+    /// Decoded physical vector for this input offset.
+    pub physical_value: &'a VectorValue,
+    /// Physical rows read for output positions in order.
+    pub logical_rows: &'a [usize],
+}
+
 /// Represents a vector value node in the RPN stack.
 ///
 /// It can be either an owned node or a reference node.
