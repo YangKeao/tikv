@@ -90,6 +90,158 @@ fn borrowed_selected_inputs_use_independent_rows() {
 }
 
 #[test]
+fn borrowed_selected_unequal_lengths_cross_batches() {
+    let ft: FieldType = FieldTypeTp::LongLong.into();
+    let program = prepare(
+        E::scalar_func(ScalarFuncSig::PlusInt, ft.clone())
+            .push_child(E::column_ref(0, ft.clone()))
+            .push_child(E::column_ref(1, ft.clone())),
+        &[ft.clone(), ft],
+        Context::default(),
+    );
+    let left = ints(&[7]);
+    let right = ints(&[10, 20, 30]);
+    let count = crate::BATCH_MAX_SIZE + 3;
+    let left_rows = vec![0; count];
+    let right_rows: Vec<_> = (0..count).map(|i| 2 - i % 3).collect();
+    let inputs = [
+        SelectedColumnRef {
+            column: ColumnRef::Int {
+                values: &left,
+                validity: &[1],
+            },
+            selection: Some(&left_rows),
+        },
+        SelectedColumnRef {
+            column: ColumnRef::Int {
+                values: &right,
+                validity: &[0b101],
+            },
+            selection: Some(&right_rows),
+        },
+    ];
+    // No shared physical count can describe these two input chunks.
+    assert!(
+        program
+            .eval_borrowed_selected_shared(&inputs, 3, count, |_| panic!("invalid shared shape"))
+            .is_err()
+    );
+    let mut actual = Vec::new();
+    program
+        .eval_borrowed_selected_columns_shared(&inputs, &[1, 3], count, |v| {
+            actual.push(match v {
+                ScalarRef::Int(v) => Some(v),
+                ScalarRef::Null => None,
+                _ => panic!("unexpected result"),
+            });
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        actual,
+        (0..count)
+            .map(|i| match i % 3 {
+                0 => Some(37),
+                1 => None,
+                _ => Some(17),
+            })
+            .collect::<Vec<_>>()
+    );
+    for counts in [&[][..], &[1][..], &[2, 3][..], &[1, 2][..]] {
+        assert!(
+            program
+                .eval_borrowed_selected_columns_shared(&inputs, counts, count, |_| panic!(
+                    "preflight failed"
+                ))
+                .is_err()
+        );
+    }
+    let bad_rows = vec![1; count];
+    let mut invalid = inputs;
+    invalid[0].selection = Some(&bad_rows);
+    assert!(
+        program
+            .eval_borrowed_selected_columns_shared(&invalid, &[1, 3], count, |_| panic!(
+                "column-local bounds failed"
+            ))
+            .is_err()
+    );
+    invalid[0].selection = None;
+    assert!(
+        program
+            .eval_borrowed_selected_columns_shared(&invalid, &[1, 3], count, |_| panic!(
+                "dense bounds failed"
+            ))
+            .is_err()
+    );
+    invalid[0].selection = Some(&[]);
+    invalid[1].selection = Some(&[]);
+    program
+        .eval_borrowed_selected_columns_shared(&invalid, &[1, 3], 0, |_| panic!("empty output"))
+        .unwrap();
+}
+
+#[test]
+fn borrowed_selected_mixed_dense_and_repeated_inputs() {
+    let ft: FieldType = FieldTypeTp::LongLong.into();
+    let program = prepare(
+        E::scalar_func(ScalarFuncSig::PlusInt, ft.clone())
+            .push_child(E::column_ref(0, ft.clone()))
+            .push_child(E::column_ref(1, ft.clone())),
+        &[ft.clone(), ft],
+        Context::default(),
+    );
+    let left = ints(&[1, 2, 3]);
+    let right = ints(&[10]);
+    let inputs = [
+        SelectedColumnRef {
+            column: ColumnRef::Int {
+                values: &left,
+                validity: &[7],
+            },
+            selection: None,
+        },
+        SelectedColumnRef {
+            column: ColumnRef::Int {
+                values: &right,
+                validity: &[1],
+            },
+            selection: Some(&[0, 0, 0]),
+        },
+    ];
+    let mut actual = Vec::new();
+    program
+        .eval_borrowed_selected_columns_shared(&inputs, &[3, 1], 3, |v| {
+            actual.push(match v {
+                ScalarRef::Int(v) => v,
+                _ => panic!("unexpected result"),
+            });
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(actual, [11, 12, 13]);
+}
+
+#[test]
+fn borrowed_selected_constants_need_no_physical_columns() {
+    let program = prepare(E::constant_int(7), &[], Context::default());
+    let mut count = 0;
+    program
+        .eval_borrowed_selected_columns_shared(&[], &[], 3, |v| {
+            assert_eq!(v, ScalarRef::Int(7));
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(count, 3);
+    assert!(
+        program
+            .eval_borrowed_selected_columns_shared(&[], &[0], 0, |_| panic!("invalid shape"))
+            .is_err()
+    );
+}
+
+#[test]
 fn borrowed_selected_dense_bounds_are_checked_before_sink() {
     let ft: FieldType = FieldTypeTp::LongLong.into();
     let program = prepare(E::column_ref(0, ft.clone()), &[ft], Context::default());

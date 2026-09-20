@@ -154,17 +154,66 @@ impl PreparedExpression {
     /// Evaluates borrowed columns with an independent ordered selection for
     /// each input. `output_rows` is the common logical length; a `None`
     /// selection reads the first `output_rows` physical rows in that column,
-    /// which must not exceed `row_count`. All columns currently have the same
-    /// physical `row_count`; independent physical lengths are not supported.
-    /// Selections remain whole across batches and the engine applies the
-    /// batch-local start offset. Shape, bounds and selected REAL values are
-    /// checked before any sink callback. As with `eval_borrowed_shared`,
-    /// callers must discard partial output after runtime/sink errors and
-    /// never replay.
+    /// which must not exceed `row_count`. This compatibility entry point uses
+    /// one physical row count for all columns; use
+    /// [`Self::eval_borrowed_selected_columns_shared`] for unequal input
+    /// lengths. Selections remain whole across batches and the engine
+    /// applies the batch-local start offset. Shape, bounds and selected
+    /// REAL values are checked before any sink callback. As with
+    /// `eval_borrowed_shared`, callers must discard partial output after
+    /// runtime/sink errors and never replay.
     pub fn eval_borrowed_selected_shared<F>(
         &self,
         inputs: &[SelectedColumnRef<'_>],
         row_count: usize,
+        output_rows: usize,
+        sink: F,
+    ) -> Result<Diagnostics, Error>
+    where
+        F: for<'a> FnMut(ScalarRef<'a>) -> Result<(), Error>,
+    {
+        self.eval_borrowed_selected_with_counts(inputs, |_| row_count, output_rows, sink)
+    }
+
+    /// Evaluates independently selected columns whose physical lengths may
+    /// differ (for example, columns from two join input chunks).
+    /// `physical_rows` must have one entry per input column; each selection
+    /// is checked against its own column's length. Dense (`None`)
+    /// selections use the first `output_rows` rows. Explicit selections may
+    /// repeat or reorder rows and must all have exactly `output_rows`
+    /// entries.
+    ///
+    /// Validation precedes all kernel/sink calls, including empty output.
+    /// No input cells are copied or concatenated by this facade. The supported
+    /// kernels/types and partial-output/error contract are unchanged from
+    /// [`Self::eval_borrowed_shared`]. Lazy programs are still unsupported.
+    pub fn eval_borrowed_selected_columns_shared<F>(
+        &self,
+        inputs: &[SelectedColumnRef<'_>],
+        physical_rows: &[usize],
+        output_rows: usize,
+        sink: F,
+    ) -> Result<Diagnostics, Error>
+    where
+        F: for<'a> FnMut(ScalarRef<'a>) -> Result<(), Error>,
+    {
+        if physical_rows.len() != inputs.len() {
+            return Err(Error::invalid(
+                "borrowed physical row counts differ from input columns",
+            ));
+        }
+        self.eval_borrowed_selected_with_counts(
+            inputs,
+            |index| physical_rows[index],
+            output_rows,
+            sink,
+        )
+    }
+
+    fn eval_borrowed_selected_with_counts<F>(
+        &self,
+        inputs: &[SelectedColumnRef<'_>],
+        row_count: impl Fn(usize) -> usize,
         output_rows: usize,
         mut sink: F,
     ) -> Result<Diagnostics, Error>
@@ -176,7 +225,8 @@ impl PreparedExpression {
                 "borrowed selected input shape is unsupported",
             ));
         }
-        for (input, expected) in inputs.iter().zip(&self.input_types) {
+        for (index, (input, expected)) in inputs.iter().zip(&self.input_types).enumerate() {
+            let row_count = row_count(index);
             if input.column.eval_type() != *expected {
                 return Err(Error::invalid("borrowed column type differs from schema"));
             }

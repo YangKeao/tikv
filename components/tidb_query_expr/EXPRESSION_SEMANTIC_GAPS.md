@@ -142,7 +142,11 @@ rollout switch it mentions does not exist in either checkout yet.
   borrowed standalone facade. The legacy shared-selection APIs wrap it, and lazy
   child materialization continues to own its dense boundary value. Independent
   selections can represent join left/right rows without concatenating columns,
-  but the borrowed facade currently requires equal physical column lengths and
+  and `eval_borrowed_selected_columns_shared` now accepts a separate physical
+  row count per column, validating each selection against its own column.
+  Tests cover 1-versus-3-row inputs across batches, repeated/reordered/nullable
+  rows, dense-plus-selected inputs and invalid shapes before sink callbacks.
+  The old shared-count API remains compatible. Borrowed evaluation still
   rejects lazy programs. TiDB Join is not yet routed through it; a naive
   full-chunk cache remains forbidden.
 
