@@ -272,13 +272,20 @@ rollout switch it mentions does not exist in either checkout yet.
   DATETIME(0/6), mode changes on retained programs, permissive engine receipts,
   optional native fallback and required structured refusal. Admission counters
   include required-mode declines, not only actual native execution. TIMESTAMP
-  is now admitted only for proven UTC compile contexts: absent/empty name with
-  offset zero, or exact named UTC (name takes precedence over offset). The
-  context-free encoder is unchanged; non-UTC/unknown aliases still decline.
-  Tests cover TIMESTAMP(0/3/6), NULL, nested YEAR, both transports and retained
-  programs across timezone changes (60 engine rows), plus zero-mode policies,
-  wire metadata and kind/invalid-calendar rejection. Kind/FSP and physical-shape
-  restrictions remain; non-UTC/DST transport is not yet unified.
+  is now admitted for validated fixed-offset contexts or exact named UTC.
+  Local lowering calls Context::pack_time_literal: TiKV performs timezone
+  normalization and checks warning-free exact chunk round-trip (kind/FSP too).
+  The distributed catalog/output bridge are unchanged. Tests cover
+  TIMESTAMP(0/3/6), NULL, nested YEAR, day/year boundaries, both transports and
+  retained programs across context changes (168 engine rows), plus zero-mode,
+  wire bytes, invalid offsets and kind/calendar rejection.
+- Named non-UTC zones remain declined. A focused native-Rust/engine reproduction
+  demonstrates why wall-field round-trip is not enough: London
+  2021-10-31 01:30:00 resolves to 01:30 UTC in the native Go-style resolver but
+  00:30 UTC in TiKV's earliest-fold resolver. Both decode to the same wall fields.
+  `timestamp_london_fold_remains_declined_due_to_instant_mismatch` pins the
+  discrepancy and the refusal. This is not a new Go-runtime oracle result;
+  named-zone/DST instant semantics and restrictive zero modes remain incomplete.
 
 ## 7. Found by dual-running the Go source-port corpus
 
