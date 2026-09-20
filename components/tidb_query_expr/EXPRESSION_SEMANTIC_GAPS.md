@@ -153,8 +153,12 @@ rollout switch it mentions does not exist in either checkout yet.
   Tests cover 1-versus-3-row inputs across batches, repeated/reordered/nullable
   rows, dense-plus-selected inputs and invalid shapes before sink callbacks.
   The old shared-count API remains compatible. Borrowed evaluation still
-  rejects lazy programs. TiDB Join is not yet routed through it; a naive
-  full-chunk cache remains forbidden.
+  rejects lazy programs. TiDB Join CNF now uses suites over the existing row
+  cursor with an explicit physical selection, preserving NULL-from-IN and
+  per-condition short-circuit; semi-family joiners retain shared programs.
+  Existing joined scratch-row copies still exist, and Join has not yet adopted
+  the independent-column facade to eliminate them. Other `eval_bool` callers
+  still construct temporary programs. A naive full-chunk cache remains forbidden.
 
 ## 7. Found by dual-running the Go source-port corpus
 
