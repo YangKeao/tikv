@@ -342,12 +342,49 @@ impl RpnExpression {
         )
     }
 
+    /// Compatibility adapter for the legacy shared-selection input shape.
     fn eval_decoded_into<'a, const CHECK_FINITE_REALS: bool>(
         &'a self,
         ctx: &mut EvalContext,
         schema: &'a [FieldType],
         input_physical_columns: &'a LazyBatchColumnVec,
         input_logical_rows: &'a [usize],
+        output_rows: usize,
+        stack: &mut Vec<RpnStackNode<'a>>,
+    ) -> Result<RpnStackNode<'a>> {
+        let inputs: Vec<RpnSelectedColumn<'a>> = (0..input_physical_columns.columns_len())
+            .map(|offset| RpnSelectedColumn {
+                physical_value: input_physical_columns[offset].decoded(),
+                logical_rows: input_logical_rows,
+            })
+            .collect();
+        self.eval_decoded_selected_into::<CHECK_FINITE_REALS>(
+            ctx,
+            schema,
+            &inputs,
+            output_rows,
+            stack,
+        )
+    }
+
+    /// Evaluates already-decoded inputs with an independent ordered selection
+    /// per input column. All selections must have `output_rows` entries.
+    pub fn eval_decoded_selected<'a>(
+        &'a self,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        inputs: &[RpnSelectedColumn<'a>],
+        output_rows: usize,
+    ) -> Result<RpnStackNode<'a>> {
+        let mut stack = Vec::with_capacity(self.len());
+        self.eval_decoded_selected_into::<false>(ctx, schema, inputs, output_rows, &mut stack)
+    }
+
+    fn eval_decoded_selected_into<'a, const CHECK_FINITE_REALS: bool>(
+        &'a self,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        inputs: &[RpnSelectedColumn<'a>],
         output_rows: usize,
         stack: &mut Vec<RpnStackNode<'a>>,
     ) -> Result<RpnStackNode<'a>> {
@@ -368,8 +405,7 @@ impl RpnExpression {
             self.len() - 1,
             ctx,
             schema,
-            input_physical_columns,
-            input_logical_rows,
+            inputs,
             output_rows,
             stack,
         )?;
@@ -392,8 +428,7 @@ impl RpnExpression {
         root: usize,
         ctx: &mut EvalContext,
         schema: &'x [FieldType],
-        input_physical_columns: &'x LazyBatchColumnVec,
-        input_logical_rows: &'x [usize],
+        inputs: &[RpnSelectedColumn<'x>],
         output_rows: usize,
         scratch: &mut Vec<RpnStackNode<'x>>,
     ) -> Result<RpnStackNode<'x>> {
@@ -404,11 +439,12 @@ impl RpnExpression {
                 RpnStackNode::Scalar { value, field_type }
             }
             RpnExpressionNode::ColumnRef { offset } => {
-                assert_eq!(input_logical_rows.len(), output_rows);
+                let input = &inputs[*offset];
+                assert_eq!(input.logical_rows.len(), output_rows);
                 RpnStackNode::Vector {
                     value: RpnStackNodeVectorValue::Ref {
-                        physical_value: input_physical_columns[*offset].decoded(),
-                        logical_rows: input_logical_rows,
+                        physical_value: input.physical_value,
+                        logical_rows: input.logical_rows,
                     },
                     field_type: &schema[*offset],
                 }
@@ -430,8 +466,7 @@ impl RpnExpression {
                         let mut children = ChildHandle::<CHECK_FINITE_REALS> {
                             expr: self,
                             schema,
-                            cols: input_physical_columns,
-                            logical_rows: input_logical_rows,
+                            inputs,
                             roots: &roots,
                             selection: Vec::new(),
                         };
@@ -450,8 +485,7 @@ impl RpnExpression {
                                 child_root,
                                 ctx,
                                 schema,
-                                input_physical_columns,
-                                input_logical_rows,
+                                inputs,
                                 output_rows,
                                 scratch,
                             )?;
@@ -571,17 +605,16 @@ fn ensure_finite_real_vector(value: &VectorValue, output_rows: usize) -> Result<
 /// [`LazyChildren::eval`] returns an owned dense [`VectorValue`], so the
 /// child's stack nodes (which may be `Ref` nodes over the local selection)
 /// cannot escape this call.
-struct ChildHandle<'e, 's, 'r, const CHECK_FINITE_REALS: bool> {
+struct ChildHandle<'e, 's, 'i, 'r, const CHECK_FINITE_REALS: bool> {
     expr: &'e RpnExpression,
     schema: &'s [FieldType],
-    cols: &'s LazyBatchColumnVec,
-    logical_rows: &'s [usize],
+    inputs: &'i [RpnSelectedColumn<'s>],
     roots: &'r [usize],
-    selection: Vec<usize>,
+    selection: Vec<Vec<usize>>,
 }
 
-impl<'e, 's, 'r, 'a, const CHECK_FINITE_REALS: bool> LazyChildren<'a>
-    for ChildHandle<'e, 's, 'r, CHECK_FINITE_REALS>
+impl<'e, 's, 'i, 'r, 'a, const CHECK_FINITE_REALS: bool> LazyChildren<'a>
+    for ChildHandle<'e, 's, 'i, 'r, CHECK_FINITE_REALS>
 {
     fn len(&self) -> usize {
         self.roots.len()
@@ -616,11 +649,21 @@ impl<'e, 's, 'r, 'a, const CHECK_FINITE_REALS: bool> LazyChildren<'a>
             return Ok(VectorValue::with_capacity(0, eval_type));
         }
         self.selection.clear();
-        self.selection.extend(
+        self.selection.extend(self.inputs.iter().map(|input| {
             positions
                 .iter()
-                .map(|&position| self.logical_rows[position]),
-        );
+                .map(|&position| input.logical_rows[position])
+                .collect()
+        }));
+        let selected_inputs: Vec<RpnSelectedColumn<'_>> = self
+            .inputs
+            .iter()
+            .zip(&self.selection)
+            .map(|(input, logical_rows)| RpnSelectedColumn {
+                physical_value: input.physical_value,
+                logical_rows,
+            })
+            .collect();
         // A lazy boundary materializes immediately, so the child's own node
         // stack stays local to this call and never escapes.
         let mut local_stack: Vec<RpnStackNode<'_>> = Vec::new();
@@ -628,8 +671,7 @@ impl<'e, 's, 'r, 'a, const CHECK_FINITE_REALS: bool> LazyChildren<'a>
             self.roots[arg],
             ctx,
             self.schema,
-            self.cols,
-            &self.selection,
+            &selected_inputs,
             positions.len(),
             &mut local_stack,
         )?;
@@ -885,6 +927,60 @@ mod tests {
         );
         assert_eq!(val.vector_value().unwrap().logical_rows(), &[0, 1]);
         assert_eq!(val.field_type().as_accessor().tp(), FieldTypeTp::LongLong);
+    }
+
+    /// Independently ordered input selections remain separate through eager
+    /// evaluation, so callers can represent a join pair without copying input
+    /// columns into one dense row space.
+    #[test]
+    fn test_eval_decoded_selected_uses_per_column_rows() {
+        #[rpn_fn(nullable)]
+        fn add(left: Option<&i64>, right: Option<&i64>) -> Result<Option<i64>> {
+            Ok(left.zip(right).map(|(left, right)| left + right))
+        }
+
+        let columns = LazyBatchColumnVec::from(vec![
+            {
+                let mut column = LazyBatchColumn::decoded_with_capacity_and_tp(3, EvalType::Int);
+                for value in [1, 2, 3] {
+                    column.mut_decoded().push_int(Some(value));
+                }
+                column
+            },
+            {
+                let mut column = LazyBatchColumn::decoded_with_capacity_and_tp(3, EvalType::Int);
+                for value in [10, 20, 30] {
+                    column.mut_decoded().push_int(Some(value));
+                }
+                column
+            },
+        ]);
+        let schema = &[FieldTypeTp::LongLong.into(), FieldTypeTp::LongLong.into()];
+        let left_rows = [2, 0];
+        let right_rows = [1, 1];
+        let inputs = [
+            RpnSelectedColumn {
+                physical_value: columns[0].decoded(),
+                logical_rows: &left_rows,
+            },
+            RpnSelectedColumn {
+                physical_value: columns[1].decoded(),
+                logical_rows: &right_rows,
+            },
+        ];
+        let expression = RpnExpressionBuilder::new_for_test()
+            .push_column_ref_for_test(0)
+            .push_column_ref_for_test(1)
+            .push_fn_call_for_test(add_fn_meta(), 2, FieldTypeTp::LongLong)
+            .build_for_test();
+
+        let value = expression
+            .eval_decoded_selected(&mut EvalContext::default(), schema, &inputs, 2)
+            .unwrap();
+        assert_eq!(
+            value.vector_value().unwrap().as_ref().to_int_vec(),
+            [Some(23), Some(21)]
+        );
     }
 
     /// Unary function (argument is raw column). The column should be decoded.
