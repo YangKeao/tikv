@@ -2,7 +2,7 @@
 
 use tidb_query_datatype::{EvalType, codec::data_type::ScalarValueRef, expr::EvalContext};
 
-use super::{ColumnRef, Error, PreparedExpression, Warning};
+use super::{ColumnRef, Error, PreparedExpression, SelectedColumnRef, Warning};
 use crate::{BATCH_MAX_SIZE, RpnExpressionNode};
 
 /// Output values are borrowed only for the callback invocation. Numeric values
@@ -130,6 +130,82 @@ impl PreparedExpression {
                     }
                     ScalarValueRef::Real(value) => {
                         value.map_or(ScalarRef::Null, |value| ScalarRef::Real(value.into_inner()))
+                    }
+                    ScalarValueRef::Bytes(value) => value.map_or(ScalarRef::Null, ScalarRef::Bytes),
+                    _ => return Err(Error::invalid("unsupported borrowed output type")),
+                };
+                sink(value)?;
+            }
+        }
+        Ok(Diagnostics {
+            warning_count: ctx.warnings.warning_cnt,
+            warnings: ctx
+                .warnings
+                .warnings
+                .into_iter()
+                .map(|warning| Warning {
+                    code: warning.get_code(),
+                    message: warning.get_msg().to_owned(),
+                })
+                .collect(),
+        })
+    }
+
+    /// Evaluates borrowed columns with an independent ordered selection for
+    /// each input. `output_rows` is the common logical length; a `None`
+    /// selection reads dense physical rows in that column. Selections
+    /// remain whole across batches and the engine applies the batch-local
+    /// start offset.
+    pub fn eval_borrowed_selected_shared<F>(
+        &self,
+        inputs: &[SelectedColumnRef<'_>],
+        row_count: usize,
+        output_rows: usize,
+        mut sink: F,
+    ) -> Result<Diagnostics, Error>
+    where
+        F: for<'a> FnMut(ScalarRef<'a>) -> Result<(), Error>,
+    {
+        if !self.supports_borrowed() || inputs.len() != self.input_types.len() {
+            return Err(Error::invalid(
+                "borrowed selected input shape is unsupported",
+            ));
+        }
+        for (input, expected) in inputs.iter().zip(&self.input_types) {
+            if input.column.eval_type() != *expected {
+                return Err(Error::invalid("borrowed column type differs from schema"));
+            }
+            input.column.validate(row_count).map_err(Error::invalid)?;
+            if input.selection.is_some_and(|rows| {
+                rows.len() != output_rows || rows.iter().any(|&row| row >= row_count)
+            }) {
+                return Err(Error::invalid("borrowed selected row is invalid"));
+            }
+        }
+        for input in inputs {
+            if input.column.eval_type() == EvalType::Real {
+                for logical in 0..output_rows {
+                    let physical = input.selection.map_or(logical, |rows| rows[logical]);
+                    if !input.column.finite_at(physical) {
+                        return Err(Error::invalid("nonfinite real inputs are not supported"));
+                    }
+                }
+            }
+        }
+        let mut ctx = EvalContext::new(self.config.clone());
+        for start in (0..output_rows).step_by(BATCH_MAX_SIZE) {
+            let rows = BATCH_MAX_SIZE.min(output_rows - start);
+            let result = self
+                .expression
+                .eval_borrowed_selected(&mut ctx, inputs, start, rows)?;
+            for row in 0..rows {
+                let holder = result.scalar(row);
+                let value = match holder.as_scalar_ref() {
+                    ScalarValueRef::Int(value) => {
+                        value.map_or(ScalarRef::Null, |v| ScalarRef::Int(*v))
+                    }
+                    ScalarValueRef::Real(value) => {
+                        value.map_or(ScalarRef::Null, |v| ScalarRef::Real(v.into_inner()))
                     }
                     ScalarValueRef::Bytes(value) => value.map_or(ScalarRef::Null, ScalarRef::Bytes),
                     _ => return Err(Error::invalid("unsupported borrowed output type")),

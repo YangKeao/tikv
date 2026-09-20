@@ -5,7 +5,9 @@ use tidb_query_datatype::FieldTypeTp;
 use tipb::{Expr, FieldType, ScalarFuncSig};
 use tipb_helper::ExprDefBuilder as E;
 
-use crate::standalone::{Column, ColumnRef, Context, Error, PreparedExpression, ScalarRef};
+use crate::standalone::{
+    Column, ColumnRef, Context, Error, PreparedExpression, ScalarRef, SelectedColumnRef,
+};
 
 fn prepare(expr: impl Into<Expr>, schema: &[FieldType], context: Context) -> PreparedExpression {
     PreparedExpression::compile(
@@ -42,6 +44,49 @@ fn collect_int(
         })
         .unwrap();
     output
+}
+
+#[test]
+fn borrowed_selected_inputs_use_independent_rows() {
+    let ft: FieldType = FieldTypeTp::LongLong.into();
+    let program = prepare(
+        E::scalar_func(ScalarFuncSig::PlusInt, ft.clone())
+            .push_child(E::column_ref(0, ft.clone()))
+            .push_child(E::column_ref(1, ft.clone())),
+        &[ft.clone(), ft],
+        Context::default(),
+    );
+    let left = ints(&[1, 2, 3]);
+    let right = ints(&[10, 20, 30]);
+    let left_rows = [2, 0];
+    let right_rows = [1, 1];
+    let inputs = [
+        SelectedColumnRef {
+            column: ColumnRef::Int {
+                values: &left,
+                validity: &[0b111],
+            },
+            selection: Some(&left_rows),
+        },
+        SelectedColumnRef {
+            column: ColumnRef::Int {
+                values: &right,
+                validity: &[0b111],
+            },
+            selection: Some(&right_rows),
+        },
+    ];
+    let mut actual = Vec::new();
+    program
+        .eval_borrowed_selected_shared(&inputs, 3, 2, |value| {
+            actual.push(match value {
+                ScalarRef::Int(value) => value,
+                _ => panic!("unexpected result"),
+            });
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(actual, [23, 21]);
 }
 
 #[test]

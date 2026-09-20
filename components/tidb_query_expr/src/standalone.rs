@@ -784,7 +784,7 @@ fn validate_builder_safety(expr: &Expr, args: &[EvalType]) -> Result<(), Error> 
 mod borrowed;
 pub use borrowed::{Diagnostics, ScalarRef};
 
-pub use crate::types::borrowed::ColumnRef;
+pub use crate::types::borrowed::{ColumnRef, SelectedColumnRef};
 
 #[cfg(test)]
 mod coverage_tests;
