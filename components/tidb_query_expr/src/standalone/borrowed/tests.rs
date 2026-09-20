@@ -90,6 +90,98 @@ fn borrowed_selected_inputs_use_independent_rows() {
 }
 
 #[test]
+fn borrowed_selected_dense_bounds_are_checked_before_sink() {
+    let ft: FieldType = FieldTypeTp::LongLong.into();
+    let program = prepare(E::column_ref(0, ft.clone()), &[ft], Context::default());
+    let payload = ints(&[7]);
+    let inputs = [SelectedColumnRef {
+        column: ColumnRef::Int {
+            values: &payload,
+            validity: &[1],
+        },
+        selection: None,
+    }];
+    let mut calls = 0;
+    let result = program.eval_borrowed_selected_shared(&inputs, 1, 2, |_| {
+        calls += 1;
+        Ok(())
+    });
+    assert!(
+        result.is_err(),
+        "dense selection must not read beyond physical rows"
+    );
+    assert_eq!(calls, 0, "preflight must reject before invoking the sink");
+}
+
+#[test]
+fn borrowed_selected_cross_batch_and_preflight() {
+    let ft: FieldType = FieldTypeTp::Double.into();
+    let program = prepare(
+        E::scalar_func(ScalarFuncSig::PlusReal, ft.clone())
+            .push_child(E::column_ref(0, ft.clone()))
+            .push_child(E::column_ref(1, ft.clone())),
+        &[ft.clone(), ft],
+        Context::default(),
+    );
+    let left = reals(&[1.0, f64::INFINITY, 3.0]);
+    let right = reals(&[10.0, 20.0, f64::NAN]);
+    let count = crate::BATCH_MAX_SIZE + 3;
+    let left_rows: Vec<_> = (0..count).map(|i| if i % 2 == 0 { 2 } else { 0 }).collect();
+    let right_rows: Vec<_> = (0..count).map(|i| i % 2).collect();
+    let mut inputs = [
+        SelectedColumnRef {
+            column: ColumnRef::Real {
+                values: &left,
+                validity: &[7],
+            },
+            selection: Some(&left_rows),
+        },
+        SelectedColumnRef {
+            column: ColumnRef::Real {
+                values: &right,
+                validity: &[7],
+            },
+            selection: Some(&right_rows),
+        },
+    ];
+    let mut actual = Vec::new();
+    program
+        .eval_borrowed_selected_shared(&inputs, 3, count, |v| {
+            actual.push(match v {
+                ScalarRef::Real(v) => v,
+                _ => panic!("unexpected output"),
+            });
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        actual,
+        (0..count)
+            .map(|i| if i % 2 == 0 { 13.0 } else { 21.0 })
+            .collect::<Vec<_>>()
+    );
+
+    for bad in [vec![0], vec![3; count], vec![2; count]] {
+        // Wrong length, out-of-range index, or selected NaN must all fail
+        // before any output callback, including when another column is valid.
+        let mut bad_inputs = inputs;
+        bad_inputs[1].selection = Some(&bad);
+        assert!(
+            program
+                .eval_borrowed_selected_shared(&bad_inputs, 3, count, |_| panic!(
+                    "preflight failed"
+                ))
+                .is_err()
+        );
+    }
+    inputs[0].selection = Some(&[]);
+    inputs[1].selection = Some(&[]);
+    program
+        .eval_borrowed_selected_shared(&inputs, 3, 0, |_| panic!("empty output"))
+        .unwrap();
+}
+
+#[test]
 fn borrowed_nullable_nested_selection_and_unaligned_numeric() {
     let ft: FieldType = FieldTypeTp::LongLong.into();
     let tree = E::scalar_func(ScalarFuncSig::AbsInt, ft.clone()).push_child(

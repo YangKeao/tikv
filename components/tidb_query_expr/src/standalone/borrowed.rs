@@ -153,9 +153,14 @@ impl PreparedExpression {
 
     /// Evaluates borrowed columns with an independent ordered selection for
     /// each input. `output_rows` is the common logical length; a `None`
-    /// selection reads dense physical rows in that column. Selections
-    /// remain whole across batches and the engine applies the batch-local
-    /// start offset.
+    /// selection reads the first `output_rows` physical rows in that column,
+    /// which must not exceed `row_count`. All columns currently have the same
+    /// physical `row_count`; independent physical lengths are not supported.
+    /// Selections remain whole across batches and the engine applies the
+    /// batch-local start offset. Shape, bounds and selected REAL values are
+    /// checked before any sink callback. As with `eval_borrowed_shared`,
+    /// callers must discard partial output after runtime/sink errors and
+    /// never replay.
     pub fn eval_borrowed_selected_shared<F>(
         &self,
         inputs: &[SelectedColumnRef<'_>],
@@ -176,7 +181,7 @@ impl PreparedExpression {
                 return Err(Error::invalid("borrowed column type differs from schema"));
             }
             input.column.validate(row_count).map_err(Error::invalid)?;
-            if input.selection.is_some_and(|rows| {
+            if input.selection.map_or(output_rows > row_count, |rows| {
                 rows.len() != output_rows || rows.iter().any(|&row| row >= row_count)
             }) {
                 return Err(Error::invalid("borrowed selected row is invalid"));
