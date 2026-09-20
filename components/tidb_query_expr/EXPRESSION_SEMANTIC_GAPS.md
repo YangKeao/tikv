@@ -187,6 +187,16 @@ rollout switch it mentions does not exist in either checkout yet.
   overlapping/empty/FIRST_ROW frames and delayed overflow demand; the existing
   recomputation algorithm remains unchanged. Admission/fallback remains.
 
+- The filtering facades previously bypassed mandatory-engine admission and
+  could execute native user-variable reads. A regression failed before the
+  fix; engine requests now enter retained/single-expression suites, so required
+  row-major refusals happen before native effects and optional refusals use the
+  existing fallback diagnostics. Selection retains the programs across child
+  chunks and no longer owns duplicate NULL/string-IN kernels. Tests pin engine
+  receipts, cache reuse, NULL/false short-circuit and physical-mask intersection
+  after evaluation. Non-requesting contexts retain native typed vector kernels;
+  other convenience filter callers still need cross-call program retention.
+
 ## 7. Found by dual-running the Go source-port corpus
 
 The TiDB adapter now evaluates every constant expression in the 33 source-port
