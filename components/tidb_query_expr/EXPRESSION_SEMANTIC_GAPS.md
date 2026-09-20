@@ -156,6 +156,10 @@ rollout switch it mentions does not exist in either checkout yet.
   rejects lazy programs. TiDB Join CNF now uses suites over the existing row
   cursor with an explicit physical selection, preserving NULL-from-IN and
   per-condition short-circuit; semi-family joiners retain shared programs.
+  `JoinExec` datum/index-pair matching and scalar index-hash tasks also retain
+  and share condition programs. Ordinary matching preserves NULL-immediate
+  rejection (unlike anti-semi CNF continuation), and merge-key reselection
+  refreshes the residual cache. Other chunk/parallel/batch paths remain.
   Existing joined scratch-row copies still exist, and Join has not yet adopted
   the independent-column facade to eliminate them. Other `eval_bool` callers
   still construct temporary programs. A naive full-chunk cache remains forbidden.
