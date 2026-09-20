@@ -197,6 +197,14 @@ rollout switch it mentions does not exist in either checkout yet.
   after evaluation. Non-requesting contexts retain native typed vector kernels;
   other convenience filter callers still need cross-call program retention.
 
+- UnionScan generating expressions now retain programs and borrow the existing
+  mutable-row chunk. Each cast, NOT NULL zero substitution and writeback finishes
+  before the next dependency; tests pin real Next receipts, reuse, and error
+  stopping/rebinding. Post-generation CNF conditions also retain their cache.
+  Native cast support and expression fallback remain. Sort merge keys now use
+  validated materialized-cell transfer instead of a native Column AST call;
+  this is not engine execution, and deferred constants remain unevaluated.
+
 ## 7. Found by dual-running the Go source-port corpus
 
 The TiDB adapter now evaluates every constant expression in the 33 source-port
