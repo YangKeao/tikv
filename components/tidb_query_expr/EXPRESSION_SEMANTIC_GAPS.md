@@ -223,6 +223,20 @@ rollout switch it mentions does not exist in either checkout yet.
   descriptors are not safe immutable cache owners. Existing dependency gather
   copies, native conversion support, and optional native fallback remain.
 
+- Pushed-scan filters no longer bypass engine dispatch through local IN/LIKE
+  shortcuts. Retained condition programs share compilation across clone/conjoin;
+  remapped columns rebuild programs. Tests pin receipts, NULL/FALSE stopping and
+  skipped errors. Removing local shortcuts has unmeasured performance risk.
+- Boolean coercion needs scalar Datum kinds too: typed output turned binary
+  literal 0x10 false. Pushed matching and FilterProgram row/vector regressions
+  fail before using the scalar-preserving entry and pass afterward. Binary
+  admission remains declined/native; required-engine refusals stay errors.
+- Statistics probes now use the same facade, with one shared program across an
+  estimate's TopN/bounds/NULL samples. Tests pin seven engine sample rows, cache
+  reuse after overflow and missing-engine refusal through erased contexts. Error
+  results remain unknown selectivity (the NULL probe retains its special rule),
+  not native replay. This is not an engine-only/native-deletion claim.
+
 ## 7. Found by dual-running the Go source-port corpus
 
 The TiDB adapter now evaluates every constant expression in the 33 source-port
