@@ -205,6 +205,24 @@ rollout switch it mentions does not exist in either checkout yet.
   validated materialized-cell transfer instead of a native Column AST call;
   this is not engine execution, and deferred constants remain unevaluated.
 
+- Late table casts need scalar Datum semantics, not a typed projection carrier.
+  During generated/default routing, `0x10` changed from Int(16) to Int(0) after
+  losing its BinaryLiteral tag; UnionScan instead raised an IncorrectValue
+  error. Red/green tests pin both. `eval_selected_for_cast` shares engine
+  admission/error dispatch while preserving native fallback Datum kinds.
+  Binary-literal admission is still declined; this is NOT new engine support.
+  Required-engine refusals still error and engine errors never replay.
+- `ENUM_SET_AS_INT` is a scalar-result metadata contract. Plain Sort cell
+  transfer and the first late-cast implementation returned Enum carriers where
+  UInt ordinal/bitmask values were required. Separate failing regressions now
+  pin ENUM/SET metadata adaptation in both paths; ordinary typed projection
+  behavior is unchanged. Sort transfer is not kernel execution.
+- General generated/default compatibility helpers now route through the facade,
+  but create temporary programs. Statement-owned retention must account for
+  schema/name rebinding and zone/LIKE rewrite changes; public mutable column
+  descriptors are not safe immutable cache owners. Existing dependency gather
+  copies, native conversion support, and optional native fallback remain.
+
 ## 7. Found by dual-running the Go source-port corpus
 
 The TiDB adapter now evaluates every constant expression in the 33 source-port
