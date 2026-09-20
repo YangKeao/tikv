@@ -260,6 +260,16 @@ rollout switch it mentions does not exist in either checkout yet.
   Program ownership is insert-local; performance and cross-statement retention
   are not established.
 
+- Nonzero DATE/DATETIME constants and typed NULLs are now admitted locally
+  when Datum kind/FSP match the declared metadata and physical fields fit the
+  bridge. Tests pin existing MysqlTime packed bytes and 132 required-engine rows
+  across offsets, SQL modes and transports, including partial/invalid-calendar
+  dates and nested YEAR. This exposes existing TiKV support, not new wire types.
+  Packed zero remains excluded: Time::from_packed_u64 validates it under SQL mode
+  and may warn/error, unlike native constant transfer. TIMESTAMP also remains
+  excluded because decode converts UTC to session time; the catalog encoder has
+  no context. Mismatched kind/FSP and malformed physical values remain declined.
+
 ## 7. Found by dual-running the Go source-port corpus
 
 The TiDB adapter now evaluates every constant expression in the 33 source-port
