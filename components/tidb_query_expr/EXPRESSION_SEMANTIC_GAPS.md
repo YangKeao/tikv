@@ -265,10 +265,15 @@ rollout switch it mentions does not exist in either checkout yet.
   bridge. Tests pin existing MysqlTime packed bytes and 132 required-engine rows
   across offsets, SQL modes and transports, including partial/invalid-calendar
   dates and nested YEAR. This exposes existing TiKV support, not new wire types.
-  Packed zero remains excluded: Time::from_packed_u64 validates it under SQL mode
-  and may warn/error, unlike native constant transfer. TIMESTAMP also remains
-  excluded because decode converts UTC to session time; the catalog encoder has
-  no context. Mismatched kind/FSP and malformed physical values remain declined.
+  Packed zero is now allowed only after warning-free compilation:
+  Time::from_packed_u64 validates it under SQL mode and may warn/error, unlike
+  native constant transfer. Restrictive profiles still compile-decline; warnings
+  never reach the host, even when max_warning_count is zero. Tests cover DATE and
+  DATETIME(0/6), mode changes on retained programs, permissive engine receipts,
+  optional native fallback and required structured refusal. Admission counters
+  include required-mode declines, not only actual native execution. TIMESTAMP
+  remains excluded because decode converts UTC to session time; the catalog
+  encoder has no context. Kind/FSP and physical-shape restrictions are unchanged.
 
 ## 7. Found by dual-running the Go source-port corpus
 
