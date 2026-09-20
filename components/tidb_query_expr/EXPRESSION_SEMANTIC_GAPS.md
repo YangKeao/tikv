@@ -287,6 +287,22 @@ rollout switch it mentions does not exist in either checkout yet.
   discrepancy and the refusal. This is not a new Go-runtime oracle result;
   named-zone/DST instant semantics and restrictive zero modes remain incomplete.
 
+- Direct BinaryLiteral `cast_signed`/`cast_unsigned` now reuse the existing
+  CastStringAsInt binary kernel for canonical binary VarString metadata, no
+  deferred/parameter input, matching LongLong signedness, <=8 payload bytes;
+  signed values additionally require <=i64::MAX. Tests prove 84 engine rows,
+  exact Int/UInt kinds, empty/repeated selections and one retained compilation.
+  Root/lazy literal forwarding, generic/real/decimal casts and BIT are not newly
+  admitted. No dedicated runtime literal-kind carrier exists yet.
+- Provenance matters independently of binary collation. Focused RED reproduced
+  ordinary bytes b"1" cast to signed as native 1 versus engine 49. TiDB now
+  refuses non-null ordinary binary-collated constants for integer CAST rather
+  than selecting the literal kernel. Other implicit coercion contexts are not
+  covered by this fix. Another test bypasses only adapter admission to reproduce
+  signed 8-byte 0xff: native saturates to i64::MAX without warning, engine returns
+  -1. This current-native discrepancy is guarded, not declared Go-correct or
+  fixed. High-bit unsigned literal casts are separately proven exact.
+
 ## 7. Found by dual-running the Go source-port corpus
 
 The TiDB adapter now evaluates every constant expression in the 33 source-port
@@ -301,7 +317,7 @@ surfaced automatically rather than silently:
 | 23 | `GREATEST`/`LEAST` over a non-binary collation | folds case/accents through the derived collation | compares bytes (`utf8mb4_general_ci`: native `B`, engine `a`) | string shapes require binary arguments |
 | 24 | `FIND_IN_SET` over a non-binary collation | collation- and padding-aware (`2`) | bytewise (`1`) | string shapes require binary arguments |
 | 25 | `LAST_DAY` over an implicit temporal cast | `2024-03-31` | `ExternalEngine` error "unsupported TiKV temporal value shape" | FIXED: the kernel returns `DateTime` kind for a DATE-declared result; the TiDB bridge now rebuilds the declared DATE the way Go's DATE decoder drops the time part, so the implicit cast, `last_day`, `date` and `month` are admitted |
-| 26 | binary/bit literal in a numeric context | numeric (`b'1' + 0` -> 1) | bytes (`0`) | those constants declined |
+| 26 | binary/bit literal in a numeric context | numeric (`b'1' + 0` -> 1) | bytes (`0`) | declined except the verified direct signed/unsigned BinaryLiteral CAST subset described above |
 | 27 | `ROUND`/`TRUNCATE` with a computed digit | `round(5, -100)` is `0`, `round(1.2345, '2')` is `1.23` | compile refusal "ROUND/TRUNCATE fractional digits require an integer literal or input column" | the row-12 panic guard needs the digit as a literal or column; the rewriter's constant is not folded and `-100` is `unaryminus(100)`, so these stay native. An embedder-side constant fold of the digit, or a runtime digit check inside the kernel, is the way in |
 
 Item 20 is worth an upstream look for the opposite reason the older text
