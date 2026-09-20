@@ -121,20 +121,23 @@ rollout switch it mentions does not exist in either checkout yet.
   `Set` column (`LENGTH(set_col)`) failed validation even though the hybrid
   codec supports it. Both carriers are now accepted.
 * The `eager` interaction between window functions and the expression engine.
-  `WindowExec` drains all child rows, but its native paths still demand partition,
-  RANGE and LAG/LEAD expressions only at the current comparison/target. A naive
-  retained `EvaluatorSuite::eval_chunk` cache would run an expression for every
-  row and surface a later-row error before an earlier frame/key short-circuit.
-  The TiDB adapter therefore keeps these paths native until they can call the
-  selected-row interface at their original demand points; this is a
+  `WindowExec` drains all child rows, but expressions are demanded only at the
+  current comparison/target. TiDB partition/order keys now use retained suites
+  with a single-row selection at each original left/right demand point. Tests
+  assert engine receipts, cache reuse, skipped later-key errors and restoration
+  of the dense buffer after errors. RANGE and value/LAG/LEAD expressions remain
+  native until similarly routed. A naive whole-chunk result cache would surface
+  later-row errors before an earlier frame/key short-circuit; avoiding that is a
   semantic-ordering guard, not a performance fallback. The no-wire-change
   per-input-column table (`physical_value` plus an ordered/repeatable
   `logical_rows` slice) is now threaded through `eval_decoded_into`,
   `eval_subtree` and `ChildHandle`; `SelectedColumnRef` exposes the corresponding
   borrowed standalone facade. The legacy shared-selection APIs wrap it, and lazy
-  child materialization continues to own its dense boundary value. It represents
-  join left/right rows without concatenating their columns, but TiDB Window/Join
-  have not yet been routed through it; a naive full-chunk cache remains forbidden.
+  child materialization continues to own its dense boundary value. Independent
+  selections can represent join left/right rows without concatenating columns,
+  but the borrowed facade currently requires equal physical column lengths and
+  rejects lazy programs. TiDB Join is not yet routed through it; a naive
+  full-chunk cache remains forbidden.
 
 ## 7. Found by dual-running the Go source-port corpus
 
