@@ -246,9 +246,19 @@ rollout switch it mentions does not exist in either checkout yet.
   empty dependency rows could panic through the dense helper. Red/green tests
   cover both, plus integer conversion and engine errors. Partition helpers now
   use the scalar facade with original indexes and explicit virtual empty rows.
-  Programs remain temporary across bounds; the old general eval_row_values
-  helper still needs its own empty-input/caller audit. Neither change removes
-  native fallback or proves engine-only coverage.
+  Programs remain temporary across bounds. Neither change removes native
+  fallback or proves engine-only coverage.
+- The general eval_row_values helper also had incorrect operand remapping
+  (-7 instead of 7), empty-row handling and caller-native fallback requests.
+  It now preserves original indexes and shares scalar-preserving dispatch with
+  eval_constant_row. Its compatible Option API returns Some on success and errors
+  directly in both feature modes. Binary literal kinds survive subsequent casts;
+  no additional binary-literal engine admission is claimed.
+- Explicit INSERT VALUES now dispatch through prepared suites in original
+  row-major order after explicit default preparation. SQL tests pin execution
+  receipts, binary assignment and overflow stopping before later rows/writes.
+  Program ownership is insert-local; performance and cross-statement retention
+  are not established.
 
 ## 7. Found by dual-running the Go source-port corpus
 
