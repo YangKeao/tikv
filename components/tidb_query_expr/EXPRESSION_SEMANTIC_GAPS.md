@@ -175,6 +175,15 @@ rollout switch it mentions does not exist in either checkout yet.
   Existing joined scratch-row copies still exist, and Join has not yet adopted
   the independent-column facade to eliminate them. Other `eval_bool` callers
   still construct temporary programs. A naive full-chunk cache remains forbidden.
+- Aggregate arguments and order keys now use per-expression programs retained
+  in TiDB's aggregate input plans, shared by clones/bindings across groups.
+  Native/engine tests pin NULL short-circuit, AVG/JSON_OBJECTAGG extra arguments
+  before the primary, FIRST_ROW skipping later errors, and physical selections.
+  GROUP_CONCAT sort keys after a NULL argument preserve current native behavior;
+  this ordering has not been independently verified against Go in this change.
+  Typed aggregate kernels are unchanged and do not contribute expression-engine
+  row receipts. Window aggregate frames still rebuild their input plans, so
+  cross-frame compilation reuse remains pending. Admission/fallback remains.
 
 ## 7. Found by dual-running the Go source-port corpus
 
