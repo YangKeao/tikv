@@ -182,8 +182,10 @@ rollout switch it mentions does not exist in either checkout yet.
   GROUP_CONCAT sort keys after a NULL argument preserve current native behavior;
   this ordering has not been independently verified against Go in this change.
   Typed aggregate kernels are unchanged and do not contribute expression-engine
-  row receipts. Window aggregate frames still rebuild their input plans, so
-  cross-frame compilation reuse remains pending. Admission/fallback remains.
+  row receipts. Window aggregates now retain input plans across frames, while
+  each frame gets a fresh accumulator. Emission tests pin one compilation,
+  overlapping/empty/FIRST_ROW frames and delayed overflow demand; the existing
+  recomputation algorithm remains unchanged. Admission/fallback remains.
 
 ## 7. Found by dual-running the Go source-port corpus
 
