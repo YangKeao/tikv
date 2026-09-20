@@ -125,14 +125,16 @@ rollout switch it mentions does not exist in either checkout yet.
   RANGE and LAG/LEAD expressions only at the current comparison/target. A naive
   retained `EvaluatorSuite::eval_chunk` cache would run an expression for every
   row and surface a later-row error before an earlier frame/key short-circuit.
-  The TiDB adapter therefore keeps these paths native until the engine exposes a
-  selected-row/lazy vector interface; this is a semantic-ordering guard, not a
-  performance fallback. The proposed no-wire-change fix is a per-input-column
-  selected-row table (`physical_value` plus an ordered/repeatable `logical_rows`
-  slice) threaded through `eval_decoded_into`, `eval_subtree` and `ChildHandle`.
-  The legacy shared-selection API can wrap that table; lazy child materialization
-  continues to own its dense boundary value. This also represents join left/right
-  rows without concatenating their columns.
+  The TiDB adapter therefore keeps these paths native until they can call the
+  selected-row interface at their original demand points; this is a
+  semantic-ordering guard, not a performance fallback. The no-wire-change
+  per-input-column table (`physical_value` plus an ordered/repeatable
+  `logical_rows` slice) is now threaded through `eval_decoded_into`,
+  `eval_subtree` and `ChildHandle`; `SelectedColumnRef` exposes the corresponding
+  borrowed standalone facade. The legacy shared-selection APIs wrap it, and lazy
+  child materialization continues to own its dense boundary value. It represents
+  join left/right rows without concatenating their columns, but TiDB Window/Join
+  have not yet been routed through it; a naive full-chunk cache remains forbidden.
 
 ## 7. Found by dual-running the Go source-port corpus
 
