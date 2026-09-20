@@ -165,8 +165,13 @@ rollout switch it mentions does not exist in either checkout yet.
   task windows. Local index-lookup filters now also retain ordinary-match
   programs shared with fork templates/rebuilt tasks. Tests cover local Next,
   cache sharing, template isolation after filter replacement, and NULL/FALSE
-  skipping a later error; the new tests do not open remote cursors. Index-bound
-  native evaluation and other batch/filter work remain.
+  skipping a later error; the new tests do not open remote cursors. Index-probe
+  bounds now also share per-bound programs over existing selected chunk rows.
+  Tests pin invalid-key/NULL rejection, evaluation before deduplication, skipped
+  overflowing rows, cross-batch cache reuse and recovery after a demanded error.
+  The adapter must disable column-swap mode for these calculated-value calls;
+  the first regression caught and corrected that construction mistake. Other
+  batch/filter work and admitted-path versus native-fallback separation remain.
   Existing joined scratch-row copies still exist, and Join has not yet adopted
   the independent-column facade to eliminate them. Other `eval_bool` callers
   still construct temporary programs. A naive full-chunk cache remains forbidden.
