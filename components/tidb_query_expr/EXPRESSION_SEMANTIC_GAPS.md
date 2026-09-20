@@ -272,8 +272,13 @@ rollout switch it mentions does not exist in either checkout yet.
   DATETIME(0/6), mode changes on retained programs, permissive engine receipts,
   optional native fallback and required structured refusal. Admission counters
   include required-mode declines, not only actual native execution. TIMESTAMP
-  remains excluded because decode converts UTC to session time; the catalog
-  encoder has no context. Kind/FSP and physical-shape restrictions are unchanged.
+  is now admitted only for proven UTC compile contexts: absent/empty name with
+  offset zero, or exact named UTC (name takes precedence over offset). The
+  context-free encoder is unchanged; non-UTC/unknown aliases still decline.
+  Tests cover TIMESTAMP(0/3/6), NULL, nested YEAR, both transports and retained
+  programs across timezone changes (60 engine rows), plus zero-mode policies,
+  wire metadata and kind/invalid-calendar rejection. Kind/FSP and physical-shape
+  restrictions remain; non-UTC/DST transport is not yet unified.
 
 ## 7. Found by dual-running the Go source-port corpus
 
