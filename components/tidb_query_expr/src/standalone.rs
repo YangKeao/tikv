@@ -398,11 +398,37 @@ pub struct PreparedExpression {
 }
 
 impl PreparedExpression {
+    /// Compiles ordinary String/Bytes constants with textual numeric semantics,
+    /// even under binary collation. Numeric binary literals must instead use
+    /// explicit numeric wire nodes (for example MysqlBit) after the caller has
+    /// established their provenance. This is not a runtime literal-kind
+    /// carrier. The policy selects existing cast kernels at compile time;
+    /// it is local to this program and does not alter the legacy
+    /// compile/coprocessor behavior. Embedders caching both entrypoints must
+    /// distinguish this policy in addition to the wire
+    /// expression/schema/context.
+    pub fn compile_with_text_constants(
+        expr_bytes: &[u8],
+        schema: &[Vec<u8>],
+        context: Context,
+    ) -> Result<Self, Error> {
+        Self::compile_impl(expr_bytes, schema, context, true)
+    }
+
     /// Parses and validates wire messages, then invokes the existing RPN
     /// builder. Only admitted signatures are accepted; unsupported input is
     /// an error, never an implicit fallback. Callers may choose fallback at
     /// this boundary.
     pub fn compile(expr_bytes: &[u8], schema: &[Vec<u8>], context: Context) -> Result<Self, Error> {
+        Self::compile_impl(expr_bytes, schema, context, false)
+    }
+
+    fn compile_impl(
+        expr_bytes: &[u8],
+        schema: &[Vec<u8>],
+        context: Context,
+        text_constants: bool,
+    ) -> Result<Self, Error> {
         let tree = protobuf::parse_from_bytes::<Expr>(expr_bytes)
             .map_err(|e| Error::invalid(e.to_string()))?;
         let schema: Vec<FieldType> = schema
@@ -418,7 +444,23 @@ impl PreparedExpression {
         safety::collect_digit_columns(&tree, &mut fractional_digit_columns)?;
         let config = context.config()?;
         let mut ctx = EvalContext::new(config.clone());
-        let expression = RpnExpressionBuilder::build_from_expr_tree(tree, &mut ctx, schema.len())?;
+        let expression = RpnExpressionBuilder::build_with_context_and_mapper(
+            tree,
+            &mut ctx,
+            schema.len(),
+            |node| {
+                if text_constants
+                    && matches!(
+                        node.get_sig(),
+                        ScalarFuncSig::CastStringAsInt | ScalarFuncSig::CastStringAsReal
+                    )
+                {
+                    crate::impl_cast::map_cast_func_with_text_constants(node, true)
+                } else {
+                    crate::map_expr_node_to_rpn_func(node)
+                }
+            },
+        )?;
         // Admitted constants do not require lossy decoding. Do not silently lose
         // compile-time warnings if the admitted set is expanded in the future.
         if ctx.warnings.warning_cnt != 0 {

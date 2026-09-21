@@ -304,6 +304,13 @@ aggregation.
 - `PreparedExpression::compile` accepts serialized tipb `Expr` and `FieldType`
   messages to avoid exposing rust-protobuf types to prost consumers. It fixes
   the schema and evaluation context for the lifetime of the compiled program.
+  It preserves legacy constant dispatch. The opt-in local embedding entrypoint
+  `compile_with_text_constants` selects existing textual numeric kernels for
+  String/Bytes constants instead of inferring binary-literal provenance from
+  collation. Numeric literals must be explicitly represented as numeric nodes;
+  MysqlBit is recognized as scalar in CAST dispatch. Policy is fixed in compiled
+  metadata, not mutable global state; caches spanning both APIs must key it.
+  Neither the wire format nor classic coprocessor dispatch opts into this policy.
 - The scalar signature whitelist has been removed. Original mapper, validators
   and metadata builders remain authoritative (510 mapped signatures at the
   borrowed baseline). Generic metadata/shape validation plus focused safeguards
@@ -311,9 +318,9 @@ aggregation.
   enum constant indices and malformed binary JSON. Do not assume native builders
   safely accept arbitrary malformed trees. Enum name lookup exposes wire numbers,
   not a support claim; compile the complete expression to check capability.
-- All nine usable eval types have owned input/output: integer, real, bytes,
-  exact native Decimal, DateTime, Duration, Json, Enum and VectorFloat32. Set has
-  no engine codec and remains unsupported. `standalone/values.rs` supplies checked
+- Ten eval types have owned input/output: integer, real, bytes, exact native
+  Decimal, DateTime, Duration, Json, Enum, Set and VectorFloat32. Set preserves
+  name and bit mask with schema validation. `standalone/values.rs` supplies checked
   decimal/Time chunk and binary JSON transport around existing codecs. Decimal
   preserves stored/result fractions independently; never format it through text
   or invoke the unsafe native chunk decoder on unvalidated bool/header bytes.
@@ -321,9 +328,10 @@ aggregation.
   because native shift assumes at least one storage word. A zero-digit header
   with nonzero word storage is rejected.
   Native JSON/vector public mutable payloads are revalidated on selected ingress.
-- RPN children remain eager, including IF/CASE/COALESCE and logical operators.
-  Consumers requiring lazy semantics must retain unsafe trees natively before
-  evaluation; there is no lazy rewrite or runtime fallback. Metadata initialization
+- Registered lazy kernels skip unreachable work in owned execution without
+  changing tipb. Check `eager_lazy_risk` for whole-program hazards and borrowed
+  capability separately; the presence of any lazy node is not sufficient.
+  There is no runtime fallback. Metadata initialization
   can fail at compile time (constant regex/unit, cast metadata); compile-time
   warnings are rejected explicitly rather than silently dropped.
 - Selection is validated and normalized to dense rows, including

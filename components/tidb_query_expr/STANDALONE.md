@@ -62,14 +62,14 @@ The borrowed API follows the same split: `eval_borrowed(&mut self, ..)` is kept
 for existing callers and `eval_borrowed_shared(&self, ..)` evaluates a shared
 program.
 
-`Column` has nullable vectors for all nine usable engine types: `Int(i64)`,
+`Column` has nullable vectors for ten engine types: `Int(i64)`,
 `Real(f64)`, `Bytes(Vec<u8>)`, `Decimal(Decimal)`, `DateTime(DateTime)`,
-`Duration(Duration)`, `Json(Json)`, `Enum(Enum)`, and `VectorFloat32(VectorFloat32)`.
+`Duration(Duration)`, `Json(Json)`, `Enum(Enum)`, `Set(Set)`, and `VectorFloat32(VectorFloat32)`.
 Native value types are re-exported from `standalone`; no generated protobuf type
 is exposed. Unsigned integers retain their `i64` bits; FieldType carries flags,
 collation, temporal kind, precision and scale. Byte strings are not UTF-8 converted.
-`Set` exists in EvalType but is not supported by the engine's FieldType conversion
-or codecs, so it remains rejected (as do Geometry and unsupported SQL types).
+`Set` retains both its name and bit mask, with schema checks on transfer.
+Geometry and other unsupported SQL types remain rejected.
 
 **Breaking PoC change:** Decimal uses native values, not strings. This preserves
 all decimal words, stored fraction and result fraction independently: e.g. division
@@ -178,16 +178,34 @@ Cast InUnionMetadata remains in Expr.val; IN retains original hash extraction an
 child mutation; regex constants are precompiled; date arithmetic and TimestampDiff
 retain their constant-unit metadata requirements. Unknown signatures are errors.
 
-**Evaluation remains TiKV eager RPN.** There are only Constant, ColumnRef and
-FnCall nodes, not lazy branch nodes. All IF/IFNULL/CASE/COALESCE/AND/OR children
-are evaluated before the parent kernel. An unreachable overflowing branch still
-errors, and unreachable warning-producing/volatile expressions still run. Consumers
-requiring lazy semantics must keep the whole unsafe tree in their native evaluator,
-or establish safety before compilation; this facade neither rewrites kernels nor
-silently retries after evaluation starts. Volatile functions such as RAND, UUID,
+**Lazy execution is signature-driven, not a wire rewrite.** Registered lazy
+kernels skip unreachable work in the owned execution path. `has_lazy_nodes` alone
+is not a whole-program safety proof: inspect `eager_lazy_risk` for remaining eager
+lazy-sensitive kernels, and check borrowed capability separately. The facade does
+not silently retry after evaluation starts. Volatile functions such as RAND, UUID,
 RandomBytes and SYSDATE preserve their existing TiKV behavior, not another engine's
 statement/session state. Constant metadata errors (e.g. invalid regex) occur during
 compilation even for empty input or otherwise unreachable branches.
+
+### Byte-constant compilation policy
+
+`compile` preserves legacy dispatch: binary-collated scalar String/Bytes
+constants select binary-number kernels for integer/real casts. Collation is not
+proof of the source datum's literal kind.
+
+`compile_with_text_constants` is an explicit local-embedding alternative. Those
+constants use the existing textual numeric cast kernels instead; e.g. bytes
+`b"1"` yield 1 rather than 49. The policy is fixed in compiled function metadata,
+not global state or an execution toggle. Caches supporting both entrypoints must
+include the policy in their identity. Schema/context checks, compile-warning
+rejection, runtime warnings/errors and lazy registration remain shared.
+
+Callers must establish provenance before encoding numeric binary literals as
+numeric nodes (e.g. MysqlBit with appropriate unsigned metadata). MysqlBit now
+participates in scalar CAST classification, preserving full-u64 bits. This API
+is not a BinaryLiteral result-kind carrier or a claim of all native dialect
+compatibility. TiDB's guarded adapter has not adopted it yet; no wire format or
+legacy coprocessor switch is changed.
 
 ### Context and results
 

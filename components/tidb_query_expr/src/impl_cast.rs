@@ -256,6 +256,16 @@ pub fn get_cast_fn_rpn_node(
 
 /// Gets the RPN function meta
 pub fn map_cast_func(expr: &Expr) -> Result<RpnFnMeta> {
+    map_cast_func_with_text_constants(expr, false)
+}
+
+/// Standalone embedding may declare String/Bytes constants to be ordinary text,
+/// rather than relying on binary collation to infer binary-literal provenance.
+/// Legacy coprocessor callers keep the existing dispatch above.
+pub(crate) fn map_cast_func_with_text_constants(
+    expr: &Expr,
+    text_constants: bool,
+) -> Result<RpnFnMeta> {
     let children = expr.get_children();
     if children.len() != 1 {
         return Err(other_err!(
@@ -265,7 +275,12 @@ pub fn map_cast_func(expr: &Expr) -> Result<RpnFnMeta> {
         ));
     }
     get_cast_fn_rpn_meta(
-        RpnExpressionBuilder::is_expr_eval_to_scalar(&children[0])?,
+        RpnExpressionBuilder::is_expr_eval_to_scalar(&children[0])?
+            && !(text_constants
+                && matches!(
+                    children[0].get_tp(),
+                    tipb::ExprType::String | tipb::ExprType::Bytes
+                )),
         children[0].get_field_type(),
         expr.get_field_type(),
     )

@@ -72,6 +72,7 @@ impl RpnExpressionBuilder {
             | ExprType::MysqlDecimal
             | ExprType::MysqlJson
             | ExprType::MysqlEnum
+            | ExprType::MysqlBit
             | ExprType::TiDbVectorFloat32 => Ok(true),
             ExprType::ScalarFunc => Ok(false),
             ExprType::ColumnRef => Ok(false),
@@ -85,14 +86,27 @@ impl RpnExpressionBuilder {
         ctx: &mut EvalContext,
         max_columns: usize,
     ) -> Result<RpnExpression> {
-        let mut expr_nodes = Vec::new();
-        append_rpn_nodes_recursively(
+        Self::build_with_context_and_mapper(
             tree_node,
-            &mut expr_nodes,
             ctx,
-            super::super::map_expr_node_to_rpn_func,
             max_columns,
-        )?;
+            super::super::map_expr_node_to_rpn_func,
+        )
+    }
+
+    /// Internal embedding policies select existing kernels at compile time.
+    /// The mapper is not retained in the shareable compiled expression.
+    pub(crate) fn build_with_context_and_mapper<F>(
+        tree_node: Expr,
+        ctx: &mut EvalContext,
+        max_columns: usize,
+        fn_mapper: F,
+    ) -> Result<RpnExpression>
+    where
+        F: Fn(&Expr) -> Result<RpnFnMeta> + Copy,
+    {
+        let mut expr_nodes = Vec::new();
+        append_rpn_nodes_recursively(tree_node, &mut expr_nodes, ctx, fn_mapper, max_columns)?;
         Ok(RpnExpression::from(expr_nodes))
     }
 

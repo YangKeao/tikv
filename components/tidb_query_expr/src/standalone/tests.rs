@@ -19,6 +19,155 @@ pub(super) fn prepare(
 }
 
 #[test]
+fn text_constant_policy_is_explicit_and_does_not_change_legacy() {
+    for wire_kind in [ExprType::String, ExprType::Bytes] {
+        for (sig, target, legacy, text) in [
+            (
+                ScalarFuncSig::CastStringAsInt,
+                FieldTypeTp::LongLong,
+                Column::Int(vec![Some(49); 3]),
+                Column::Int(vec![Some(1); 3]),
+            ),
+            (
+                ScalarFuncSig::CastStringAsReal,
+                FieldTypeTp::Double,
+                Column::Real(vec![Some(49.0); 3]),
+                Column::Real(vec![Some(1.0); 3]),
+            ),
+        ] {
+            let mut source = Expr::default();
+            source.set_tp(wire_kind);
+            source.set_val(vec![b'1']);
+            let mut ft: FieldType = FieldTypeTp::VarString.into();
+            ft.set_collate(63);
+            ft.set_charset("binary".into());
+            source.set_field_type(ft);
+            let mut tree = Expr::default();
+            tree.set_tp(ExprType::ScalarFunc);
+            tree.set_sig(sig);
+            let mut target: FieldType = target.into();
+            target.set_flen(-1);
+            target.set_decimal(-1);
+            tree.set_field_type(target);
+            tree.mut_children().push(source);
+            let wire = tree.write_to_bytes().unwrap();
+            let mut old = PreparedExpression::compile(&wire, &[], Context::default()).unwrap();
+            let mut new =
+                PreparedExpression::compile_with_text_constants(&wire, &[], Context::default())
+                    .unwrap();
+            assert_eq!(old.eval(&[], 2, Some(&[1, 0, 1])).unwrap().column, legacy);
+            let output = new.eval(&[], 2, Some(&[1, 0, 1])).unwrap();
+            assert_eq!(output.column, text);
+            assert_eq!(output.warning_count, 0);
+            assert_eq!(old.eval(&[], 2, Some(&[1, 0, 1])).unwrap().column, legacy);
+            if sig == ScalarFuncSig::CastStringAsReal {
+                let mut nested = Expr::default();
+                nested.set_tp(ExprType::ScalarFunc);
+                nested.set_sig(ScalarFuncSig::Sqrt);
+                nested.set_field_type(tree.get_field_type().clone());
+                nested.mut_children().push(tree);
+                let wire = nested.write_to_bytes().unwrap();
+                let mut old = PreparedExpression::compile(&wire, &[], Context::default()).unwrap();
+                let mut new =
+                    PreparedExpression::compile_with_text_constants(&wire, &[], Context::default())
+                        .unwrap();
+                assert_eq!(
+                    old.eval(&[], 1, None).unwrap().column,
+                    Column::Real(vec![Some(7.0)])
+                );
+                assert_eq!(
+                    new.eval(&[], 1, None).unwrap().column,
+                    Column::Real(vec![Some(1.0)])
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn text_constant_policy_preserves_errors_warnings_and_lazy_branches() {
+    let mut source = Expr::default();
+    source.set_tp(ExprType::Bytes);
+    source.set_val(b"1x".to_vec());
+    let mut ft: FieldType = FieldTypeTp::VarString.into();
+    ft.set_collate(63);
+    source.set_field_type(ft);
+    let mut cast = Expr::default();
+    cast.set_tp(ExprType::ScalarFunc);
+    cast.set_sig(ScalarFuncSig::CastStringAsInt);
+    cast.set_field_type(FieldTypeTp::LongLong.into());
+    cast.mut_children().push(source);
+    let wire = cast.write_to_bytes().unwrap();
+    let mut strict =
+        PreparedExpression::compile_with_text_constants(&wire, &[], Context::default()).unwrap();
+    assert!(strict.eval(&[], 1, None).is_err());
+    for max_warning_count in [0, 64] {
+        let context = Context {
+            flags: tidb_query_datatype::expr::Flag::TRUNCATE_AS_WARNING.bits(),
+            max_warning_count,
+            ..Context::default()
+        };
+        let mut warning =
+            PreparedExpression::compile_with_text_constants(&wire, &[], context).unwrap();
+        for _ in 0..2 {
+            let result = warning.eval(&[], 1, None).unwrap();
+            assert_eq!(result.column, Column::Int(vec![Some(1)]));
+            assert_eq!(result.warning_count, 1);
+            assert_eq!(result.warnings.len(), usize::from(max_warning_count != 0));
+        }
+        assert_eq!(warning.eval(&[], 1, Some(&[])).unwrap().warning_count, 0);
+    }
+    let mut conditional = Expr::default();
+    conditional.set_tp(ExprType::ScalarFunc);
+    conditional.set_sig(ScalarFuncSig::IfInt);
+    conditional.set_field_type(FieldTypeTp::LongLong.into());
+    conditional.mut_children().push(E::constant_int(0).into());
+    conditional.mut_children().push(cast);
+    conditional.mut_children().push(E::constant_int(7).into());
+    let mut lazy = PreparedExpression::compile_with_text_constants(
+        &conditional.write_to_bytes().unwrap(),
+        &[],
+        Context::default(),
+    )
+    .unwrap();
+    assert!(lazy.has_lazy_nodes());
+    let result = lazy.eval(&[], 1, None).unwrap();
+    assert_eq!(result.column, Column::Int(vec![Some(7)]));
+    assert_eq!(result.warning_count, 0);
+}
+
+#[test]
+fn mysql_bit_constant_is_scalar_when_used_by_cast() {
+    let mut ft: FieldType = FieldTypeTp::Bit.into();
+    ft.set_flen(64);
+    ft.as_mut_accessor().set_flag(FieldTypeFlag::UNSIGNED);
+    let mut source = Expr::default();
+    source.set_tp(ExprType::MysqlBit);
+    source.set_val(vec![0xff; 8]);
+    source.set_field_type(ft);
+    let mut target: FieldType = FieldTypeTp::LongLong.into();
+    target.as_mut_accessor().set_flag(FieldTypeFlag::UNSIGNED);
+    let mut tree = Expr::default();
+    tree.set_tp(ExprType::ScalarFunc);
+    tree.set_sig(ScalarFuncSig::CastIntAsInt);
+    tree.set_field_type(target);
+    tree.mut_children().push(source);
+    let wire = tree.write_to_bytes().unwrap();
+    for text in [false, true] {
+        let mut program = if text {
+            PreparedExpression::compile_with_text_constants(&wire, &[], Context::default())
+        } else {
+            PreparedExpression::compile(&wire, &[], Context::default())
+        }
+        .unwrap();
+        assert_eq!(
+            program.eval(&[], 1, None).unwrap().column,
+            Column::Int(vec![Some(-1)])
+        );
+    }
+}
+
+#[test]
 fn nullable_nested_numeric_selection_and_reuse() {
     let ft: FieldType = FieldTypeTp::LongLong.into();
     let expr = E::scalar_func(ScalarFuncSig::AbsInt, ft.clone()).push_child(

@@ -318,6 +318,20 @@ rollout switch it mentions does not exist in either checkout yet.
   programs (108 selected engine rows). Wrong widths, padding, kinds, deferred/
   parameter values and all non-null literal BIT consumers remain declined.
 
+- Engine support now exposes `compile_with_text_constants` as an opt-in local
+  compile policy. Ordinary String/Bytes constants use existing textual numeric
+  cast kernels under binary collation (1 instead of legacy 49; nested sqrt 1
+  instead of 7). Legacy `compile`/coprocessor behavior remains unchanged. Policy
+  lives in compiled function metadata and must be part of mixed-policy cache
+  identity. Numeric binary literals require authenticated numeric wire nodes,
+  not an invented flag or inference from byte contents/collation. MysqlBit was
+  decoded already but missing from scalar CAST classification; that omission is
+  fixed and full-u64 bits survive a numeric CAST under both policies. Tests cover
+  strict errors, warning/count retention with zero warning storage, repeated
+  execution and skipping a failing cast in an unselected lazy branch. TiDB has
+  NOT pinned/adopted this API yet; its guards remain. Root/lazy BinaryLiteral
+  result-kind provenance and complete native error/warning parity remain open.
+
 ## 7. Found by dual-running the Go source-port corpus
 
 The TiDB adapter now evaluates every constant expression in the 33 source-port
