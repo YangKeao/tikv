@@ -296,14 +296,17 @@ rollout switch it mentions does not exist in either checkout yet.
   BinaryLiteral root/lazy forwarding and generic/real/decimal casts remain
   declined. No dedicated runtime literal-kind carrier exists yet.
 - Provenance matters independently of binary collation. Focused RED reproduced
-  ordinary bytes b"1" cast to signed as native 1 versus engine 49. TiDB now
-  refuses non-null ordinary binary-collated constants for integer CAST rather
-  than selecting the literal kernel. Follow-up RED also reproduced implicit
+  ordinary bytes b"1" cast to signed as native 1 versus legacy engine 49. TiDB
+  now admits explicit signed/unsigned CAST of ordinary String/Bytes only for
+  canonical binary VarString and 1..6 ASCII digits, using text semantics (1).
+  Shared metadata/signedness/deferred/parameter checks remain; other ordinary
+  binary-collated constants are still refused rather than treated as literals. Follow-up RED also reproduced implicit
   sqrt: 1 versus 7, plus: 1 versus 49, shift: 2 versus 562949953421312, and LEFT:
   one character versus four. Synthesized CastStringAsInt/Real are now guarded
   by signature+constant shape in the common node builder AND catalog
   substitution, not a list of consumer names. Source-AST-validated direct
-  literal casts use explicit numeric transport rather than bypassing that guard. Trusted child subtrees are not reclassified
+  literal casts use explicit numeric transport, while bounded explicit text
+  casts select the textual kernel. Trusted child subtrees are not reclassified
   by wire equality; an ordinary String can serialize identically to a literal.
   This closes unsafe admission, not the engine's missing provenance contract.
   Another test bypasses only adapter admission to reproduce
@@ -333,9 +336,12 @@ rollout switch it mentions does not exist in either checkout yet.
   pins db9c7f0 and uses this policy exclusively. Adoption RED demonstrated a
   truncation warning when a literal was still sent as text; numeric MysqlBit
   encoding fixes it without TiDB-side arithmetic. Existing 84-row literal/cache
-  tests and expression/executor regressions pass. Ordinary binary string guards
-  remain pending native diagnostic/value parity; root/lazy BinaryLiteral
-  result-kind provenance is still missing.
+  tests and expression/executor regressions pass. Bounded ordinary text CAST
+  adds 120 selected rows over both transports/kinds/signednesses, retained-cache
+  checks and 160 flag/sql-mode profile rows without warnings. Signs, spaces,
+  non-ASCII, suffixes, long digits, real and implicit conversions remain guarded
+  pending native diagnostic/value parity; root/lazy BinaryLiteral result-kind
+  provenance is still missing.
 
 ## 7. Found by dual-running the Go source-port corpus
 
