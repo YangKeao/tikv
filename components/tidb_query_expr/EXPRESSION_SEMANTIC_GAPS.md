@@ -13,6 +13,8 @@ Status legend:
 * **avoided** — the embedder keeps the SQL shape on its own implementation.
 * **open** — no guard; currently reachable only for shapes the embedder does
   not admit.
+* **accepted gap** — admitted because the common/result domain agrees; the
+  named edge difference remains visible in tests and compatibility reporting.
 
 Most entries are facade guards rather than kernel fixes. However, the earlier
 lazy/short-circuit work also changed the shared `RpnExpression::eval_decoded`
@@ -31,6 +33,7 @@ must be isolated or verified separately before publication.
 | 4 | `IsIPv4`, `IsIPv6`, `IsIPv4Compat`, `IsIPv4Mapped` (`impl_miscellaneous.rs`) | returns 0 for a NULL input (the kernels return `Some(0)` for `None`) | returns NULL | guarded | new differential fixture `IS_IPV4(NULL)`: native `Null`, engine `Int(0)`; the adapter now wraps with a leaf-only `IF(StringIsNull(x), NULL, kernel(x))` |
 | 5 | `FromDays` (`impl_time.rs`) | `FROM_DAYS(1)` yields the zero date `0000-00-00` | returns NULL | avoided | differential fixture: native `Null`, engine `Date(0,0,0)`; valid inputs such as `FROM_DAYS(739000)` agree, so the admission row was changed to `Excluded` |
 | 6 | `JsonArrayAppend` (`impl_json.rs`) | appending an array value through a nested path appends the array's *elements* | appends the array itself | avoided | `JSON_ARRAY_APPEND('[1,2,3]', '$[0]', '[9]')`: native `[[1, [9]], 2, 3]`, engine `[[1, 9], 2, 3]`; scalar values through `$`/`$[0]` agree, so the admission row was changed to `Excluded` |
+| 7 | `InetAton`, `Inet6Aton` (`impl_miscellaneous.rs`) invalid spelling | returns SQL NULL for empty or parse-invalid input; `InetAton` also returns NULL for out-of-range, trailing-dot, extra-component, or non-digit text | the production Go kernels return an evaluation error | accepted gap | TiDB Rust's engine-only source tables pin NULL for invalid IPv4 text such as `''`, `0.0.0.256`, `127,256`, `123.2.1.`, and `127.0.0.1.1`, and invalid IPv6-capable text such as `''`, `Not IP address`, `1.0002.3.4`, and `1.2.256`; valid IPv4, IPv6, and binary rows still match independent Go results |
 
 A second class surfaced while adding fixtures: names the engine lowers but the
 *Rust* evaluator has no implementation for, so no differential baseline can be
@@ -54,6 +57,10 @@ gaps, not engine divergences, and they do not block the engine.
    the argument is NULL, so the embedder's NULL mask can be removed.
 5. Decide `FROM_DAYS`'s out-of-range result (zero date versus NULL) and make
    the JSON array-append path append the array value rather than its elements.
+6. Decide whether invalid `INET_ATON` / `INET6_ATON` spellings should return
+   NULL or propagate the production Go-kernel error; if error/warning policy is
+   session-dependent, expose that context through the engine API instead of
+   guessing in the kernel.
 
 
 ## 2. Lazy / eager control flow
