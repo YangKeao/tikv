@@ -204,8 +204,9 @@ Callers must establish provenance before encoding numeric binary literals as
 numeric nodes (e.g. MysqlBit with appropriate unsigned metadata). MysqlBit now
 participates in scalar CAST classification, preserving full-u64 bits. This API
 is not a BinaryLiteral result-kind carrier or a claim of all native dialect
-compatibility. TiDB's guarded adapter has not adopted it yet; no wire format or
-legacy coprocessor switch is changed.
+compatibility. TiDB's adapter now uses this policy with source-authenticated
+numeric literal encoding; ordinary binary-string coercion guards remain until
+native parity is established. No wire format or legacy coprocessor switch changes.
 
 ### Context and results
 
