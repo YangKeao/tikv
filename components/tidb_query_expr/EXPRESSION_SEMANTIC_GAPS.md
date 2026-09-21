@@ -367,3 +367,21 @@ worth an upstream look too: they are a collation-semantics difference, not a
 wording one. Items 21 and 26 are representation choices the
 adapter could carry differently if the enum-style hybrid were extended to
 binary literals.
+
+## Embedder failure boundaries (not kernel divergences)
+
+**Fixed in TiDB Rust's hash JoinExec:** a probe child could write partial rows
+and then return an error, while the caller still evaluated outer filters over
+those rows before propagating the error. A successful filter produced observable
+engine execution after failure; a failing filter could replace the child error.
+The embedder now returns the original error before filter compilation/execution
+and restores an empty typed chunk. No native replay or automatic retry is added.
+
+Evidence: `probe_error_does_not_evaluate_partial_chunk_filters` in TiDB's
+`rust/crates/tidb-executor/src/join_tests.rs`, native/engine modes with successful
+and poison filters. Before the fix, the engine row counter is 1 rather than 0;
+after it, output/engine rows and retained compilations are all zero, and the
+child's sentinel error survives. Detailed commands and red/green logs are in
+TiDB's `rust/docs/tikv-expression-removal-execplan.md`. This does not establish
+retry-after-error behavior or a Go SQL diagnostic-text requirement; no TiKV
+kernel or wire format changed.
