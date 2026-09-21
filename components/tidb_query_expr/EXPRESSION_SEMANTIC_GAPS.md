@@ -14,8 +14,11 @@ Status legend:
 * **open** — no guard; currently reachable only for shapes the embedder does
   not admit.
 
-None of these were fixed in the kernel: the standalone changes are additive
-and the server's `eval_decoded` path is unchanged.
+Most entries are facade guards rather than kernel fixes. However, the earlier
+lazy/short-circuit work also changed the shared `RpnExpression::eval_decoded`
+dispatch path used by TiKV server evaluation. It is therefore **not** valid to
+claim that server behavior is unchanged; compatibility of that shared change
+must be isolated or verified separately before publication.
 
 
 ## 1. Verified semantic divergences
