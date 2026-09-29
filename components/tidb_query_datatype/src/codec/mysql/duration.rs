@@ -307,6 +307,12 @@ pub struct Duration {
     fsp: u8,
 }
 
+impl Default for Duration {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 impl Duration {
     #[inline]
     pub fn is_neg(self) -> bool {

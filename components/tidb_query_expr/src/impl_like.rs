@@ -4,23 +4,6 @@ use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::codec::{collation::*, data_type::*};
 
-const UTF8_REPLACEMENT_CHARACTER: &[u8] = b"\xEF\xBF\xBD";
-
-// TiDB decodes malformed UTF-8 as U+FFFD when matching with a character
-// collation. Canonicalize only that case; collators using byte-wise LIKE
-// literal matching must continue to compare the original bytes.
-#[inline]
-fn char_bytes_for_compare<C: Collator, CS: Charset>(data: &[u8], ch: CS::Char) -> &[u8] {
-    if <C::Charset as Charset>::charset() == tidb_query_datatype::Charset::Utf8Mb4
-        && ch.into() == char::REPLACEMENT_CHARACTER as u32
-        && data.len() == 1
-    {
-        UTF8_REPLACEMENT_CHARACTER
-    } else {
-        data
-    }
-}
-
 #[rpn_fn]
 #[inline]
 pub fn like<C: Collator, CS: Charset>(
@@ -28,75 +11,15 @@ pub fn like<C: Collator, CS: Charset>(
     pattern: BytesRef,
     escape: &i64,
 ) -> Result<Option<i64>> {
-    let escape = *escape as u32;
-    // current search positions in pattern and target.
-    let (mut px, mut tx) = (0, 0);
-    // positions for backtrace.
-    let (mut next_px, mut next_tx) = (0, 0);
-    while px < pattern.len() || tx < target.len() {
-        if let Some((mut pattern_char, mut poff)) = CS::decode_one(&pattern[px..]) {
-            let code: u32 = pattern_char.into();
-            let is_escape = code == escape;
-            if is_escape && px + poff < pattern.len() {
-                px += poff;
-                (pattern_char, poff) = if let Some((ch, off)) = CS::decode_one(&pattern[px..]) {
-                    (ch, off)
-                } else {
-                    break;
-                };
-            }
-            if !is_escape && code == '_' as u32 {
-                if let Some((_, toff)) = CS::decode_one(&target[tx..]) {
-                    px += poff;
-                    tx += toff;
-                    continue;
-                }
-            } else if !is_escape && code == '%' as u32 {
-                // update the backtrace point.
-                px += poff;
-                next_px = px;
-                // Last '%' can match all left characters
-                if next_px >= pattern.len() {
-                    return Ok(Some(true as i64));
-                }
-                next_tx = tx;
-                continue;
-            } else {
-                if let Some((target_char, toff)) = CS::decode_one(&target[tx..]) {
-                    let target_bytes = &target[tx..tx + toff];
-                    let pattern_bytes = &pattern[px..px + poff];
-                    let matches = if C::LIKE_PATTERN_MODE == LikePatternMode::Bytes {
-                        target_bytes == pattern_bytes
-                    } else {
-                        let target_char_bytes =
-                            char_bytes_for_compare::<C, CS>(target_bytes, target_char);
-                        let pattern_char_bytes =
-                            char_bytes_for_compare::<C, CS>(pattern_bytes, pattern_char);
-                        C::like_pattern_compare(target_char_bytes, pattern_char_bytes)?
-                    };
-                    if matches {
-                        tx += toff;
-                        px += poff;
-                        continue;
-                    }
-                }
-            }
-        }
-        // mismatch and backtrace to position after last %.
-        if 0 < next_px && next_tx < target.len() {
-            next_tx += if let Some((_, toff)) = CS::decode_one(&target[next_tx..]) {
-                toff
-            } else {
-                1
-            };
-            px = next_px;
-            tx = next_tx;
-            continue;
-        }
-        return Ok(Some(false as i64));
-    }
-
-    Ok(Some(true as i64))
+    let matched = pattern::matches_raw::<C, CS>(
+        target,
+        pattern,
+        pattern::MatchOptions {
+            escape: *escape as u32,
+            trailing_escape: pattern::TrailingEscape::Literal,
+        },
+    )?;
+    Ok(Some(i64::from(matched)))
 }
 
 #[cfg(test)]

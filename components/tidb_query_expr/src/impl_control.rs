@@ -127,16 +127,28 @@ fn if_condition_bytes(
     })
 }
 
-fn case_when_validator<T: EvaluableRet>(expr: &tipb::Expr) -> Result<()> {
-    for chunk in expr.get_children().chunks(2) {
+fn case_when_validator<T: EvaluableRet>(expr: &crate::types::function::CallShape) -> Result<()> {
+    for chunk in expr.args().chunks(2) {
         if chunk.len() == 1 {
-            super::function::validate_expr_return_type(&chunk[0], T::EVAL_TYPE)?;
+            super::function::validate_field_type(chunk[0].field_type(), T::EVAL_TYPE)?;
         } else {
-            super::function::validate_expr_return_type(&chunk[0], <Int as Evaluable>::EVAL_TYPE)?;
-            super::function::validate_expr_return_type(&chunk[1], T::EVAL_TYPE)?;
+            super::function::validate_field_type(
+                chunk[0].field_type(),
+                <Int as Evaluable>::EVAL_TYPE,
+            )?;
+            super::function::validate_field_type(chunk[1].field_type(), T::EVAL_TYPE)?;
         }
     }
     Ok(())
+}
+
+/// The local signed-integer seed retains its first operand instead of lowering
+/// to an IF tree which evaluates that operand a second time.
+#[rpn_fn(nullable)]
+pub fn local_nullif_int_signed_signed(lhs: Option<&Int>, rhs: Option<&Int>) -> Result<Option<Int>> {
+    use crate::impl_compare::{BasicComparer, CmpOpEq, compare};
+    let equal = compare::<BasicComparer<Int, CmpOpEq>>(lhs, rhs)?;
+    Ok(if equal == Some(1) { None } else { lhs.copied() })
 }
 
 #[cfg(test)]

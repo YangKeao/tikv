@@ -803,7 +803,9 @@ mod parser {
             _ => return None,
         };
         let mut t = parse_from_i64_default(ctx, int_part)?;
-        let fsp = std::cmp::min(MAX_FSP as u8, input.frac_cnt());
+        let fsp = std::cmp::min(MAX_FSP as u32, input.frac_cnt());
+        // Narrow only after clamping the wide Decimal scale to MAX_FSP (6).
+        let fsp = u8::try_from(fsp).expect("MAX_FSP fits in u8");
         t.set_fsp(fsp);
         if fsp == 0 || t.get_time_type() == TimeType::Date {
             return Some(t);

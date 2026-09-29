@@ -21,11 +21,20 @@ impl Collator for CollatorLatin1Bin {
         ch
     }
 
+    const SORT_KEY_IS_BYTES: bool = true;
+
+    fn preprocess_sort_key(bstr: &[u8], options: KeyOptions) -> &[u8] {
+        prepare_padded_key(bstr, options)
+    }
+
+    fn max_sort_key_len(bstr: &[u8]) -> usize {
+        bstr.len()
+    }
+
     #[inline]
-    fn write_sort_key<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
-        let s = B(bstr).trim_end_with(|c| c == PADDING_SPACE);
-        writer.write_bytes(s)?;
-        Ok(s.len())
+    fn write_sort_key_unpadded<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
+        writer.write_bytes(bstr)?;
+        Ok(bstr.len())
     }
 
     #[inline]

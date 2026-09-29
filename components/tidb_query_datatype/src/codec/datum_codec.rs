@@ -282,6 +282,14 @@ pub trait DatumFlagAndPayloadEncoder: BufferWriter + DatumPayloadEncoder {
         self.write_u8(datum::DECIMAL_FLAG)?;
         // FIXME: prec and frac should come from field type?
         let (prec, frac) = val.prec_and_frac();
+        let prec = u8::try_from(prec).map_err(|_| {
+            Error::InvalidDataType(
+                "Decimal precision exceeds the legacy codec's u8 field".to_owned(),
+            )
+        })?;
+        let frac = u8::try_from(frac).map_err(|_| {
+            Error::InvalidDataType("Decimal scale exceeds the legacy codec's u8 field".to_owned())
+        })?;
         self.write_datum_payload_decimal(val, prec, frac)?;
         Ok(())
     }

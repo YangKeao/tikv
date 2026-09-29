@@ -507,7 +507,7 @@ pub fn truncate_decimal_with_int(arg0: &Decimal, arg1: &Int) -> Result<Option<De
         *arg1.max(&-128) as i8
     };
 
-    let res: codec::Result<Decimal> = arg0.round(d, RoundMode::Truncate).into();
+    let res: codec::Result<Decimal> = arg0.clone().round(d, RoundMode::Truncate).into();
     Ok(Some(res?))
 }
 
@@ -516,7 +516,7 @@ pub fn truncate_decimal_with_int(arg0: &Decimal, arg1: &Int) -> Result<Option<De
 pub fn truncate_decimal_with_uint(arg0: &Decimal, arg1: &Int) -> Result<Option<Decimal>> {
     let d = (*arg1 as u64).min(127) as i8;
 
-    let res: codec::Result<Decimal> = arg0.round(d, RoundMode::Truncate).into();
+    let res: codec::Result<Decimal> = arg0.clone().round(d, RoundMode::Truncate).into();
     Ok(Some(res?))
 }
 
@@ -901,7 +901,7 @@ mod tests {
             let arg = arg.parse::<Decimal>().ok();
             let expect_output = expect_output.parse::<Decimal>().ok();
             let output = RpnFnScalarEvaluator::new()
-                .push_param(arg)
+                .push_param(arg.clone())
                 .evaluate(ScalarFuncSig::AbsDecimal)
                 .unwrap();
             assert_eq!(output, expect_output, "{:?}", arg);

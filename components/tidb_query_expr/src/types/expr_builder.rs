@@ -65,24 +65,7 @@ impl RpnExpressionBuilder {
     /// Gets the result type when expression tree is converted to RPN expression
     /// and evaluated. The result type will be either scalar or vector.
     pub fn is_expr_eval_to_scalar(c: &Expr) -> Result<bool> {
-        match c.get_tp() {
-            ExprType::Null
-            | ExprType::Int64
-            | ExprType::Uint64
-            | ExprType::String
-            | ExprType::Bytes
-            | ExprType::Float32
-            | ExprType::Float64
-            | ExprType::MysqlTime
-            | ExprType::MysqlDuration
-            | ExprType::MysqlDecimal
-            | ExprType::MysqlJson
-            | ExprType::MysqlEnum
-            | ExprType::TiDbVectorFloat32 => Ok(true),
-            ExprType::ScalarFunc => Ok(false),
-            ExprType::ColumnRef => Ok(false),
-            _ => Err(other_err!("Unsupported expression type {:?}", c.get_tp())),
-        }
+        super::function::wire_expr_type_is_scalar(c.get_tp())
     }
 
     /// Builds the RPN expression node list from an expression definition tree.
@@ -92,12 +75,7 @@ impl RpnExpressionBuilder {
         max_columns: usize,
     ) -> Result<RpnExpression> {
         let mut expr_nodes = Vec::new();
-        let mut build_ctx = RpnBuildContext::new(
-            ctx,
-            super::super::map_expr_node_to_rpn_func,
-            super::super::map_expr_node_to_sc_func,
-            max_columns,
-        );
+        let mut build_ctx = RpnBuildContext::new(ctx, super::super::select_expr_node, max_columns);
         build_ctx.append_rpn_nodes_recursively(
             tree_node,
             ScalarFuncSig::Unspecified,
@@ -109,13 +87,14 @@ impl RpnExpressionBuilder {
 
     /// Only used in tests, with a customized function mapper.
     #[cfg(test)]
-    pub fn build_from_expr_tree_with_fn_mapper<F>(
+    pub(crate) fn build_from_expr_tree_with_fn_mapper<F, M>(
         tree_node: Expr,
         fn_mapper: F,
         max_columns: usize,
     ) -> Result<RpnExpression>
     where
-        F: Fn(&Expr) -> Result<RpnFnMeta> + Copy,
+        F: Fn(&Expr) -> Result<M> + Copy,
+        M: Into<super::function::SelectedCall>,
     {
         Self::build_from_expr_tree_with_fn_mapper_and_ctx(
             tree_node,
@@ -128,20 +107,20 @@ impl RpnExpressionBuilder {
     /// Only used in tests, with a customized function mapper and evaluation
     /// context. The context controls request flags used while building.
     #[cfg(test)]
-    pub fn build_from_expr_tree_with_fn_mapper_and_ctx<F>(
+    pub(crate) fn build_from_expr_tree_with_fn_mapper_and_ctx<F, M>(
         tree_node: Expr,
         ctx: &mut EvalContext,
         fn_mapper: F,
         max_columns: usize,
     ) -> Result<RpnExpression>
     where
-        F: Fn(&Expr) -> Result<RpnFnMeta> + Copy,
+        F: Fn(&Expr) -> Result<M> + Copy,
+        M: Into<super::function::SelectedCall>,
     {
         let mut expr_nodes = Vec::new();
         let mut build_ctx = RpnBuildContext::new(
             ctx,
-            fn_mapper,
-            super::super::map_expr_node_to_sc_func,
+            |expr: &Expr| fn_mapper(expr).map(Into::into),
             max_columns,
         );
         build_ctx.append_rpn_nodes_recursively(
@@ -288,26 +267,23 @@ impl AsRef<[RpnExpressionNode]> for RpnExpressionBuilder {
 /// flattened to avoid recursive evaluation.
 ///
 /// This context carries the dependencies shared by every recursive call.
-struct RpnBuildContext<'a, F, SCF> {
+struct RpnBuildContext<'a, F> {
     ctx: &'a mut EvalContext,
     fn_mapper: F,
-    sc_fn_mapper: SCF,
     max_columns: usize,
     // TODO: Passing `max_columns` is only a workaround solution that works when we only check
     // column offset. To totally check whether or not the expression is valid, we need to pass in
     // the full schema instead.
 }
 
-impl<'a, F, SCF> RpnBuildContext<'a, F, SCF>
+impl<'a, F> RpnBuildContext<'a, F>
 where
-    F: Fn(&Expr) -> Result<RpnFnMeta>,
-    SCF: Fn(&Expr) -> Option<ShortCircuitFnMeta>,
+    F: Fn(&Expr) -> Result<super::function::SelectedCall>,
 {
-    fn new(ctx: &'a mut EvalContext, fn_mapper: F, sc_fn_mapper: SCF, max_columns: usize) -> Self {
+    fn new(ctx: &'a mut EvalContext, fn_mapper: F, max_columns: usize) -> Self {
         Self {
             ctx,
             fn_mapper,
-            sc_fn_mapper,
             max_columns,
         }
     }
@@ -342,22 +318,21 @@ where
         depth: usize,
         rpn_nodes: &mut Vec<RpnExpressionNode>,
     ) -> Result<()> {
-        let short_circuit_func_meta = (self.sc_fn_mapper)(&tree_node);
-
-        // Map, validate, and initialize metadata before taking the children because
-        // each of these operations may inspect the original expression tree.
-        let func_meta = (self.fn_mapper)(&tree_node)?;
-        (func_meta.validator_ptr)(&tree_node).map_err(|e| {
-            other_err!(
-                "Invalid {} (sig = {:?}) signature: {}",
-                func_meta.name,
-                tree_node.get_sig(),
-                e
-            )
-        })?;
-
-        let metadata = (func_meta.metadata_expr_ptr)(&mut tree_node)?;
-        let args: Vec<_> = tree_node.take_children().into();
+        // Selection happens once. Preparation keeps its checked control tag;
+        // wire admission below still permits only legacy logical AND/OR.
+        let selected = (self.fn_mapper)(&tree_node)?;
+        let mut call = super::function::CallBuild::from_expr(&tree_node);
+        let prepared = super::function::prepare_selected_call(&mut call, selected)?;
+        let short_circuit_func_meta = prepared
+            .short_circuit_meta()
+            .filter(|meta| meta.kind.is_logical());
+        let mut original: Vec<Option<Expr>> =
+            tree_node.take_children().into_iter().map(Some).collect();
+        let args: Vec<_> = prepared
+            .retained_args()
+            .iter()
+            .map(|&index| original[index].take().expect("validated retained argument"))
+            .collect();
         let args_len = args.len();
 
         let can_flatten_with_parent =
@@ -440,12 +415,7 @@ where
                 )?
             }
         }
-        rpn_nodes.push(RpnExpressionNode::FnCall {
-            func_meta,
-            args_len,
-            field_type: tree_node.take_field_type(),
-            metadata,
-        });
+        rpn_nodes.push(prepared.into_node());
         Ok(())
     }
 
@@ -1190,7 +1160,7 @@ mod tests {
         let exp = RpnExpressionBuilder::build_from_expr_tree_with_fn_mapper_and_ctx(
             node,
             &mut ctx,
-            crate::map_expr_node_to_rpn_func,
+            crate::select_expr_node,
             1,
         )
         .unwrap();
@@ -1218,7 +1188,7 @@ mod tests {
 
         let eager_exp = RpnExpressionBuilder::build_from_expr_tree_with_fn_mapper(
             node.clone(),
-            crate::map_expr_node_to_rpn_func,
+            crate::select_expr_node,
             0,
         )
         .unwrap();
@@ -1232,7 +1202,7 @@ mod tests {
         let exp = RpnExpressionBuilder::build_from_expr_tree_with_fn_mapper_and_ctx(
             node,
             &mut ctx,
-            crate::map_expr_node_to_rpn_func,
+            crate::select_expr_node,
             0,
         )
         .unwrap();
@@ -1273,7 +1243,7 @@ mod tests {
         let exp = RpnExpressionBuilder::build_from_expr_tree_with_fn_mapper_and_ctx(
             node,
             &mut ctx,
-            crate::map_expr_node_to_rpn_func,
+            crate::select_expr_node,
             4,
         )
         .unwrap();

@@ -200,7 +200,10 @@ pub trait UnsafeRefInto<T> {
 }
 
 /// A trait of all types that can be used during evaluation (eval type).
-pub trait Evaluable: Clone + std::fmt::Debug + Send + Sync + 'static {
+///
+/// `Default` supplies a valid owned backing value for NULL slots. The container
+/// bitmap, not that backing value, determines whether the slot is NULL.
+pub trait Evaluable: Clone + Default + std::fmt::Debug + Send + Sync + 'static {
     const EVAL_TYPE: EvalType;
 
     /// Borrows this concrete type from a `ScalarValue` in the same type;

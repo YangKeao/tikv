@@ -5,19 +5,19 @@ use std::{
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
-    intrinsics::copy_nonoverlapping,
     mem,
     ops::{Add, Deref, DerefMut, Div, Mul, Neg, Rem, Sub},
     str::{self, FromStr},
 };
 
 use codec::prelude::*;
+use smallvec::SmallVec;
 use tikv_util::escape;
 
 use crate::{
     codec::{
         Error, Result, TEN_POW,
-        convert::{self, ConvertTo, ToStringValue},
+        convert::{ConvertTo, ToStringValue},
         data_type::*,
         mysql::DEFAULT_DIV_FRAC_INCR,
     },
@@ -69,6 +69,17 @@ impl<T> Res<T> {
         truncated_err: Option<Error>,
         overflow_err: Option<Error>,
     ) -> Result<T> {
+        self.into_result_with_error_factory(ctx, truncated_err, || {
+            overflow_err.unwrap_or_else(|| Error::overflow("DECIMAL", ""))
+        })
+    }
+
+    fn into_result_with_error_factory<F: FnOnce() -> Error>(
+        self,
+        ctx: &mut EvalContext,
+        truncated_err: Option<Error>,
+        overflow_err: F,
+    ) -> Result<T> {
         match self {
             Res::Ok(t) => Ok(t),
             Res::Truncated(t) => if let Some(error) = truncated_err {
@@ -77,14 +88,19 @@ impl<T> Res<T> {
                 ctx.handle_truncate(true)
             }
             .map(|()| t),
-
-            Res::Overflow(t) => if let Some(error) = overflow_err {
-                ctx.handle_overflow_err(error)
-            } else {
-                ctx.handle_overflow_err(Error::overflow("DECIMAL", ""))
-            }
-            .map(|()| t),
+            Res::Overflow(t) => ctx.handle_overflow_err(overflow_err()).map(|()| t),
         }
+    }
+
+    /// Construct the supplied overflow error only for `Res::Overflow`.
+    /// Ok/Truncated retain the same payload/context handling without invoking
+    /// this factory, even when truncation itself becomes an error.
+    pub fn into_result_with_overflow_err_lazy<F: FnOnce() -> Error>(
+        self,
+        ctx: &mut EvalContext,
+        overflow_err: F,
+    ) -> Result<T> {
+        self.into_result_with_error_factory(ctx, None, overflow_err)
     }
 
     pub fn into_result_with_overflow_err(
@@ -128,25 +144,330 @@ impl<T> DerefMut for Res<T> {
     }
 }
 
-// A `Decimal` holds 9 words.
-const WORD_BUF_LEN: u8 = 9;
+// The existing arithmetic policy and physical cell retain a nine-word limit.
+// This is not the capacity of the owning logical representation.
+const WORD_BUF_LEN: usize = 9;
 // A word holds 9 digits.
-const DIGITS_PER_WORD: u8 = 9;
+const DIGITS_PER_WORD: usize = 9;
 // A word is 4 bytes i32.
-const WORD_SIZE: u8 = 4;
+const WORD_SIZE: usize = 4;
 const DIG_MASK: u32 = TEN_POW[8];
 const WORD_BASE: u32 = TEN_POW[9];
 const WORD_MAX: u32 = WORD_BASE - 1;
-const MAX_FRACTION: u8 = 30;
-const DIG_2_BYTES: &[u8] = &[0, 1, 1, 2, 2, 3, 3, 4, 4, 4];
+const MAX_FRACTION: usize = 30;
+const DIG_2_BYTES: &[usize] = &[0, 1, 1, 2, 2, 3, 3, 4, 4, 4];
 const FRAC_MAX: &[u32] = &[
     900000000, 990000000, 999000000, 999900000, 999990000, 999999000, 999999900, 999999990,
 ];
-const NOT_FIXED_DEC: u8 = 31;
+const NOT_FIXED_DEC: usize = 31;
+
+/// SQL parsing disposition, separate from resource/layout/count failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecimalParseStatus {
+    Ok,
+    Truncated,
+    Overflow,
+    BadNumber,
+    TruncatedWrongValue,
+}
+
+#[derive(Clone, Debug)]
+pub struct DecimalParseOutcome {
+    pub value: Decimal,
+    pub status: DecimalParseStatus,
+}
+
+/// Lexical and ordered-disposition contracts over one scanner/word packer.
+/// Canonical admits only a complete decimal lexeme, never an exponent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecimalParsePolicy {
+    Legacy(usize),
+    Mysql(usize),
+    Canonical,
+}
+
+impl DecimalParsePolicy {
+    fn limit(self) -> WordLimit {
+        match self {
+            Self::Legacy(words) | Self::Mysql(words) => WordLimit::Fixed(words),
+            Self::Canonical => WordLimit::Grow,
+        }
+    }
+
+    fn legacy(self) -> bool {
+        matches!(self, Self::Legacy(_))
+    }
+}
+
+/// Only the reset/rounding/disposition choices differ; shifts use the same
+/// word-alignment and move loops. This is not stored on a Decimal value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShiftDisposition {
+    Legacy,
+    Mysql,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShiftStatusOrigin {
+    Direct,
+    Rounding,
+}
+
+struct DecimalShiftOutcome {
+    result: Res<Decimal>,
+    origin: ShiftStatusOrigin,
+}
+
+impl DecimalShiftOutcome {
+    fn direct(result: Res<Decimal>) -> Self {
+        Self {
+            result,
+            origin: ShiftStatusOrigin::Direct,
+        }
+    }
+}
+
+fn first_utf8_char(bytes: &[u8]) -> Option<(char, usize)> {
+    let width = match *bytes.first()? {
+        0..=0x7f => 1,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return None,
+    };
+    let prefix = str::from_utf8(bytes.get(..width)?).ok()?;
+    Some((prefix.chars().next()?, width))
+}
+
+/// Go strings.TrimSpace semantics at the edges without requiring a complete
+/// UTF-8 input. An invalid byte is junk, not a codec decoding failure.
+fn trim_unicode_space(mut bytes: &[u8]) -> &[u8] {
+    while let Some((character, width)) = first_utf8_char(bytes) {
+        if !character.is_whitespace() {
+            break;
+        }
+        bytes = &bytes[width..];
+    }
+    while !bytes.is_empty() {
+        let mut start = bytes.len() - 1;
+        while start > 0 && bytes[start] & 0xc0 == 0x80 && bytes.len() - start < 4 {
+            start -= 1;
+        }
+        let Some((character, width)) = first_utf8_char(&bytes[start..]) else {
+            break;
+        };
+        if width != bytes.len() - start || !character.is_whitespace() {
+            break;
+        }
+        bytes = &bytes[..start];
+    }
+    bytes
+}
+
+struct DecimalExponent {
+    value: i64,
+    status: DecimalParseStatus,
+}
+
+/// One exponent digit scan. Source range validation also runs after junk;
+/// legacy suppresses junk warnings but retains its outer BIGINT range error.
+fn scan_decimal_exponent(bytes: &[u8], legacy: bool) -> Result<DecimalExponent> {
+    let bytes = if legacy {
+        let start = bytes
+            .iter()
+            .position(|byte| *byte != b' ' && *byte != b'\t')
+            .unwrap_or(bytes.len());
+        &bytes[start..]
+    } else {
+        trim_unicode_space(bytes)
+    };
+    let (negative, start) = match bytes.first() {
+        Some(b'-') => (true, 1),
+        Some(b'+') => (false, 1),
+        _ => (false, 0),
+    };
+    let mut magnitude = 0_u64;
+    let mut has_digit = false;
+    let mut status = DecimalParseStatus::Ok;
+    for byte in &bytes[start..] {
+        if !byte.is_ascii_digit() {
+            status = DecimalParseStatus::Truncated;
+            break;
+        }
+        has_digit = true;
+        let Some(next) = magnitude
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u64::from(byte - b'0')))
+        else {
+            if legacy {
+                return Err(Error::overflow("BIGINT", ""));
+            }
+            magnitude = 0;
+            status = DecimalParseStatus::BadNumber;
+            break;
+        };
+        magnitude = next;
+        if legacy && magnitude > (i64::MAX as u64 + u64::from(negative)) {
+            return Err(Error::overflow("BIGINT", ""));
+        }
+    }
+    if !has_digit {
+        status = DecimalParseStatus::Truncated;
+    }
+    let value = if !negative && magnitude > i64::MAX as u64 {
+        status = DecimalParseStatus::BadNumber;
+        i64::MAX
+    } else if negative && magnitude > i64::MAX as u64 + 1 {
+        status = DecimalParseStatus::BadNumber;
+        i64::MIN
+    } else if negative && magnitude == i64::MAX as u64 + 1 {
+        i64::MIN
+    } else if negative {
+        -(magnitude as i64)
+    } else {
+        magnitude as i64
+    };
+    if legacy {
+        status = DecimalParseStatus::Ok;
+    }
+    Ok(DecimalExponent { value, status })
+}
+
+/// Capacity policy for the one set of word workers. This is independent of
+/// SQL declaration limits and of a result's visible fraction count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WordLimit {
+    Grow,
+    Fixed(usize),
+}
+
+impl WordLimit {
+    fn apply(self, int_words: usize, frac_words: usize) -> Result<Res<(usize, usize)>> {
+        match self {
+            Self::Fixed(words) => Ok(fix_word_cnt_err(int_words, frac_words, words)),
+            Self::Grow => {
+                checked_word_extent(int_words, frac_words)?;
+                Ok(Res::Ok((int_words, frac_words)))
+            }
+        }
+    }
+}
+
+/// A bounded stack buffer shared by storage and result formatting. A common
+/// inline decimal is emitted in one write; arbitrarily long zero tails use
+/// this same fixed space and stop as soon as the destination reports failure.
+struct DecimalTextWriter<'a> {
+    out: &'a mut dyn fmt::Write,
+    bytes: [u8; 128],
+    len: usize,
+}
+
+impl<'a> DecimalTextWriter<'a> {
+    fn new(out: &'a mut dyn fmt::Write) -> Self {
+        Self {
+            out,
+            bytes: [0; 128],
+            len: 0,
+        }
+    }
+
+    fn flush(&mut self) -> fmt::Result {
+        if self.len != 0 {
+            let text = str::from_utf8(&self.bytes[..self.len]).map_err(|_| fmt::Error)?;
+            self.out.write_str(text)?;
+            self.len = 0;
+        }
+        Ok(())
+    }
+
+    fn byte(&mut self, byte: u8) -> fmt::Result {
+        if self.len == self.bytes.len() {
+            self.flush()?;
+        }
+        self.bytes[self.len] = byte;
+        self.len += 1;
+        Ok(())
+    }
+
+    fn word(&mut self, word: u32, digits: usize, skip_low: usize) -> fmt::Result {
+        let mut value = word / TEN_POW[skip_low];
+        let mut bytes = [b'0'; DIGITS_PER_WORD];
+        for byte in bytes[..digits].iter_mut().rev() {
+            *byte += (value % 10) as u8;
+            value /= 10;
+        }
+        for byte in &bytes[..digits] {
+            self.byte(*byte)?;
+        }
+        Ok(())
+    }
+
+    fn zeroes(&mut self, mut count: usize) -> fmt::Result {
+        while count > 0 {
+            if self.len == self.bytes.len() {
+                self.flush()?;
+            }
+            let written = count.min(self.bytes.len() - self.len);
+            self.bytes[self.len..self.len + written].fill(b'0');
+            self.len += written;
+            count -= written;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> fmt::Result {
+        self.flush()
+    }
+}
+
+#[derive(Default)]
+struct DecimalTextCounter {
+    bytes: usize,
+}
+
+impl fmt::Write for DecimalTextCounter {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        self.bytes = self.bytes.checked_add(text.len()).ok_or(fmt::Error)?;
+        Ok(())
+    }
+}
+
+fn decimal_resource_error(detail: &str) -> Error {
+    Error::InvalidDataType(format!("decimal resource/count failure: {detail}"))
+}
+
+fn checked_word_extent(int_words: usize, frac_words: usize) -> Result<usize> {
+    let words = int_words
+        .checked_add(frac_words)
+        .ok_or_else(|| decimal_resource_error("active word count overflow"))?;
+    words
+        .max(WORD_BUF_LEN)
+        .checked_mul(mem::size_of::<u32>())
+        .filter(|bytes| *bytes <= isize::MAX as usize)
+        .ok_or_else(|| decimal_resource_error("word allocation size overflow"))?;
+    Ok(words)
+}
+
+fn checked_word_digits(words: usize) -> Result<usize> {
+    words
+        .checked_mul(DIGITS_PER_WORD)
+        .ok_or_else(|| decimal_resource_error("word-aligned digit count overflow"))
+}
+
+fn checked_decimal_position(position: i128) -> Result<usize> {
+    usize::try_from(position)
+        .map_err(|_| decimal_resource_error("digit/word position exceeds indexing domain"))
+}
+
+fn checked_fraction(count: usize) -> Result<usize> {
+    u32::try_from(count)
+        .map(|_| count)
+        .map_err(|_| decimal_resource_error("fraction count exceeds u32"))
+}
 
 macro_rules! word_cnt {
     ($len:expr) => {
-        word_cnt!($len, u8)
+        word_cnt!($len, usize)
     };
     ($len:expr, $t:ty) => {{
         if $len > 0 && $len as usize > (DIGITS_PER_WORD * WORD_BUF_LEN) as usize {
@@ -171,8 +492,8 @@ pub fn dec_encoded_len(encoded: &[u8]) -> Result<usize> {
         return Err(box_err!("decimal too short: {} < 2", encoded.len()));
     }
 
-    let precision = encoded[0];
-    let frac_cnt = encoded[1];
+    let precision = usize::from(encoded[0]);
+    let frac_cnt = usize::from(encoded[1]);
     if precision < frac_cnt {
         return Err(box_err!(
             "invalid decimal, precision {} < frac_cnt {}",
@@ -192,7 +513,7 @@ pub fn dec_encoded_len(encoded: &[u8]) -> Result<usize> {
 
 /// `count_leading_zeroes` returns the number of leading zeroes that can be
 /// removed from int.
-fn count_leading_zeroes(i: u8, word: u32) -> u8 {
+fn count_leading_zeroes(i: usize, word: u32) -> usize {
     let (mut c, mut i) = (0, i as usize);
     while TEN_POW[i] > word {
         i -= 1;
@@ -203,7 +524,7 @@ fn count_leading_zeroes(i: u8, word: u32) -> u8 {
 
 /// `count_trailing_zeroes` returns the number of trailing zeroes that can be
 /// removed from fraction.
-fn count_trailing_zeroes(i: u8, word: u32) -> u8 {
+fn count_trailing_zeroes(i: usize, word: u32) -> usize {
     let (mut c, mut i) = (0, i as usize);
     while word.is_multiple_of(TEN_POW[i]) {
         i += 1;
@@ -225,11 +546,15 @@ fn add(a: u32, b: u32, carry: &mut u32, res: &mut u32) {
 }
 
 /// `fix_word_cnt_err` limits word count in `word_buf_len`.
-fn fix_word_cnt_err(int_word_cnt: u8, frac_word_cnt: u8, word_buf_len: u8) -> Res<(u8, u8)> {
-    if int_word_cnt + frac_word_cnt > word_buf_len {
-        if int_word_cnt > word_buf_len {
-            return Res::Overflow((word_buf_len, 0));
-        }
+fn fix_word_cnt_err(
+    int_word_cnt: usize,
+    frac_word_cnt: usize,
+    word_buf_len: usize,
+) -> Res<(usize, usize)> {
+    if int_word_cnt > word_buf_len {
+        return Res::Overflow((word_buf_len, 0));
+    }
+    if frac_word_cnt > word_buf_len - int_word_cnt {
         return Res::Truncated((int_word_cnt, word_buf_len - int_word_cnt));
     }
     Res::Ok((int_word_cnt, frac_word_cnt))
@@ -263,7 +588,7 @@ fn sub2(lhs: u32, rhs: u32, carry: &mut i32, res: &mut u32) {
     *res = diff as u32;
 }
 
-type SubTmp = (usize, usize, u8);
+type SubTmp = (usize, usize, usize);
 
 /// calculate the carry for lhs - rhs, returns the carry and needed temporary
 /// results for beginning a subtraction.
@@ -275,9 +600,9 @@ type SubTmp = (usize, usize, u8);
 /// l_frac_word_cnt and r_frac_word_cnt do not contain the suffix 0 when
 /// r_int_word_cnt == l_int_word_cnt.
 #[inline]
-fn calc_sub_carry(lhs: &Decimal, rhs: &Decimal) -> (Option<i32>, u8, SubTmp, SubTmp) {
-    let (l_int_word_cnt, mut l_frac_word_cnt) = (word_cnt!(lhs.int_cnt), word_cnt!(lhs.frac_cnt));
-    let (r_int_word_cnt, mut r_frac_word_cnt) = (word_cnt!(rhs.int_cnt), word_cnt!(rhs.frac_cnt));
+fn calc_sub_carry(lhs: &Decimal, rhs: &Decimal) -> (Option<i32>, usize, SubTmp, SubTmp) {
+    let (l_int_word_cnt, mut l_frac_word_cnt) = (lhs.int_words(), lhs.frac_words());
+    let (r_int_word_cnt, mut r_frac_word_cnt) = (rhs.int_words(), rhs.frac_words());
     let frac_word_to = cmp::max(l_frac_word_cnt, r_frac_word_cnt);
 
     let (l_stop, mut l_idx) = (l_int_word_cnt as usize, 0usize);
@@ -297,8 +622,8 @@ fn calc_sub_carry(lhs: &Decimal, rhs: &Decimal) -> (Option<i32>, u8, SubTmp, Sub
     let carry = match r_int_word_cnt.cmp(&l_int_word_cnt) {
         Ordering::Greater => Some(1),
         Ordering::Equal => {
-            let mut l_end = (l_stop + l_frac_word_cnt as usize - 1) as isize;
-            let mut r_end = (r_stop + r_frac_word_cnt as usize - 1) as isize;
+            let mut l_end = (l_stop + l_frac_word_cnt) as isize - 1;
+            let mut r_end = (r_stop + r_frac_word_cnt) as isize - 1;
             // trims suffix 0(also trims the suffix 0 before the point
             // when there is no digit after point).
             while l_idx as isize <= l_end && lhs.word_buf[l_end as usize] == 0 {
@@ -312,10 +637,10 @@ fn calc_sub_carry(lhs: &Decimal, rhs: &Decimal) -> (Option<i32>, u8, SubTmp, Sub
             }
             // here l_end is the last nonzero index in l.word_buf, attention:it may in the
             // range of (0,l_int_word_cnt)
-            l_frac_word_cnt = cmp::max(0, l_end + 1 - l_stop as isize) as u8;
+            l_frac_word_cnt = cmp::max(0, l_end + 1 - l_stop as isize) as usize;
             // here r_end is the last nonzero index in r.word_buf, attention:it may in the
             // range of (0,r_int_word_cnt)
-            r_frac_word_cnt = cmp::max(0, r_end + 1 - r_stop as isize) as u8;
+            r_frac_word_cnt = cmp::max(0, r_end + 1 - r_stop as isize) as usize;
             while l_idx as isize <= l_end
                 && r_idx as isize <= r_end
                 && lhs.word_buf[l_idx] == rhs.word_buf[r_idx]
@@ -342,11 +667,26 @@ fn calc_sub_carry(lhs: &Decimal, rhs: &Decimal) -> (Option<i32>, u8, SubTmp, Sub
     (carry, frac_word_to, l_res, r_res)
 }
 
-/// subtract rhs from lhs when lhs.negative=rhs.negative.
-fn do_sub<'a>(mut lhs: &'a Decimal, mut rhs: &'a Decimal) -> Res<Decimal> {
+/// Subtract rhs from lhs when lhs.negative=rhs.negative.
+fn do_sub(lhs: &Decimal, rhs: &Decimal) -> Res<Decimal> {
+    do_sub_with_limit(lhs, rhs, WordLimit::Fixed(WORD_BUF_LEN))
+        .expect("bounded Decimal subtraction allocation failed")
+}
+
+fn do_sub_with_limit<'a>(
+    mut lhs: &'a Decimal,
+    mut rhs: &'a Decimal,
+    limit: WordLimit,
+) -> Result<Res<Decimal>> {
     let (carry, mut frac_word_to, l_res, r_res) = calc_sub_carry(lhs, rhs);
     if carry.is_none() {
-        return Res::Ok(Decimal::zero());
+        let value = if limit == WordLimit::Grow {
+            let frac = cmp::max(lhs.frac_cnt, rhs.frac_cnt);
+            Decimal::try_new(usize::from(frac == 0), frac, false)?
+        } else {
+            Decimal::zero()
+        };
+        return Ok(Res::Ok(value));
     }
     let (mut l_start, mut l_int_word_cnt, mut l_frac_word_cnt) = l_res;
     let (mut r_start, mut r_int_word_cnt, mut r_frac_word_cnt) = r_res;
@@ -362,12 +702,12 @@ fn do_sub<'a>(mut lhs: &'a Decimal, mut rhs: &'a Decimal) -> Res<Decimal> {
         lhs.negative
     };
 
-    let res = fix_word_cnt_err(l_int_word_cnt as u8, frac_word_to, WORD_BUF_LEN);
-    l_int_word_cnt = res.0 as usize;
+    let res = limit.apply(l_int_word_cnt, frac_word_to)?;
+    l_int_word_cnt = res.0;
     frac_word_to = res.1;
-    let mut idx_to = l_int_word_cnt + frac_word_to as usize;
+    let mut idx_to = checked_word_extent(l_int_word_cnt, frac_word_to)?;
     let mut frac_cnt = cmp::max(lhs.frac_cnt, rhs.frac_cnt);
-    let int_cnt = l_int_word_cnt as u8 * DIGITS_PER_WORD;
+    let int_cnt = checked_word_digits(l_int_word_cnt)?;
     if !res.is_ok() {
         frac_cnt = cmp::min(frac_cnt, frac_word_to * DIGITS_PER_WORD);
         l_frac_word_cnt = cmp::min(l_frac_word_cnt, frac_word_to);
@@ -375,7 +715,8 @@ fn do_sub<'a>(mut lhs: &'a Decimal, mut rhs: &'a Decimal) -> Res<Decimal> {
         r_int_word_cnt = cmp::min(r_int_word_cnt, l_int_word_cnt);
     }
     let mut carry = 0;
-    let mut res = res.map(|_| Decimal::new(int_cnt, frac_cnt, negative));
+    let value = Decimal::try_new(int_cnt, frac_cnt, negative)?;
+    let mut res = res.map(|_| value);
     let mut l_idx = l_start + l_int_word_cnt + l_frac_word_cnt as usize;
     let mut r_idx = r_start + r_int_word_cnt + r_frac_word_cnt as usize;
     // adjust `l_idx` and `r_idx` to the same position of digits after the point.
@@ -435,20 +776,43 @@ fn do_sub<'a>(mut lhs: &'a Decimal, mut rhs: &'a Decimal) -> Res<Decimal> {
         l_idx -= 1;
         res.word_buf[idx_to] = lhs.word_buf[l_idx];
     }
-    res
+    res.try_ensure_storage()?;
+    Ok(res)
 }
 
-/// Get the max possible decimal with giving precision and fraction digit count.
-/// The `prec` should >= `frac_cnt`.
+fn checked_fixed_decimal_target(prec: u8, frac: u8) -> Result<(usize, usize)> {
+    if prec < frac {
+        return Err(Error::m_bigger_than_d(""));
+    }
+    let int_digits = usize::from(prec - frac);
+    let frac_digits = usize::from(frac);
+    let words = checked_word_extent(
+        int_digits.div_ceil(DIGITS_PER_WORD),
+        frac_digits.div_ceil(DIGITS_PER_WORD),
+    )?;
+    if words > WORD_BUF_LEN {
+        return Err(Error::InvalidDataType(format!(
+            "decimal target ({prec},{frac}) exceeds the nine-word layout"
+        )));
+    }
+    Ok((int_digits, frac_digits))
+}
+
+/// Get the maximum decimal for the given bounded precision/fraction shape.
 ///
 /// # Panics
 ///
-/// Will panic if `prec` < `frac_cnt`.
-/// The panic is because of `debug_assert`.
+/// Panics unless `prec >= frac_cnt` AND the separately rounded-up integer and
+/// fraction word counts sum to at most nine. This is not a SQL65/30 validator.
 pub fn max_decimal(prec: u8, frac_cnt: u8) -> Decimal {
-    debug_assert!(prec >= frac_cnt);
-    let int_cnt = prec - frac_cnt;
-    let mut res = Decimal::new(int_cnt, frac_cnt, false);
+    try_max_decimal(prec, frac_cnt)
+        .expect("max_decimal requires ordered counts and the existing nine-word layout")
+}
+
+/// Checked callers and legacy wrappers share this one fill loop.
+fn try_max_decimal(prec: u8, frac_cnt: u8) -> Result<Decimal> {
+    let (int_cnt, frac_cnt) = checked_fixed_decimal_target(prec, frac_cnt)?;
+    let mut res = Decimal::try_new(int_cnt, frac_cnt, false)?;
     let mut idx = 0;
     if int_cnt > 0 {
         let first_word_cnt = int_cnt % DIGITS_PER_WORD;
@@ -471,54 +835,81 @@ pub fn max_decimal(prec: u8, frac_cnt: u8) -> Decimal {
             res.word_buf[idx] = FRAC_MAX[last_digits as usize - 1];
         }
     }
-    res
+    Ok(res)
 }
 
 /// `max_or_min_dec`(`NewMaxOrMinDec` in tidb) returns the max or min
 /// value decimal for given precision and fraction.
-/// The `prec` should >= `frac_cnt`.
+/// The precision/fraction pair must fit the bounded layout.
 ///
 /// # Panics
 ///
-/// Will panic if `prec` < `frac_cnt`.
-/// The panic is because of `debug_assert`.
+/// Panics unless `prec >= frac` AND the separately rounded-up integer and
+/// fraction word counts sum to at most nine, as for `max_decimal`.
 pub fn max_or_min_dec(negative: bool, prec: u8, frac: u8) -> Decimal {
     let mut ret = max_decimal(prec, frac);
     ret.negative = negative;
     ret
 }
 
-/// add lhs to rhs.
-fn do_add<'a>(mut lhs: &'a Decimal, mut rhs: &'a Decimal) -> Res<Decimal> {
-    let (mut l_int_word_cnt, mut l_frac_word_cnt) =
-        (word_cnt!(lhs.int_cnt), word_cnt!(lhs.frac_cnt));
-    let (mut r_int_word_cnt, mut r_frac_word_cnt) =
-        (word_cnt!(rhs.int_cnt), word_cnt!(rhs.frac_cnt));
+/// Add lhs to rhs.
+fn do_add(lhs: &Decimal, rhs: &Decimal) -> Res<Decimal> {
+    do_add_with_limit(lhs, rhs, WordLimit::Fixed(WORD_BUF_LEN))
+        .expect("bounded Decimal addition allocation failed")
+}
+
+fn do_add_with_limit<'a>(
+    mut lhs: &'a Decimal,
+    mut rhs: &'a Decimal,
+    limit: WordLimit,
+) -> Result<Res<Decimal>> {
+    let (mut l_int_word_cnt, mut l_frac_word_cnt) = (lhs.int_words(), lhs.frac_words());
+    let (mut r_int_word_cnt, mut r_frac_word_cnt) = (rhs.int_words(), rhs.frac_words());
     let (mut int_word_to, frac_word_to) = (
         cmp::max(l_int_word_cnt, r_int_word_cnt),
         cmp::max(l_frac_word_cnt, r_frac_word_cnt),
     );
+    // An empty physical prefix has no numerical head word. Inactive bytes
+    // are preserved by transport, not used to predict an arithmetic carry.
+    let l_head = if l_int_word_cnt + l_frac_word_cnt == 0 {
+        0
+    } else {
+        lhs.word_buf[0]
+    };
+    let r_head = if r_int_word_cnt + r_frac_word_cnt == 0 {
+        0
+    } else {
+        rhs.word_buf[0]
+    };
     let x = match l_int_word_cnt.cmp(&r_int_word_cnt) {
-        Ordering::Greater => lhs.word_buf[0],
-        Ordering::Less => rhs.word_buf[0],
-        Ordering::Equal => lhs.word_buf[0] + rhs.word_buf[0],
+        Ordering::Greater => l_head,
+        Ordering::Less => r_head,
+        Ordering::Equal => l_head + r_head,
     };
     if x > WORD_MAX - 1 {
-        int_word_to += 1;
+        int_word_to = int_word_to
+            .checked_add(1)
+            .ok_or_else(|| decimal_resource_error("addition carry extent overflow"))?;
     }
-    let res = fix_word_cnt_err(int_word_to, frac_word_to, WORD_BUF_LEN);
+    let res = limit.apply(int_word_to, frac_word_to)?;
     if res.is_overflow() {
-        return Res::Overflow(max_decimal(WORD_BUF_LEN * DIGITS_PER_WORD, 0));
+        let mut max = Decimal::try_new(checked_word_digits(res.0)?, 0, false)?;
+        max.word_buf[..res.0].fill(WORD_MAX);
+        return Ok(Res::Overflow(max));
     }
     let (int_word_to, frac_word_to) = res.unwrap();
-    let mut idx_to = (int_word_to + frac_word_to) as usize;
-    let mut res = res.map(|_| {
-        Decimal::new(
-            int_word_to * DIGITS_PER_WORD,
-            cmp::max(lhs.frac_cnt, rhs.frac_cnt),
-            lhs.negative,
-        )
-    });
+    let mut idx_to = checked_word_extent(int_word_to, frac_word_to)?;
+    let source_frac = cmp::max(lhs.frac_cnt, rhs.frac_cnt);
+    let stored_frac = if res.is_ok() {
+        source_frac
+    } else {
+        cmp::min(checked_word_digits(frac_word_to)?, source_frac)
+    };
+    // Fixed preselection precedes allocation, rather than constructing a wide
+    // exact result and clipping it afterward.
+    let mut value = Decimal::try_new(checked_word_digits(int_word_to)?, stored_frac, lhs.negative)?;
+    value.result_frac_cnt = source_frac;
+    let mut res = res.map(|_| value);
     res.word_buf[0] = 0;
     if !res.is_ok() {
         res.frac_cnt = cmp::min(frac_word_to * DIGITS_PER_WORD, res.frac_cnt);
@@ -585,95 +976,265 @@ fn do_add<'a>(mut lhs: &'a Decimal, mut rhs: &'a Decimal) -> Res<Decimal> {
         idx_to -= 1;
         res.word_buf[idx_to] = 1;
     }
-    res
+    res.try_ensure_storage()?;
+    Ok(res)
+}
+
+/// Precision requests on the same base-1e9 long-division loop. An integer
+/// pair captures both guesses and the final scratch remainder in one pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DivisionRequest {
+    MysqlQuotient { frac_incr: usize },
+    RetainedQuotient { frac_words: usize },
+    Remainder,
+    IntegerPair,
+}
+
+impl DivisionRequest {
+    fn quotient(self) -> bool {
+        self != Self::Remainder
+    }
+
+    fn remainder(self) -> bool {
+        matches!(self, Self::Remainder | Self::IntegerPair)
+    }
+}
+
+struct DivisionOutput {
+    quotient: Option<Res<Decimal>>,
+    remainder: Option<Res<Decimal>>,
+}
+
+/// Legacy counter selection is not a numerical truth about an exact quotient.
+/// In particular Fixed MOD historically stops at the n+1-word sentinel even
+/// though it does not store the quotient. Grow must not inherit that cap.
+fn division_word_count(digits: usize, limit: WordLimit) -> usize {
+    let words = digits.div_ceil(DIGITS_PER_WORD);
+    match limit {
+        WordLimit::Grow => words,
+        WordLimit::Fixed(words_limit) => words.min(words_limit.saturating_add(1)),
+    }
+}
+
+fn try_zeroed_words(words: usize) -> Result<Vec<u32>> {
+    checked_word_extent(words, 0)?;
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(words)
+        .map_err(|_| decimal_resource_error("division scratch allocation failed"))?;
+    result.resize(words, 0);
+    Ok(result)
 }
 
 fn do_div_mod_impl(
     lhs: &Decimal,
     rhs: &Decimal,
-    mut frac_incr: u8,
+    frac_incr: usize,
     do_mod: bool,
-    result_frac_cnt: Option<u8>,
+    result_frac_cnt: Option<usize>,
 ) -> Option<Res<Decimal>> {
-    let r_frac_cnt = word_cnt!(rhs.frac_cnt) * DIGITS_PER_WORD;
-    let (r_idx, r_prec) = rhs.remove_leading_zeroes(rhs.int_cnt + r_frac_cnt);
-    if r_prec == 0 {
-        // short-circuit everything: rhs == 0
-        return None;
-    }
-
-    let l_frac_cnt = word_cnt!(lhs.frac_cnt) * DIGITS_PER_WORD;
-    let (l_idx, l_prec) = lhs.remove_leading_zeroes(lhs.int_cnt + l_frac_cnt);
-    if l_prec == 0 {
-        // short-circuit everything: lhs == 0
-        if let Some(result_frac) = result_frac_cnt {
-            return Some(Res::Ok(Decimal::new(0, result_frac, false)));
+    let request = if do_mod {
+        DivisionRequest::Remainder
+    } else {
+        DivisionRequest::MysqlQuotient { frac_incr }
+    };
+    divide_with_limit(
+        lhs,
+        rhs,
+        request,
+        WordLimit::Fixed(WORD_BUF_LEN),
+        result_frac_cnt,
+    )
+    .expect("bounded Decimal division count or allocation failed")
+    .map(|output| {
+        if do_mod {
+            output.remainder.expect("requested division remainder")
         } else {
-            return Some(Res::Ok(Decimal::zero()));
+            output.quotient.expect("requested division quotient")
         }
+    })
+}
+
+fn divide_with_limit(
+    lhs: &Decimal,
+    rhs: &Decimal,
+    request: DivisionRequest,
+    limit: WordLimit,
+    result_frac_cnt: Option<usize>,
+) -> Result<Option<DivisionOutput>> {
+    if request == DivisionRequest::IntegerPair && limit != WordLimit::Grow {
+        return Err(Error::InvalidDataType(
+            "full integer pair requires Grow capacity".to_owned(),
+        ));
+    }
+    // Input extents are real initialized extents, not the legacy quotient
+    // sentinel. Padded digit counts are intermediate counts, not u32 headers.
+    let l_frac_words = lhs.frac_words();
+    let r_frac_words = rhs.frac_words();
+    let l_frac_cnt = checked_word_digits(l_frac_words)?;
+    let r_frac_cnt = checked_word_digits(r_frac_words)?;
+    let r_full = rhs
+        .int_cnt
+        .checked_add(r_frac_cnt)
+        .ok_or_else(|| decimal_resource_error("divisor precision count overflow"))?;
+    let (r_idx, r_prec) = rhs.remove_leading_zeroes(r_full);
+    if r_prec == 0 {
+        return Ok(None);
+    }
+    let l_full = lhs
+        .int_cnt
+        .checked_add(l_frac_cnt)
+        .ok_or_else(|| decimal_resource_error("dividend precision count overflow"))?;
+    let (l_start, l_prec) = lhs.remove_leading_zeroes(l_full);
+    let remainder_scale = lhs.frac_cnt.max(rhs.frac_cnt);
+    let remainder_visible = result_frac_cnt.unwrap_or(lhs.result_frac_cnt.max(rhs.result_frac_cnt));
+    let requested_frac_words = match request {
+        DivisionRequest::MysqlQuotient { frac_incr } => {
+            let padding = (l_frac_cnt - lhs.frac_cnt) + (r_frac_cnt - rhs.frac_cnt);
+            let increment = frac_incr.saturating_sub(padding);
+            let digits = match limit {
+                WordLimit::Fixed(_) => l_frac_cnt
+                    .saturating_add(r_frac_cnt)
+                    .saturating_add(increment),
+                WordLimit::Grow => l_frac_cnt
+                    .checked_add(r_frac_cnt)
+                    .and_then(|digits| digits.checked_add(increment))
+                    .ok_or_else(|| decimal_resource_error("division retained scale overflow"))?,
+            };
+            division_word_count(digits, limit)
+        }
+        DivisionRequest::RetainedQuotient { frac_words } => frac_words,
+        DivisionRequest::Remainder | DivisionRequest::IntegerPair => 0,
+    };
+    if l_prec == 0 {
+        // Legacy zero uses the requested visible scale; AVG and exact
+        // remainder instead retain their independently planned storage scale.
+        let quotient = if request.quotient() {
+            let mut zero = match request {
+                DivisionRequest::RetainedQuotient { .. } => {
+                    Decimal::try_new(0, checked_word_digits(requested_frac_words)?, false)?
+                }
+                DivisionRequest::MysqlQuotient { .. } => {
+                    if let Some(scale) = result_frac_cnt {
+                        Decimal::try_new(0, scale, false)?
+                    } else {
+                        Decimal::zero()
+                    }
+                }
+                DivisionRequest::IntegerPair => Decimal::zero(),
+                DivisionRequest::Remainder => unreachable!(),
+            };
+            if let Some(scale) = result_frac_cnt {
+                zero.result_frac_cnt = checked_fraction(scale)?;
+            }
+            Some(Res::Ok(zero))
+        } else {
+            None
+        };
+        let remainder = if request.remainder() {
+            // Keep the entire legacy result-byte domain unchanged. A newly
+            // wide visible scale is presentation metadata, not permission to
+            // allocate that many stored zero digits in a Fixed operation.
+            let retain_input_storage =
+                limit == WordLimit::Grow || remainder_visible > usize::from(u8::MAX);
+            let mut zero = if retain_input_storage {
+                Decimal::try_new(0, remainder_scale, false)?
+            } else if let Some(scale) = result_frac_cnt {
+                Decimal::try_new(0, scale, false)?
+            } else {
+                Decimal::zero()
+            };
+            if retain_input_storage {
+                zero.result_frac_cnt = checked_fraction(remainder_visible)?;
+            }
+            Some(Res::Ok(zero))
+        } else {
+            None
+        };
+        return Ok(Some(DivisionOutput {
+            quotient,
+            remainder,
+        }));
     }
 
-    frac_incr = frac_incr.saturating_sub(l_frac_cnt - lhs.frac_cnt + r_frac_cnt - rhs.frac_cnt);
-    let mut int_cnt_to =
-        (i32::from(l_prec) - i32::from(l_frac_cnt)) - (i32::from(r_prec) - i32::from(r_frac_cnt));
-
-    if lhs.word_buf[l_idx] >= rhs.word_buf[r_idx] {
-        int_cnt_to += 1;
-    }
-    let mut int_word_to = if int_cnt_to < 0 {
-        int_cnt_to /= i32::from(DIGITS_PER_WORD);
-        0
-    } else {
-        word_cnt!(int_cnt_to)
-    };
-
-    let mut frac_word_to;
-    let mut res = if do_mod {
-        frac_word_to = 0;
-        let frac_cnt = cmp::max(lhs.frac_cnt, rhs.frac_cnt);
-        Res::Ok(Decimal::new(0, frac_cnt, lhs.negative))
-    } else {
-        frac_word_to = word_cnt!(
-            l_frac_cnt
-                .saturating_add(r_frac_cnt)
-                .saturating_add(frac_incr)
-        );
-        let res = fix_word_cnt_err(int_word_to, frac_word_to, WORD_BUF_LEN);
-        int_word_to = res.0;
-        frac_word_to = res.1;
-        res.map(|_| {
-            Decimal::new(
-                int_word_to * DIGITS_PER_WORD,
-                frac_word_to * DIGITS_PER_WORD,
-                lhs.negative != rhs.negative,
-            )
-        })
-    };
-    let mut idx_to = if !do_mod && int_cnt_to < 0 {
-        cmp::min((-int_cnt_to) as u8, WORD_BUF_LEN)
+    // Signed digit displacement is not a base-1e9 carry and must not narrow
+    // to i32. Fractional gaps use truncation toward zero, not ceil(abs/9).
+    let displacement = (l_prec as i128 - l_frac_cnt as i128)
+        - (r_prec as i128 - r_frac_cnt as i128)
+        + i128::from(lhs.word_buf[l_start] >= rhs.word_buf[r_idx]);
+    let int_digits = if displacement > 0 {
+        usize::try_from(displacement)
+            .map_err(|_| decimal_resource_error("quotient integer precision overflow"))?
     } else {
         0
     };
-    let i = word_cnt!(l_prec as usize, usize);
-    let l_len = cmp::max(
-        3,
-        i + word_cnt!(
-            r_frac_cnt
-                .saturating_mul(2)
-                .saturating_add(frac_incr)
-                .saturating_add(1)
-        ) as usize
-            + 1,
+    let mut int_word_to = division_word_count(int_digits, limit);
+    let mut frac_word_to = requested_frac_words;
+    let mut quotient = if request.quotient() {
+        let status = limit.apply(int_word_to, frac_word_to)?;
+        (int_word_to, frac_word_to) = (status.0, status.1);
+        let mut value = Decimal::try_new(
+            checked_word_digits(int_word_to)?,
+            checked_word_digits(frac_word_to)?,
+            lhs.negative != rhs.negative,
+        )?;
+        if let Some(scale) = result_frac_cnt {
+            value.result_frac_cnt = checked_fraction(scale)?;
+        }
+        Some(status.map(|_| value))
+    } else {
+        None
+    };
+    let end = checked_word_extent(int_word_to, frac_word_to)?;
+    let start = if request.quotient() && displacement < 0 {
+        let gap = usize::try_from(-displacement / DIGITS_PER_WORD as i128)
+            .map_err(|_| decimal_resource_error("quotient fractional gap overflow"))?;
+        match limit {
+            WordLimit::Fixed(words) => gap.min(words),
+            WordLimit::Grow => gap.min(end),
+        }
+    } else {
+        0
+    };
+
+    let lhs_words = l_prec.div_ceil(DIGITS_PER_WORD);
+    let rhs_words = r_prec.div_ceil(DIGITS_PER_WORD);
+    let (r_start, mut r_stop) = (
+        r_idx,
+        r_idx
+            .checked_add(rhs_words - 1)
+            .ok_or_else(|| decimal_resource_error("divisor active extent overflow"))?,
     );
-    let mut buf = vec![0; l_len];
-    buf[0..i].copy_from_slice(&lhs.word_buf[l_idx..l_idx + i]);
-    let mut l_idx = 0;
-    let (r_start, mut r_stop) = (r_idx, r_idx + word_cnt!(r_prec as usize, usize) - 1);
-    while rhs.word_buf[r_stop] == 0 && r_stop >= r_start {
+    while r_stop > r_start && rhs.word_buf[r_stop] == 0 {
         r_stop -= 1;
     }
     let r_len = r_stop - r_start;
     r_stop += 1;
+    let head_skip = usize::from(lhs.word_buf[l_start] < rhs.word_buf[r_start]);
+    let iterations = end.saturating_sub(start);
+    let loop_words = if iterations == 0 {
+        0
+    } else {
+        head_skip
+            .checked_add(iterations)
+            .and_then(|words| words.checked_add(r_len.max(1)))
+            .ok_or_else(|| decimal_resource_error("division loop extent overflow"))?
+    };
+    let remainder_words = remainder_scale.div_ceil(DIGITS_PER_WORD);
+    let remainder_stop = if request.remainder() {
+        lhs_words
+            .checked_add(remainder_words - l_frac_words)
+            .ok_or_else(|| decimal_resource_error("remainder scratch extent overflow"))?
+    } else {
+        0
+    };
+    let scratch_words = 3.max(lhs_words).max(loop_words).max(remainder_stop);
+    let mut buf = try_zeroed_words(scratch_words)?;
+    let l_stop = l_start
+        .checked_add(lhs_words)
+        .ok_or_else(|| decimal_resource_error("dividend active extent overflow"))?;
+    buf[..lhs_words].copy_from_slice(&lhs.word_buf[l_start..l_stop]);
+    let mut l_idx = 0;
 
     let norm_factor = i64::from(WORD_BASE / (rhs.word_buf[r_start] + 1));
     let mut r_norm = norm_factor * i64::from(rhs.word_buf[r_start]);
@@ -686,7 +1247,7 @@ fn do_div_mod_impl(
         l_idx += 1;
     }
     let mut guess;
-    for idx_to in idx_to..int_word_to + frac_word_to {
+    for idx_to in start..end {
         if dcarry == 0 && buf[l_idx] < rhs.word_buf[r_start] {
             guess = 0;
         } else {
@@ -729,115 +1290,209 @@ fn do_div_mod_impl(
                 }
             }
         }
-        if !do_mod {
-            res.word_buf[idx_to as usize] = guess as u32;
+        if let Some(ref mut value) = quotient {
+            value.word_buf[idx_to] = guess as u32;
         }
         dcarry = buf[l_idx] as i32;
         l_idx += 1;
     }
-    if do_mod {
+    let remainder = if request.remainder() {
         if dcarry != 0 {
-            l_idx -= 1;
+            l_idx = l_idx
+                .checked_sub(1)
+                .ok_or_else(|| decimal_resource_error("remainder carry position underflow"))?;
             buf[l_idx] = dcarry as u32;
         }
-        idx_to = 0;
-
-        int_cnt_to =
-            i32::from(l_prec) - i32::from(l_frac_cnt) - l_idx as i32 * i32::from(DIGITS_PER_WORD);
-
-        let mut int_word_to = if int_cnt_to < 0 {
-            (int_cnt_to / i32::from(DIGITS_PER_WORD)) as i8
-        } else {
-            word_cnt!(int_cnt_to, i8)
+        let plan = RemainderPlan {
+            // ceil((l_prec - l_frac_cnt - 9*l_idx)/9), with signed
+            // truncation toward zero for its negative branch, simplifies to
+            // this word displacement. No narrowing or unsigned wrap cast.
+            int_words: lhs_words as i128 - l_frac_words as i128 - l_idx as i128,
+            storage_frac: remainder_scale,
+            result_frac: if limit == WordLimit::Grow {
+                remainder_visible
+            } else {
+                result_frac_cnt.unwrap_or(remainder_scale)
+            },
+            integer_bound: rhs.int_cnt,
+            negative: lhs.negative,
+            start: l_idx,
+            stop: remainder_stop,
         };
+        Some(finish_division_remainder(&buf, plan, limit)?)
+    } else {
+        None
+    };
+    if let Some(ref mut value) = quotient {
+        value.try_ensure_storage()?;
+        if value.is_zero() {
+            value.negative = false;
+        }
+    }
+    Ok(Some(DivisionOutput {
+        quotient,
+        remainder,
+    }))
+}
 
-        let mut frac_word_to = word_cnt!(res.frac_cnt);
-        if int_word_to == 0 && frac_word_to == 0 {
-            return Some(Res::Ok(Decimal::zero()));
+/// Shape/copy planning over the completed shared division scratch. This does
+/// not recalculate a remainder from a quotient or run another numeric loop.
+struct RemainderPlan {
+    int_words: i128,
+    storage_frac: usize,
+    result_frac: usize,
+    integer_bound: usize,
+    negative: bool,
+    start: usize,
+    stop: usize,
+}
+
+fn finish_division_remainder(
+    buf: &[u32],
+    plan: RemainderPlan,
+    limit: WordLimit,
+) -> Result<Res<Decimal>> {
+    let int_words = usize::try_from(plan.int_words.max(0))
+        .map_err(|_| decimal_resource_error("remainder integer extent overflow"))?;
+    let gap = usize::try_from((-plan.int_words).max(0))
+        .map_err(|_| decimal_resource_error("remainder fractional gap overflow"))?;
+    let frac_words = plan.storage_frac.div_ceil(DIGITS_PER_WORD);
+    let mut storage_frac = plan.storage_frac;
+    let mut stop = plan.stop;
+    let mut status = Res::Ok(());
+    if let WordLimit::Fixed(words_limit) = limit {
+        // Preserve legacy early-return payloads, including their distinct
+        // zero-scale/sign dispositions. Grow does not take these branches.
+        if plan.int_words == 0 && frac_words == 0 {
+            return Ok(Res::Ok(Decimal::zero()));
         }
-        let mut l_stop;
-        if int_word_to <= 0 {
-            if (-int_word_to) as u8 >= WORD_BUF_LEN {
-                return Some(Res::Truncated(Decimal::zero()));
-            }
-            l_stop = (l_idx as i8 + int_word_to + frac_word_to as i8) as u8;
-            frac_word_to = (frac_word_to as i8 + int_word_to) as u8;
-            res.int_cnt = 0;
-            while int_word_to < 0 {
-                res.word_buf[idx_to as usize] = 0;
-                idx_to += 1;
-                int_word_to += 1;
-            }
-        } else {
-            if int_word_to as u8 > WORD_BUF_LEN {
-                res.int_cnt = DIGITS_PER_WORD * WORD_BUF_LEN;
-                res.frac_cnt = 0;
-                return Some(Res::Overflow(res.unwrap()));
-            }
-            l_stop = l_idx as u8 + int_word_to as u8 + frac_word_to;
-            res.int_cnt = cmp::min(int_word_to as u8 * DIGITS_PER_WORD, rhs.int_cnt);
+        if plan.int_words <= 0 && gap >= words_limit {
+            return Ok(Res::Truncated(Decimal::zero()));
         }
-        if int_word_to as u8 + frac_word_to > WORD_BUF_LEN {
-            l_stop -= int_word_to as u8 + frac_word_to - WORD_BUF_LEN;
-            frac_word_to = WORD_BUF_LEN - int_word_to as u8;
-            res.frac_cnt = frac_word_to - int_word_to as u8;
-            res = Res::Truncated(res.unwrap());
+        if int_words > words_limit {
+            let mut value = Decimal::try_new(checked_word_digits(words_limit)?, 0, plan.negative)?;
+            value.result_frac_cnt = checked_fraction(plan.result_frac)?;
+            return Ok(Res::Overflow(value));
         }
-        let src = &buf[l_idx..l_stop as usize];
-        let idx_to = idx_to as usize;
-        let dest = &mut res.word_buf[idx_to..idx_to + src.len()];
-        dest.copy_from_slice(src);
+        if gap > frac_words {
+            return Err(decimal_resource_error(
+                "legacy remainder gap exceeds storage",
+            ));
+        }
+        // Approved bounded output plan: leading fractional zero words occupy
+        // cells too. Select the FULL integer+fraction extent before copying,
+        // not merely the non-gap source tail. Canonical <=n inputs retain
+        // their old path by the recorded extent bound.
+        let output_words = checked_word_extent(int_words, frac_words)?;
+        if output_words > words_limit {
+            stop = stop
+                .checked_sub(output_words - words_limit)
+                .ok_or_else(|| {
+                    decimal_resource_error("remainder selected copy extent underflow")
+                })?;
+            let selected_frac_words = words_limit - int_words;
+            storage_frac = checked_word_digits(selected_frac_words)?;
+            status = Res::Truncated(());
+        }
     }
-    if res.is_zero() {
-        res.negative = false
+    let copy_len = stop
+        .checked_sub(plan.start)
+        .ok_or_else(|| decimal_resource_error("remainder source extent underflow"))?;
+    let copy_end = gap
+        .checked_add(copy_len)
+        .ok_or_else(|| decimal_resource_error("remainder destination extent overflow"))?;
+    if let WordLimit::Fixed(words_limit) = limit {
+        if copy_end > words_limit {
+            return Err(decimal_resource_error(
+                "legacy Fixed remainder projection exceeds capacity",
+            ));
+        }
     }
-    Some(res)
+    let int_digits = checked_word_digits(int_words)?.min(plan.integer_bound);
+    // Allocate/initialize the complete destination BEFORE copying. Growing
+    // an initially fraction-only destination after the copy is too late.
+    let mut value = Decimal::try_new(int_digits, storage_frac, plan.negative)?;
+    value.result_frac_cnt = checked_fraction(plan.result_frac)?;
+    value.try_reserve_words(copy_end)?;
+    let source = buf
+        .get(plan.start..stop)
+        .ok_or_else(|| decimal_resource_error("remainder source exceeds initialized scratch"))?;
+    value.word_buf[gap..copy_end].copy_from_slice(source);
+    value.try_ensure_storage()?;
+    if value.is_zero() {
+        value.negative = false;
+    }
+    Ok(status.map(|_| value))
 }
 
 #[allow(dead_code)]
 fn do_div_mod(lhs: &Decimal, rhs: &Decimal, frac_incr: u8, do_mod: bool) -> Option<Res<Decimal>> {
-    do_div_mod_impl(lhs, rhs, frac_incr, do_mod, None)
+    do_div_mod_impl(lhs, rhs, usize::from(frac_incr), do_mod, None)
 }
 
 /// `do_mul` multiplies two decimals.
 fn do_mul(lhs: &Decimal, rhs: &Decimal) -> Res<Decimal> {
-    let (l_int_word_cnt, mut l_frac_word_cnt) = (
-        i32::from(word_cnt!(lhs.int_cnt)),
-        i32::from(word_cnt!(lhs.frac_cnt)),
-    );
-    let (mut r_int_word_cnt, mut r_frac_word_cnt) = (
-        i32::from(word_cnt!(rhs.int_cnt)),
-        i32::from(word_cnt!(rhs.frac_cnt)),
-    );
+    do_mul_with_limit(lhs, rhs, WordLimit::Fixed(WORD_BUF_LEN))
+        .expect("bounded Decimal multiplication allocation failed")
+}
 
+fn do_mul_with_limit(lhs: &Decimal, rhs: &Decimal, limit: WordLimit) -> Result<Res<Decimal>> {
+    let (l_int_word_cnt, mut l_frac_word_cnt) =
+        (lhs.int_words() as isize, lhs.frac_words() as isize);
+    let (mut r_int_word_cnt, mut r_frac_word_cnt) =
+        (rhs.int_words() as isize, rhs.frac_words() as isize);
     let old_r_int_word_cnt = r_int_word_cnt;
-
+    let int_digits = lhs
+        .int_cnt
+        .checked_add(rhs.int_cnt)
+        .ok_or_else(|| decimal_resource_error("product integer digit count overflow"))?;
     let (int_word_to, frac_word_to) = (
-        word_cnt!(lhs.int_cnt + rhs.int_cnt) as usize,
+        int_digits.div_ceil(DIGITS_PER_WORD),
         l_frac_word_cnt + r_frac_word_cnt,
     );
-    let (mut old_int_word_to, mut old_frac_word_to) = (int_word_to as i32, frac_word_to);
-    let res = fix_word_cnt_err(int_word_to as u8, frac_word_to as u8, WORD_BUF_LEN);
-    let (int_word_to, frac_word_to) = (res.0 as usize, res.1 as usize);
+    let (mut old_int_word_to, mut old_frac_word_to) = (int_word_to as isize, frac_word_to);
+    let res = limit.apply(int_word_to, frac_word_to as usize)?;
+    let (int_word_to, frac_word_to) = (res.0, res.1);
     let negative = lhs.negative != rhs.negative;
-    let frac_cnt = cmp::min(lhs.frac_cnt + rhs.frac_cnt, NOT_FIXED_DEC);
-    let int_cnt = int_word_to as u8 * DIGITS_PER_WORD;
-    let mut dec = Decimal::new(int_cnt, frac_cnt, negative);
-    dec.result_frac_cnt = cmp::min(lhs.result_frac_cnt + rhs.result_frac_cnt, MAX_FRACTION);
+    let (frac_cnt, result_frac_cnt) = match limit {
+        WordLimit::Fixed(_) => (
+            (lhs.frac_cnt.min(NOT_FIXED_DEC) + rhs.frac_cnt.min(NOT_FIXED_DEC)).min(NOT_FIXED_DEC),
+            (lhs.result_frac_cnt.min(MAX_FRACTION) + rhs.result_frac_cnt.min(MAX_FRACTION))
+                .min(MAX_FRACTION),
+        ),
+        WordLimit::Grow => (
+            checked_fraction(
+                lhs.frac_cnt
+                    .checked_add(rhs.frac_cnt)
+                    .ok_or_else(|| decimal_resource_error("product storage scale overflow"))?,
+            )?,
+            checked_fraction(
+                lhs.result_frac_cnt
+                    .checked_add(rhs.result_frac_cnt)
+                    .ok_or_else(|| decimal_resource_error("product result scale overflow"))?,
+            )?,
+        ),
+    };
+    let int_cnt = checked_word_digits(int_word_to)?;
+    let mut dec = Decimal::try_new(int_cnt, frac_cnt, negative)?;
+    dec.result_frac_cnt = result_frac_cnt;
     if res.is_overflow() {
-        return Res::Overflow(dec);
+        return Ok(Res::Overflow(dec));
     }
+    // Separately aligned input fractions can need one scratch word beyond
+    // the logical product's active extent. It is initialized before the loop.
+    dec.try_reserve_words(checked_word_extent(int_word_to, frac_word_to)?)?;
 
     if !res.is_ok() {
-        dec.frac_cnt = cmp::min(dec.frac_cnt, frac_word_to as u8 * DIGITS_PER_WORD);
-        if old_int_word_to > int_word_to as i32 {
-            old_int_word_to -= int_word_to as i32;
+        dec.frac_cnt = cmp::min(dec.frac_cnt, frac_word_to as usize * DIGITS_PER_WORD);
+        if old_int_word_to > int_word_to as isize {
+            old_int_word_to -= int_word_to as isize;
             old_frac_word_to = old_int_word_to / 2;
             r_int_word_cnt = old_int_word_to - old_frac_word_to;
             l_frac_word_cnt = 0;
             r_frac_word_cnt = 0;
         } else {
-            old_frac_word_to -= frac_word_to as i32;
+            old_frac_word_to -= frac_word_to as isize;
             old_int_word_to = old_frac_word_to / 2;
             if l_frac_word_cnt <= r_frac_word_cnt {
                 l_frac_word_cnt -= old_int_word_to;
@@ -849,7 +1504,7 @@ fn do_mul(lhs: &Decimal, rhs: &Decimal) -> Res<Decimal> {
         }
     }
 
-    let mut start_to = (int_word_to + frac_word_to - 1) as isize;
+    let mut start_to = (int_word_to + frac_word_to) as isize - 1;
     let r_start = old_r_int_word_cnt + r_frac_word_cnt - 1;
     let r_stop = old_r_int_word_cnt - r_int_word_cnt;
     let mut l_idx = l_int_word_cnt + l_frac_word_cnt - 1;
@@ -874,7 +1529,8 @@ fn do_mul(lhs: &Decimal, rhs: &Decimal) -> Res<Decimal> {
         }
         while carry > 0 {
             if idx_to < 0 {
-                return Res::Overflow(dec);
+                dec.try_ensure_storage()?;
+                return Ok(Res::Overflow(dec));
             }
             add(
                 dec.word_buf[idx_to as usize],
@@ -888,20 +1544,23 @@ fn do_mul(lhs: &Decimal, rhs: &Decimal) -> Res<Decimal> {
         start_to -= 1;
     }
 
-    // Now we have to check for -0.000 case
-    if dec.negative {
-        let (mut idx, end) = (0, int_word_to + frac_word_to);
-        while dec.word_buf[idx] == 0 {
-            idx += 1;
-            if idx == end {
-                // we got decimal zero.
-                dec = Decimal::zero();
-                break;
-            }
+    // Now we have to check for -0.000, including an empty physical zero.
+    if dec.negative
+        && dec.word_buf[..int_word_to + frac_word_to]
+            .iter()
+            .all(|word| *word == 0)
+    {
+        // A successful zero product keeps its storage/result scale.
+        // Preserve the existing truncated payload convention; overflow
+        // has already returned above and may intentionally contain -0.
+        if res.is_ok() {
+            dec.negative = false;
+        } else {
+            dec = Decimal::zero();
         }
     }
 
-    let (mut idx_to, mut d_to_move) = (0, int_word_to + word_cnt!(dec.frac_cnt) as usize);
+    let (mut idx_to, mut d_to_move) = (0, int_word_to + dec.frac_words());
     while dec.word_buf[idx_to] == 0 && dec.int_cnt > DIGITS_PER_WORD {
         idx_to += 1;
         dec.int_cnt -= DIGITS_PER_WORD;
@@ -913,32 +1572,70 @@ fn do_mul(lhs: &Decimal, rhs: &Decimal) -> Res<Decimal> {
             idx_to += 1;
         }
     }
-    res.map(|_| dec)
+    dec.try_ensure_storage()?;
+    Ok(res.map(|_| dec))
 }
 
-/// `DECIMAL_STRUCT_SIZE`is the struct size of `Decimal`.
+/// Size of the legacy physical Decimal chunk cell, not the owning Rust value.
 pub const DECIMAL_STRUCT_SIZE: usize = 40;
 
-const_assert_eq!(DECIMAL_STRUCT_SIZE, mem::size_of::<Decimal>());
+/// Physical bytes only. No pointer or owning value is copied across this
+/// layout.
+struct DecimalCell([u8; DECIMAL_STRUCT_SIZE]);
 
-/// `Decimal` represents a decimal value.
-#[repr(C)]
-#[derive(Clone, Debug, Copy)]
+const_assert_eq!(DECIMAL_STRUCT_SIZE, mem::size_of::<DecimalCell>());
+const_assert_eq!(DECIMAL_STRUCT_SIZE, 4 + WORD_BUF_LEN * WORD_SIZE);
+
+/// An owning logical decimal, independent of the physical forty-byte cell.
+///
+/// All counters use the indexing width. Constructors enforce the public u32
+/// fraction-count domain; the current public arithmetic remains Fixed(9).
+#[derive(Clone, Debug)]
 pub struct Decimal {
-    /// The number of *decimal* digits before the point.
-    int_cnt: u8,
-
-    /// The number of decimal digits after the point.
-    frac_cnt: u8,
-
-    /// The number of calculated or printed result fraction digits.
-    result_frac_cnt: u8,
-
+    /// The number of stored decimal digits before the point.
+    int_cnt: usize,
+    /// Stored fraction digits, independent of the visible result scale.
+    frac_cnt: usize,
+    /// Calculated or printed result fraction digits.
+    result_frac_cnt: usize,
     negative: bool,
+    /// Initialized base-1e9 words, with nine inline cells. Status payloads may
+    /// need additional cells even when arithmetic itself has a nine-word limit.
+    word_buf: SmallVec<[u32; 9]>,
+}
 
-    /// An array of u32 words.
-    /// A word is an u32 value can hold 9 digits.(0 <= word < wordBase)
-    word_buf: [u32; 9],
+/// Borrowed exact logical fields, not a wire or FFI representation.
+///
+/// `words` includes initialized inactive cells, not uninitialized capacity.
+/// General wide construction is not yet admitted by the fixed-worker APIs.
+#[derive(Clone, Copy, Debug)]
+pub struct DecimalWordsRef<'a> {
+    pub int_digits: usize,
+    pub storage_frac: u32,
+    pub result_frac: u32,
+    pub negative: bool,
+    pub words: &'a [u32],
+}
+
+/// Logical, exact components of the bounded decimal core.
+///
+/// This is not a wire format or a raw-memory/FFI layout. Storage fraction and
+/// displayed result fraction are independent; neither is a SQL column's
+/// declared precision/scale. Use `Decimal::try_from_parts` before importing
+/// components supplied by another representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecimalParts {
+    /// Number of stored decimal digits before the decimal point.
+    pub int_digits: u8,
+    /// Number of stored decimal digits after the decimal point.
+    pub frac_digits: u8,
+    /// Number of calculated or printed result fraction digits.
+    pub result_frac_digits: u8,
+    /// Sign bit, including signed zero in an arithmetic status payload.
+    pub negative: bool,
+    /// Big-endian base-1e9 words; the counts determine the active prefix.
+    /// Inactive capacity is preserved verbatim, not treated as extra digits.
+    pub words: [u32; 9],
 }
 
 #[derive(Debug, Clone)]
@@ -951,7 +1648,224 @@ pub enum RoundMode {
     Ceiling,
 }
 
+impl Default for Decimal {
+    fn default() -> Self {
+        // Valid in-memory NULL backing; physical NULL bytes follow the bitmap.
+        Self::zero()
+    }
+}
+
 impl Decimal {
+    /// Imports exact bounded components without parsing, rounding or SQL
+    /// policy.
+    ///
+    /// Checks active word capacity/ranges, partial-word padding and a result
+    /// fraction count at most 81. It does not impose SQL's 65/30 declaration
+    /// limits or require stored and result fraction counts to agree. Inactive
+    /// words and the sign of zero are retained. A zero-length active prefix is
+    /// rejected by this initial logical admission contract (canonical zero has
+    /// one integer digit). Physical cells have a separate checked adapter.
+    ///
+    /// Over-capacity status payloads are observable through `words`, not a
+    /// silently truncated nine-word export.
+    pub fn try_from_parts(parts: DecimalParts) -> Result<Self> {
+        Self::from_fixed_parts(parts, false)
+    }
+
+    /// Exact logical import, private until every reachable wide consumer is
+    /// closed. This extends strict parts validation, not physical admission.
+    /// Supplied inactive cells, count padding and raw zero sign are preserved.
+    fn try_from_words(parts: DecimalWordsRef<'_>) -> Result<Self> {
+        let storage_frac = usize::try_from(parts.storage_frac)
+            .map_err(|_| decimal_resource_error("storage scale exceeds indexing width"))?;
+        let result_frac = usize::try_from(parts.result_frac)
+            .map_err(|_| decimal_resource_error("result scale exceeds indexing width"))?;
+        parts
+            .int_digits
+            .checked_add(storage_frac)
+            .ok_or_else(|| decimal_resource_error("import storage precision count overflow"))?;
+        let int_words = parts.int_digits.div_ceil(DIGITS_PER_WORD);
+        let frac_words = storage_frac.div_ceil(DIGITS_PER_WORD);
+        let active = checked_word_extent(int_words, frac_words)?;
+        checked_word_digits(active)?;
+        checked_word_extent(parts.words.len(), 0)?;
+        if active == 0 {
+            return Err(Error::InvalidDataType(
+                "logical decimal words require a nonempty active prefix".to_owned(),
+            ));
+        }
+        if parts.words.len() < active {
+            return Err(Error::InvalidDataType(
+                "decimal words omit active initialized cells".to_owned(),
+            ));
+        }
+        for (index, word) in parts.words[..active].iter().enumerate() {
+            if *word >= WORD_BASE {
+                return Err(Error::InvalidDataType(format!(
+                    "decimal active word {index}={word} is not base-1e9"
+                )));
+            }
+        }
+        let head_digits = parts.int_digits % DIGITS_PER_WORD;
+        if head_digits != 0 && parts.words[0] >= TEN_POW[head_digits] {
+            return Err(Error::InvalidDataType(
+                "decimal leading integer word exceeds its digit count".to_owned(),
+            ));
+        }
+        let tail_digits = storage_frac % DIGITS_PER_WORD;
+        if tail_digits != 0 && parts.words[active - 1] % TEN_POW[DIGITS_PER_WORD - tail_digits] != 0
+        {
+            return Err(Error::InvalidDataType(
+                "decimal trailing fractional word has nonzero padding".to_owned(),
+            ));
+        }
+        // Validate before indexing/allocation, then reserve the supplied
+        // INITIALIZED extent, not just numerical active words or Vec capacity.
+        let mut value = Self {
+            int_cnt: parts.int_digits,
+            frac_cnt: storage_frac,
+            result_frac_cnt: result_frac,
+            negative: parts.negative,
+            word_buf: SmallVec::from_buf([0; WORD_BUF_LEN]),
+        };
+        value.try_reserve_words(parts.words.len())?;
+        value.word_buf[..parts.words.len()].copy_from_slice(parts.words);
+        // No arithmetic normalization or ensure_storage here: that would
+        // strip headers/sign or silently drop supplied inactive heap cells.
+        Ok(value)
+    }
+
+    // Physical transport preserves all byte-sized result headers and does not
+    // impose logical partial-word normalization. Both domains require valid
+    // active base-1e9 words within the supplied nine cells. Raw-like-Go cells
+    // with invalid counts/words remain outside this checked owning admission.
+    fn from_fixed_parts(parts: DecimalParts, physical: bool) -> Result<Self> {
+        let digits_per_word = DIGITS_PER_WORD;
+        // Widen before ceiling/count arithmetic so malformed u8 counts cannot
+        // wrap before the capacity check or reach an indexing operation.
+        let int_words = usize::from(parts.int_digits).div_ceil(digits_per_word);
+        let frac_words = usize::from(parts.frac_digits).div_ceil(digits_per_word);
+        let used_words = int_words + frac_words;
+        if used_words > usize::from(WORD_BUF_LEN) {
+            return Err(Error::InvalidDataType(format!(
+                "decimal parts need {used_words} words for int_digits={} frac_digits={}",
+                parts.int_digits, parts.frac_digits
+            )));
+        }
+        if !physical && usize::from(parts.result_frac_digits) > DIGITS_PER_WORD * WORD_BUF_LEN {
+            return Err(Error::InvalidDataType(format!(
+                "decimal parts result_frac_digits={} exceeds 81",
+                parts.result_frac_digits
+            )));
+        }
+        for (index, word) in parts.words[..used_words].iter().enumerate() {
+            if *word >= WORD_BASE {
+                return Err(Error::InvalidDataType(format!(
+                    "decimal parts active word {index}={word} is not base-1e9"
+                )));
+            }
+        }
+        if used_words == 0 && !physical {
+            return Err(Error::InvalidDataType(
+                "decimal parts with no active words are not an admitted zero representation"
+                    .to_owned(),
+            ));
+        }
+        let leading_digits = usize::from(parts.int_digits) % DIGITS_PER_WORD;
+        if !physical
+            && leading_digits != 0
+            && parts.words[0] >= TEN_POW[usize::from(leading_digits)]
+        {
+            return Err(Error::InvalidDataType(
+                "decimal parts leading integer word exceeds its digit count".to_owned(),
+            ));
+        }
+        let trailing_digits = usize::from(parts.frac_digits) % DIGITS_PER_WORD;
+        if !physical
+            && trailing_digits != 0
+            && parts.words[used_words - 1] % TEN_POW[usize::from(DIGITS_PER_WORD - trailing_digits)]
+                != 0
+        {
+            return Err(Error::InvalidDataType(
+                "decimal parts trailing fractional word has nonzero padding".to_owned(),
+            ));
+        }
+        Ok(Self {
+            int_cnt: usize::from(parts.int_digits),
+            frac_cnt: usize::from(parts.frac_digits),
+            result_frac_cnt: usize::from(parts.result_frac_digits),
+            negative: parts.negative,
+            word_buf: SmallVec::from_buf(parts.words),
+        })
+    }
+
+    /// Borrows exact logical fields, including safe over-capacity status data.
+    pub fn words(&self) -> DecimalWordsRef<'_> {
+        DecimalWordsRef {
+            int_digits: self.int_cnt,
+            storage_frac: self.storage_scale(),
+            result_frac: self.result_scale(),
+            negative: self.negative,
+            words: &self.word_buf,
+        }
+    }
+
+    /// Checked bounded transport, never a lossy projection or diagnostic clip.
+    pub fn try_to_parts(&self) -> Result<DecimalParts> {
+        self.fixed_parts(false)
+    }
+
+    fn fixed_parts(&self, physical: bool) -> Result<DecimalParts> {
+        let narrow = |name: &str, count: usize| {
+            u8::try_from(count).map_err(|_| {
+                Error::InvalidDataType(format!(
+                    "decimal {name}={count} does not fit a physical count"
+                ))
+            })
+        };
+        if self.word_buf.len() > WORD_BUF_LEN {
+            return Err(Error::InvalidDataType(
+                "decimal backing does not fit the bounded nine-word record".to_owned(),
+            ));
+        }
+        let mut words = [0; WORD_BUF_LEN];
+        words[..self.word_buf.len()].copy_from_slice(&self.word_buf);
+        let parts = DecimalParts {
+            int_digits: narrow("int_digits", self.int_cnt)?,
+            frac_digits: narrow("storage_frac", self.frac_cnt)?,
+            result_frac_digits: narrow("result_frac", self.result_frac_cnt)?,
+            negative: self.negative,
+            words,
+        };
+        Self::from_fixed_parts(parts, physical)?;
+        Ok(parts)
+    }
+
+    pub fn storage_scale(&self) -> u32 {
+        u32::try_from(self.frac_cnt).expect("constructed Decimal storage scale is u32")
+    }
+
+    pub fn result_scale(&self) -> u32 {
+        u32::try_from(self.result_frac_cnt).expect("constructed Decimal result scale is u32")
+    }
+
+    pub fn integer_digits(&self) -> usize {
+        self.remove_leading_zeroes(self.int_cnt).1
+    }
+
+    pub fn natural_storage_shape(&self) -> (usize, u32) {
+        self.prec_and_frac()
+    }
+
+    /// Heap allocation in addition to the inline owning value, not wire bytes.
+    pub fn spill_capacity_bytes(&self) -> usize {
+        if self.word_buf.spilled() {
+            self.word_buf.capacity() * mem::size_of::<u32>()
+        } else {
+            0
+        }
+    }
+
     /// abs the Decimal into a new Decimal.
     #[inline]
     pub fn abs(mut self) -> Res<Decimal> {
@@ -962,30 +1876,247 @@ impl Decimal {
     /// ceil the Decimal into a new Decimal.
     pub fn ceil(&self) -> Res<Decimal> {
         if !self.negative {
-            self.round(0, RoundMode::Ceiling)
+            self.clone().round(0, RoundMode::Ceiling)
         } else {
-            self.round(0, RoundMode::Truncate)
+            self.clone().round(0, RoundMode::Truncate)
         }
     }
 
     /// floor the Decimal into a new Decimal.
     pub fn floor(&self) -> Res<Decimal> {
         if !self.negative {
-            self.round(0, RoundMode::Truncate)
+            self.clone().round(0, RoundMode::Truncate)
         } else {
-            self.round(0, RoundMode::Ceiling)
+            self.clone().round(0, RoundMode::Ceiling)
         }
     }
 
-    /// create a new decimal for internal usage.
-    fn new(int_cnt: u8, frac_cnt: u8, negative: bool) -> Decimal {
-        Decimal {
+    /// Existing bounded constructors retain their infallible interface. The
+    /// Grow workers use try_new and propagate structural/resource failures.
+    fn new(int_cnt: usize, frac_cnt: usize, negative: bool) -> Decimal {
+        Self::try_new(int_cnt, frac_cnt, negative)
+            .expect("bounded Decimal construction or allocation failed")
+    }
+
+    fn try_new(int_cnt: usize, frac_cnt: usize, negative: bool) -> Result<Decimal> {
+        checked_fraction(frac_cnt)?;
+        let mut value = Decimal {
             int_cnt,
             frac_cnt,
             result_frac_cnt: frac_cnt,
             negative,
-            word_buf: [0; 9],
+            word_buf: SmallVec::from_buf([0; WORD_BUF_LEN]),
+        };
+        value.try_ensure_storage()?;
+        Ok(value)
+    }
+
+    fn int_words(&self) -> usize {
+        self.int_cnt.div_ceil(DIGITS_PER_WORD)
+    }
+
+    fn frac_words(&self) -> usize {
+        self.frac_cnt.div_ceil(DIGITS_PER_WORD)
+    }
+
+    /// Fallible equivalent of Clone: preserve every raw field and ALL
+    /// initialized cells, including inactive heap cells and physical shapes
+    /// outside strict logical admission. No normalization or re-import.
+    fn try_clone_all(&self) -> Result<Self> {
+        checked_word_extent(self.word_buf.len(), 0)?;
+        let mut words: SmallVec<[u32; 9]> = SmallVec::new();
+        words
+            .try_reserve_exact(self.word_buf.len())
+            .map_err(|_| decimal_resource_error("decimal clone reservation failed"))?;
+        words.resize(self.word_buf.len(), 0);
+        words.copy_from_slice(&self.word_buf);
+        Ok(Self {
+            int_cnt: self.int_cnt,
+            frac_cnt: self.frac_cnt,
+            result_frac_cnt: self.result_frac_cnt,
+            negative: self.negative,
+            word_buf: words,
+        })
+    }
+
+    /// Fallible scratch copy for a value-producing worker. Inactive physical
+    /// cells within the inline prefix are retained; unused heap capacity is
+    /// not an operand or a reason to allocate more scratch.
+    fn try_clone_for_worker(&self) -> Result<Self> {
+        let mut value = Self::try_new(self.int_cnt, self.frac_cnt, self.negative)?;
+        value.result_frac_cnt = checked_fraction(self.result_frac_cnt)?;
+        let extent = checked_word_extent(self.int_words(), self.frac_words())?.max(WORD_BUF_LEN);
+        value.word_buf[..extent].copy_from_slice(&self.word_buf[..extent]);
+        Ok(value)
+    }
+
+    fn try_reserve_words(&mut self, words: usize) -> Result<()> {
+        let extent = checked_word_extent(words, 0)?.max(WORD_BUF_LEN);
+        if extent > self.word_buf.len() {
+            self.word_buf
+                .try_reserve_exact(extent - self.word_buf.len())
+                .map_err(|_| decimal_resource_error("word reservation failed"))?;
+            self.word_buf.resize(extent, 0);
         }
+        Ok(())
+    }
+
+    /// Backing extent is independent of arithmetic capacity, including every
+    /// non-Ok payload. Scratch words may be reserved separately by a worker.
+    fn try_ensure_storage(&mut self) -> Result<()> {
+        checked_fraction(self.frac_cnt)?;
+        checked_fraction(self.result_frac_cnt)?;
+        self.int_cnt
+            .checked_add(self.frac_cnt)
+            .ok_or_else(|| decimal_resource_error("storage precision count overflow"))?;
+        let extent = checked_word_extent(self.int_words(), self.frac_words())?.max(WORD_BUF_LEN);
+        self.try_reserve_words(extent)?;
+        self.word_buf.truncate(extent);
+        if extent == WORD_BUF_LEN && self.word_buf.spilled() {
+            // Moving the nine initialized words back inline does not allocate.
+            self.word_buf.shrink_to_fit();
+        }
+        Ok(())
+    }
+
+    // Grow-producing entrypoints stay private until the complete wide-value
+    // consumer closure (including division and formatting) has been checked.
+    fn try_add_exact(&self, rhs: &Self) -> Result<Self> {
+        let outcome = if self.negative == rhs.negative {
+            do_add_with_limit(self, rhs, WordLimit::Grow)?
+        } else {
+            do_sub_with_limit(self, rhs, WordLimit::Grow)?
+        };
+        Self::try_finish_exact(outcome, self.result_frac_cnt.max(rhs.result_frac_cnt))
+    }
+
+    fn try_sub_exact(&self, rhs: &Self) -> Result<Self> {
+        let outcome = if self.negative == rhs.negative {
+            do_sub_with_limit(self, rhs, WordLimit::Grow)?
+        } else {
+            do_add_with_limit(self, rhs, WordLimit::Grow)?
+        };
+        Self::try_finish_exact(outcome, self.result_frac_cnt.max(rhs.result_frac_cnt))
+    }
+
+    fn try_mul_exact(&self, rhs: &Self) -> Result<Self> {
+        let outcome = do_mul_with_limit(self, rhs, WordLimit::Grow)?;
+        let result_frac = outcome.result_frac_cnt;
+        Self::try_finish_exact(outcome, result_frac)
+    }
+
+    fn try_div_rem_exact(&self, rhs: &Self) -> Result<Option<(Self, Self)>> {
+        let Some(output) = divide_with_limit(
+            self,
+            rhs,
+            DivisionRequest::IntegerPair,
+            WordLimit::Grow,
+            None,
+        )?
+        else {
+            return Ok(None);
+        };
+        let quotient = output
+            .quotient
+            .ok_or_else(|| decimal_resource_error("missing requested integer quotient"))?;
+        let remainder = output
+            .remainder
+            .ok_or_else(|| decimal_resource_error("missing requested exact remainder"))?;
+        Ok(Some((
+            Self::try_finish_exact(quotient, 0)?,
+            Self::try_finish_exact(remainder, self.result_frac_cnt.max(rhs.result_frac_cnt))?,
+        )))
+    }
+
+    fn try_div_round_exact(&self, count: i64, result_scale: u32) -> Result<Option<Self>> {
+        if count < 0 {
+            return Err(Error::InvalidDataType(
+                "decimal AVG count must be nonnegative".to_owned(),
+            ));
+        }
+        if count == 0 {
+            return Ok(None);
+        }
+        let target = usize::try_from(result_scale)
+            .map_err(|_| decimal_resource_error("AVG result scale exceeds indexing width"))?;
+        let increment = target.checked_sub(self.result_frac_cnt).ok_or_else(|| {
+            Error::InvalidDataType(
+                "decimal AVG result scale is below the input visible scale".to_owned(),
+            )
+        })?;
+        let retained = self
+            .frac_cnt
+            .checked_add(increment)
+            .ok_or_else(|| decimal_resource_error("AVG retained scale overflow"))?;
+        let frac_words = retained.div_ceil(DIGITS_PER_WORD);
+        checked_fraction(checked_word_digits(frac_words)?)?;
+        // Retain whole storage words, then record the visible target. There
+        // is no extra guard digit and no rounding mutation of this payload.
+        let Some(output) = divide_with_limit(
+            self,
+            &Self::from(count),
+            DivisionRequest::RetainedQuotient { frac_words },
+            WordLimit::Grow,
+            Some(target),
+        )?
+        else {
+            return Ok(None);
+        };
+        let quotient = output
+            .quotient
+            .ok_or_else(|| decimal_resource_error("missing requested AVG quotient"))?;
+        Ok(Some(Self::try_finish_exact(quotient, target)?))
+    }
+
+    fn try_round_exact(&self, scale: i64, mode: RoundMode) -> Result<Self> {
+        let stored_scale = if scale > 0 {
+            checked_fraction(
+                usize::try_from(scale)
+                    .map_err(|_| decimal_resource_error("round scale exceeds indexing width"))?,
+            )?
+        } else {
+            0
+        };
+        let result = self.try_clone_for_worker()?.round_with_limit(
+            i128::from(scale),
+            WordLimit::Grow,
+            mode,
+        )?;
+        // Host exact-value construction normalizes successful zero, including
+        // no-op/growth. Fixed wrappers keep their original raw-zero policy.
+        Self::try_finish_exact(result, stored_scale)
+    }
+
+    fn try_finish_exact(outcome: Res<Self>, result_frac: usize) -> Result<Self> {
+        let mut value = match outcome {
+            Res::Ok(value) => value,
+            Res::Truncated(_) | Res::Overflow(_) => {
+                return Err(Error::InvalidDataType(
+                    "Grow arithmetic produced a bounded numeric status".to_owned(),
+                ));
+            }
+        };
+        value.result_frac_cnt = checked_fraction(result_frac)?;
+        // Canonicalize only a fresh successful Grow result. Transport and
+        // legacy status payloads retain their original header/sign/bytes.
+        let active = checked_word_extent(value.int_words(), value.frac_words())?;
+        let (skip, int_digits) = value.remove_leading_zeroes(value.int_cnt);
+        if skip > 0 {
+            value.word_buf.copy_within(skip..active, 0);
+            value.word_buf[active - skip..].fill(0);
+        }
+        value.int_cnt = if int_digits == 0 && value.frac_cnt == 0 {
+            1
+        } else {
+            int_digits
+        };
+        if value.is_zero() {
+            value.negative = false;
+        }
+        value.try_ensure_storage()?;
+        let active = checked_word_extent(value.int_words(), value.frac_words())?;
+        value.word_buf[active..].fill(0);
+        Ok(value)
     }
 
     pub fn is_negative(&self) -> bool {
@@ -1002,9 +2133,13 @@ impl Decimal {
     ///     leading 'prec' number of     digits
     ///  2. the number of remained digits if we remove all leading zeros for the
     ///     leading 'prec'     number of digits
-    fn remove_leading_zeroes(&self, prec: u8) -> (usize, u8) {
+    fn remove_leading_zeroes(&self, prec: usize) -> (usize, usize) {
         let mut cnt = prec;
-        let mut i = ((cnt + DIGITS_PER_WORD - 1) % DIGITS_PER_WORD) + 1;
+        let mut i = if cnt == 0 {
+            DIGITS_PER_WORD
+        } else {
+            (cnt - 1) % DIGITS_PER_WORD + 1
+        };
         let mut word_idx = 0;
         while cnt > 0 && self.word_buf[word_idx] == 0 {
             cnt -= i;
@@ -1018,47 +2153,114 @@ impl Decimal {
     }
 
     /// Prepare a buf for string output.
-    fn prepare_buf(&self) -> (Vec<u8>, usize, u8, u8, u8) {
-        let frac_cnt = self.frac_cnt;
-        let (mut word_start_idx, mut int_cnt) = self.remove_leading_zeroes(self.int_cnt);
-        if int_cnt + frac_cnt == 0 {
-            int_cnt = 1;
-            word_start_idx = 0;
+    fn write_storage_into(&self, text: &mut DecimalTextWriter<'_>) -> fmt::Result {
+        let (mut word_start, mut int_digits) = self.remove_leading_zeroes(self.int_cnt);
+        if int_digits == 0 && self.frac_cnt == 0 {
+            // Keep the legacy virtual integer cell for empty/zero storage.
+            int_digits = 1;
+            word_start = 0;
         }
-        let int_len = cmp::max(1, int_cnt);
-        let frac_len = frac_cnt;
-        let mut len = int_len + frac_len;
         if self.negative {
-            len += 1;
+            text.byte(b'-')?;
         }
-        if frac_cnt > 0 {
-            len += 1;
+        let int_words = int_digits.div_ceil(DIGITS_PER_WORD);
+        if int_digits > 0 {
+            let first_digits = (int_digits - 1) % DIGITS_PER_WORD + 1;
+            text.word(self.word_buf[word_start], first_digits, 0)?;
+            for index in word_start + 1..word_start + int_words {
+                text.word(self.word_buf[index], DIGITS_PER_WORD, 0)?;
+            }
+        } else {
+            text.byte(b'0')?;
         }
-        let buf = Vec::with_capacity(len as usize);
-        (buf, word_start_idx, int_len, int_cnt, frac_cnt)
+        if self.frac_cnt > 0 {
+            text.byte(b'.')?;
+            let mut index = word_start + int_words;
+            let mut remaining = self.frac_cnt;
+            while remaining > 0 {
+                let digits = remaining.min(DIGITS_PER_WORD);
+                text.word(self.word_buf[index], digits, DIGITS_PER_WORD - digits)?;
+                remaining -= digits;
+                index += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_storage(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        let mut text = DecimalTextWriter::new(out);
+        self.write_storage_into(&mut text)?;
+        text.finish()
+    }
+
+    /// Materialize the actual STORAGE emitter fallibly, including allowed raw
+    /// shapes. Counting and writing share the emitter, not a guessed header
+    /// length, a second formatter, or visible-scale padding.
+    fn try_storage_text(&self) -> Result<String> {
+        let mut count = DecimalTextCounter::default();
+        self.write_storage(&mut count)
+            .map_err(|_| decimal_resource_error("storage text byte count overflow"))?;
+        let mut text = String::new();
+        text.try_reserve_exact(count.bytes)
+            .map_err(|_| decimal_resource_error("storage text reservation failed"))?;
+        self.write_storage(&mut text)
+            .map_err(|_| decimal_resource_error("storage text emission failed"))?;
+        Ok(text)
+    }
+
+    fn write_result(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        if self.result_frac_cnt < self.frac_cnt {
+            let rounded = self
+                .try_round_exact(i64::from(self.result_scale()), RoundMode::HalfEven)
+                .map_err(|_| fmt::Error)?;
+            return rounded.write_storage(out);
+        }
+        // Presentation-only padding borrows the value. In particular a u32
+        // visible scale is NOT a request for a dense decimal or temporary String.
+        // Equal/growing scales preserve a raw/error zero's original sign.
+        let mut text = DecimalTextWriter::new(out);
+        self.write_storage_into(&mut text)?;
+        if self.result_frac_cnt > self.frac_cnt {
+            if self.frac_cnt == 0 {
+                text.byte(b'.')?;
+            }
+            text.zeroes(self.result_frac_cnt - self.frac_cnt)?;
+        }
+        text.finish()
+    }
+
+    fn write_legacy_result(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        let scale = u8::try_from(self.result_frac_cnt).map_err(|_| fmt::Error)?;
+        let scale = i128::from(i8::from_ne_bytes([scale])).min(MAX_FRACTION as i128);
+        let rounded = self
+            .try_clone_for_worker()
+            .map_err(|_| fmt::Error)?
+            .round_with_limit(scale, WordLimit::Fixed(WORD_BUF_LEN), RoundMode::HalfEven)
+            .map_err(|_| fmt::Error)?
+            .unwrap();
+        rounded.write_storage(out)
     }
 
     /// Get the least precision and fraction count to encode this decimal
     /// completely.
-    pub fn prec_and_frac(&self) -> (u8, u8) {
+    pub fn prec_and_frac(&self) -> (usize, u32) {
         let (_, int_cnt) = self.remove_leading_zeroes(self.int_cnt);
         let prec = int_cnt + self.frac_cnt;
-        if prec == 0 {
-            (1, self.frac_cnt)
-        } else {
-            (prec, self.frac_cnt)
-        }
+        (prec.max(1), self.storage_scale())
     }
 
-    /// `frac_cnt` returns fraction count.
-    pub fn frac_cnt(&self) -> u8 {
-        self.frac_cnt
+    /// `frac_cnt` returns the full storage fraction count.
+    pub fn frac_cnt(&self) -> u32 {
+        self.storage_scale()
     }
 
     /// `digit_bounds` returns bounds of decimal digits in the number.
-    fn digit_bounds(&self) -> (u8, u8) {
+    fn digit_bounds(&self) -> (usize, usize) {
         let mut buf_beg = 0;
-        let buf_len = (word_cnt!(self.int_cnt) + word_cnt!(self.frac_cnt)) as usize;
+        let buf_len = self.int_words() + self.frac_words();
+        if buf_len == 0 {
+            return (0, 0);
+        }
         let mut buf_end = buf_len - 1;
 
         while buf_beg < buf_len && self.word_buf[buf_beg] == 0 {
@@ -1074,7 +2276,7 @@ impl Decimal {
             DIGITS_PER_WORD - i - 1
         } else {
             i = DIGITS_PER_WORD - 1;
-            buf_beg as u8 * DIGITS_PER_WORD
+            buf_beg * DIGITS_PER_WORD
         };
         if buf_beg < buf_len {
             start += count_leading_zeroes(i, self.word_buf[buf_beg]);
@@ -1085,9 +2287,9 @@ impl Decimal {
         }
         let (i, mut end) = if buf_end == buf_len - 1 && self.frac_cnt > 0 {
             i = (self.frac_cnt - 1) % DIGITS_PER_WORD + 1;
-            (DIGITS_PER_WORD - i + 1, buf_end as u8 * DIGITS_PER_WORD + i)
+            (DIGITS_PER_WORD - i + 1, buf_end * DIGITS_PER_WORD + i)
         } else {
-            (1, (buf_end as u8 + 1) * DIGITS_PER_WORD)
+            (1, (buf_end + 1) * DIGITS_PER_WORD)
         };
         end -= count_trailing_zeroes(i, self.word_buf[buf_end]);
         (start, end)
@@ -1097,12 +2299,12 @@ impl Decimal {
     ///
     /// Result fitting in the buffer should be garanted.
     /// 'shift' have to be from 1 to DIGITS_PER_WORD - 1 (inclusive)
-    fn do_mini_left_shift(mut self, shift: u8, beg: u8, end: u8) -> Decimal {
+    fn do_mini_left_shift(mut self, shift: usize, beg: usize, end: usize) -> Decimal {
         let shift = shift as usize;
         let mut buf_from = (beg / DIGITS_PER_WORD) as usize;
         let buf_end = ((end - 1) / DIGITS_PER_WORD) as usize;
         let c_shift = DIGITS_PER_WORD as usize - shift;
-        if beg % DIGITS_PER_WORD < shift as u8 {
+        if beg % DIGITS_PER_WORD < shift {
             self.word_buf[buf_from - 1] = self.word_buf[buf_from] / TEN_POW[c_shift];
         }
         while buf_from < buf_end {
@@ -1118,12 +2320,12 @@ impl Decimal {
     ///
     /// Result fitting in the buffer should be garanted.
     /// 'shift' have to be from 1 to DIGITS_PER_WORD - 1 (inclusive)
-    fn do_mini_right_shift(mut self, shift: u8, beg: u8, end: u8) -> Decimal {
+    fn do_mini_right_shift(mut self, shift: usize, beg: usize, end: usize) -> Decimal {
         let shift = shift as usize;
         let mut buf_from = ((end - 1) / DIGITS_PER_WORD) as usize;
         let buf_end = (beg / DIGITS_PER_WORD) as usize;
         let c_shift = DIGITS_PER_WORD as usize - shift;
-        if DIGITS_PER_WORD - ((end - 1) % DIGITS_PER_WORD + 1) < shift as u8 {
+        if DIGITS_PER_WORD - ((end - 1) % DIGITS_PER_WORD + 1) < shift {
             self.word_buf[buf_from + 1] =
                 (self.word_buf[buf_from] % TEN_POW[shift]) * TEN_POW[c_shift];
         }
@@ -1136,28 +2338,80 @@ impl Decimal {
         self
     }
 
+    /// Checked declaration bridge for codec callers. Either-UNSPECIFIED policy
+    /// belongs to the caller; preserve the old ordering error before bounds.
+    pub(in crate::codec) fn checked_declared_fixed_target(
+        precision: isize,
+        scale: isize,
+    ) -> Result<(u8, u8)> {
+        if precision < scale {
+            return Err(Error::m_bigger_than_d(""));
+        }
+        let target_error = || {
+            Error::InvalidDataType(format!(
+                "decimal target ({precision},{scale}) is outside the nonnegative byte-count domain"
+            ))
+        };
+        let prec = u8::try_from(precision).map_err(|_| target_error())?;
+        let frac = u8::try_from(scale).map_err(|_| target_error())?;
+        checked_fixed_decimal_target(prec, frac)?;
+        Ok((prec, frac))
+    }
+
+    pub(in crate::codec) fn try_max_or_min_for_target(
+        negative: bool,
+        precision: u8,
+        scale: u8,
+    ) -> Result<Self> {
+        let mut value = try_max_decimal(precision, scale)?;
+        // Negation is not equivalent here: retain valid-target negative zero.
+        value.negative = negative;
+        Ok(value)
+    }
+
+    /// Borrowed checked bridge for nonnegative declared scales. Preserve all
+    /// raw cells when copying and the legacy Fixed/MAX30 result/status policy.
+    pub(in crate::codec) fn try_round_fixed(
+        &self,
+        scale: u8,
+        mode: RoundMode,
+    ) -> Result<Res<Self>> {
+        self.try_clone_all()?.round_with_limit(
+            i128::from(scale).min(MAX_FRACTION as i128),
+            WordLimit::Fixed(WORD_BUF_LEN),
+            mode,
+        )
+    }
+
     // TODO: remove this after merge the `refactor ScalarFunc::builtin_cast`
     //
     /// convert_to(ProduceDecWithSpecifiedTp in tidb)
     /// produces a new decimal according to `flen` and `decimal`.
     pub fn convert_to(self, ctx: &mut EvalContext, flen: u8, decimal: u8) -> Result<Decimal> {
+        // Validate even a zero/no-op target before any saturation or narrowing.
+        let (target_int_digits, _) = checked_fixed_decimal_target(flen, decimal)?;
         let (prec, frac) = self.prec_and_frac();
-        if flen < decimal {
-            return Err(Error::m_bigger_than_d(""));
-        }
-        if !self.is_zero() && prec - frac > flen - decimal {
-            return Ok(max_or_min_dec(self.negative, flen, decimal));
+        if !self.is_zero() && prec - frac as usize > target_int_digits {
+            let mut maximum = try_max_decimal(flen, decimal)?;
+            maximum.negative = self.negative;
+            return Ok(maximum);
             // TODO:select (cast 111 as decimal(1)) causes a warning in MySQL.
         }
 
-        if frac == decimal {
+        if frac == u32::from(decimal) {
             return Ok(self);
         }
 
-        let tmp = self;
-        let ret = self.round(decimal as i8, RoundMode::HalfEven).unwrap();
+        let tmp = self.try_clone_all()?;
+        let ret = self
+            .round_with_limit(
+                i128::from(decimal).min(MAX_FRACTION as i128),
+                WordLimit::Fixed(WORD_BUF_LEN),
+                RoundMode::HalfEven,
+            )?
+            .unwrap();
         // TODO: process over_flow
-        if !ret.is_zero() && frac > decimal && ret != tmp {
+        if !ret.is_zero() && frac > u32::from(decimal) && ret != tmp {
             // TODO handle InInsertStmt in ctx
             ctx.handle_truncate(true)?;
         }
@@ -1170,47 +2424,94 @@ impl Decimal {
     ///  scale can be negative !
     ///  one TRUNCATED error (line XXX below) isn't treated very logical :(
     pub fn round(self, frac: i8, round_mode: RoundMode) -> Res<Decimal> {
-        self.round_with_word_buf_len(frac, WORD_BUF_LEN, round_mode)
+        self.round_with_word_buf_len(isize::from(frac), WORD_BUF_LEN, round_mode)
     }
 
     fn round_with_word_buf_len(
         self,
-        mut frac: i8,
-        word_buf_len: u8,
+        frac: isize,
+        word_buf_len: usize,
         round_mode: RoundMode,
     ) -> Res<Decimal> {
-        if frac > MAX_FRACTION as i8 {
-            frac = MAX_FRACTION as i8;
-        }
-        let mut frac_words_to = if frac > 0 {
-            word_cnt!(frac, i8)
-        } else {
-            (frac + 1) / DIGITS_PER_WORD as i8
-        };
-        let (int_word_cnt, frac_word_cnt) = (word_cnt!(self.int_cnt), word_cnt!(self.frac_cnt));
+        // This cap belongs to the legacy wrapper, not to exact rounding.
+        self.round_with_limit(
+            frac.min(MAX_FRACTION as isize) as i128,
+            WordLimit::Fixed(word_buf_len),
+            round_mode,
+        )
+        .expect("bounded Decimal rounding count or allocation failed")
+    }
 
-        let mut res = if int_word_cnt as i8 + frac_words_to > word_buf_len as i8 {
-            frac_words_to = word_buf_len as i8 - int_word_cnt as i8;
-            frac = frac_words_to * DIGITS_PER_WORD as i8;
+    fn round_with_limit(
+        self,
+        mut frac: i128,
+        limit: WordLimit,
+        round_mode: RoundMode,
+    ) -> Result<Res<Decimal>> {
+        let mut frac_words_to = if frac > 0 {
+            let stored = checked_fraction(
+                usize::try_from(frac)
+                    .map_err(|_| decimal_resource_error("round scale exceeds indexing width"))?,
+            )?;
+            stored.div_ceil(DIGITS_PER_WORD) as i128
+        } else {
+            // Preserve the source negative-scale grouping, including -9=>0.
+            (frac + 1) / DIGITS_PER_WORD as i128
+        };
+        let (int_word_cnt, frac_word_cnt) = (self.int_words(), self.frac_words());
+        let clipped = match limit {
+            WordLimit::Fixed(words) => int_word_cnt as i128 + frac_words_to > words as i128,
+            WordLimit::Grow => false,
+        };
+        let mut res = if clipped {
+            let WordLimit::Fixed(words) = limit else {
+                unreachable!()
+            };
+            frac_words_to = words as i128 - int_word_cnt as i128;
+            frac = frac_words_to * DIGITS_PER_WORD as i128;
             Res::Truncated(self)
-        } else if self.int_cnt as i8 + frac < 0 {
-            return Res::Ok(Self::zero());
+        } else if self.int_cnt as i128 + frac < 0 {
+            return Ok(Res::Ok(Self::zero()));
         } else {
             Res::Ok(self)
         };
-        res.int_cnt = cmp::min(int_word_cnt, word_buf_len) * DIGITS_PER_WORD;
-        if frac_words_to > frac_word_cnt as i8 {
-            for idx in int_word_cnt + frac_word_cnt..int_word_cnt + frac_words_to as u8 {
-                res.word_buf[idx as usize] = 0;
+        let selected_int_words = match limit {
+            WordLimit::Fixed(words) => int_word_cnt.min(words),
+            WordLimit::Grow => int_word_cnt,
+        };
+        res.int_cnt = checked_word_digits(selected_int_words)?;
+        let retained_frac_words = usize::try_from(frac_words_to.max(0))
+            .map_err(|_| decimal_resource_error("round retained word count overflow"))?;
+        let word_buf_len = match limit {
+            WordLimit::Fixed(words) => words,
+            WordLimit::Grow => {
+                checked_word_extent(int_word_cnt, frac_word_cnt.max(retained_frac_words))?
+                    .max(WORD_BUF_LEN)
             }
-            res.frac_cnt = frac as u8;
+        };
+        // Extension writes precede the final header update, so initialize the
+        // entire working window now. A carry grows it only when actually needed.
+        res.try_reserve_words(word_buf_len)?;
+        if frac_words_to > frac_word_cnt as i128 {
+            let start = checked_word_extent(int_word_cnt, frac_word_cnt)?;
+            let end = checked_word_extent(int_word_cnt, retained_frac_words)?;
+            res.word_buf[start..end].fill(0);
+            res.frac_cnt = checked_fraction(
+                usize::try_from(frac)
+                    .map_err(|_| decimal_resource_error("round storage count overflow"))?,
+            )?;
             res.result_frac_cnt = res.frac_cnt;
-            return res;
+            res.try_ensure_storage()?;
+            return Ok(res);
         }
-        if frac >= res.frac_cnt as i8 {
-            res.frac_cnt = frac as u8;
+        if frac >= res.frac_cnt as i128 {
+            res.frac_cnt = checked_fraction(
+                usize::try_from(frac)
+                    .map_err(|_| decimal_resource_error("round storage count overflow"))?,
+            )?;
             res.result_frac_cnt = res.frac_cnt;
-            return res;
+            res.try_ensure_storage()?;
+            return Ok(res);
         }
 
         Decimal::handle_incr(
@@ -1219,29 +2520,29 @@ impl Decimal {
             frac_words_to,
             frac,
             frac_word_cnt,
-            word_buf_len,
             round_mode,
+            limit,
         )
     }
 
     fn handle_incr(
         mut res: Res<Decimal>,
-        int_word_cnt: u8,
-        frac_words_to: i8,
-        frac: i8,
-        frac_word_cnt: u8,
-        word_buf_len: u8,
+        int_word_cnt: usize,
+        frac_words_to: i128,
+        frac: i128,
+        frac_word_cnt: usize,
         round_mode: RoundMode,
-    ) -> Res<Decimal> {
-        // Do increment
-        let mut to_idx = int_word_cnt as i8 + frac_words_to - 1;
-        if frac == frac_words_to * DIGITS_PER_WORD as i8 {
+        limit: WordLimit,
+    ) -> Result<Res<Decimal>> {
+        // -1 is the intentional carry-before-first-word sentinel.
+        let mut to_idx = int_word_cnt as i128 + frac_words_to - 1;
+        if frac == frac_words_to * DIGITS_PER_WORD as i128 {
             let do_inc = match round_mode {
                 // Notice: No support for ceiling mode now.
                 RoundMode::Ceiling => {
                     // If any word after scale is not zero, do increment.
                     // e.g ceiling 3.0001 to scale 1, gets 3.1
-                    let idx = to_idx + frac_word_cnt as i8 - frac_words_to;
+                    let idx = to_idx + frac_word_cnt as i128 - frac_words_to;
                     if idx > to_idx {
                         res.word_buf[(to_idx + 1) as usize..=(idx as usize)]
                             .iter()
@@ -1264,13 +2565,20 @@ impl Decimal {
                     to_idx += 1;
                     res.word_buf[to_idx as usize] = WORD_BASE;
                 }
-            } else if int_word_cnt as i8 + frac_words_to == 0 {
-                return Res::Ok(Self::zero());
+            } else if int_word_cnt as i128 + frac_words_to == 0 {
+                return Ok(Res::Ok(Self::zero()));
             }
         } else {
             // TODO - fix this code as it won't work for CEILING mode
-            let pos = (frac_words_to * DIGITS_PER_WORD as i8 - frac - 1) as usize;
-            let mut shifted_number = res.word_buf[to_idx as usize] / TEN_POW[pos];
+            let pos = usize::try_from(frac_words_to * DIGITS_PER_WORD as i128 - frac - 1)
+                .ok()
+                .filter(|position| *position < DIGITS_PER_WORD)
+                .ok_or_else(|| {
+                    decimal_resource_error("round partial-word digit position is invalid")
+                })?;
+            let word_index = usize::try_from(to_idx)
+                .map_err(|_| decimal_resource_error("round partial-word index is negative"))?;
+            let mut shifted_number = res.word_buf[word_index] / TEN_POW[pos];
             let dig_after_scale = shifted_number % 10;
             let round_digit = match round_mode {
                 RoundMode::Ceiling => 0,
@@ -1280,38 +2588,46 @@ impl Decimal {
             if dig_after_scale > round_digit || (round_digit == 5 && dig_after_scale == 5) {
                 shifted_number += 10;
             }
-            res.word_buf[to_idx as usize] = TEN_POW[pos] * (shifted_number - dig_after_scale);
+            res.word_buf[word_index] = TEN_POW[pos] * (shifted_number - dig_after_scale);
         }
 
-        if frac_words_to < frac_word_cnt as i8 {
+        if frac_words_to < frac_word_cnt as i128 {
             let idx = if frac == 0 && int_word_cnt == 0 {
                 1
             } else {
-                (int_word_cnt as i8 + frac_words_to) as usize
+                usize::try_from(int_word_cnt as i128 + frac_words_to)
+                    .map_err(|_| decimal_resource_error("round discard index is negative"))?
             };
-            for i in idx..word_buf_len as usize {
-                res.word_buf[i] = 0;
+            // Initialized Grow scratch is a clearing window, never a Fixed
+            // arithmetic budget. Fixed keeps its original n-word window.
+            let clear_end = match limit {
+                WordLimit::Fixed(words) => words,
+                WordLimit::Grow => res.word_buf.len(),
+            };
+            if idx < clear_end {
+                res.word_buf[idx..clear_end].fill(0);
             }
         }
 
         Decimal::handle_carry(
             res,
-            to_idx as usize,
+            usize::try_from(to_idx)
+                .map_err(|_| decimal_resource_error("round carry index is negative"))?,
             frac,
             frac_words_to,
             int_word_cnt,
-            word_buf_len,
+            limit,
         )
     }
 
     fn handle_carry(
         mut dec: Res<Decimal>,
         mut to_idx: usize,
-        mut frac: i8,
-        mut frac_word_to: i8,
-        int_word_cnt: u8,
-        word_buf_len: u8,
-    ) -> Res<Decimal> {
+        mut frac: i128,
+        mut frac_word_to: i128,
+        int_word_cnt: usize,
+        limit: WordLimit,
+    ) -> Result<Res<Decimal>> {
         if dec.word_buf[to_idx] >= WORD_BASE {
             let mut carry = 1;
             dec.word_buf[to_idx] -= WORD_BASE;
@@ -1325,13 +2641,28 @@ impl Decimal {
                 );
             }
             if carry > 0 {
-                if int_word_cnt as i8 + frac_word_to >= word_buf_len as i8 {
-                    frac_word_to -= 1;
-                    frac = frac_word_to * DIGITS_PER_WORD as i8;
-                    dec = Res::Truncated(dec.unwrap());
+                if let WordLimit::Fixed(words) = limit {
+                    if int_word_cnt as i128 + frac_word_to >= words as i128 {
+                        frac_word_to -= 1;
+                        frac = frac_word_to * DIGITS_PER_WORD as i128;
+                        dec = Res::Truncated(dec.unwrap());
+                    }
                 }
-                for i in (0..int_word_cnt as usize + cmp::max(frac_word_to, 0) as usize).rev() {
-                    if i + 1 < word_buf_len as usize {
+                let frac_words = usize::try_from(frac_word_to.max(0))
+                    .map_err(|_| decimal_resource_error("round carry fraction extent overflow"))?;
+                let shift_words = checked_word_extent(int_word_cnt, frac_words)?;
+                let shift_capacity = match limit {
+                    WordLimit::Grow => {
+                        let needed = shift_words.checked_add(1).ok_or_else(|| {
+                            decimal_resource_error("round carry word count overflow")
+                        })?;
+                        dec.try_reserve_words(needed)?;
+                        needed
+                    }
+                    WordLimit::Fixed(words) => words,
+                };
+                for i in (0..shift_words).rev() {
+                    if i + 1 < shift_capacity {
                         dec.word_buf[i + 1] = dec.word_buf[i];
                     } else if !dec.is_overflow() {
                         dec = Res::Overflow(dec.unwrap());
@@ -1339,8 +2670,14 @@ impl Decimal {
                 }
                 to_idx = 0;
                 dec.word_buf[0] = 1;
-                if dec.int_cnt < DIGITS_PER_WORD * word_buf_len {
-                    dec.int_cnt += 1;
+                let can_grow_integer = match limit {
+                    WordLimit::Grow => true,
+                    WordLimit::Fixed(words) => dec.int_cnt < checked_word_digits(words)?,
+                };
+                if can_grow_integer {
+                    dec.int_cnt = dec.int_cnt.checked_add(1).ok_or_else(|| {
+                        decimal_resource_error("round integer digit carry overflow")
+                    })?;
                 } else {
                     dec = Res::Overflow(dec.unwrap());
                 }
@@ -1348,26 +2685,48 @@ impl Decimal {
         } else {
             while dec.word_buf[to_idx] == 0 {
                 if to_idx == 0 {
-                    let idx = frac_word_to + 1;
-                    dec.int_cnt = 1;
+                    dec.int_cnt = if limit == WordLimit::Grow && frac > 0 {
+                        0
+                    } else {
+                        1
+                    };
                     dec.negative = false;
-                    dec.frac_cnt = cmp::max(0, frac) as u8;
+                    dec.frac_cnt = checked_fraction(
+                        usize::try_from(frac.max(0))
+                            .map_err(|_| decimal_resource_error("rounded zero scale overflow"))?,
+                    )?;
                     dec.result_frac_cnt = dec.frac_cnt;
-                    for i in 0..idx {
-                        dec.word_buf[i as usize] = 0;
-                    }
-                    return Res::Ok(dec.unwrap());
+                    // Fixed retains the old extra integer-zero header and
+                    // status cancellation. Fresh Grow zero uses its canonical
+                    // fractional-only shape without a speculative heap word.
+                    dec.try_ensure_storage()?;
+                    let clear = if limit == WordLimit::Grow {
+                        checked_word_extent(dec.int_words(), dec.frac_words())?
+                    } else {
+                        usize::try_from((frac_word_to + 1).max(0)).map_err(|_| {
+                            decimal_resource_error("rounded zero clearing extent overflow")
+                        })?
+                    };
+                    dec.word_buf[..clear].fill(0);
+                    return Ok(Res::Ok(dec.unwrap()));
                 }
                 to_idx -= 1;
             }
         }
         let first_dig = dec.int_cnt % DIGITS_PER_WORD;
-        if first_dig > 0 && dec.word_buf[to_idx] >= TEN_POW[first_dig as usize] {
-            dec.int_cnt += 1;
+        if first_dig > 0 && dec.word_buf[to_idx] >= TEN_POW[first_dig] {
+            dec.int_cnt = dec
+                .int_cnt
+                .checked_add(1)
+                .ok_or_else(|| decimal_resource_error("round integer precision overflow"))?;
         }
-        dec.frac_cnt = cmp::max(0, frac) as u8;
+        dec.frac_cnt = checked_fraction(
+            usize::try_from(frac.max(0))
+                .map_err(|_| decimal_resource_error("rounded storage scale overflow"))?,
+        )?;
         dec.result_frac_cnt = dec.frac_cnt;
-        dec
+        dec.try_ensure_storage()?;
+        Ok(dec)
     }
 
     /// `shift` shifts decimal digits in given number (with rounding if it
@@ -1379,147 +2738,236 @@ impl Decimal {
         self.shift_with_word_buf_len(shift, WORD_BUF_LEN)
     }
 
-    fn shift_with_word_buf_len(self, shift: isize, word_buf_len: u8) -> Res<Decimal> {
+    fn shift_with_word_buf_len(self, shift: isize, word_buf_len: usize) -> Res<Decimal> {
+        self.shift_with_limit(
+            shift as i128,
+            WordLimit::Fixed(word_buf_len),
+            ShiftDisposition::Legacy,
+        )
+        .expect("bounded Decimal shift count or allocation failed")
+        .result
+    }
+
+    fn shift_with_limit(
+        self,
+        shift: i128,
+        limit: WordLimit,
+        disposition: ShiftDisposition,
+    ) -> Result<DecimalShiftOutcome> {
+        i64::try_from(shift).map_err(|_| decimal_resource_error("shift count exceeds i64"))?;
         if shift == 0 {
-            return Res::Ok(self);
+            return Ok(DecimalShiftOutcome::direct(Res::Ok(self)));
         }
+        let input_words = checked_word_extent(self.int_words(), self.frac_words())?;
+        // digit_bounds uses word-aligned positions; validate those counts
+        // before its usize arithmetic, independently of allocation capacity.
+        checked_word_digits(input_words)?;
         let (mut beg, mut end) = self.digit_bounds();
         if beg == end {
-            return Res::Ok(Self::zero());
+            return Ok(DecimalShiftOutcome::direct(Res::Ok(Self::zero_for_shift(
+                disposition,
+            )?)));
         }
-
-        let upper = (DIGITS_PER_WORD * word_buf_len * 2) as isize;
-        if shift > upper {
-            // process overflow by shift.
-            return Res::Overflow(self);
-        } else if shift < -upper {
-            // processor truncated by shift.
-            return Res::Truncated(Self::zero());
+        if let WordLimit::Fixed(words) = limit {
+            if disposition == ShiftDisposition::Legacy {
+                let upper = checked_word_digits(words)? as i128 * 2;
+                if shift > upper {
+                    return Ok(DecimalShiftOutcome::direct(Res::Overflow(self)));
+                }
+                if shift < -upper {
+                    return Ok(DecimalShiftOutcome::direct(Res::Truncated(
+                        Self::zero_for_shift(disposition)?,
+                    )));
+                }
+            }
         }
-
-        let point = word_cnt!(self.int_cnt) * DIGITS_PER_WORD;
-        let mut new_point = point as isize + shift;
-        let int_cnt = if new_point < beg as isize {
+        let point = checked_word_digits(self.int_words())? as i128;
+        let mut new_point = point + shift;
+        let int_cnt = (new_point - beg as i128).max(0);
+        let mut frac_cnt = (end as i128 - new_point).max(0);
+        if let WordLimit::Fixed(words) = limit {
+            if int_cnt > checked_word_digits(words)? as i128 {
+                return Ok(DecimalShiftOutcome::direct(Res::Overflow(self)));
+            }
+        }
+        let int_words = checked_decimal_position(int_cnt)?.div_ceil(DIGITS_PER_WORD);
+        let desired_frac_words = if frac_cnt == 0 {
             0
         } else {
-            new_point - beg as isize
+            (frac_cnt - 1) / DIGITS_PER_WORD as i128 + 1
         };
-        let mut frac_cnt = if new_point > end as isize {
-            0
-        } else {
-            end as isize - new_point
+        let fraction_request = match limit {
+            WordLimit::Grow => checked_decimal_position(desired_frac_words)?,
+            WordLimit::Fixed(words) => {
+                checked_decimal_position(desired_frac_words.min(words.saturating_add(1) as i128))?
+            }
         };
-        let int_word_cnt = word_cnt!(int_cnt, isize);
-        let mut frac_word_cnt = word_cnt!(frac_cnt, isize);
-        let new_len = int_word_cnt + frac_word_cnt;
-        let mut res = if new_len > word_buf_len as isize {
-            let lack = new_len - word_buf_len as isize;
-            if frac_word_cnt < lack {
-                return Res::Overflow(self);
+        let selected = limit.apply(int_words, fraction_request)?;
+        let selected_frac_words = selected.1;
+        let clipped = selected.is_truncated();
+        let word_buf_len = match limit {
+            WordLimit::Fixed(words) => words,
+            WordLimit::Grow => checked_word_extent(int_words, selected_frac_words)?
+                .max(input_words)
+                .max(WORD_BUF_LEN),
+        };
+        let window_digits = checked_word_digits(word_buf_len)? as i128;
+        // Preselection precedes all expansion/reservation, including huge
+        // in-range exponent equalities. Nothing allocates in proportion to a
+        // rejected Fixed exponent.
+        let mut res = if clipped {
+            let retained_digits = checked_word_digits(selected_frac_words)? as i128;
+            let diff = frac_cnt - retained_digits;
+            frac_cnt = retained_digits;
+            let rounded_end = end as i128 - diff;
+            if disposition == ShiftDisposition::Legacy && rounded_end <= beg as i128 {
+                return Ok(DecimalShiftOutcome::direct(Res::Truncated(
+                    Self::zero_for_shift(disposition)?,
+                )));
             }
-            frac_word_cnt -= lack;
-            let diff = frac_cnt - frac_word_cnt * DIGITS_PER_WORD as isize;
-            frac_cnt = frac_word_cnt * DIGITS_PER_WORD as isize;
-            if end as isize - diff <= beg as isize {
-                return Res::Truncated(Self::zero());
+            let mut round_scale = rounded_end - point;
+            if disposition == ShiftDisposition::Legacy {
+                round_scale = round_scale.min(MAX_FRACTION as i128);
             }
-            end = (end as isize - diff) as u8;
-            Res::Truncated(
-                self.round_with_word_buf_len(
-                    end as i8 - point as i8,
-                    word_buf_len,
-                    RoundMode::HalfEven,
-                )
-                .unwrap(),
-            )
+            let rounded = self.round_with_limit(round_scale, limit, RoundMode::HalfEven)?;
+            if disposition == ShiftDisposition::Mysql && !rounded.is_ok() {
+                // Go traces a nested Round error. Its caller's direct error
+                // comparison does not saturate this Overflow's partial value.
+                return Ok(DecimalShiftOutcome {
+                    result: rounded,
+                    origin: ShiftStatusOrigin::Rounding,
+                });
+            }
+            if rounded_end <= beg as i128 {
+                return Ok(DecimalShiftOutcome::direct(Res::Truncated(
+                    Self::zero_for_shift(disposition)?,
+                )));
+            }
+            end = checked_decimal_position(rounded_end)?;
+            Res::Truncated(rounded.unwrap())
         } else {
             Res::Ok(self)
         };
+        checked_fraction(checked_decimal_position(frac_cnt)?)?;
+        res.try_reserve_words(word_buf_len)?;
 
-        if shift % DIGITS_PER_WORD as isize != 0 {
+        if shift % DIGITS_PER_WORD as i128 != 0 {
             let (l_mini_shift, r_mini_shift, mini_shift, do_left);
             if shift > 0 {
-                l_mini_shift = (shift % DIGITS_PER_WORD as isize) as u8;
+                l_mini_shift = checked_decimal_position(shift % DIGITS_PER_WORD as i128)?;
                 r_mini_shift = DIGITS_PER_WORD - l_mini_shift;
                 do_left = l_mini_shift <= beg;
             } else {
-                r_mini_shift = ((-shift) % DIGITS_PER_WORD as isize) as u8;
+                r_mini_shift = checked_decimal_position((-shift) % DIGITS_PER_WORD as i128)?;
                 l_mini_shift = DIGITS_PER_WORD - r_mini_shift;
-                do_left = (DIGITS_PER_WORD * word_buf_len - end) < r_mini_shift;
+                do_left = window_digits - (end as i128) < r_mini_shift as i128;
             }
             if do_left {
+                if beg < l_mini_shift {
+                    return Err(decimal_resource_error(
+                        "left mini-shift precedes initialized words",
+                    ));
+                }
                 res = res.map(|d| d.do_mini_left_shift(l_mini_shift, beg, end));
-                mini_shift = -(l_mini_shift as i8);
+                mini_shift = -(l_mini_shift as i128);
             } else {
+                if end as i128 + r_mini_shift as i128 > window_digits {
+                    return Err(decimal_resource_error(
+                        "right mini-shift exceeds selected word window",
+                    ));
+                }
                 res = res.map(|d| d.do_mini_right_shift(r_mini_shift, beg, end));
-                mini_shift = r_mini_shift as i8;
+                mini_shift = r_mini_shift as i128;
             }
-            new_point += mini_shift as isize;
-            if shift + mini_shift as isize == 0 && (new_point - int_cnt) < DIGITS_PER_WORD as isize
-            {
-                res.int_cnt = int_cnt as u8;
-                res.frac_cnt = frac_cnt as u8;
-                return res;
+            new_point += mini_shift;
+            if shift + mini_shift == 0 && (new_point - int_cnt) < DIGITS_PER_WORD as i128 {
+                res.int_cnt = checked_decimal_position(int_cnt)?;
+                res.frac_cnt = checked_fraction(checked_decimal_position(frac_cnt)?)?;
+                res.try_ensure_storage()?;
+                return Ok(DecimalShiftOutcome::direct(res));
             }
-            beg = (beg as i8 + mini_shift) as u8;
-            end = (end as i8 + mini_shift) as u8;
+            beg = checked_decimal_position(beg as i128 + mini_shift)?;
+            end = checked_decimal_position(end as i128 + mini_shift)?;
         }
 
         let new_front = new_point - int_cnt;
-        if new_front >= DIGITS_PER_WORD as isize || new_front < 0 {
-            let mut word_shift;
+        if new_front >= DIGITS_PER_WORD as i128 || new_front < 0 {
+            let word_shift;
             if new_front > 0 {
-                word_shift = new_front / DIGITS_PER_WORD as isize;
-                let to = ((beg / DIGITS_PER_WORD) as isize - word_shift) as usize;
-                let barier = (((end - 1) / DIGITS_PER_WORD) as isize - word_shift) as usize;
-                for i in to..=barier {
-                    res.word_buf[i] = res.word_buf[i + word_shift as usize];
+                let words = checked_decimal_position(new_front / DIGITS_PER_WORD as i128)?;
+                let to = (beg / DIGITS_PER_WORD)
+                    .checked_sub(words)
+                    .ok_or_else(|| decimal_resource_error("left shift target underflow"))?;
+                let source_end = (end - 1) / DIGITS_PER_WORD;
+                let barrier = source_end
+                    .checked_sub(words)
+                    .ok_or_else(|| decimal_resource_error("left shift end underflow"))?;
+                for i in to..=barrier {
+                    res.word_buf[i] = res.word_buf[i + words];
                 }
-                for i in barier + 1..=barier + word_shift as usize {
+                for i in barrier + 1..=source_end {
                     res.word_buf[i] = 0;
                 }
-                word_shift = -word_shift;
+                word_shift = -(words as i128);
             } else {
-                word_shift = (1 - new_front) / DIGITS_PER_WORD as isize;
-                let to = (((end - 1) / DIGITS_PER_WORD) as isize + word_shift) as usize;
-                let barier = ((beg / DIGITS_PER_WORD) as isize + word_shift) as usize;
-                for i in (barier..=to).rev() {
-                    res.word_buf[i] = res.word_buf[i - word_shift as usize];
+                let words = checked_decimal_position((1 - new_front) / DIGITS_PER_WORD as i128)?;
+                let to = checked_word_extent((end - 1) / DIGITS_PER_WORD, words)?;
+                let source_start = beg / DIGITS_PER_WORD;
+                let barrier = checked_word_extent(source_start, words)?;
+                if to >= res.word_buf.len() {
+                    return Err(decimal_resource_error(
+                        "right shift exceeds initialized words",
+                    ));
                 }
-                for i in barier - word_shift as usize..barier {
+                for i in (barrier..=to).rev() {
+                    res.word_buf[i] = res.word_buf[i - words];
+                }
+                for i in source_start..barrier {
                     res.word_buf[i] = 0;
                 }
+                word_shift = words as i128;
             }
-            let shift_cnt = word_shift * DIGITS_PER_WORD as isize;
-            beg = (beg as isize + shift_cnt) as u8;
-            end = (end as isize + shift_cnt) as u8;
-            new_point += shift_cnt;
+            let shift_digits = word_shift * DIGITS_PER_WORD as i128;
+            beg = checked_decimal_position(beg as i128 + shift_digits)?;
+            end = checked_decimal_position(end as i128 + shift_digits)?;
+            new_point += shift_digits;
         }
-        let beg_word = (beg / DIGITS_PER_WORD) as isize;
-        let end_word = ((end - 1) / DIGITS_PER_WORD) as isize;
+        let beg_word = beg / DIGITS_PER_WORD;
+        let end_word = (end - 1) / DIGITS_PER_WORD;
+        if new_point < 0 {
+            return Err(decimal_resource_error(
+                "shift retained a negative decimal point",
+            ));
+        }
         let new_point_word = if new_point != 0 {
-            (new_point - 1) / DIGITS_PER_WORD as isize
+            checked_decimal_position((new_point - 1) / DIGITS_PER_WORD as i128)?
         } else {
             0
         };
         if new_point_word > end_word {
+            if new_point_word >= res.word_buf.len() {
+                return Err(decimal_resource_error(
+                    "shift zero fill exceeds initialized words",
+                ));
+            }
             for i in end_word + 1..=new_point_word {
-                res.word_buf[i as usize] = 0;
+                res.word_buf[i] = 0;
             }
         } else {
             for i in new_point_word..beg_word {
-                res.word_buf[i as usize] = 0;
+                res.word_buf[i] = 0;
             }
         }
-        res.int_cnt = int_cnt as u8;
-        res.frac_cnt = frac_cnt as u8;
-        res
+        res.int_cnt = checked_decimal_position(int_cnt)?;
+        res.frac_cnt = checked_fraction(checked_decimal_position(frac_cnt)?)?;
+        res.try_ensure_storage()?;
+        Ok(DecimalShiftOutcome::direct(res))
     }
 
     /// `as_i64` returns int part of the decimal.
     pub fn as_i64(&self) -> Res<i64> {
         let mut x = 0i64;
-        let int_word_cnt = word_cnt!(self.int_cnt) as usize;
+        let int_word_cnt = self.int_words();
         for word_idx in 0..int_word_cnt {
             let y = x;
             x = x
@@ -1538,7 +2986,7 @@ impl Decimal {
         if !self.negative {
             x = -x;
         }
-        for word_idx in int_word_cnt..int_word_cnt + word_cnt!(self.frac_cnt) as usize {
+        for word_idx in int_word_cnt..int_word_cnt + self.frac_words() {
             if self.word_buf[word_idx] != 0 {
                 return Res::Truncated(x);
             }
@@ -1559,7 +3007,7 @@ impl Decimal {
             return Res::Overflow(0);
         }
         let mut x = 0u64;
-        let int_cnt = word_cnt!(self.int_cnt) as usize;
+        let int_cnt = self.int_words();
         for word_idx in 0..int_cnt {
             x = match x.overflowing_mul(u64::from(WORD_BASE)) {
                 (_, true) => return Res::Overflow(u64::MAX),
@@ -1569,7 +3017,7 @@ impl Decimal {
                 },
             };
         }
-        for word_idx in int_cnt..int_cnt + word_cnt!(self.frac_cnt) as usize {
+        for word_idx in int_cnt..int_cnt + self.frac_words() {
             if self.word_buf[word_idx] != 0 {
                 return Res::Truncated(x);
             }
@@ -1605,121 +3053,228 @@ impl Decimal {
     /// An error will be returned if the given input is as follows:
     /// 1. an empty string
     /// 2. a string which cannot be converted to decimal
-    fn from_bytes_with_word_buf(s: &[u8], word_buf_len: u8) -> Result<Res<Decimal>> {
-        // trim whitespace
-        let mut bs = match s.iter().position(|c| !c.is_ascii_whitespace()) {
-            // TODO: return badnumber
-            None => return Err(box_err!("\"{}\" is empty", escape(s))),
-            Some(pos) => &s[pos..],
-        };
-        let mut negative = false;
-        match bs[0] {
-            b'-' => {
-                negative = true;
-                bs = &bs[1..];
-            }
-            b'+' => bs = &bs[1..],
-            _ => {}
+    fn from_bytes_with_word_buf(s: &[u8], word_buf_len: usize) -> Result<Res<Decimal>> {
+        let outcome = Self::parse_with_policy(s, DecimalParsePolicy::Legacy(word_buf_len))?;
+        match outcome.status {
+            DecimalParseStatus::Ok => Ok(Res::Ok(outcome.value)),
+            DecimalParseStatus::Truncated => Ok(Res::Truncated(outcome.value)),
+            DecimalParseStatus::Overflow => Ok(Res::Overflow(outcome.value)),
+            DecimalParseStatus::BadNumber | DecimalParseStatus::TruncatedWrongValue => Err(
+                Error::InvalidDataType("unexpected legacy decimal parse disposition".to_owned()),
+            ),
         }
-        let int_idx = first_non_digit(bs, 0);
-        let mut int_cnt = int_idx;
-        let mut end_idx = int_idx;
-        let mut frac_cnt = if int_idx < bs.len() && bs[int_idx] == b'.' {
-            end_idx = first_non_digit(bs, int_idx + 1);
-            end_idx - int_idx - 1
+    }
+
+    fn parse_mysql(s: &[u8]) -> Result<DecimalParseOutcome> {
+        Self::parse_with_policy(s, DecimalParsePolicy::Mysql(WORD_BUF_LEN))
+    }
+
+    fn try_from_literal(text: &str) -> Result<Self> {
+        Ok(Self::parse_with_policy(text.as_bytes(), DecimalParsePolicy::Canonical)?.value)
+    }
+
+    fn parse_with_policy(s: &[u8], policy: DecimalParsePolicy) -> Result<DecimalParseOutcome> {
+        let start = s
+            .iter()
+            .position(|byte| match policy {
+                DecimalParsePolicy::Legacy(_) => !byte.is_ascii_whitespace(),
+                DecimalParsePolicy::Mysql(_) => *byte != b' ' && *byte != b'\t',
+                DecimalParsePolicy::Canonical => true,
+            })
+            .unwrap_or(s.len());
+        if start == s.len() && policy.legacy() {
+            return Err(box_err!("\"{}\" is empty", escape(s)));
+        }
+        let mut bs = &s[start..];
+        let negative = bs.first() == Some(&b'-');
+        if matches!(bs.first(), Some(b'-' | b'+')) {
+            bs = &bs[1..];
+        }
+        let int_end = first_non_digit(bs, 0);
+        let has_dot = bs.get(int_end) == Some(&b'.');
+        let frac_start = int_end + usize::from(has_dot);
+        let end = if has_dot {
+            first_non_digit(bs, frac_start)
         } else {
-            0
+            int_end
         };
-        if int_cnt + frac_cnt == 0 {
-            // TODO: bad number
-            return Err(box_err!("\"{}\" is invalid number", escape(s)));
+        let mut int_cnt = int_end;
+        let mut frac_cnt = end - frac_start;
+        if int_cnt == 0 && frac_cnt == 0 {
+            return match policy {
+                DecimalParsePolicy::Legacy(_) => {
+                    Err(box_err!("\"{}\" is invalid number", escape(s)))
+                }
+                DecimalParsePolicy::Mysql(_) => Ok(DecimalParseOutcome {
+                    value: Self::try_new(0, 0, false)?,
+                    status: DecimalParseStatus::TruncatedWrongValue,
+                }),
+                DecimalParsePolicy::Canonical => Err(Error::InvalidDataType(
+                    "invalid canonical decimal literal".to_owned(),
+                )),
+            };
         }
-        let int_word_cnt = word_cnt!(int_cnt);
-        let frac_word_cnt = word_cnt!(frac_cnt);
-        let res = fix_word_cnt_err(int_word_cnt, frac_word_cnt, word_buf_len);
-        let (int_word_cnt, frac_word_cnt) = (res.0, res.1);
-        if !res.is_ok() {
-            frac_cnt = (frac_word_cnt * DIGITS_PER_WORD) as usize;
-            if res.is_overflow() {
-                int_cnt = (int_word_cnt * DIGITS_PER_WORD) as usize;
+        if policy == DecimalParsePolicy::Canonical {
+            if end != bs.len() {
+                return Err(Error::InvalidDataType(
+                    "canonical decimal literal has a suffix".to_owned(),
+                ));
+            }
+            // Fixed planning must count leading zeroes. Canonical Grow has no
+            // capacity disposition, so it can omit that needless integer prefix.
+            let leading = bs[..int_end]
+                .iter()
+                .take_while(|byte| **byte == b'0')
+                .count();
+            int_cnt -= leading;
+        }
+        let selected = policy.limit().apply(
+            int_cnt.div_ceil(DIGITS_PER_WORD),
+            frac_cnt.div_ceil(DIGITS_PER_WORD),
+        )?;
+        let (int_words, frac_words) = (selected.0, selected.1);
+        let mut status = if selected.is_overflow() {
+            DecimalParseStatus::Overflow
+        } else if selected.is_truncated() {
+            DecimalParseStatus::Truncated
+        } else {
+            DecimalParseStatus::Ok
+        };
+        if !selected.is_ok() {
+            frac_cnt = checked_word_digits(frac_words)?;
+            if selected.is_overflow() {
+                int_cnt = checked_word_digits(int_words)?;
             }
         }
-        let mut d = res.map(|_| Decimal::new(int_cnt as u8, frac_cnt as u8, negative));
-        let mut inner_idx = 0;
-        let mut word_idx = int_word_cnt as usize;
+        // Capacity selection happens before u32 storage validation/allocation.
+        let mut value = Self::try_new(int_cnt, frac_cnt, negative)?;
+        let mut inner = 0;
+        let mut word_index = int_words;
         let mut word = 0;
-        for c in bs[int_idx - int_cnt..int_idx].iter().rev() {
-            word += u32::from(c - b'0') * TEN_POW[inner_idx];
-            inner_idx += 1;
-            if inner_idx == DIGITS_PER_WORD as usize {
-                // TODO overflow
-                word_idx -= 1;
-                d.word_buf[word_idx] = word;
+        for byte in bs[int_end - int_cnt..int_end].iter().rev() {
+            word += u32::from(byte - b'0') * TEN_POW[inner];
+            inner += 1;
+            if inner == DIGITS_PER_WORD {
+                word_index -= 1;
+                value.word_buf[word_index] = word;
                 word = 0;
-                inner_idx = 0;
+                inner = 0;
             }
         }
-        if inner_idx != 0 {
-            word_idx -= 1;
-            d.word_buf[word_idx] = word;
+        if inner != 0 {
+            word_index -= 1;
+            value.word_buf[word_index] = word;
+        }
+        word_index = int_words;
+        word = 0;
+        inner = 0;
+        for byte in &bs[frac_start..frac_start + frac_cnt] {
+            word = u32::from(byte - b'0') + word * 10;
+            inner += 1;
+            if inner == DIGITS_PER_WORD {
+                value.word_buf[word_index] = word;
+                word_index += 1;
+                word = 0;
+                inner = 0;
+            }
+        }
+        if inner != 0 {
+            value.word_buf[word_index] = word * TEN_POW[DIGITS_PER_WORD - inner];
         }
 
-        word_idx = int_word_cnt as usize;
-        word = 0;
-        inner_idx = 0;
-        for &c in bs.iter().skip(int_idx + 1).take(frac_cnt) {
-            word = u32::from(c - b'0') + word * 10;
-            inner_idx += 1;
-            if inner_idx == DIGITS_PER_WORD as usize {
-                d.word_buf[word_idx] = word;
-                word_idx += 1;
-                word = 0;
-                inner_idx = 0;
-            }
-        }
-        if inner_idx != 0 {
-            d.word_buf[word_idx] = word * TEN_POW[DIGITS_PER_WORD as usize - inner_idx];
-        }
-        if end_idx < bs.len() {
-            if bs[end_idx] == b'e' || bs[end_idx] == b'E' {
-                let exp = convert::bytes_to_int_without_context(&bs[end_idx + 1..])?;
-                if exp > i64::from(i32::MAX) / 2 {
-                    d = Res::Overflow(max_or_min_dec(
-                        d.negative,
-                        WORD_BUF_LEN * DIGITS_PER_WORD,
-                        0,
-                    ));
+        if end < bs.len() {
+            if matches!(bs[end], b'e' | b'E') {
+                let exponent = scan_decimal_exponent(&bs[end + 1..], policy.legacy())?;
+                if exponent.status != DecimalParseStatus::Ok {
+                    status = exponent.status;
+                    if status == DecimalParseStatus::BadNumber {
+                        value = Self::try_new(0, 0, false)?;
+                    }
                 }
-                if exp < i64::from(i32::MIN) / 2 && !d.is_overflow() {
-                    d = Res::Truncated(Self::zero());
+                // The legacy private n-word parser historically shifts and
+                // saturates at nine words. Source policy uses n throughout.
+                let (shift_words, disposition) = match policy {
+                    DecimalParsePolicy::Legacy(_) => (WORD_BUF_LEN, ShiftDisposition::Legacy),
+                    DecimalParsePolicy::Mysql(words) => (words, ShiftDisposition::Mysql),
+                    DecimalParsePolicy::Canonical => unreachable!(),
+                };
+                if exponent.value > i64::from(i32::MAX) / 2 {
+                    value = Self::try_max_for_words(shift_words, value.negative)?;
+                    status = DecimalParseStatus::Overflow;
                 }
-                if !d.is_overflow() {
-                    let is_truncated = d.is_truncated();
-                    d = match d.unwrap().shift(exp as isize) {
-                        Res::Overflow(v) => Res::Overflow(max_or_min_dec(
-                            v.negative,
-                            WORD_BUF_LEN * DIGITS_PER_WORD,
-                            0,
-                        )),
-                        Res::Ok(v) => {
-                            if is_truncated {
-                                Res::Truncated(v)
-                            } else {
-                                Res::Ok(v)
-                            }
+                if exponent.value < i64::from(i32::MIN) / 2
+                    && status != DecimalParseStatus::Overflow
+                {
+                    value = Self::zero_for_shift(disposition)?;
+                    status = DecimalParseStatus::Truncated;
+                }
+                if status != DecimalParseStatus::Overflow {
+                    let shifted = value.shift_with_limit(
+                        i128::from(exponent.value),
+                        WordLimit::Fixed(shift_words),
+                        disposition,
+                    )?;
+                    let saturate = policy.legacy() || shifted.origin == ShiftStatusOrigin::Direct;
+                    match shifted.result {
+                        Res::Ok(shifted) => value = shifted,
+                        Res::Truncated(shifted) => {
+                            value = shifted;
+                            status = DecimalParseStatus::Truncated;
                         }
-                        res => res,
-                    };
+                        Res::Overflow(shifted) => {
+                            // Go wraps a nested Round error; FromString's direct
+                            // ErrOverflow comparison then retains its partial
+                            // value instead of saturating. Preserve that event
+                            // origin here, never on the owning Decimal itself.
+                            value = if saturate {
+                                Self::try_max_for_words(shift_words, shifted.negative)?
+                            } else {
+                                shifted
+                            };
+                            status = DecimalParseStatus::Overflow;
+                        }
+                    }
                 }
-            } else if bs[end_idx..].iter().any(|c| !c.is_ascii_whitespace()) {
-                d = Res::Truncated(d.unwrap());
+            } else {
+                let junk = if policy.legacy() {
+                    bs[end..].iter().any(|byte| !byte.is_ascii_whitespace())
+                } else {
+                    !trim_unicode_space(&bs[end..]).is_empty()
+                };
+                if junk {
+                    status = DecimalParseStatus::Truncated;
+                }
             }
         }
-        if d.word_buf.iter().all(|c| *c == 0) {
-            d.negative = false;
+        value.result_frac_cnt = value.frac_cnt;
+        if policy == DecimalParsePolicy::Canonical {
+            value = Self::try_finish_exact(Res::Ok(value), frac_cnt)?;
+        } else {
+            let zero = match policy {
+                DecimalParsePolicy::Legacy(_) => value.word_buf.iter().all(|word| *word == 0),
+                DecimalParsePolicy::Mysql(words) => {
+                    value.word_buf.iter().take(words).all(|word| *word == 0)
+                }
+                DecimalParsePolicy::Canonical => unreachable!(),
+            };
+            if zero {
+                value.negative = false;
+            }
         }
-        d.result_frac_cnt = d.frac_cnt;
-        Ok(d)
+        Ok(DecimalParseOutcome { value, status })
+    }
+
+    fn try_max_for_words(words: usize, negative: bool) -> Result<Self> {
+        let mut value = Self::try_new(checked_word_digits(words)?, 0, negative)?;
+        value.word_buf[..words].fill(WORD_MAX);
+        Ok(value)
+    }
+
+    fn zero_for_shift(disposition: ShiftDisposition) -> Result<Self> {
+        match disposition {
+            ShiftDisposition::Legacy => Ok(Self::zero()),
+            ShiftDisposition::Mysql => Self::try_new(0, 0, false),
+        }
     }
 
     /// Get the approximate needed capacity to encode this decimal.
@@ -1727,10 +3282,15 @@ impl Decimal {
     /// see also `encode_decimal`.
     pub fn approximate_encoded_size(&self) -> usize {
         let (prec, frac) = self.prec_and_frac();
+        let (Ok(prec), Ok(frac)) = (u8::try_from(prec), u8::try_from(frac)) else {
+            // A wire-sized estimate is not a logical owner's heap footprint.
+            return 3;
+        };
         dec_encoded_len(&[prec, frac]).unwrap_or(3)
     }
 
     pub fn div(&self, rhs: &Decimal, frac_incr: u8) -> Option<Res<Decimal>> {
+        let frac_incr = usize::from(frac_incr);
         let result_frac_cnt =
             cmp::min(self.result_frac_cnt.saturating_add(frac_incr), MAX_FRACTION);
         let mut res = do_div_mod_impl(self, rhs, frac_incr, false, Some(result_frac_cnt));
@@ -1741,13 +3301,14 @@ impl Decimal {
     }
 
     pub fn is_zero(&self) -> bool {
-        let len = word_cnt!(self.int_cnt) + word_cnt!(self.frac_cnt);
+        let len = self.int_words() + self.frac_words();
         self.word_buf[0..len as usize].iter().all(|&x| x == 0)
     }
 
-    #[cfg(test)]
-    pub fn result_frac_cnt(&self) -> u8 {
-        self.result_frac_cnt
+    /// Returns the result/display scale, independently of stored fraction
+    /// digits.
+    pub fn result_frac_cnt(&self) -> u32 {
+        self.result_scale()
     }
 }
 
@@ -1772,15 +3333,12 @@ enable_conv_for_int!(usize, u64);
 enable_conv_for_int!(isize, i64);
 
 impl ConvertTo<f64> for Decimal {
-    /// This function should not return err,
-    /// if it return err, then the err because of bug.
-    ///
-    /// Port from TiDB's MyDecimal::ToFloat64.
+    /// Preserve native STORAGE-value Rust parsing, including infinity and
+    /// signed zero. This is not the Go/TiDB result-scale projection policy.
+    /// Count/allocation failures are outer codec errors, not SQL warnings.
     #[inline]
     fn convert(&self, _: &mut EvalContext) -> Result<f64> {
-        let r = self.to_string_value().parse::<f64>();
-        debug_assert!(r.is_ok());
-        Ok(r?)
+        Ok(self.try_storage_text()?.parse::<f64>()?)
     }
 }
 
@@ -1922,58 +3480,43 @@ impl FromStr for Decimal {
     }
 }
 
+impl crate::codec::convert::TryToStringValue for Decimal {
+    fn try_to_string_value(&self) -> Result<String> {
+        self.try_storage_text()
+    }
+}
+
 impl ToStringValue for Decimal {
     fn to_string_value(&self) -> String {
-        let (mut buf, word_start_idx, int_len, int_cnt, frac_cnt) = self.prepare_buf();
-        if self.negative {
-            buf.push(b'-');
-        }
-        let padding = int_len - cmp::max(int_cnt, 1);
-        buf.resize(padding as usize + buf.len(), b'0');
-        if int_cnt > 0 {
-            let base_idx = buf.len();
-            let mut idx = base_idx + int_cnt as usize;
-            let mut widx = word_start_idx + word_cnt!(int_cnt) as usize;
-            buf.resize(idx, 0);
-            while idx > base_idx {
-                widx -= 1;
-                let mut x = self.word_buf[widx];
-                for _ in 0..cmp::min((idx - base_idx) as u8, DIGITS_PER_WORD) {
-                    idx -= 1;
-                    buf[idx] = b'0' + (x % 10) as u8;
-                    x /= 10;
-                }
-            }
-        } else {
-            buf.push(b'0');
-        };
-        if frac_cnt > 0 {
-            buf.push(b'.');
-            let mut widx = word_start_idx + word_cnt!(int_cnt) as usize;
-            let exp_idx = buf.len() + frac_cnt as usize;
-            while buf.len() < exp_idx {
-                let mut x = self.word_buf[widx];
-                for _ in 0..cmp::min((exp_idx - buf.len()) as u8, DIGITS_PER_WORD) {
-                    buf.push((x / DIG_MASK) as u8 + b'0');
-                    x = (x % DIG_MASK) * 10;
-                }
-                widx += 1;
-            }
-            while buf.capacity() != buf.len() {
-                buf.push(b'0');
-            }
-        }
-        unsafe { String::from_utf8_unchecked(buf) }
+        let (_, int_digits) = self.remove_leading_zeroes(self.int_cnt);
+        let bytes = int_digits
+            .max(1)
+            .checked_add(self.frac_cnt)
+            .and_then(|len| len.checked_add(usize::from(self.negative)))
+            .and_then(|len| len.checked_add(usize::from(self.frac_cnt > 0)))
+            .expect("Decimal storage text length overflow");
+        let mut text = String::with_capacity(bytes);
+        self.write_storage(&mut text)
+            .expect("Decimal storage formatting failed");
+        text
     }
 }
 
 impl fmt::Display for Decimal {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut dec = *self;
-        dec = dec
-            .round(self.result_frac_cnt as i8, RoundMode::HalfEven)
-            .unwrap();
-        fmt.write_str(&dec.to_string_value())
+        let active = self
+            .int_words()
+            .checked_add(self.frac_words())
+            .ok_or(fmt::Error)?;
+        if active <= WORD_BUF_LEN && self.result_frac_cnt <= u8::MAX as usize {
+            // Extensional legacy domain, including signed-byte interpretation
+            // of raw result headers128..255; no operand-origin tag.
+            self.write_legacy_result(fmt)
+        } else {
+            // Approved domain extension: overcapacity status payloads and
+            // full-u32 visible scales use the same general result writer.
+            self.write_result(fmt)
+        }
     }
 }
 
@@ -2023,7 +3566,11 @@ pub trait DecimalEncoder: NumberEncoder {
     /// Encode decimal to comparable bytes.
     // TODO: resolve following warnings.
     fn write_decimal(&mut self, d: &Decimal, prec: u8, frac: u8) -> Result<Res<()>> {
+        // Header validation must precede all writes. Keep the existing byte
+        // target domain; this is not the decoder's nine-word admission check.
+        dec_encoded_len(&[prec, frac])?;
         self.write_bytes(&[prec, frac])?;
+        let (prec, frac) = (usize::from(prec), usize::from(frac));
         let mut mask = if d.negative { u32::MAX } else { 0 };
         let mut int_cnt = prec - frac;
         let int_word_cnt = int_cnt / DIGITS_PER_WORD;
@@ -2064,7 +3611,11 @@ pub trait DecimalEncoder: NumberEncoder {
             res = Res::Overflow(());
             error!(
                 "encode decimal overflow";
-                "from" => d.to_string(),
+                "source_int_digits" => d.int_cnt,
+                "source_storage_frac" => d.frac_cnt,
+                "source_result_frac" => d.result_frac_cnt,
+                "source_negative" => d.negative,
+                "source_initialized_words" => d.word_buf.len(),
                 "prec" => prec,
                 "frac" => frac,
             );
@@ -2080,7 +3631,11 @@ pub trait DecimalEncoder: NumberEncoder {
             res = Res::Truncated(());
             warn!(
                 "encode decimal truncated";
-                "from" => d.to_string(),
+                "source_int_digits" => d.int_cnt,
+                "source_storage_frac" => d.frac_cnt,
+                "source_result_frac" => d.result_frac_cnt,
+                "source_negative" => d.negative,
+                "source_initialized_words" => d.word_buf.len(),
                 "prec" => prec,
                 "frac" => frac,
             );
@@ -2133,11 +3688,18 @@ pub trait DecimalEncoder: NumberEncoder {
 
     #[inline]
     fn write_decimal_to_chunk(&mut self, v: &Decimal) -> Result<()> {
-        let data = unsafe {
-            let p = v as *const Decimal as *const u8;
-            std::slice::from_raw_parts(p, DECIMAL_STRUCT_SIZE)
-        };
-        self.write_bytes(data)?;
+        let parts = v.fixed_parts(true)?;
+        let mut cell = DecimalCell([0; DECIMAL_STRUCT_SIZE]);
+        cell.0[..4].copy_from_slice(&[
+            parts.int_digits,
+            parts.frac_digits,
+            parts.result_frac_digits,
+            u8::from(parts.negative),
+        ]);
+        for (slot, word) in cell.0[4..].chunks_exact_mut(WORD_SIZE).zip(parts.words) {
+            slot.copy_from_slice(&word.to_ne_bytes());
+        }
+        self.write_bytes(&cell.0)?;
         Ok(())
     }
 }
@@ -2205,7 +3767,10 @@ pub trait DecimalDecoder: NumberDecoder {
         if self.bytes().len() < 3 {
             return Err(box_err!("decimal too short: {} < 3", self.bytes().len()));
         }
-        let (prec, frac_cnt) = (self.read_u8().unwrap(), self.read_u8().unwrap());
+        let (prec, frac_cnt) = (
+            usize::from(self.read_u8().unwrap()),
+            usize::from(self.read_u8().unwrap()),
+        );
 
         if prec < frac_cnt {
             return Err(box_err!(
@@ -2250,7 +3815,7 @@ pub trait DecimalDecoder: NumberDecoder {
             if d.word_buf[word_idx] != 0 {
                 word_idx += 1;
             } else {
-                d.int_cnt -= leading_digits as u8;
+                d.int_cnt -= leading_digits;
             }
         }
         for _ in 0..int_word_cnt {
@@ -2291,14 +3856,31 @@ pub trait DecimalDecoder: NumberDecoder {
     /// `read_decimal_from_chunk` decode Decimal encoded by
     /// `write_decimal_to_chunk`.
     fn read_decimal_from_chunk(&mut self) -> Result<Decimal> {
+        // Consume one complete cell, retaining the reader's following bytes.
         let buf = self.read_bytes(DECIMAL_STRUCT_SIZE)?;
-        let d = unsafe {
-            let mut d = mem::MaybeUninit::<Decimal>::uninit();
-            let p = d.as_mut_ptr() as *mut u8;
-            copy_nonoverlapping(buf.as_ptr(), p, DECIMAL_STRUCT_SIZE);
-            d.assume_init()
+        let negative = match buf[3] {
+            0 => false,
+            1 => true,
+            byte => {
+                return Err(Error::InvalidDataType(format!(
+                    "invalid decimal sign byte {byte}"
+                )));
+            }
         };
-        Ok(d)
+        let mut words = [0; WORD_BUF_LEN];
+        for (word, bytes) in words.iter_mut().zip(buf[4..].chunks_exact(WORD_SIZE)) {
+            *word = u32::from_ne_bytes(bytes.try_into().expect("physical word is four bytes"));
+        }
+        Decimal::from_fixed_parts(
+            DecimalParts {
+                int_digits: buf[0],
+                frac_digits: buf[1],
+                result_frac_digits: buf[2],
+                negative,
+                words,
+            },
+            true,
+        )
     }
 }
 
@@ -2417,7 +3999,7 @@ impl Neg for Decimal {
 
 impl Hash for Decimal {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let (int_word_cnt, frac_word_cnt) = (word_cnt!(self.int_cnt), word_cnt!(self.frac_cnt));
+        let (int_word_cnt, frac_word_cnt) = (self.int_words(), self.frac_words());
 
         let (stop, mut idx) = (int_word_cnt as usize, 0usize);
         while idx < stop && self.word_buf[idx] == 0 {
@@ -2427,7 +4009,7 @@ impl Hash for Decimal {
         let int_word_cnt = stop - idx;
 
         int_word_cnt.hash(state);
-        let mut end = (stop + frac_word_cnt as usize - 1) as isize;
+        let mut end = (stop + frac_word_cnt as usize) as isize - 1;
         // trims suffix 0(also trims the suffix 0 before the point
         // when there is no digit after point).
         while start as isize <= end && self.word_buf[end as usize] == 0 {
@@ -2450,6 +4032,2376 @@ mod tests {
         codec::error::*,
         expr::{EvalConfig, Flag},
     };
+
+    #[test]
+    fn test_default_is_valid_zero() {
+        let value = Decimal::default();
+        assert_eq!(
+            value.try_to_parts().unwrap(),
+            Decimal::zero().try_to_parts().unwrap()
+        );
+        assert_eq!(value.try_to_parts().unwrap().int_digits, 1);
+        assert!(value.is_zero());
+        assert!(!value.is_negative());
+    }
+
+    #[test]
+    fn test_private_grow_integer_workers() {
+        // Exact word input, not a second parser or a widened public admission.
+        let mut power = Decimal::try_new(100, 0, false).unwrap();
+        power.word_buf[0] = 1; // 10^99: one head digit and eleven zero words.
+        let one = Decimal::from(1);
+        let sum = power.try_add_exact(&one).unwrap();
+        assert_eq!(sum.to_string_value(), format!("1{}1", "0".repeat(98)));
+        assert_eq!(sum.words().int_digits, 100);
+        let difference = power.try_sub_exact(&one).unwrap();
+        assert_eq!(difference.to_string_value(), "9".repeat(99));
+        assert_eq!(difference.words().int_digits, 99);
+        let product = power.try_mul_exact(&power).unwrap();
+        assert_eq!(product.to_string_value(), format!("1{}", "0".repeat(198)));
+        assert_eq!(product.words().int_digits, 199);
+        assert_eq!(sum.try_sub_exact(&one).unwrap(), power);
+        assert_eq!(difference.try_add_exact(&one).unwrap(), power);
+        let mut negative = power.clone();
+        negative.negative = true;
+        assert_eq!(
+            negative.try_add_exact(&one).unwrap().to_string_value(),
+            format!("-{}", "9".repeat(99))
+        );
+        assert_eq!(
+            negative.try_mul_exact(&power).unwrap().to_string_value(),
+            format!("-1{}", "0".repeat(198))
+        );
+    }
+
+    #[test]
+    fn test_private_grow_fraction_alignment() {
+        for scale in [1, 8, 9, 10, 71, 72, 73, 81, 82, 100, 101, 255, 256, 300] {
+            let mut value = Decimal::try_new(0, scale, false).unwrap();
+            let words = value.frac_words();
+            value.word_buf[words - 1] = TEN_POW[words * DIGITS_PER_WORD - scale];
+            assert!(
+                !value.is_zero(),
+                "last initialized fraction word at scale {scale}"
+            );
+            let sum = value.try_add_exact(&value).unwrap();
+            assert_eq!(
+                sum.to_string_value(),
+                format!("0.{}2", "0".repeat(scale - 1))
+            );
+            let product = value.try_mul_exact(&value).unwrap();
+            assert_eq!(
+                product.to_string_value(),
+                format!("0.{}1", "0".repeat(scale * 2 - 1))
+            );
+            assert_eq!(product.storage_scale(), (scale * 2) as u32);
+            assert_eq!(product.result_scale(), (scale * 2) as u32);
+            let zero = value.try_sub_exact(&value).unwrap();
+            assert!(zero.is_zero());
+            assert!(!zero.is_negative());
+            assert_eq!(
+                (zero.storage_scale(), zero.result_scale()),
+                (scale as u32, scale as u32)
+            );
+            assert_eq!(zero.to_string_value(), format!("0.{}", "0".repeat(scale)));
+            let mut negative_zero = zero.clone();
+            negative_zero.negative = true;
+            let zero_product = value.try_mul_exact(&negative_zero).unwrap();
+            assert!(zero_product.is_zero());
+            assert!(!zero_product.is_negative());
+            assert_eq!(zero_product.storage_scale(), (scale * 2) as u32);
+        }
+    }
+
+    #[test]
+    fn test_private_grow_hidden_scales_and_resource_checks() {
+        let mut hidden = Decimal::from_str("0.000000001").unwrap();
+        hidden.result_frac_cnt = 7;
+        let sum = hidden.try_add_exact(&hidden).unwrap();
+        assert_eq!(sum.to_string_value(), "0.000000002");
+        assert_eq!((sum.storage_scale(), sum.result_scale()), (9, 7));
+        let product = hidden.try_mul_exact(&hidden).unwrap();
+        assert_eq!(product.to_string_value(), "0.000000000000000001");
+        assert_eq!((product.storage_scale(), product.result_scale()), (18, 14));
+        assert!(WordLimit::Grow.apply(usize::MAX, 1).is_err());
+        assert!(WordLimit::Grow.apply(0, usize::MAX).is_err());
+        assert_eq!(
+            WordLimit::Fixed(9).apply(usize::MAX, usize::MAX).unwrap(),
+            Res::Overflow((9, 0))
+        );
+        assert!(Decimal::try_new(usize::MAX, 1, false).is_err());
+        if let Some(too_wide) = (u32::MAX as usize).checked_add(1) {
+            assert!(Decimal::try_new(0, too_wide, false).is_err());
+        }
+        let mut huge_result = Decimal::from(1);
+        huge_result.result_frac_cnt = u32::MAX as usize;
+        assert!(
+            huge_result
+                .try_mul_exact(&Decimal::from_str("1.0").unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_private_grow_comparison_hash_and_clone() {
+        let mut value = Decimal::try_new(100, 101, false).unwrap();
+        value.word_buf[0] = 1;
+        let last = value.int_words() + value.frac_words() - 1;
+        value.word_buf[last] = 10_000_000;
+        let mut different = value.clone();
+        different.word_buf[last] = 20_000_000;
+        assert!(value < different);
+        assert_eq!(value.word_buf[last], 10_000_000);
+        let mut padded = value.clone();
+        padded.frac_cnt += DIGITS_PER_WORD;
+        padded.try_ensure_storage().unwrap();
+        assert_eq!(value, padded);
+        let mut lhs_hash = DefaultHasher::new();
+        let mut rhs_hash = DefaultHasher::new();
+        value.hash(&mut lhs_hash);
+        padded.hash(&mut rhs_hash);
+        assert_eq!(lhs_hash.finish(), rhs_hash.finish());
+    }
+
+    // Test-fixture word loading only: these trusted independent literals are
+    // not routed through an uncompleted production parser or public admission.
+    fn independent_literal_words(text: &str) -> Decimal {
+        let negative = text.starts_with('-');
+        let text = text.strip_prefix('-').unwrap_or(text);
+        let (integer, fraction) = text.split_once('.').unwrap();
+        assert!(!integer.is_empty() && !fraction.is_empty());
+        assert!(
+            integer
+                .bytes()
+                .chain(fraction.bytes())
+                .all(|byte| byte.is_ascii_digit())
+        );
+        let mut value = Decimal::try_new(integer.len(), fraction.len(), negative).unwrap();
+        let int_words = value.int_words();
+        for (index, digits) in integer.as_bytes().rchunks(DIGITS_PER_WORD).enumerate() {
+            value.word_buf[int_words - index - 1] =
+                str::from_utf8(digits).unwrap().parse().unwrap();
+        }
+        for (index, digits) in fraction.as_bytes().chunks(DIGITS_PER_WORD).enumerate() {
+            let word: u32 = str::from_utf8(digits).unwrap().parse().unwrap();
+            value.word_buf[int_words + index] = word * TEN_POW[DIGITS_PER_WORD - digits.len()];
+        }
+        value
+    }
+
+    fn assert_independent_value(value: &Decimal, coefficient: &str, scale: usize) {
+        // Numerical normalization of STORAGE text only. This intentionally
+        // says nothing about result scale, declared shape or SQL disposition.
+        let storage = value.to_string_value();
+        let negative = storage.starts_with('-');
+        let magnitude = storage.strip_prefix('-').unwrap_or(&storage);
+        let (integer, fraction) = magnitude.split_once('.').unwrap_or((magnitude, ""));
+        let digits = format!("{integer}{fraction}");
+        let mut digits = digits.trim_start_matches('0').to_owned();
+        let mut stored_scale = fraction.len();
+        while stored_scale > 0 && digits.ends_with('0') {
+            digits.pop();
+            stored_scale -= 1;
+        }
+        if digits.is_empty() {
+            digits.push('0');
+            stored_scale = 0;
+        } else if negative {
+            digits.insert(0, '-');
+        }
+        assert_eq!((digits.as_str(), stored_scale), (coefficient, scale));
+    }
+
+    #[test]
+    fn test_private_grow_integer_pair_signs_and_zero() {
+        // Independent decimal-exact-v1 / seed20260928 four-sign cases.
+        for (lhs, rhs, quotient, remainder) in [
+            ("5.25", "2.0", "2", "1.25"),
+            ("-5.25", "2.0", "-2", "-1.25"),
+            ("5.25", "-2.0", "-2", "1.25"),
+            ("-5.25", "-2.0", "2", "-1.25"),
+        ] {
+            let lhs = Decimal::from_str(lhs).unwrap();
+            let rhs = Decimal::from_str(rhs).unwrap();
+            let (q, r) = lhs.try_div_rem_exact(&rhs).unwrap().unwrap();
+            assert_eq!(q.to_string_value(), quotient);
+            assert_eq!(r.to_string_value(), remainder);
+            // Separate source-policy assertions, not numerical-oracle claims.
+            assert_eq!((q.storage_scale(), q.result_scale()), (0, 0));
+            assert_eq!((r.storage_scale(), r.result_scale()), (2, 2));
+        }
+        let mut zero = Decimal::from_str("0.000").unwrap();
+        zero.negative = true;
+        let rhs = Decimal::from_str("2.0").unwrap();
+        let (q, r) = zero.try_div_rem_exact(&rhs).unwrap().unwrap();
+        assert_eq!(q.to_string_value(), "0");
+        assert_eq!(r.to_string_value(), "0.000");
+        assert!(!q.is_negative() && !r.is_negative());
+        assert_eq!((r.storage_scale(), r.result_scale()), (3, 3));
+        assert!(rhs.try_div_rem_exact(&zero).unwrap().is_none());
+        assert!(zero.try_div_rem_exact(&zero).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_private_grow_integer_pair_large_quotient() {
+        let lhs = Decimal::from(u64::MAX);
+        let rhs = Decimal::from_str("1.5").unwrap();
+        let (q, r) = lhs.try_div_rem_exact(&rhs).unwrap().unwrap();
+        assert_eq!(q.to_string_value(), "12297829382473034410");
+        assert_eq!(r.to_string_value(), "0.0");
+        let mut lhs =
+            Decimal::from_str("3428138243708624600000000000000000000000000000000000").unwrap();
+        let rhs =
+            Decimal::from_str("0.000000000000000000000000000000000000000000010962196522059515")
+                .unwrap();
+        let (q, r) = lhs.try_div_rem_exact(&rhs).unwrap().unwrap();
+        // Independent Fraction identity and pinned-Go remainder observation;
+        // deliberately NOT the existing capped Fixed MOD value oracle.
+        let full_quotient = "312723662343590746587750435944686855597018456899102054479447138416084646758822877655408325148828";
+        let full_remainder = "0.000000000000000000000000000000000000000000010939552551501580";
+        assert_eq!(q.to_string_value(), full_quotient);
+        assert_eq!(r.to_string_value(), full_remainder);
+        lhs.negative = true;
+        let (q, r) = lhs.try_div_rem_exact(&rhs).unwrap().unwrap();
+        assert_eq!(q.to_string_value(), format!("-{full_quotient}"));
+        assert_eq!(r.to_string_value(), format!("-{full_remainder}"));
+    }
+
+    #[test]
+    fn test_private_grow_independent_fraction_values() {
+        // Self-contained independent Fraction/int oracle decimal-exact-v1,
+        // seed20260928; cases SHA256
+        // 86a2722320feb68ba6e399507c0cccb12a6bc1ff0c24e496ba6a7bc72a01964b.
+        // Rows word-18-dense-opposite-signs and fraction-256-by-300.
+        let lhs = independent_literal_words("184628305780335313.494431762906928909");
+        let rhs = independent_literal_words("-930718901249546327.853367952721884931");
+        assert_independent_value(
+            &lhs.try_add_exact(&rhs).unwrap(),
+            "-746090595469211014358936189814956022",
+            18,
+        );
+        assert_independent_value(
+            &lhs.try_sub_exact(&rhs).unwrap(),
+            "111534720702988164134779971562881384",
+            17,
+        );
+        assert_independent_value(
+            &lhs.try_mul_exact(&rhs).unwrap(),
+            "-171837053895438946112299425621433320984073416945493974733201102895370279",
+            36,
+        );
+        let (q, r) = lhs.try_div_rem_exact(&rhs).unwrap().unwrap();
+        assert_independent_value(&q, "0", 0);
+        assert_independent_value(&r, "184628305780335313494431762906928909", 18);
+
+        let lhs = independent_literal_words(
+            "-0.5439767909187346061089285520915574831506891562065998621311102453539558970127812305859011973741924537857663161480124750658918326829210957444713125200350066344909747537788039187593544618553689143985694843419709780548776579533285833378481022689204141610805813",
+        );
+        let rhs = independent_literal_words(
+            "0.372737857310148440963747137278784278874471758359866056322842216165299227102842007169287638674684924853646138589983270541785229545432034636246831853813697228796843641812710635642988226016938952975738080343197697768588166841654971293421688110661107743280333999626957534421653121891315338593576299055183",
+        );
+        let difference = "-171238933608586165145181414812773204276217397846733805808268029188656669909939223416613558699507528932120177558029204524106603137489061108224480666221309405694131111966093283116366235838429961422831403998773280286289491111673612044426414158259306417800247300373042465578346878108684661406423700944817";
+        assert_independent_value(&lhs.try_add_exact(&rhs).unwrap(), difference, 300);
+        assert_independent_value(
+            &lhs.try_sub_exact(&rhs).unwrap(),
+            "-916714648228883047072675689370341762025160914566465918453952461519255124115623237755188836048877378639412454737995745607677062228353130380718144373848703863287818395591514554402342687872307867374307564685168675823465824794983554631269790379581521904360915299626957534421653121891315338593576299055183",
+            300,
+        );
+        assert_independent_value(
+            &lhs.try_mul_exact(&rhs).unwrap(),
+            "-2027607434734997518566889169254489182455881016422477992140640099125994577672044398567928443083917725128752225927497194977069537167707824504993847407376884558653128387855385403512917842398877367576914740672859270773383918114555635585065883243959246822153350731822005671966294910431238920759179648542877836630823293478019830858487382636578568929642058831525910814974249647981131402806984496956443774141493215680292119626653236997954509239023157786186870041786818820974974243987602952399349572409078478842909379431111526795782640145160574332159034735184178779",
+            556,
+        );
+        let (q, r) = lhs.try_div_rem_exact(&rhs).unwrap().unwrap();
+        assert_independent_value(&q, "-1", 0);
+        assert_independent_value(&r, difference, 300);
+    }
+
+    #[test]
+    fn test_private_grow_independent_498_digit_quotient() {
+        // decimal-exact-v1 row integer-199-by-tiny-300. No experiment path or
+        // generator dependency is required to build/run this native test.
+        let lhs = independent_literal_words(
+            "5225910969883206332688559313566302417354660470502923306617865703804401723273576942809373538438175031163964200694666348267915625866124196226659535325278231330210693826502374526883827355835920931354941.0",
+        );
+        let rhs = independent_literal_words(&format!("0.{}7", "0".repeat(299)));
+        let (q, r) = lhs.try_div_rem_exact(&rhs).unwrap().unwrap();
+        assert_independent_value(
+            &q,
+            "746558709983315190384079901938043202479237210071846186659695100543485960467653848972767648348310718737709171527809478323987946552303456603808505046468318761458670546643196360983403907976560133050705857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142857142",
+            0,
+        );
+        assert_independent_value(&r, "6", 300);
+    }
+
+    #[test]
+    fn test_private_grow_avg_retention() {
+        let eight = Decimal::from(8).try_div_round_exact(7, 7).unwrap().unwrap();
+        let nine = Decimal::from(9).try_div_round_exact(7, 7).unwrap().unwrap();
+        assert_eq!(eight.to_string_value(), "1.142857142");
+        assert_eq!((eight.storage_scale(), eight.result_scale()), (9, 7));
+        let sum = eight.try_add_exact(&nine).unwrap();
+        let average = sum.try_div_round_exact(2, 14).unwrap().unwrap();
+        assert_eq!(average.to_string_value(), "1.214285713500000000");
+        assert_eq!((average.storage_scale(), average.result_scale()), (18, 14));
+        for target in [9_u32, 31, 81, 300] {
+            let value = Decimal::from(2)
+                .try_div_round_exact(3, target)
+                .unwrap()
+                .unwrap();
+            let retained = (target as usize).div_ceil(DIGITS_PER_WORD) * DIGITS_PER_WORD;
+            assert_eq!(
+                value.to_string_value(),
+                format!("0.{}", "6".repeat(retained))
+            );
+            assert_eq!(
+                (value.storage_scale(), value.result_scale()),
+                (retained as u32, target)
+            );
+        }
+        // Exactly nine retained digits have NO tenth guard digit to round.
+        let no_guard = Decimal::from(2).try_div_round_exact(3, 9).unwrap().unwrap();
+        assert_eq!(no_guard.to_string_value(), "0.666666666");
+        let zero = Decimal::from_str("0.00").unwrap();
+        let average_zero = zero.try_div_round_exact(3, 10).unwrap().unwrap();
+        assert_eq!(
+            (average_zero.storage_scale(), average_zero.result_scale()),
+            (18, 10)
+        );
+        assert_eq!(average_zero.to_string_value(), "0.000000000000000000");
+        // Native fixed zero retains its existing visible-scale shape instead.
+        let legacy_zero = zero.div(&Decimal::from(3), 8).unwrap();
+        assert_eq!(
+            (legacy_zero.storage_scale(), legacy_zero.result_scale()),
+            (10, 10)
+        );
+    }
+
+    #[test]
+    fn test_private_division_preflight_and_fixed_domain() {
+        let value = Decimal::from_str("1.00").unwrap();
+        assert!(value.try_div_round_exact(0, 2).unwrap().is_none());
+        assert!(value.try_div_round_exact(-1, 2).is_err());
+        assert!(value.try_div_round_exact(1, 1).is_err());
+        assert!(Decimal::from(1).try_div_round_exact(1, u32::MAX).is_err());
+        assert!(
+            divide_with_limit(
+                &Decimal::from(1),
+                &Decimal::from(2),
+                DivisionRequest::RetainedQuotient {
+                    frac_words: usize::MAX
+                },
+                WordLimit::Grow,
+                None
+            )
+            .is_err()
+        );
+
+        // The original private witness recorded a checked header-underflow
+        // Err here; immutable before logs and a separate actual RED preceded
+        // the approved FULL-fraction budget fix. This new-domain expectation
+        // is updated under that approval, not an old bounded numeric oracle.
+        let mut lhs = Decimal::try_new(45, 100, false).unwrap();
+        lhs.word_buf[0] = 150_000_000;
+        let last = lhs.int_words() + lhs.frac_words() - 1;
+        lhs.word_buf[last] = 100_000_000;
+        let mut rhs = Decimal::try_new(45, 0, false).unwrap();
+        rhs.word_buf[0] = 100_000_000;
+        let (q, r) = lhs.try_div_rem_exact(&rhs).unwrap().unwrap();
+        assert_eq!(q.to_string_value(), "1");
+        assert_eq!(
+            r.to_string_value(),
+            format!("5{}.{}1", "0".repeat(43), "0".repeat(99))
+        );
+        let limited = divide_with_limit(
+            &lhs,
+            &rhs,
+            DivisionRequest::Remainder,
+            WordLimit::Fixed(WORD_BUF_LEN),
+            None,
+        )
+        .unwrap()
+        .unwrap()
+        .remainder
+        .unwrap();
+        assert!(limited.is_truncated());
+        assert_eq!((limited.storage_scale(), limited.result_scale()), (36, 100));
+        assert_eq!(
+            limited.to_string_value(),
+            format!("5{}.{}", "0".repeat(43), "0".repeat(36))
+        );
+    }
+
+    #[test]
+    fn test_private_words_import_exact_fields_and_ownership() {
+        let mut source = vec![0; 14];
+        source[0] = 1;
+        source[1] = 500_000_000;
+        source[13] = u32::MAX; // initialized inactive cell, not a digit
+        let value = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 100,
+            result_frac: 7,
+            negative: true,
+            words: &source,
+        })
+        .unwrap();
+        assert_eq!(
+            (
+                value.words().int_digits,
+                value.storage_scale(),
+                value.result_scale(),
+                value.is_negative()
+            ),
+            (1, 100, 7, true)
+        );
+        assert_eq!(value.words().words, source);
+        assert_eq!(value.words().words.len(), 14);
+        assert!(value.spill_capacity_bytes() >= 14 * WORD_SIZE);
+        assert!(value.try_to_parts().is_err());
+        source[0] = 9;
+        source[13] = 0;
+        assert_eq!(value.words().words[0], 1);
+        assert_eq!(value.words().words[13], u32::MAX);
+        assert_eq!(value.to_string_value(), format!("-1.5{}", "0".repeat(99)));
+
+        let metadata_only = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 0,
+            result_frac: u32::MAX,
+            negative: false,
+            words: &[1],
+        })
+        .unwrap();
+        assert_eq!(
+            (metadata_only.storage_scale(), metadata_only.result_scale()),
+            (0, u32::MAX)
+        );
+        assert_eq!(metadata_only.words().words.len(), WORD_BUF_LEN);
+        assert_eq!(metadata_only.words().words[0], 1);
+        assert!(
+            metadata_only.words().words[1..]
+                .iter()
+                .all(|word| *word == 0)
+        );
+        assert_eq!(metadata_only.spill_capacity_bytes(), 0);
+        assert_eq!(metadata_only.as_i64(), Res::Ok(1));
+        assert_eq!(metadata_only.as_u64(), Res::Ok(1));
+        assert!(metadata_only.try_to_parts().is_err());
+    }
+
+    #[test]
+    fn test_private_words_import_rejects_invalid_shape() {
+        for view in [
+            DecimalWordsRef {
+                int_digits: 0,
+                storage_frac: 0,
+                result_frac: 0,
+                negative: false,
+                words: &[0; 9],
+            },
+            DecimalWordsRef {
+                int_digits: 0,
+                storage_frac: 0,
+                result_frac: 1,
+                negative: false,
+                words: &[0; 9],
+            },
+            DecimalWordsRef {
+                int_digits: 100,
+                storage_frac: 0,
+                result_frac: 0,
+                negative: false,
+                words: &[0; 9],
+            },
+            DecimalWordsRef {
+                int_digits: 1,
+                storage_frac: 0,
+                result_frac: 0,
+                negative: false,
+                words: &[WORD_BASE],
+            },
+            DecimalWordsRef {
+                int_digits: 1,
+                storage_frac: 0,
+                result_frac: 0,
+                negative: false,
+                words: &[10],
+            },
+            DecimalWordsRef {
+                int_digits: 0,
+                storage_frac: 1,
+                result_frac: 1,
+                negative: false,
+                words: &[1],
+            },
+            DecimalWordsRef {
+                int_digits: usize::MAX,
+                storage_frac: 1,
+                result_frac: 0,
+                negative: false,
+                words: &[],
+            },
+            DecimalWordsRef {
+                int_digits: usize::MAX,
+                storage_frac: 0,
+                result_frac: 0,
+                negative: false,
+                words: &[],
+            },
+        ] {
+            assert!(
+                matches!(
+                    Decimal::try_from_words(view),
+                    Err(Error::InvalidDataType(_))
+                ),
+                "{view:?}"
+            );
+        }
+        let fraction = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 0,
+            storage_frac: 1,
+            result_frac: 31,
+            negative: false,
+            words: &[100_000_000],
+        })
+        .unwrap();
+        assert_eq!(fraction.to_string_value(), "0.1");
+        assert_eq!(fraction.result_scale(), 31);
+        // Inactive words are deliberately NOT subject to base/padding checks.
+        let inactive = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 0,
+            result_frac: 0,
+            negative: false,
+            words: &[1, u32::MAX],
+        })
+        .unwrap();
+        assert_eq!(inactive.words().words[1], u32::MAX);
+        assert_eq!(inactive.spill_capacity_bytes(), 0);
+    }
+
+    #[test]
+    fn test_private_wide_integer_conversion_extents() {
+        // This expectation must fail against the old capped fraction scan:
+        // scale91 places its nonzero digit in word11, beyond the ten sentinel.
+        for scale in [91_u32, 100, 101, 300, 82, 90] {
+            let count = (scale as usize).div_ceil(DIGITS_PER_WORD);
+            let mut words = vec![0; count];
+            words[count - 1] = TEN_POW[count * DIGITS_PER_WORD - scale as usize];
+            let view = DecimalWordsRef {
+                int_digits: 0,
+                storage_frac: scale,
+                result_frac: scale,
+                negative: false,
+                words: &words,
+            };
+            let value = Decimal::try_from_words(view).unwrap();
+            assert!(!value.is_zero());
+            assert_eq!(value.as_i64(), Res::Truncated(0), "storage scale {scale}");
+            assert_eq!(value.as_u64(), Res::Truncated(0), "storage scale {scale}");
+            let negative = Decimal::try_from_words(DecimalWordsRef {
+                negative: true,
+                ..view
+            })
+            .unwrap();
+            assert_eq!(negative.as_i64(), Res::Truncated(0));
+            assert_eq!(negative.as_u64(), Res::Overflow(0));
+        }
+        let mut leading = [0; 11];
+        leading[10] = 1;
+        let padded = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 99,
+            storage_frac: 0,
+            result_frac: 0,
+            negative: false,
+            words: &leading,
+        })
+        .unwrap();
+        assert_eq!(padded.words().int_digits, 99); // import must not normalize
+        assert_eq!(padded.as_i64(), Res::Ok(1));
+        assert_eq!(padded.as_u64(), Res::Ok(1));
+        let raw_negative_zero = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 91,
+            result_frac: 7,
+            negative: true,
+            words: &[0; 12],
+        })
+        .unwrap();
+        assert_eq!(raw_negative_zero.as_i64(), Res::Ok(0));
+        assert_eq!(raw_negative_zero.as_u64(), Res::Overflow(0));
+        assert!(raw_negative_zero.is_negative());
+    }
+
+    #[test]
+    fn test_private_words_import_equality_and_physical_boundary() {
+        let mut words = [0; 14];
+        words[0] = 1;
+        words[1] = 500_000_000;
+        words[13] = u32::MAX;
+        let wide_scale = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 100,
+            result_frac: 300,
+            negative: false,
+            words: &words,
+        })
+        .unwrap();
+        let short = Decimal::from_str("1.50").unwrap();
+        assert_eq!(wide_scale, short);
+        let mut wide_hash = DefaultHasher::new();
+        let mut short_hash = DefaultHasher::new();
+        wide_scale.hash(&mut wide_hash);
+        short.hash(&mut short_hash);
+        assert_eq!(wide_hash.finish(), short_hash.finish());
+        let negative_zero = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 2,
+            result_frac: 7,
+            negative: true,
+            words: &[0; 9],
+        })
+        .unwrap();
+        assert!(negative_zero < Decimal::zero());
+        assert!(negative_zero.clone().neg().is_negative());
+        assert!(!negative_zero.clone().abs().is_negative());
+
+        let mut ten_words = [0; 10];
+        ten_words[0] = 1;
+        let wide_integer = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 82,
+            storage_frac: 0,
+            result_frac: 0,
+            negative: false,
+            words: &ten_words,
+        })
+        .unwrap();
+        let wide_result = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 0,
+            result_frac: 256,
+            negative: false,
+            words: &[1],
+        })
+        .unwrap();
+        for value in [&wide_integer, &wide_result] {
+            assert!(value.try_to_parts().is_err());
+            let mut encoded = vec![42];
+            assert!(encoded.write_decimal_to_chunk(value).is_err());
+            assert_eq!(encoded, vec![42]);
+        }
+    }
+
+    #[test]
+    fn test_private_fixed_mod_full_fraction_budget() {
+        // Approved-in-principle NEW canonical-wide capacity contract; obtain
+        // actual RED before changing the held remainder planner. This does
+        // not change the capped quotient loop or any old numeric fixture.
+        for (negative_lhs, negative_rhs) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut lhs_words = [0; 17];
+            lhs_words[0] = 150_000_000;
+            lhs_words[16] = 100_000_000;
+            let lhs = Decimal::try_from_words(DecimalWordsRef {
+                int_digits: 45,
+                storage_frac: 100,
+                result_frac: 100,
+                negative: negative_lhs,
+                words: &lhs_words,
+            })
+            .unwrap();
+            let rhs = Decimal::try_from_words(DecimalWordsRef {
+                int_digits: 45,
+                storage_frac: 0,
+                result_frac: 0,
+                negative: negative_rhs,
+                words: &[100_000_000, 0, 0, 0, 0],
+            })
+            .unwrap();
+            let remainder = (&lhs % &rhs).unwrap();
+            assert!(remainder.is_truncated());
+            assert_eq!(
+                (
+                    remainder.words().int_digits,
+                    remainder.storage_scale(),
+                    remainder.result_scale(),
+                    remainder.is_negative()
+                ),
+                (45, 36, 100, negative_lhs)
+            );
+            assert_eq!(
+                remainder.to_string_value(),
+                format!(
+                    "{}5{}.{}",
+                    if negative_lhs { "-" } else { "" },
+                    "0".repeat(43),
+                    "0".repeat(36)
+                )
+            );
+            assert_eq!(remainder.words().words.len(), WORD_BUF_LEN);
+        }
+        for exponent in [50_usize, 80, 91] {
+            for negative in [false, true] {
+                let mut words = [0; 12];
+                let index = (exponent - 1) / DIGITS_PER_WORD;
+                words[index] = TEN_POW[DIGITS_PER_WORD - 1 - (exponent - 1) % DIGITS_PER_WORD];
+                let lhs = Decimal::try_from_words(DecimalWordsRef {
+                    int_digits: 0,
+                    storage_frac: 100,
+                    result_frac: 100,
+                    negative,
+                    words: &words,
+                })
+                .unwrap();
+                let rhs = Decimal::from(1);
+                let remainder = (&lhs % &rhs).unwrap();
+                assert!(remainder.is_truncated());
+                assert_eq!(remainder.result_scale(), 100);
+                assert_eq!(remainder.words().words.len(), WORD_BUF_LEN);
+                if exponent <= 81 {
+                    // Leading zero words count toward the output fraction
+                    // budget; copying fewer nonzero words is not enough.
+                    assert_eq!(
+                        (
+                            remainder.words().int_digits,
+                            remainder.storage_scale(),
+                            remainder.is_negative()
+                        ),
+                        (0, 81, negative)
+                    );
+                    assert_eq!(
+                        remainder.to_string_value(),
+                        format!(
+                            "{}0.{}1{}",
+                            if negative { "-" } else { "" },
+                            "0".repeat(exponent - 1),
+                            "0".repeat(81 - exponent)
+                        )
+                    );
+                } else {
+                    // Existing gap>=n early zero/status rule remains.
+                    assert_eq!(
+                        (
+                            remainder.words().int_digits,
+                            remainder.storage_scale(),
+                            remainder.is_negative()
+                        ),
+                        (1, 0, false)
+                    );
+                    assert_eq!(remainder.to_string_value(), "0");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_private_fixed_mod_visible_only_zero_budget() {
+        let negative_zero = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 0,
+            result_frac: 0,
+            negative: true,
+            words: &[0],
+        })
+        .unwrap();
+        // Existing raw result-byte domain must keep its old visible-as-stored
+        // shape, even when that zero has more than nine active fraction words.
+        for visible in [30_u8, 255] {
+            let mut cell = [0; DECIMAL_STRUCT_SIZE];
+            cell[..4].copy_from_slice(&[1, 0, visible, 0]);
+            cell[4..8].copy_from_slice(&1_u32.to_ne_bytes());
+            let rhs = cell.as_slice().read_decimal_from_chunk().unwrap();
+            let remainder = (&negative_zero % &rhs).unwrap();
+            assert!(remainder.is_ok());
+            assert_eq!(
+                (
+                    remainder.words().int_digits,
+                    remainder.storage_scale(),
+                    remainder.result_scale(),
+                    remainder.is_negative()
+                ),
+                (0, u32::from(visible), u32::from(visible), false)
+            );
+        }
+        let lhs = Decimal::from_str(&format!("-1{}.1", "0".repeat(60))).unwrap();
+        let rhs = Decimal::from_str(&format!("1{}.1", "0".repeat(60))).unwrap();
+        let diagnostic = (&lhs * &rhs).unwrap();
+        let remainder = (&diagnostic % &Decimal::from(1)).unwrap();
+        assert!(remainder.is_ok());
+        assert_eq!(
+            (
+                remainder.words().int_digits,
+                remainder.storage_scale(),
+                remainder.result_scale(),
+                remainder.is_negative()
+            ),
+            (0, 2, 2, false)
+        );
+        assert_eq!(
+            (
+                diagnostic.words().int_digits,
+                diagnostic.storage_scale(),
+                diagnostic.result_scale(),
+                diagnostic.is_negative()
+            ),
+            (81, 2, 2, true)
+        );
+
+        // Moderate safe RED analogue only. Do NOT run max-u32 dense MOD
+        // until the checked zero allocation path has been implemented/reviewed.
+        let metadata_only = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 0,
+            result_frac: 300,
+            negative: false,
+            words: &[1],
+        })
+        .unwrap();
+        let remainder = (&negative_zero % &metadata_only).unwrap();
+        assert!(remainder.is_ok());
+        assert_eq!(
+            (
+                remainder.words().int_digits,
+                remainder.storage_scale(),
+                remainder.result_scale(),
+                remainder.is_negative()
+            ),
+            (0, 0, 300, false)
+        );
+        assert_eq!(remainder.words().words.len(), WORD_BUF_LEN);
+        assert_eq!(remainder.spill_capacity_bytes(), 0);
+        assert_eq!(remainder.to_string_value(), "0");
+    }
+
+    #[test]
+    fn test_private_fixed_mod_max_visible_zero_budget() {
+        // Added ONLY after reading the corrected zero path: remainder_scale
+        // comes from input STORAGE, and visible>255 selects it before try_new.
+        // For these inputs the constructor initializes just nine inline cells;
+        // max-u32 is assigned afterward as metadata. Never Display this value.
+        let rhs = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 0,
+            result_frac: u32::MAX,
+            negative: false,
+            words: &[1],
+        })
+        .unwrap();
+        for (stored, negative) in [(0_u32, false), (0, true), (2, false)] {
+            let lhs = Decimal::try_from_words(DecimalWordsRef {
+                int_digits: 1,
+                storage_frac: stored,
+                result_frac: stored,
+                negative,
+                words: &[0; 9],
+            })
+            .unwrap();
+            let remainder = (&lhs % &rhs).unwrap();
+            assert!(remainder.is_ok());
+            assert!(remainder.is_zero());
+            assert_eq!(
+                (
+                    remainder.words().int_digits,
+                    remainder.storage_scale(),
+                    remainder.result_scale(),
+                    remainder.is_negative()
+                ),
+                (0, stored, u32::MAX, false)
+            );
+            assert_eq!(remainder.words().words.len(), WORD_BUF_LEN);
+            assert_eq!(remainder.spill_capacity_bytes(), 0);
+            assert_eq!(remainder.words().words, &[0; WORD_BUF_LEN]);
+        }
+    }
+
+    #[test]
+    fn test_private_producer_wide_current_observations() {
+        use std::sync::Arc;
+
+        use tipb::FieldType;
+
+        use crate::{
+            codec::convert::produce_dec_with_specified_tp,
+            expr::{EvalConfig, Flag},
+        };
+
+        fn observe(label: &str, input: Decimal, precision: i32, scale: i32) {
+            let mut target = FieldType::default();
+            target.set_flen(precision);
+            target.set_decimal(scale);
+            let config =
+                EvalConfig::from_flag(Flag::OVERFLOW_AS_WARNING | Flag::TRUNCATE_AS_WARNING);
+            let mut context = EvalContext::new(Arc::new(config));
+            let result = produce_dec_with_specified_tp(&mut context, input, &target);
+            let observation = result
+                .as_ref()
+                .map(|value| {
+                    let stored = value.to_string_value();
+                    assert!(stored.len() <= 1024);
+                    (
+                        stored,
+                        value.words().int_digits,
+                        value.storage_scale(),
+                        value.result_scale(),
+                        value.is_negative(),
+                        value.words().words.to_vec(),
+                    )
+                })
+                .map_err(|error| format!("{error:?}"));
+            let warnings: Vec<_> = context
+                .warnings
+                .warnings
+                .iter()
+                .map(|warning| warning.get_code())
+                .collect();
+            eprintln!(
+                "wide producer {label}: target=({precision},{scale}) result={observation:?} warning_count={} codes={warnings:?}",
+                context.warnings.warning_cnt
+            );
+        }
+        observe(
+            "integer101",
+            Decimal::try_from_literal(&format!("1{}", "0".repeat(100))).unwrap(),
+            65,
+            30,
+        );
+        observe(
+            "fraction100",
+            Decimal::try_from_literal(&format!("-0.{}1", "0".repeat(99))).unwrap(),
+            65,
+            30,
+        );
+        observe(
+            "hidden-stored100",
+            Decimal::try_from_literal(&format!("1.25{}", "0".repeat(98))).unwrap(),
+            65,
+            1,
+        );
+        let mut words = [0; 14];
+        words[0] = 1;
+        words[13] = u32::MAX;
+        let visible = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 0,
+            result_frac: u32::MAX,
+            negative: false,
+            words: &words,
+        })
+        .unwrap();
+        // Existing producer's no-op preserves raw result metadata/all cells.
+        // Observe STORAGE only, never enormous result/Display formatting.
+        observe("visibleMAX-no-op-all-cells", visible, 81, 0);
+        // Exact intended81-fraction-digit/nine-word shape. The bounded literal parser
+        // returned Truncated for the earlier0.+81ones fixture; do not alter
+        // that parser/status or substitute its shorter partial as this input.
+        let fraction81 = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 0,
+            storage_frac: 81,
+            result_frac: 81,
+            negative: false,
+            words: &[111_111_111; 9],
+        })
+        .unwrap();
+        assert_eq!(
+            fraction81.to_string_value(),
+            format!("0.{}", "1".repeat(81))
+        );
+        observe("fraction81-no-op", fraction81, 81, 81);
+        for header in [[1, 0, 0, 0], [0, 0, 0, 0]] {
+            let mut cell = [0; DECIMAL_STRUCT_SIZE];
+            cell[..4].copy_from_slice(&header);
+            cell[4..8].copy_from_slice(&12_u32.to_ne_bytes());
+            cell[36..40].copy_from_slice(&u32::MAX.to_ne_bytes());
+            let raw = cell.as_slice().read_decimal_from_chunk().unwrap();
+            observe("raw-physical-no-op", raw, 81, 0);
+        }
+    }
+
+    #[test]
+    fn test_private_boundary_rejects_invalid_encode_target() {
+        // RED first: validation must precede even the two header bytes.
+        let value = Decimal::from(1);
+        let mut output = vec![42];
+        let result = output.write_decimal(&value, 1, 2);
+        assert!(result.is_err());
+        assert_eq!(output, vec![42]);
+    }
+
+    #[test]
+    fn test_private_boundary_rejects_invalid_convert_target() {
+        // A zero/no-op may not bypass the separately aligned word budget.
+        // No new SQL65/30 cap is proposed for memory-valid targets here.
+        for (input, precision, scale) in
+            [("0.0", 81, 1), ("0", 82, 0), ("0", 128, 128), ("1", 1, 2)]
+        {
+            let value = Decimal::from_str(input).unwrap();
+            let mut context = EvalContext::default();
+            assert!(
+                value.convert_to(&mut context, precision, scale).is_err(),
+                "target=({precision},{scale})"
+            );
+        }
+        // The same invalid layout must not reach infallible max construction
+        // through the saturation branch either; the input itself is bounded.
+        let value = Decimal::from_str(&format!("1{}", "0".repeat(80))).unwrap();
+        let mut context = EvalContext::default();
+        assert!(value.convert_to(&mut context, 81, 1).is_err());
+    }
+
+    #[test]
+    fn test_private_codec_max_visible_bounded_diagnostics() {
+        // Added only after reading BOTH logging branches: they now contain
+        // scalar shape metadata, never Decimal Display/storage materialization.
+        let value = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 2,
+            storage_frac: 0,
+            result_frac: u32::MAX,
+            negative: false,
+            words: &[12],
+        })
+        .unwrap();
+        let before = value.words().words.to_vec();
+        let mut bytes = Vec::new();
+        assert!(bytes.write_decimal(&value, 1, 0).unwrap().is_overflow());
+        assert_eq!(bytes, vec![1, 0, 0x82]);
+        assert_eq!(
+            (
+                value.words().int_digits,
+                value.storage_scale(),
+                value.result_scale()
+            ),
+            (2, 0, u32::MAX)
+        );
+        assert_eq!(value.words().words, before);
+
+        let fraction = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 4,
+            result_frac: u32::MAX,
+            negative: false,
+            words: &[1, 234_500_000],
+        })
+        .unwrap();
+        let mut bytes = Vec::new();
+        assert!(bytes.write_decimal(&fraction, 2, 1).unwrap().is_truncated());
+        assert_eq!(bytes, vec![2, 1, 0x81, 2]);
+        assert_eq!(
+            (fraction.storage_scale(), fraction.result_scale()),
+            (4, u32::MAX)
+        );
+    }
+
+    #[test]
+    fn test_private_checked_max_and_raw_full_clone() {
+        for target in [(1, 2), (81, 1), (82, 0), (128, 128)] {
+            assert!(try_max_decimal(target.0, target.1).is_err());
+        }
+        assert_eq!(
+            try_max_decimal(81, 0).unwrap().to_string_value(),
+            "9".repeat(81)
+        );
+        assert_eq!(
+            try_max_decimal(81, 81).unwrap().to_string_value(),
+            format!("0.{}", "9".repeat(81))
+        );
+
+        let mut words = [0; 14];
+        words[0] = 1;
+        words[13] = u32::MAX;
+        let value = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 0,
+            result_frac: 7,
+            negative: true,
+            words: &words,
+        })
+        .unwrap();
+        let mut copied = value.try_clone_all().unwrap();
+        assert_eq!(
+            (
+                copied.words().int_digits,
+                copied.storage_scale(),
+                copied.result_scale(),
+                copied.is_negative()
+            ),
+            (1, 0, 7, true)
+        );
+        assert_eq!(copied.words().words, words);
+        copied.word_buf[13] = 0;
+        assert_eq!(value.words().words[13], u32::MAX);
+        let mut context = EvalContext::default();
+        let unchanged = value.convert_to(&mut context, 1, 0).unwrap();
+        assert_eq!(unchanged.words().words, words);
+        assert_eq!(unchanged.result_scale(), 7);
+        assert!(unchanged.is_negative());
+
+        // This physical head cannot pass strict logical import, so an exact
+        // fallible raw copy must not implement itself through that importer.
+        let mut cell = [0; DECIMAL_STRUCT_SIZE];
+        cell[..4].copy_from_slice(&[1, 0, 0, 0]);
+        cell[4..8].copy_from_slice(&12_u32.to_ne_bytes());
+        cell[36..40].copy_from_slice(&u32::MAX.to_ne_bytes());
+        let raw = cell.as_slice().read_decimal_from_chunk().unwrap();
+        let copied = raw.try_clone_all().unwrap();
+        assert_eq!(raw.words().words, copied.words().words);
+        assert_eq!(raw.words().int_digits, copied.words().int_digits);
+        assert_eq!(raw.try_storage_text().unwrap(), "2");
+        let mut encoded = Vec::new();
+        encoded.write_decimal_to_chunk(&copied).unwrap();
+        assert_eq!(encoded, cell);
+        let mut count = DecimalTextCounter { bytes: usize::MAX };
+        assert!(fmt::Write::write_str(&mut count, "0").is_err());
+    }
+
+    #[test]
+    fn test_private_codec_visible_300_observation() {
+        // CURRENT safe-size observation only. Do not replace300 withMAX until
+        // both diagnostic full-Display calls have been removed and reviewed.
+        let value = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 2,
+            storage_frac: 0,
+            result_frac: 300,
+            negative: false,
+            words: &[12],
+        })
+        .unwrap();
+        let mut bytes = Vec::new();
+        let status = bytes.write_decimal(&value, 1, 0).unwrap();
+        assert!(status.is_overflow());
+        assert_eq!(bytes, vec![1, 0, 0x82]);
+        assert_eq!(
+            (
+                value.words().int_digits,
+                value.storage_scale(),
+                value.result_scale()
+            ),
+            (2, 0, 300)
+        );
+        eprintln!(
+            "moderate codec observation: Overflow bytes={bytes:?}; source int2/storage0/result300; no source mutation"
+        );
+    }
+
+    #[test]
+    fn test_private_storage_float_current_observations() {
+        fn observe(label: &str, value: &Decimal) -> f64 {
+            // All STORAGE strings in this characterization are moderate.
+            // This is the existing native policy, not Go/TDB projection.
+            let stored = value.to_string_value();
+            assert!(stored.len() <= 1024);
+            let expected = stored.parse::<f64>().unwrap();
+            let mut context = EvalContext::default();
+            let result = <Decimal as ConvertTo<f64>>::convert(value, &mut context).unwrap();
+            assert_eq!(result.to_bits(), expected.to_bits());
+            assert_eq!(context.warnings.warning_cnt, 0);
+            eprintln!(
+                "storage float {label}: bytes={} bits={:016x} infinite={} warnings={}",
+                stored.len(),
+                result.to_bits(),
+                result.is_infinite(),
+                context.warnings.warning_cnt
+            );
+            result
+        }
+        for negative in [false, true] {
+            let sign = if negative { "-" } else { "" };
+            let large = Decimal::try_from_literal(&format!("{sign}1{}", "0".repeat(400))).unwrap();
+            assert!(observe("integer400", &large).is_infinite());
+            let tiny = Decimal::try_from_literal(&format!("{sign}0.{}1", "0".repeat(399))).unwrap();
+            let result = observe("fraction400", &tiny);
+            assert_eq!(
+                result.to_bits(),
+                if negative {
+                    (-0.0_f64).to_bits()
+                } else {
+                    0.0_f64.to_bits()
+                }
+            );
+        }
+        for last in ['2', '3', '5'] {
+            let value = Decimal::try_from_literal(&format!("0.{}{last}", "0".repeat(323))).unwrap();
+            observe("subnormal324", &value);
+        }
+        for head in ["17976931348623157", "17976931348623159"] {
+            let value = Decimal::try_from_literal(&format!("{head}{}", "0".repeat(292))).unwrap();
+            observe("finite-neighbor309", &value);
+        }
+        let ordinary = Decimal::try_from_literal(&format!("1.25{}", "0".repeat(398))).unwrap();
+        let high_visible = Decimal::try_from_words(DecimalWordsRef {
+            result_frac: u32::MAX,
+            ..ordinary.words()
+        })
+        .unwrap();
+        assert_eq!(
+            observe("visible400", &ordinary).to_bits(),
+            observe("visibleMAXignored", &high_visible).to_bits()
+        );
+        let negative_zero = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 2,
+            result_frac: 2,
+            negative: true,
+            words: &[0; 9],
+        })
+        .unwrap();
+        assert_eq!(
+            observe("raw-negative-zero", &negative_zero).to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        // Allowed physical but noncanonical logical heads/empty prefixes:
+        // future allocation sizing must follow the ACTUAL shared emitter.
+        for (header, word) in [([1, 0, 0, 0], 12_u32), ([0, 0, 0, 0], u32::MAX)] {
+            let mut cell = [0; DECIMAL_STRUCT_SIZE];
+            cell[..4].copy_from_slice(&header);
+            cell[4..8].copy_from_slice(&word.to_ne_bytes());
+            let raw = cell.as_slice().read_decimal_from_chunk().unwrap();
+            observe("raw-physical-storage", &raw);
+        }
+        let hidden = Decimal::from(1).div(&Decimal::from(3), 4).unwrap().unwrap();
+        let native = observe("bounded-hidden-one-third", &hidden);
+        assert_eq!(
+            native.to_bits(),
+            "0.333333333".parse::<f64>().unwrap().to_bits()
+        );
+        assert_ne!(native.to_bits(), "0.3333".parse::<f64>().unwrap().to_bits());
+    }
+
+    #[test]
+    fn test_private_storage_bridge_current_observations() {
+        fn observe(label: &str, value: &Decimal, expected: &str) {
+            // These fixtures have bounded ACTUAL storage even if visible scale
+            // is MAX. Never format/Debug the Decimal or its result projection.
+            assert!(value.int_cnt <= 128 && value.frac_cnt <= 128);
+            let before = (
+                value.int_cnt,
+                value.frac_cnt,
+                value.result_frac_cnt,
+                value.negative,
+                value.word_buf.to_vec(),
+            );
+            let legacy = value.to_string_value();
+            assert!(legacy.len() <= 260);
+            assert_eq!(legacy, expected);
+            assert_eq!(value.try_storage_text().unwrap(), expected);
+            for flag in [
+                Flag::empty(),
+                Flag::TRUNCATE_AS_WARNING | Flag::OVERFLOW_AS_WARNING,
+                Flag::IGNORE_TRUNCATE,
+            ] {
+                for cap in [0, 1, 4] {
+                    let mut config = EvalConfig::from_flag(flag);
+                    config.set_max_warning_cnt(cap);
+                    let mut context = EvalContext::new(Arc::new(config));
+                    context
+                        .warnings
+                        .append_warning(Error::truncated_wrong_val("prefix", "retained"));
+                    let count = context.warnings.warning_cnt;
+                    let prefix = context.warnings.warnings.clone();
+                    let text =
+                        <Decimal as ConvertTo<String>>::convert(value, &mut context).unwrap();
+                    let bytes =
+                        <Decimal as ConvertTo<Bytes>>::convert(value, &mut context).unwrap();
+                    assert_eq!(text, expected);
+                    assert_eq!(bytes, expected.as_bytes());
+                    assert_eq!(context.warnings.warning_cnt, count);
+                    assert_eq!(context.warnings.warnings, prefix);
+                }
+            }
+            assert_eq!(
+                (
+                    value.int_cnt,
+                    value.frac_cnt,
+                    value.result_frac_cnt,
+                    value.negative,
+                    value.word_buf.to_vec()
+                ),
+                before
+            );
+            eprintln!(
+                "storage bridge decimal {label}: storage={legacy:?} shape_cells={before:?} bytes_match=true contexts=9 unchanged"
+            );
+        }
+        for literal in ["12.3400", "-12.3400", "0"] {
+            observe(
+                "bounded-literal",
+                &literal.parse::<Decimal>().unwrap(),
+                literal,
+            );
+        }
+        let negative_zero = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 2,
+            result_frac: 2,
+            negative: true,
+            words: &[0; 9],
+        })
+        .unwrap();
+        observe("raw-negative-zero", &negative_zero, "-0.00");
+        let third = Decimal::from(1).div(&Decimal::from(3), 4).unwrap().unwrap();
+        assert_eq!(third.result_scale(), 4);
+        observe("hidden-one-third", &third, "0.333333333");
+        let integer = format!("1{}", "0".repeat(100));
+        observe(
+            "integer101",
+            &Decimal::try_from_literal(&integer).unwrap(),
+            &integer,
+        );
+        let fraction = format!("-0.{}1", "0".repeat(99));
+        observe(
+            "fraction100",
+            &Decimal::try_from_literal(&fraction).unwrap(),
+            &fraction,
+        );
+        let hidden_text = format!("1.25{}", "0".repeat(98));
+        let stored = Decimal::try_from_literal(&hidden_text).unwrap();
+        let hidden = Decimal::try_from_words(DecimalWordsRef {
+            result_frac: 1,
+            ..stored.words()
+        })
+        .unwrap();
+        observe("hidden-storage100", &hidden, &hidden_text);
+        for visible in [0, 30, 81, 127, 128, 255] {
+            let mut cell = [0; DECIMAL_STRUCT_SIZE];
+            cell[..4].copy_from_slice(&[2, 1, visible, 1]);
+            cell[4..8].copy_from_slice(&12_u32.to_ne_bytes());
+            cell[8..12].copy_from_slice(&300_000_000_u32.to_ne_bytes());
+            cell[36..40].copy_from_slice(&u32::MAX.to_ne_bytes());
+            let value = cell.as_slice().read_decimal_from_chunk().unwrap();
+            observe("raw-visible-byte", &value, "-12.3");
+        }
+        for (header, word, expected) in [([1, 0, 0, 0], 12_u32, "2"), ([0, 0, 0, 0], u32::MAX, "5")]
+        {
+            let mut cell = [0; DECIMAL_STRUCT_SIZE];
+            cell[..4].copy_from_slice(&header);
+            cell[4..8].copy_from_slice(&word.to_ne_bytes());
+            cell[36..40].copy_from_slice(&u32::MAX.to_ne_bytes());
+            let value = cell.as_slice().read_decimal_from_chunk().unwrap();
+            observe("raw-physical-noncanonical", &value, expected);
+        }
+        let mut words = [0; 14];
+        words[0] = 1;
+        words[1] = 234_500_000;
+        words[13] = u32::MAX;
+        for visible in [300, u32::MAX] {
+            let value = Decimal::try_from_words(DecimalWordsRef {
+                int_digits: 1,
+                storage_frac: 4,
+                result_frac: visible,
+                negative: false,
+                words: &words,
+            })
+            .unwrap();
+            observe("tiny-storage-wide-visible-all-cells", &value, "1.2345");
+        }
+    }
+
+    #[test]
+    fn test_private_fixed_policy_current_observations() {
+        fn observe(label: &str, result: &Res<Decimal>) {
+            eprintln!(
+                "{label}: ok={} truncated={} overflow={} fields={:?}; storage={}",
+                result.is_ok(),
+                result.is_truncated(),
+                result.is_overflow(),
+                result.words(),
+                result.to_string_value(),
+            );
+        }
+        // CURRENT behavior characterization only, not an approved extension
+        // policy or a mathematical Grow oracle. No arithmetic is corrected.
+        let mut fraction_words = [0; 10];
+        fraction_words[0] = 100_000_000;
+        let wide_fraction = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 0,
+            storage_frac: 90,
+            result_frac: 90,
+            negative: false,
+            words: &fraction_words,
+        })
+        .unwrap();
+        observe(
+            "unadmitted-wide MUL positive1 x0.1/storage90",
+            &(&Decimal::from(1) * &wide_fraction),
+        );
+        observe(
+            "unadmitted-wide MUL negative1 x0.1/storage90",
+            &(&Decimal::from(-1) * &wide_fraction),
+        );
+
+        // This overlap IS representable through the old public bounded
+        // parser: the leading dot avoids charging an extra integer word.
+        let bounded_fraction = Decimal::from_str(&format!(".1{}", "0".repeat(80))).unwrap();
+        let bounded_integer = Decimal::from(1_000_000_001_u64);
+        observe(
+            "canonical-bounded MUL integer2words x0.1/storage81",
+            &(&bounded_integer * &bounded_fraction),
+        );
+
+        let mut power_words = [0; 11];
+        power_words[0] = 1;
+        let wide_integer = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 91,
+            storage_frac: 0,
+            result_frac: 0,
+            negative: false,
+            words: &power_words,
+        })
+        .unwrap();
+        observe(
+            "unadmitted-wide Fixed round10^90 scale0",
+            &wide_integer.round(0, RoundMode::HalfEven),
+        );
+
+        // A bounded-size analogue of the metadata-only zero allocation risk.
+        // NEVER replace300 by u32::MAX here or render an enormous header.
+        let metadata_only = Decimal::try_from_words(DecimalWordsRef {
+            int_digits: 1,
+            storage_frac: 0,
+            result_frac: 300,
+            negative: false,
+            words: &[1],
+        })
+        .unwrap();
+        let zero = Decimal::zero();
+        let remainder = (&zero % &metadata_only).unwrap();
+        assert!(remainder.words().words.len() <= 64);
+        observe(
+            "unadmitted-wide Fixed zero MOD metadata-visible300",
+            &remainder,
+        );
+    }
+
+    fn assert_source_parse(
+        input: &[u8],
+        status: DecimalParseStatus,
+        storage: &str,
+        shape: (usize, u32, u32, bool),
+    ) -> Decimal {
+        let outcome = Decimal::parse_mysql(input).unwrap();
+        assert_eq!(outcome.status, status, "input={input:?}");
+        assert_eq!(outcome.value.to_string_value(), storage, "input={input:?}");
+        let view = outcome.value.words();
+        assert_eq!(
+            (
+                view.int_digits,
+                view.storage_frac,
+                view.result_frac,
+                view.negative
+            ),
+            shape,
+            "input={input:?}"
+        );
+        outcome.value
+    }
+
+    #[test]
+    fn test_private_mysql_parse_executed_guards() {
+        use DecimalParseStatus::{Ok as Success, Overflow, Truncated, TruncatedWrongValue};
+        // Pinned Go reference364aef2b, independently executed policy rows3..18.
+        // Every huge exponent here is handled by word/count preflight, never
+        // the old host decimal string-expansion path.
+        let maximum = "9".repeat(81);
+        for (input, status, is_max) in [
+            ("-1e+9223372036854775808", Overflow, true),
+            ("-1e-9223372036854775809", Truncated, false),
+            ("\x0b1", TruncatedWrongValue, false),
+            ("\x0c1", TruncatedWrongValue, false),
+            ("", TruncatedWrongValue, false),
+            ("junk", TruncatedWrongValue, false),
+            (" 0e1073741823", Success, false),
+            ("0e1073741824", Overflow, true),
+            ("\t0e-1073741823", Success, false),
+            ("0e-1073741824", Success, false),
+            ("1e1073741823", Overflow, true),
+            ("1e1073741824", Overflow, true),
+            ("1e-1073741823", Truncated, false),
+            ("1e-1073741824", Truncated, false),
+            ("0e-1073741825", Truncated, false),
+            ("1e-1073741825", Truncated, false),
+        ] {
+            let expected = if is_max { maximum.as_str() } else { "0" };
+            let value = assert_source_parse(
+                input.as_bytes(),
+                status,
+                expected,
+                (if is_max { 81 } else { 0 }, 0, 0, false),
+            );
+            assert_eq!(value.spill_capacity_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn test_private_mysql_parse_order_and_round_origin() {
+        let mantissa = format!("1{}98765", "0".repeat(84));
+        assert_eq!(mantissa.len(), 90);
+        assert_source_parse(
+            format!("{mantissa}e-9").as_bytes(),
+            DecimalParseStatus::Overflow,
+            "98765",
+            (81, 0, 0, false),
+        );
+        assert_source_parse(
+            format!("{mantissa}e-9x").as_bytes(),
+            DecimalParseStatus::Truncated,
+            "0.000098765",
+            (0, 9, 9, false),
+        );
+        // Independently executed Go v2 rows19/20: a traced nested Round
+        // Overflow is not pointer-equal to direct Shift Overflow. It keeps
+        // the partial 1e72 payload, not81 nines, despite the same SQL code.
+        let long = format!("9{}e-162", "0".repeat(80));
+        let partial = assert_source_parse(
+            long.as_bytes(),
+            DecimalParseStatus::Overflow,
+            &format!("1{}", "0".repeat(72)),
+            (81, 0, 0, false),
+        );
+        assert_eq!(partial.words().words[0], 1);
+        assert!(partial.words().words[1..].iter().all(|word| *word == 0));
+        assert_source_parse(
+            b"9e-82",
+            DecimalParseStatus::Truncated,
+            "0",
+            (0, 0, 0, false),
+        );
+        // The legacy worker retains its all-lost-before-Round ordering.
+        let legacy = Decimal::from_bytes(long.as_bytes()).unwrap();
+        assert!(legacy.is_truncated());
+        assert_eq!(legacy.to_string_value(), "0");
+        assert_eq!(legacy.words().int_digits, 1);
+    }
+
+    #[test]
+    fn test_private_parser_legacy_policy_differences() {
+        // Existing native fixtures deliberately suppress exponent-junk
+        // warnings; source rows are also pinned in Go TestFromStringMyDecimal.
+        for (input, storage) in [
+            ("1e", "1"),
+            ("1eabc", "1"),
+            ("1e 1dddd ", "10"),
+            ("1e - 1", "1"),
+        ] {
+            let legacy = Decimal::from_bytes(input.as_bytes()).unwrap();
+            assert!(legacy.is_ok());
+            assert_eq!(legacy.to_string_value(), storage);
+            let source = Decimal::parse_mysql(input.as_bytes()).unwrap();
+            assert_eq!(source.status, DecimalParseStatus::Truncated);
+            assert_eq!(source.value.to_string_value(), storage);
+        }
+        // Independent pre-parser rlib observation: Rust byte ASCII whitespace
+        // excludes VT but includes FF. The initial new-test VT hypothesis was
+        // wrong; the unchanged production scanner correctly rejected it.
+        assert!(Decimal::from_bytes(b"\x0b1").is_err());
+        assert_eq!(
+            Decimal::parse_mysql(b"\x0b1").unwrap().status,
+            DecimalParseStatus::TruncatedWrongValue
+        );
+        let legacy_ff = Decimal::from_bytes(b"\x0c1").unwrap();
+        assert!(legacy_ff.is_ok());
+        assert_eq!(legacy_ff.to_string_value(), "1");
+        assert_eq!(
+            Decimal::parse_mysql(b"\x0c1").unwrap().status,
+            DecimalParseStatus::TruncatedWrongValue
+        );
+        let bad_exponent = b"1e18446744073709551620";
+        assert!(Decimal::from_bytes(bad_exponent).is_err());
+        assert_source_parse(
+            bad_exponent,
+            DecimalParseStatus::BadNumber,
+            "0",
+            (0, 0, 0, false),
+        );
+        // Invalid UTF-8 is suffix junk, not a new outer codec failure.
+        let source = Decimal::parse_mysql(b"223\xe0\x80\x80").unwrap();
+        assert_eq!(source.status, DecimalParseStatus::Truncated);
+        assert_eq!(source.value.to_string_value(), "223");
+        assert_eq!(trim_unicode_space(b"\xc2\xa0\xff\xe3\x80\x80"), b"\xff");
+        assert_eq!(trim_unicode_space(b"\xc2\xa0 \t\xe3\x80\x80"), b"");
+    }
+
+    #[test]
+    fn test_private_canonical_parser_grow() {
+        for (input, expected) in [
+            ("+.1", "0.1"),
+            ("1.", "1"),
+            ("0000123.4500", "123.4500"),
+            ("-000.000", "0.000"),
+        ] {
+            let value = Decimal::try_from_literal(input).unwrap();
+            assert_eq!(value.to_string_value(), expected);
+            assert_eq!(value.storage_scale(), value.result_scale());
+        }
+        let input = format!("1{}.{}1", "0".repeat(99), "0".repeat(100));
+        let parsed = Decimal::try_from_literal(&input).unwrap();
+        let independently_loaded = independent_literal_words(&input);
+        assert_eq!(parsed, independently_loaded);
+        assert_eq!(parsed.to_string_value(), input);
+        assert_eq!(
+            (
+                parsed.words().int_digits,
+                parsed.storage_scale(),
+                parsed.result_scale()
+            ),
+            (100, 101, 101)
+        );
+        let wide_fraction = format!("-0.{}7", "0".repeat(299));
+        let parsed = Decimal::try_from_literal(&wide_fraction).unwrap();
+        assert_eq!(parsed.to_string_value(), wide_fraction);
+        assert_eq!((parsed.storage_scale(), parsed.result_scale()), (300, 300));
+        for invalid in ["", ".", "+", "-", " 1", "1 ", "1e2", "1a", "--1", "1.2.3"] {
+            assert!(Decimal::try_from_literal(invalid).is_err(), "{invalid:?}");
+        }
+        assert_eq!(Decimal::from_str("1e").unwrap().to_string_value(), "1");
+        assert!(Decimal::try_from_literal("1e").is_err());
+    }
+
+    #[test]
+    fn test_private_shared_shift_grow_alignment() {
+        for (input, shift, expected) in [
+            ("1.2300", 1, "12.3"),
+            ("1.2300", -1, "0.123"),
+            ("123456789.000000001", 9, "123456789000000001"),
+            ("123456789.000000001", -9, "0.123456789000000001"),
+            ("0.000000001", 9, "1"),
+            ("-15.00", -2, "-0.15"),
+        ] {
+            let value = Decimal::try_from_literal(input).unwrap();
+            let shifted = value
+                .shift_with_limit(shift, WordLimit::Grow, ShiftDisposition::Legacy)
+                .unwrap();
+            assert!(shifted.result.is_ok());
+            assert_eq!(
+                shifted.result.to_string_value(),
+                expected,
+                "{input} by {shift}"
+            );
+        }
+        let value = Decimal::try_from_literal("1").unwrap();
+        let shifted = value
+            .shift_with_limit(1000, WordLimit::Grow, ShiftDisposition::Legacy)
+            .unwrap()
+            .result
+            .unwrap();
+        assert_eq!(shifted.to_string_value(), format!("1{}", "0".repeat(1000)));
+        let restored = shifted
+            .shift_with_limit(-1000, WordLimit::Grow, ShiftDisposition::Legacy)
+            .unwrap()
+            .result
+            .unwrap();
+        assert_eq!(restored.to_string_value(), "1");
+        let tiny = restored
+            .shift_with_limit(-1000, WordLimit::Grow, ShiftDisposition::Legacy)
+            .unwrap()
+            .result
+            .unwrap();
+        assert_eq!(tiny.to_string_value(), format!("0.{}1", "0".repeat(999)));
+        assert!(
+            Decimal::from(1)
+                .shift_with_limit(
+                    -(i128::from(u32::MAX) + 1),
+                    WordLimit::Grow,
+                    ShiftDisposition::Legacy
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_private_parser_mantissa_capacity_preselection() {
+        // Original pinned Go one-word fixture rows, plus the required leading
+        // zero capacity distinction: selection is before normalization.
+        for (input, status, expected) in [
+            ("123450000098765", DecimalParseStatus::Overflow, "98765"),
+            ("123450.000098765", DecimalParseStatus::Truncated, "123450"),
+            ("0.1", DecimalParseStatus::Truncated, "0"),
+            (".1", DecimalParseStatus::Ok, "0.1"),
+            ("000000000000000001", DecimalParseStatus::Overflow, "1"),
+        ] {
+            let parsed =
+                Decimal::parse_with_policy(input.as_bytes(), DecimalParsePolicy::Mysql(1)).unwrap();
+            assert_eq!(parsed.status, status);
+            assert_eq!(parsed.value.to_string_value(), expected);
+        }
+        let canonical = Decimal::try_from_literal("000000000000000001").unwrap();
+        assert_eq!(canonical.to_string_value(), "1");
+        assert_eq!(canonical.words().int_digits, 1);
+    }
+
+    #[test]
+    fn test_private_grow_round_modes() {
+        // Source low-level modes: HalfEven is half-away, and Ceiling is
+        // magnitude-away with only the first discarded digit off a word edge.
+        for (input, scale, mode, expected) in [
+            ("2.5", 0, RoundMode::HalfEven, "3"),
+            ("-2.5", 0, RoundMode::HalfEven, "-3"),
+            ("-15.5", 0, RoundMode::HalfEven, "-16"),
+            ("10.99", 1, RoundMode::Truncate, "10.9"),
+            ("-10.99", 1, RoundMode::Truncate, "-10.9"),
+            ("-15.1", 0, RoundMode::Ceiling, "-16"),
+            ("1.0001", 1, RoundMode::Ceiling, "1.0"),
+            ("1.0001", 3, RoundMode::Ceiling, "1.001"),
+            ("1.000000001", 0, RoundMode::Ceiling, "2"),
+            ("999999999", -9, RoundMode::HalfEven, "1000000000"),
+            ("999999999", -9, RoundMode::Truncate, "0"),
+            (
+                "999999999999999999",
+                -18,
+                RoundMode::HalfEven,
+                "1000000000000000000",
+            ),
+        ] {
+            let value = Decimal::from_str(input).unwrap();
+            let rounded = value.try_round_exact(scale, mode).unwrap();
+            assert_eq!(
+                rounded.to_string_value(),
+                expected,
+                "input={input} scale={scale}"
+            );
+            assert_eq!(
+                value.to_string_value(),
+                Decimal::from_str(input).unwrap().to_string_value()
+            );
+        }
+        for scale in [31, 81, 300] {
+            let value = Decimal::from_str("1.25")
+                .unwrap()
+                .try_round_exact(scale, RoundMode::HalfEven)
+                .unwrap();
+            assert_eq!(
+                value.to_string_value(),
+                format!("1.25{}", "0".repeat(scale as usize - 2))
+            );
+            assert_eq!(
+                (value.storage_scale(), value.result_scale()),
+                (scale as u32, scale as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn test_private_grow_round_wide_carry_and_zero() {
+        let value = independent_literal_words(&format!("{}.5", "9".repeat(108)));
+        let rounded = value.try_round_exact(0, RoundMode::HalfEven).unwrap();
+        assert_eq!(rounded.to_string_value(), format!("1{}", "0".repeat(108)));
+        assert_eq!(rounded.words().int_digits, 109);
+        let value = independent_literal_words(&format!("9.{}", "9".repeat(301)));
+        let rounded = value.try_round_exact(300, RoundMode::HalfEven).unwrap();
+        assert_eq!(rounded.to_string_value(), format!("10.{}", "0".repeat(300)));
+        assert_eq!(
+            (rounded.storage_scale(), rounded.result_scale()),
+            (300, 300)
+        );
+
+        let mut tiny = Decimal::try_new(0, 81, false).unwrap();
+        tiny.word_buf[8] = 5;
+        let rounded = tiny.try_round_exact(80, RoundMode::HalfEven).unwrap();
+        assert_eq!(rounded.to_string_value(), format!("0.{}1", "0".repeat(79)));
+        assert_eq!(rounded.spill_capacity_bytes(), 0);
+        tiny.word_buf[8] = 1;
+        let rounded = tiny.try_round_exact(80, RoundMode::HalfEven).unwrap();
+        assert!(rounded.is_zero());
+        assert_eq!((rounded.storage_scale(), rounded.result_scale()), (80, 80));
+        assert_eq!(rounded.spill_capacity_bytes(), 0);
+    }
+
+    #[test]
+    fn test_private_streaming_result_scales() {
+        for scale in [31, 81, 300] {
+            let mut value = Decimal::from_str("1.25").unwrap();
+            value.result_frac_cnt = scale;
+            let before = value.words().words.to_vec();
+            let mut storage = String::new();
+            value.write_storage(&mut storage).unwrap();
+            assert_eq!(storage, "1.25");
+            let mut result = String::new();
+            value.write_result(&mut result).unwrap();
+            assert_eq!(result, format!("1.25{}", "0".repeat(scale - 2)));
+            assert_eq!(value.storage_scale(), 2);
+            assert_eq!(value.words().words, before);
+            if scale == 300 {
+                assert_eq!(value.to_string(), result);
+            } else {
+                assert_eq!(value.to_string(), format!("1.25{}", "0".repeat(28)));
+            }
+        }
+        let mut value = independent_literal_words(&format!("1.{}56", "0".repeat(80)));
+        value.result_frac_cnt = 81;
+        let before = value.to_string_value();
+        let mut result = String::new();
+        value.write_result(&mut result).unwrap();
+        assert_eq!(result, format!("1.{}6", "0".repeat(80)));
+        assert_eq!(value.to_string(), result);
+        assert_eq!(value.to_string_value(), before);
+        assert_eq!((value.storage_scale(), value.result_scale()), (82, 81));
+    }
+
+    #[test]
+    fn test_private_streaming_raw_result_255() {
+        let mut cell = [0; DECIMAL_STRUCT_SIZE];
+        cell[..4].copy_from_slice(&[1, 0, 255, 0]);
+        cell[4..8].copy_from_slice(&1_u32.to_ne_bytes());
+        let raw = cell.as_slice().read_decimal_from_chunk().unwrap();
+        let mut logical = Decimal::from(1);
+        logical.result_frac_cnt = 255;
+        for value in [&raw, &logical] {
+            assert_eq!(value.to_string(), "0");
+            let mut full = String::new();
+            value.write_result(&mut full).unwrap();
+            assert_eq!(full, format!("1.{}", "0".repeat(255)));
+            assert_eq!(value.to_string_value(), "1");
+            assert_eq!((value.storage_scale(), value.result_scale()), (0, 255));
+        }
+        assert_eq!(raw.words().words, logical.words().words);
+        let mut roundtrip = Vec::new();
+        roundtrip.write_decimal_to_chunk(&raw).unwrap();
+        assert_eq!(roundtrip, cell);
+    }
+
+    #[test]
+    fn test_private_streaming_full_u32_failure() {
+        #[derive(Default)]
+        struct RejectingWriter {
+            calls: usize,
+            largest_chunk: usize,
+        }
+        impl fmt::Write for RejectingWriter {
+            fn write_str(&mut self, text: &str) -> fmt::Result {
+                self.calls += 1;
+                self.largest_chunk = self.largest_chunk.max(text.len());
+                Err(fmt::Error)
+            }
+        }
+        let mut value = Decimal::from(1);
+        value.result_frac_cnt = u32::MAX as usize;
+        let mut writer = RejectingWriter::default();
+        assert!(value.write_result(&mut writer).is_err());
+        assert_eq!((writer.calls, writer.largest_chunk), (1, 128));
+        let mut writer = RejectingWriter::default();
+        assert!(fmt::write(&mut writer, format_args!("{value}")).is_err());
+        assert_eq!((writer.calls, writer.largest_chunk), (1, 128));
+        assert_eq!((value.storage_scale(), value.result_scale()), (0, u32::MAX));
+        assert_eq!(value.words().words[0], 1);
+        assert_eq!(value.spill_capacity_bytes(), 0);
+    }
+
+    #[test]
+    fn test_private_round_zero_policy_and_count_preflight() {
+        let mut value = Decimal::from_str("0.00").unwrap();
+        value.negative = true;
+        let rounded = value.try_round_exact(2, RoundMode::HalfEven).unwrap();
+        assert_eq!(rounded.to_string_value(), "0.00");
+        assert!(!rounded.is_negative());
+        assert!(value.is_negative());
+        let mut full = String::new();
+        value.write_result(&mut full).unwrap();
+        assert_eq!(full, "-0.00");
+        assert_eq!(value.to_string(), "-0.00");
+        assert_eq!(
+            Decimal::from(123)
+                .try_round_exact(i64::MIN, RoundMode::HalfEven)
+                .unwrap()
+                .to_string_value(),
+            "0"
+        );
+        assert!(
+            value
+                .try_round_exact(i64::MAX, RoundMode::HalfEven)
+                .is_err()
+        );
+        assert!(
+            value
+                .try_round_exact(i64::from(u32::MAX) + 1, RoundMode::Truncate)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_legacy_boundary_characterization() {
+        let lhs = Decimal::from_str(&format!("-1{}.1", "0".repeat(60))).unwrap();
+        let rhs = Decimal::from_str(&format!("1{}.1", "0".repeat(60))).unwrap();
+        let status = &lhs * &rhs;
+        assert!(status.is_overflow());
+        let value = status.unwrap();
+        // Immutable B2.1/Go observations justify this explicit approved
+        // domain extension, not a changed numerical/status oracle. Go's
+        // nine-cell String/ToString both panic on this ten-active-word shape.
+        let before_words = value.words().words.to_vec();
+        let mut legacy = String::new();
+        value.write_legacy_result(&mut legacy).unwrap();
+        assert_eq!(legacy, "0");
+        let mut full = String::new();
+        value.write_result(&mut full).unwrap();
+        assert_eq!(full, "-0.00");
+        assert_eq!(value.to_string(), "-0.00");
+        assert_eq!(
+            (
+                value.words().int_digits,
+                value.storage_scale(),
+                value.result_scale(),
+                value.is_negative()
+            ),
+            (81, 2, 2, true)
+        );
+        assert_eq!(value.words().words, before_words);
+        eprintln!(
+            "fractional MUL: {:?}; private legacy={}; Display={}; storage={}",
+            value.words(),
+            legacy,
+            value,
+            value.to_string_value()
+        );
+        let lhs =
+            Decimal::from_str("3428138243708624600000000000000000000000000000000000").unwrap();
+        let rhs =
+            Decimal::from_str("0.000000000000000000000000000000000000000000010962196522059515")
+                .unwrap();
+        let remainder = do_div_mod(&lhs, &rhs, 5, true).unwrap();
+        assert_eq!(
+            remainder.to_string_value(),
+            "0.000000000000000000000000000000000003564345362392880000000000"
+        );
+        eprintln!(
+            "legacy MOD: ok={} truncated={} overflow={} fields={:?}; storage={}",
+            remainder.is_ok(),
+            remainder.is_truncated(),
+            remainder.is_overflow(),
+            remainder.words(),
+            remainder.to_string_value()
+        );
+    }
+
+    #[test]
+    fn test_inline_words_and_clone_ownership() {
+        let value = Decimal::from_str("-123.4500").unwrap();
+        let view = value.words();
+        assert_eq!(view.int_digits, 3);
+        assert_eq!((view.storage_frac, view.result_frac), (4, 4));
+        assert!(view.negative);
+        assert_eq!(view.words.len(), WORD_BUF_LEN);
+        assert_eq!(value.spill_capacity_bytes(), 0);
+        assert_eq!(value.natural_storage_shape(), (7, 4));
+        let mut cloned = value.clone();
+        cloned.word_buf[0] = 321;
+        assert_eq!(value.words().words[0], 123);
+
+        let lhs = Decimal::from_str(&format!("-1{}.1", "0".repeat(60))).unwrap();
+        let rhs = Decimal::from_str(&format!("1{}.1", "0".repeat(60))).unwrap();
+        let status = &lhs * &rhs;
+        assert!(status.is_overflow());
+        let value = status.unwrap();
+        assert_eq!(value.words().words.len(), 10);
+        assert!(value.spill_capacity_bytes() >= 10 * mem::size_of::<u32>());
+        let mut cloned = value.clone();
+        cloned.word_buf[9] = 10_000_000;
+        assert_eq!(value.words().words[9], 0);
+        assert!(value.is_zero());
+    }
+
+    #[test]
+    fn test_fixed_word_limit_uses_wide_count_arithmetic() {
+        assert_eq!(
+            fix_word_cnt_err(usize::MAX, usize::MAX, 9),
+            Res::Overflow((9, 0))
+        );
+        assert_eq!(fix_word_cnt_err(8, usize::MAX, 9), Res::Truncated((8, 1)));
+        assert_eq!(word_cnt!(usize::MAX), WORD_BUF_LEN + 1);
+    }
+
+    #[test]
+    fn test_chunk_fields_are_independent_of_owning_layout() {
+        let mut words = [0; WORD_BUF_LEN];
+        words[0] = 123;
+        words[1] = 450_000_000;
+        words[8] = u32::MAX; // Inactive physical bytes are not normalized.
+        let parts = DecimalParts {
+            int_digits: 3,
+            frac_digits: 2,
+            result_frac_digits: 7,
+            negative: true,
+            words,
+        };
+        let value = Decimal::try_from_parts(parts).unwrap();
+        let mut encoded = Vec::new();
+        encoded.write_decimal_to_chunk(&value).unwrap();
+        assert_eq!(encoded.len(), 40);
+        assert_ne!(mem::size_of::<Decimal>(), DECIMAL_STRUCT_SIZE);
+        assert_eq!(&encoded[..4], &[3, 2, 7, 1]);
+        for (i, word) in words.iter().enumerate() {
+            assert_eq!(&encoded[4 + i * 4..8 + i * 4], &word.to_ne_bytes());
+        }
+        encoded.extend_from_slice(&[17, 22]);
+        let mut reader = encoded.as_slice();
+        let decoded = reader.read_decimal_from_chunk().unwrap();
+        assert_eq!(decoded.try_to_parts().unwrap(), parts);
+        assert_eq!(reader, &[17, 22]);
+    }
+
+    #[test]
+    fn test_chunk_empty_prefix_is_safe_physical_zero() {
+        for negative in [0, 1] {
+            let mut cell = [0; DECIMAL_STRUCT_SIZE];
+            cell[3] = negative;
+            cell[36..40].copy_from_slice(&u32::MAX.to_ne_bytes());
+            let value = cell.as_slice().read_decimal_from_chunk().unwrap();
+            assert_eq!(value.words().int_digits, 0);
+            assert!(value.is_zero());
+            assert_eq!(value.is_negative(), negative != 0);
+            assert!(value.try_to_parts().is_err());
+            assert_eq!(value.cmp(&value), Ordering::Equal);
+            assert!(value.clone().shift(1).unwrap().is_zero());
+            assert!((&value * &value).unwrap().is_zero());
+            let mut original_hash = DefaultHasher::new();
+            let mut zero_hash = DefaultHasher::new();
+            value.hash(&mut original_hash);
+            Decimal::zero().hash(&mut zero_hash);
+            assert_eq!(original_hash.finish(), zero_hash.finish());
+            let mut encoded = Vec::new();
+            encoded.write_decimal_to_chunk(&value).unwrap();
+            assert_eq!(encoded, cell);
+        }
+    }
+
+    #[test]
+    fn test_chunk_preserves_raw_shape_and_result_header_domain() {
+        // TiDB checked MyDecimal raw import admits result scale 127 and does
+        // not require partial-word/padding normalization. TiKV raw transport
+        // additionally has an unsigned result header, including 128..=255.
+        for (header, word) in [
+            ([1, 0, 81, 0], 1_u32),
+            ([1, 0, 82, 0], 1),
+            ([1, 0, 127, 0], 1),
+            ([1, 0, 128, 0], 1),
+            ([1, 0, 255, 0], 1),
+            ([1, 0, 0, 0], 12),
+            ([0, 1, 127, 1], 1),
+        ] {
+            let mut cell = [0; DECIMAL_STRUCT_SIZE];
+            cell[..4].copy_from_slice(&header);
+            cell[4..8].copy_from_slice(&word.to_ne_bytes());
+            let value = cell.as_slice().read_decimal_from_chunk().unwrap();
+            assert_eq!(value.result_scale(), u32::from(header[2]));
+            assert_eq!(value.words().words[0], word);
+            let mut encoded = Vec::new();
+            encoded.write_decimal_to_chunk(&value).unwrap();
+            assert_eq!(encoded, cell);
+            if header[2] == 255 {
+                // The existing Fixed9 Display interprets its result byte as i8.
+                assert_eq!(value.to_string(), "0");
+            }
+        }
+    }
+
+    #[test]
+    fn test_chunk_rejects_invalid_owned_value_fields() {
+        let mut valid = [0; DECIMAL_STRUCT_SIZE];
+        valid[0] = 1;
+        let mut bad_sign = valid;
+        bad_sign[3] = 2;
+        let mut bad_count = valid;
+        bad_count[0] = u8::MAX;
+        let mut bad_word = valid;
+        bad_word[4..8].copy_from_slice(&WORD_BASE.to_ne_bytes());
+        for cell in [bad_sign, bad_count, bad_word] {
+            let mut bytes = cell.to_vec();
+            bytes.push(17);
+            let mut reader = bytes.as_slice();
+            assert!(matches!(
+                reader.read_decimal_from_chunk(),
+                Err(Error::InvalidDataType(_))
+            ));
+            assert_eq!(reader, &[17]);
+        }
+    }
+
+    // TiDB's source-backed decimal multiplication preserves the result scale
+    // when a successful negative zero product is normalized to positive zero.
+    // Keep this regression distinct from Overflow's intentional signed zero.
+    #[test]
+    fn test_mul_zero_preserves_result_scale() {
+        let lhs = Decimal::from_str("0.000").unwrap();
+        let rhs = Decimal::from_str("-1").unwrap();
+        let result = &lhs * &rhs;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value.to_string(), "0.000");
+        assert_eq!(value.frac_cnt(), 3);
+        assert_eq!(value.result_frac_cnt(), 3);
+        assert!(!value.is_negative());
+    }
+
+    #[test]
+    fn test_mul_zero_sign_and_operand_symmetry() {
+        let zero_parts = Decimal::from_str("0.000").unwrap().try_to_parts().unwrap();
+        for (rhs_source, expected_scale) in [("1", 3), ("0.00", 5)] {
+            let rhs_parts = Decimal::from_str(rhs_source)
+                .unwrap()
+                .try_to_parts()
+                .unwrap();
+            for lhs_negative in [false, true] {
+                for rhs_negative in [false, true] {
+                    let lhs = Decimal::try_from_parts(DecimalParts {
+                        negative: lhs_negative,
+                        ..zero_parts
+                    })
+                    .unwrap();
+                    let rhs = Decimal::try_from_parts(DecimalParts {
+                        negative: rhs_negative,
+                        ..rhs_parts
+                    })
+                    .unwrap();
+                    for (lhs, rhs) in [(&lhs, &rhs), (&rhs, &lhs)] {
+                        let result = lhs * rhs;
+                        assert!(result.is_ok());
+                        let value = result.unwrap();
+                        assert!(value.is_zero());
+                        assert!(!value.is_negative());
+                        assert_eq!(value.frac_cnt(), expected_scale);
+                        assert_eq!(value.result_frac_cnt(), expected_scale);
+                        assert_eq!(
+                            value.to_string(),
+                            format!("0.{}", "0".repeat(usize::try_from(expected_scale).unwrap()))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_exact_parts_round_trip() {
+        // Exercise every storage digit-count split, not just total precision:
+        // e.g. (80, 1) fits 81 digits but needs ten separately aligned words.
+        for int_digits in 0_u8..=81 {
+            for frac_digits in 0_u8..=81 {
+                let int_words = usize::from(int_digits).div_ceil(9);
+                let frac_words = usize::from(frac_digits).div_ceil(9);
+                let used_words = int_words + frac_words;
+                let mut parts = DecimalParts {
+                    int_digits,
+                    frac_digits,
+                    result_frac_digits: frac_digits,
+                    negative: false,
+                    words: [WORD_MAX; 9],
+                };
+                if used_words == 0 || used_words > 9 {
+                    assert!(matches!(
+                        Decimal::try_from_parts(parts),
+                        Err(Error::InvalidDataType(_))
+                    ));
+                    continue;
+                }
+                if int_digits % 9 != 0 {
+                    parts.words[0] = TEN_POW[usize::from(int_digits % 9)] - 1;
+                }
+                if frac_digits % 9 != 0 {
+                    let padding = TEN_POW[usize::from(9 - frac_digits % 9)];
+                    parts.words[used_words - 1] = WORD_MAX / padding * padding;
+                }
+                let value = Decimal::try_from_parts(parts).unwrap();
+                assert_eq!(value.try_to_parts().unwrap(), parts);
+                assert_eq!(value.frac_cnt(), u32::from(frac_digits));
+                assert_eq!(value.result_frac_cnt(), u32::from(frac_digits));
+            }
+        }
+
+        // Inactive capacity is retained, including bits which would not be
+        // valid if an importer incorrectly interpreted them as active digits.
+        let mut parts = DecimalParts {
+            int_digits: 1,
+            frac_digits: 1,
+            result_frac_digits: 3,
+            negative: false,
+            words: [0; 9],
+        };
+        parts.words[0] = 1;
+        parts.words[1] = 200_000_000;
+        parts.words[8] = u32::MAX;
+        let value = Decimal::try_from_parts(parts).unwrap();
+        assert_eq!(value.try_to_parts().unwrap(), parts);
+        assert_eq!(value.to_string(), "1.200");
+
+        parts.words[0] = 0;
+        parts.words[1] = 0;
+        parts.negative = true;
+        let negative_zero = Decimal::try_from_parts(parts).unwrap();
+        assert!(negative_zero.is_negative());
+        assert!(negative_zero.is_zero());
+        assert_eq!(negative_zero.try_to_parts().unwrap(), parts);
+    }
+
+    #[test]
+    fn test_exact_parts_reject_invalid() {
+        let zero = Decimal::zero().try_to_parts().unwrap();
+        for (int_digits, frac_digits) in [
+            (0, 0),
+            (82, 0),
+            (0, 82),
+            (80, 1),
+            (81, 1),
+            (u8::MAX, 0),
+            (0, u8::MAX),
+            (u8::MAX, u8::MAX),
+        ] {
+            assert!(matches!(
+                Decimal::try_from_parts(DecimalParts {
+                    int_digits,
+                    frac_digits,
+                    ..zero
+                }),
+                Err(Error::InvalidDataType(_))
+            ));
+        }
+        for result_frac_digits in [82, u8::MAX] {
+            assert!(matches!(
+                Decimal::try_from_parts(DecimalParts {
+                    result_frac_digits,
+                    ..zero
+                }),
+                Err(Error::InvalidDataType(_))
+            ));
+        }
+        for word in [WORD_BASE, u32::MAX] {
+            let mut parts = DecimalParts {
+                int_digits: 9,
+                ..zero
+            };
+            parts.words[0] = word;
+            assert!(matches!(
+                Decimal::try_from_parts(parts),
+                Err(Error::InvalidDataType(_))
+            ));
+        }
+        for digits in 1_u8..9 {
+            let mut parts = DecimalParts {
+                int_digits: digits,
+                ..zero
+            };
+            parts.words[0] = TEN_POW[usize::from(digits)];
+            assert!(matches!(
+                Decimal::try_from_parts(parts),
+                Err(Error::InvalidDataType(_))
+            ));
+            parts.int_digits = 0;
+            parts.frac_digits = digits;
+            parts.words[0] = 700_000_001;
+            assert!(matches!(
+                Decimal::try_from_parts(parts),
+                Err(Error::InvalidDataType(_))
+            ));
+        }
+        let mut empty = DecimalParts {
+            int_digits: 0,
+            ..zero
+        };
+        empty.words[0] = 1;
+        assert!(matches!(
+            Decimal::try_from_parts(empty),
+            Err(Error::InvalidDataType(_))
+        ));
+    }
+
+    #[test]
+    fn test_exact_parts_preserve_independent_scales_and_hidden_digits() {
+        let result = Decimal::from(8_i64).div(&Decimal::from(7_i64), 7).unwrap();
+        assert!(result.is_ok());
+        let parts = result.unwrap().try_to_parts().unwrap();
+        assert_eq!(parts.frac_digits, 9);
+        assert_eq!(parts.result_frac_digits, 7);
+        assert_eq!(&parts.words[..2], &[1, 142_857_142]);
+        let value = Decimal::try_from_parts(parts).unwrap();
+        assert_eq!(value.try_to_parts().unwrap(), parts);
+        assert_eq!(value.to_string(), "1.1428571");
+
+        // This proves exact transport, not >30-scale formatting compatibility.
+        for result_frac_digits in [0, 3, 30, 31, 81] {
+            let parts = DecimalParts {
+                result_frac_digits,
+                ..parts
+            };
+            assert_eq!(
+                Decimal::try_from_parts(parts)
+                    .unwrap()
+                    .try_to_parts()
+                    .unwrap(),
+                parts
+            );
+        }
+    }
+
+    #[test]
+    fn test_exact_parts_preserve_status_payloads() {
+        // Existing asymmetric truncation behavior is not changed by transport.
+        let lhs = Decimal::from_str("999999999999999999999999999999999.9999").unwrap();
+        let rhs = Decimal::from_str("766507373740683764182618847769240.9770").unwrap();
+        let truncated = &lhs * &rhs;
+        assert!(truncated.is_truncated());
+        let large = Decimal::from_str(&format!("1{}", "0".repeat(60))).unwrap();
+        let negative_large = -large.clone();
+        let overflow = &negative_large * &large;
+        assert!(overflow.is_overflow());
+        assert!(overflow.is_negative());
+        assert!(overflow.is_zero());
+        assert_eq!(overflow.to_string(), "-0");
+        for result in [Res::Ok(Decimal::from(123_i64)), truncated, overflow] {
+            let parts = result.map(|d| d.try_to_parts().unwrap());
+            let round_trip =
+                parts.map(|p| Decimal::try_from_parts(p).unwrap().try_to_parts().unwrap());
+            assert_eq!(round_trip, parts);
+        }
+
+        // The focused successful-zero fix leaves the existing Truncated-zero
+        // payload convention intact; it must not accidentally become Ok.
+        let zero = Decimal::try_from_parts(DecimalParts {
+            int_digits: 1,
+            frac_digits: 36,
+            result_frac_digits: 30,
+            negative: false,
+            words: [0; 9],
+        })
+        .unwrap();
+        assert_eq!(
+            (&zero * &negative_large).map(|d| d.try_to_parts().unwrap()),
+            Res::Truncated(Decimal::zero().try_to_parts().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_exact_parts_reject_over_capacity_overflow_payload() {
+        // Legacy multiplication returns before clamping fractional capacity.
+        // Preserve its status/header through a safe logical view, not a clipped
+        // fixed export. Malformed fixed import must still fail independently.
+        let lhs = Decimal::from_str(&format!("-1{}.1", "0".repeat(60))).unwrap();
+        let rhs = Decimal::from_str(&format!("1{}.1", "0".repeat(60))).unwrap();
+        let result = &lhs * &rhs;
+        assert!(result.is_overflow());
+        let value = result.unwrap();
+        let view = value.words();
+        assert!(view.negative);
+        assert_eq!(view.int_digits, 81);
+        assert_eq!(view.storage_frac, 2);
+        assert_eq!(view.result_frac, 2);
+        assert_eq!(view.words.len(), 10);
+        assert!(view.words.iter().all(|word| *word == 0));
+        assert!(matches!(
+            value.try_to_parts(),
+            Err(Error::InvalidDataType(_))
+        ));
+        let mut words = [0; WORD_BUF_LEN];
+        words.copy_from_slice(&view.words[..WORD_BUF_LEN]);
+        let parts = DecimalParts {
+            int_digits: 81,
+            frac_digits: 2,
+            result_frac_digits: 2,
+            negative: true,
+            words,
+        };
+        assert!(matches!(
+            Decimal::try_from_parts(parts),
+            Err(Error::InvalidDataType(_))
+        ));
+    }
 
     #[test]
     fn test_from_i64() {
@@ -2983,11 +6935,11 @@ mod tests {
 
         for (dec_str, scale, half_exp, trunc_exp, ceil_exp) in cases {
             let dec = dec_str.parse::<Decimal>().unwrap();
-            let round_dec = dec.round(scale, RoundMode::HalfEven);
+            let round_dec = dec.clone().round(scale, RoundMode::HalfEven);
             assert_eq!(round_dec.frac_cnt, round_dec.result_frac_cnt);
             let res = round_dec.map(|d| d.to_string_value());
             assert_eq!(res, half_exp.map(|s| s.to_owned()));
-            let round_dec = dec.round(scale, RoundMode::Truncate);
+            let round_dec = dec.clone().round(scale, RoundMode::Truncate);
             assert_eq!(round_dec.frac_cnt, round_dec.result_frac_cnt);
             let res = round_dec.map(|d| d.to_string_value());
             assert_eq!(res, trunc_exp.map(|s| s.to_owned()));
@@ -3360,7 +7312,9 @@ mod tests {
         let b = "1".to_owned() + &"0".repeat(60);
         let cases = vec![
             ("12", "10", Res::Ok("120")),
-            ("0", "-1.1", Res::Ok("0")),
+            // Pinned TiDB Go oracle: successful 0 * -1.1 (both orders)
+            // retains scale 1. This intentionally corrects legacy TiKV "0".
+            ("0", "-1.1", Res::Ok("0.0")),
             ("-123.456", "98765.4321", Res::Ok("-12193185.1853376")),
             (
                 "-123456000000",
@@ -3655,19 +7609,19 @@ mod tests {
 
         for (pos, neg) in cases {
             let pos_dec: Decimal = pos.parse().unwrap();
-            let res = -pos_dec;
+            let res = -pos_dec.clone();
             assert_eq!(res.to_string_value(), neg);
             assert!((&pos_dec + &res).is_zero());
 
             let neg_dec: Decimal = neg.parse().unwrap();
-            let res = -neg_dec;
+            let res = -neg_dec.clone();
             assert_eq!(res.to_string_value(), pos);
             assert!((&neg_dec + &res).is_zero());
         }
 
         let max_dec = super::max_or_min_dec(false, 40, 20);
         let min_dec = super::max_or_min_dec(true, 40, 20);
-        assert_eq!(min_dec, -max_dec);
+        assert_eq!(min_dec, -max_dec.clone());
         assert_eq!(max_dec, -min_dec);
     }
 
@@ -3790,7 +7744,7 @@ mod tests {
         // OVERFLOW_AS_WARNING
         let mut ctx = EvalContext::new(Arc::new(EvalConfig::from_flag(Flag::OVERFLOW_AS_WARNING)));
         let val: Decimal = big.as_bytes().convert(&mut ctx).unwrap();
-        let max = max_decimal(WORD_BUF_LEN * DIGITS_PER_WORD, 0);
+        let max = max_decimal((WORD_BUF_LEN * DIGITS_PER_WORD) as u8, 0);
         assert_eq!(val, max, "expect: {:?}, got: {:?}", val, max);
         assert_eq!(ctx.warnings.warning_cnt, 1);
         assert_eq!(ctx.warnings.warnings[0].get_code(), ERR_DATA_OUT_OF_RANGE);
@@ -3827,6 +7781,100 @@ mod tests {
                 s, expect, got
             );
             assert_eq!(truncate_as_warning_ctx.warnings.warning_cnt, 1);
+        }
+    }
+
+    #[test]
+    fn test_private_eager_res_argument_baseline() {
+        use std::cell::Cell;
+        struct CountingDisplay<'a>(&'a Cell<usize>);
+        impl fmt::Display for CountingDisplay<'_> {
+            fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.set(self.0.get() + 1);
+                out.write_str("bounded operand")
+            }
+        }
+        let calls = Cell::new(0);
+        let mut ctx = EvalContext::default();
+        let payload = Res::Ok(vec![17])
+            .into_result_with_overflow_err(
+                &mut ctx,
+                Error::overflow("DECIMAL", format!("{}", CountingDisplay(&calls))),
+            )
+            .unwrap();
+        assert_eq!(payload, vec![17]);
+        assert_eq!(calls.get(), 1); // Existing eager API stays eager.
+        assert_eq!(ctx.warnings.warning_cnt, 0);
+    }
+
+    #[test]
+    fn test_private_lazy_res_factory_compatibility() {
+        use std::{cell::Cell, sync::Arc};
+        fn result(value: Result<i32>) -> std::result::Result<i32, (i32, String)> {
+            value.map_err(|error| (error.code(), error.to_string()))
+        }
+        fn details(ctx: &EvalContext) -> Vec<(i32, String)> {
+            ctx.warnings
+                .warnings
+                .iter()
+                .map(|error| (error.get_code(), error.get_msg().to_owned()))
+                .collect()
+        }
+        for flags in [
+            Flag::empty(),
+            Flag::TRUNCATE_AS_WARNING,
+            Flag::IGNORE_TRUNCATE,
+            Flag::OVERFLOW_AS_WARNING | Flag::TRUNCATE_AS_WARNING,
+        ] {
+            for cap in [0, 1, 4] {
+                for status in [Res::Ok(17), Res::Truncated(18), Res::Overflow(19)] {
+                    let mut config = EvalConfig::from_flag(flags);
+                    config.set_max_warning_cnt(cap);
+                    let config = Arc::new(config);
+                    let mut eager = EvalContext::new(config.clone());
+                    let mut lazy = EvalContext::new(config);
+                    for ctx in [&mut eager, &mut lazy] {
+                        ctx.warnings
+                            .append_warning(Error::truncated_wrong_val("prefix", "retained"));
+                    }
+                    let calls = Cell::new(0);
+                    // Moving this String out makes the factory genuinely FnOnce.
+                    let diagnostic = "(1 / 2)".to_owned();
+                    let actual = status.into_result_with_overflow_err_lazy(&mut lazy, || {
+                        calls.set(calls.get() + 1);
+                        Error::overflow("DECIMAL", diagnostic)
+                    });
+                    let expected = status.into_result_with_overflow_err(
+                        &mut eager,
+                        Error::overflow("DECIMAL", "(1 / 2)"),
+                    );
+                    assert_eq!(result(actual), result(expected));
+                    assert_eq!(calls.get(), usize::from(status.is_overflow()));
+                    assert_eq!(lazy.warnings.warning_cnt, eager.warnings.warning_cnt);
+                    assert_eq!(details(&lazy), details(&eager));
+                }
+            }
+            // The existing private custom-truncation adapter remains compatible.
+            let mut eager = EvalContext::new(Arc::new(EvalConfig::from_flag(flags)));
+            let mut lazy = EvalContext::new(Arc::new(EvalConfig::from_flag(flags)));
+            let calls = Cell::new(0);
+            let actual = Res::Truncated(23).into_result_with_error_factory(
+                &mut lazy,
+                Some(Error::truncated_wrong_val("DECIMAL", "custom")),
+                || {
+                    calls.set(calls.get() + 1);
+                    Error::overflow("DECIMAL", "unused")
+                },
+            );
+            let expected = Res::Truncated(23).into_result_impl(
+                &mut eager,
+                Some(Error::truncated_wrong_val("DECIMAL", "custom")),
+                None,
+            );
+            assert_eq!(result(actual), result(expected));
+            assert_eq!(calls.get(), 0);
+            assert_eq!(lazy.warnings.warning_cnt, eager.warnings.warning_cnt);
+            assert_eq!(details(&lazy), details(&eager));
         }
     }
 

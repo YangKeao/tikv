@@ -18,8 +18,15 @@ impl Collator for CollatorBinary {
         ch
     }
 
+    const SORT_KEY_IS_BYTES: bool = true;
+    const CAN_USE_RAW_MEM_AS_KEY: bool = true;
+
+    fn max_sort_key_len(bstr: &[u8]) -> usize {
+        bstr.len()
+    }
+
     #[inline]
-    fn write_sort_key<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
+    fn write_sort_key_unpadded<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
         writer.write_bytes(bstr)?;
         Ok(bstr.len())
     }

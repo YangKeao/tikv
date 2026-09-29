@@ -622,6 +622,10 @@ impl_from! { Set, ChunkedVecSet }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        FieldTypeTp,
+        codec::datum::{DECIMAL_FLAG, NIL_FLAG},
+    };
 
     #[test]
     fn test_basic() {
@@ -774,6 +778,46 @@ mod tests {
                 None,
                 Real::new(1.0).ok(),
                 Real::new(1.1).ok()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_decimal_selected_null_datum_bytes_after_clone() {
+        let field: tipb::FieldType = FieldTypeTp::NewDecimal.into();
+        let mut values = ChunkedVecSized::<Decimal>::from_vec(vec![
+            Some("5".parse().unwrap()),
+            None,
+            Some(Decimal::default()),
+        ]);
+        values.set(0, None);
+        values.set(1, Some("7".parse().unwrap()));
+        values.push(None);
+        let original = VectorValue::Decimal(values);
+        let cloned = original.clone();
+        drop(original);
+
+        let mut ctx = EvalContext::default();
+        let mut encoded = Vec::new();
+        for row in [3, 1, 0, 2, 3] {
+            cloned.encode(row, &field, &mut ctx, &mut encoded).unwrap();
+        }
+        // NULL is a single NIL flag. Non-NULL 7 and 0 have distinct decimal
+        // payloads (precision=1, scale=0), regardless of the hidden defaults.
+        assert_eq!(
+            encoded,
+            vec![
+                NIL_FLAG,
+                DECIMAL_FLAG,
+                1,
+                0,
+                0x87,
+                NIL_FLAG,
+                DECIMAL_FLAG,
+                1,
+                0,
+                0x80,
+                NIL_FLAG,
             ]
         );
     }

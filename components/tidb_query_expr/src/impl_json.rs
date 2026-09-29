@@ -113,18 +113,18 @@ fn json_array_append(args: &[ScalarValueRef]) -> Result<Option<Json>> {
 
 /// validate the arguments are `(Option<JsonRef>, &[(Option<Bytes>,
 /// Option<Json>)])`
-fn json_modify_validator(expr: &tipb::Expr) -> Result<()> {
-    let children = expr.get_children();
+fn json_modify_validator(expr: &crate::types::function::CallShape) -> Result<()> {
+    let children = expr.args();
     assert!(children.len() >= 2);
     if children.len() % 2 != 1 {
         return Err(other_err!(
             "Incorrect parameter count in the call to native function 'JSON_OBJECT'"
         ));
     }
-    super::function::validate_expr_return_type(&children[0], EvalType::Json)?;
+    super::function::validate_field_type(children[0].field_type(), EvalType::Json)?;
     for chunk in children[1..].chunks(2) {
-        super::function::validate_expr_return_type(&chunk[0], EvalType::Bytes)?;
-        super::function::validate_expr_return_type(&chunk[1], EvalType::Json)?;
+        super::function::validate_field_type(chunk[0].field_type(), EvalType::Bytes)?;
+        super::function::validate_field_type(chunk[1].field_type(), EvalType::Json)?;
     }
     Ok(())
 }
@@ -142,16 +142,16 @@ fn json_array(args: &[Option<JsonRef>]) -> Result<Option<Json>> {
     Ok(Some(Json::from_array(jsons)?))
 }
 
-fn json_object_validator(expr: &tipb::Expr) -> Result<()> {
-    let chunks = expr.get_children();
+fn json_object_validator(expr: &crate::types::function::CallShape) -> Result<()> {
+    let chunks = expr.args();
     if chunks.len() % 2 == 1 {
         return Err(other_err!(
             "Incorrect parameter count in the call to native function 'JSON_OBJECT'"
         ));
     }
     for chunk in chunks.chunks(2) {
-        super::function::validate_expr_return_type(&chunk[0], EvalType::Bytes)?;
-        super::function::validate_expr_return_type(&chunk[1], EvalType::Json)?;
+        super::function::validate_field_type(chunk[0].field_type(), EvalType::Bytes)?;
+        super::function::validate_field_type(chunk[1].field_type(), EvalType::Json)?;
     }
     Ok(())
 }
@@ -337,17 +337,17 @@ fn json_unquote(arg: BytesRef) -> Result<Option<Bytes>> {
 }
 
 // Args should be like `(Option<JsonRef> , &[Option<BytesRef>])`.
-fn json_with_paths_validator(expr: &tipb::Expr) -> Result<()> {
-    assert!(expr.get_children().len() >= 2);
+fn json_with_paths_validator(expr: &crate::types::function::CallShape) -> Result<()> {
+    assert!(expr.args().len() >= 2);
     // args should be like `Option<JsonRef> , &[Option<BytesRef>]`.
     valid_paths(expr)
 }
 
-fn valid_paths(expr: &tipb::Expr) -> Result<()> {
-    let children = expr.get_children();
-    super::function::validate_expr_return_type(&children[0], EvalType::Json)?;
+fn valid_paths(expr: &crate::types::function::CallShape) -> Result<()> {
+    let children = expr.args();
+    super::function::validate_field_type(children[0].field_type(), EvalType::Json)?;
     for child in children.iter().skip(1) {
-        super::function::validate_expr_return_type(child, EvalType::Bytes)?;
+        super::function::validate_field_type(child.field_type(), EvalType::Bytes)?;
     }
     Ok(())
 }
@@ -378,8 +378,8 @@ fn json_extract(args: &[ScalarValueRef]) -> Result<Option<Json>> {
 }
 
 // Args should be like `(Option<JsonRef> , &[Option<BytesRef>])`.
-fn json_with_path_validator(expr: &tipb::Expr) -> Result<()> {
-    assert!(expr.get_children().len() == 2 || expr.get_children().len() == 1);
+fn json_with_path_validator(expr: &crate::types::function::CallShape) -> Result<()> {
+    assert!(expr.args().len() == 2 || expr.args().len() == 1);
     valid_paths(expr)
 }
 
@@ -412,13 +412,13 @@ fn json_length(args: &[ScalarValueRef]) -> Result<Option<Int>> {
 
 // Args should be like `(Option<JsonRef> , Option<JsonRef>,
 // &[Option<BytesRef>])`. or `(Option<JsonRef> , Option<JsonRef>)`
-fn json_contains_validator(expr: &tipb::Expr) -> Result<()> {
-    assert!(expr.get_children().len() == 2 || expr.get_children().len() == 3);
-    let children = expr.get_children();
-    super::function::validate_expr_return_type(&children[0], EvalType::Json)?;
-    super::function::validate_expr_return_type(&children[1], EvalType::Json)?;
-    if expr.get_children().len() == 3 {
-        super::function::validate_expr_return_type(&children[2], EvalType::Bytes)?;
+fn json_contains_validator(expr: &crate::types::function::CallShape) -> Result<()> {
+    assert!(expr.args().len() == 2 || expr.args().len() == 3);
+    let children = expr.args();
+    super::function::validate_field_type(children[0].field_type(), EvalType::Json)?;
+    super::function::validate_field_type(children[1].field_type(), EvalType::Json)?;
+    if expr.args().len() == 3 {
+        super::function::validate_field_type(children[2].field_type(), EvalType::Bytes)?;
     }
     Ok(())
 }
@@ -458,11 +458,11 @@ fn json_contains(args: &[ScalarValueRef]) -> Result<Option<i64>> {
 }
 
 // Args should be like `(Option<JsonRef> , Option<JsonRef>)`
-fn member_of_validator(expr: &tipb::Expr) -> Result<()> {
-    assert!(expr.get_children().len() == 2);
-    let children = expr.get_children();
-    super::function::validate_expr_return_type(&children[0], EvalType::Json)?;
-    super::function::validate_expr_return_type(&children[1], EvalType::Json)?;
+fn member_of_validator(expr: &crate::types::function::CallShape) -> Result<()> {
+    assert!(expr.args().len() == 2);
+    let children = expr.args();
+    super::function::validate_field_type(children[0].field_type(), EvalType::Json)?;
+    super::function::validate_field_type(children[1].field_type(), EvalType::Json)?;
     Ok(())
 }
 

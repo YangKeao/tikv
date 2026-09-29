@@ -5,15 +5,16 @@ use crate::impl_chunked_vec_common;
 
 /// A vector storing `Option<T>` with a compact layout.
 ///
-/// `T` must be a primitive structure. All data must be stored
-/// in that structure itself. This includes `Int`, `Real`, `Decimal`,
-/// `DateTime` and `Duration` in copr framework.
+/// `T` owns each stored value and may itself own heap allocations. This
+/// includes `Int`, `Real`, `Decimal`, `DateTime` and `Duration` in the copr
+/// framework.
 ///
-/// Inside `ChunkedVecSized`, `bitmap` indicates if an element at given index is
-/// null, and `data` stores actual data. If the element at given index is null
-/// (or `None`), the corresponding `bitmap` bit is false, and `data` stores zero
-/// value for that element. Otherwise, `data` stores actual data, and `bitmap`
-/// bit is true.
+/// Inside `ChunkedVecSized`, `bitmap` indicates if an element at a given index
+/// is null, and `data` stores an initialized value. For a NULL element (or
+/// `None`), the corresponding bit is false and `data` stores `T::default()`.
+/// That hidden value is still owned, cloned and dropped normally, including any
+/// allocations. Encoders must consult the bitmap rather than serialize the
+/// hidden payload.
 #[derive(Debug, PartialEq, Clone)]
 pub struct ChunkedVecSized<T: Sized> {
     data: Vec<T>,
@@ -56,7 +57,7 @@ impl<T: Sized + Default> ChunkedVecSized<T> {
     }
 }
 
-impl<T: Clone> ChunkedVec<T> for ChunkedVecSized<T> {
+impl<T: Clone + Default> ChunkedVec<T> for ChunkedVecSized<T> {
     impl_chunked_vec_common! { T }
 
     fn with_capacity(capacity: usize) -> Self {
@@ -75,8 +76,9 @@ impl<T: Clone> ChunkedVec<T> for ChunkedVecSized<T> {
 
     #[inline]
     fn push_null(&mut self) {
+        let value = T::default();
         self.bitmap.push(false);
-        self.data.push(unsafe { std::mem::zeroed() });
+        self.data.push(value);
     }
 
     fn len(&self) -> usize {
@@ -122,7 +124,7 @@ impl<'a, T: Evaluable + EvaluableRet> ChunkRef<'a, &'a T> for &'a ChunkedVecSize
     }
 }
 
-impl<T: Clone> From<Vec<Option<T>>> for ChunkedVecSized<T> {
+impl<T: Clone + Default> From<Vec<Option<T>>> for ChunkedVecSized<T> {
     fn from(v: Vec<Option<T>>) -> ChunkedVecSized<T> {
         ChunkedVecSized::from_vec(v)
     }
@@ -136,8 +138,133 @@ impl<T: Evaluable> UnsafeRefInto<&'static ChunkedVecSized<T>> for &ChunkedVecSiz
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use super::*;
     use crate::codec::data_type::*;
+
+    #[derive(Clone, Debug)]
+    struct OwnedPayload {
+        bytes: Vec<u8>,
+        boxed: Box<u64>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Default for OwnedPayload {
+        fn default() -> Self {
+            Self {
+                bytes: vec![7],
+                boxed: Box::new(7),
+                drops: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl Drop for OwnedPayload {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn test_push_null_uses_default_payload() {
+        // A u64-only payload is valid even under the former zeroed initializer,
+        // making this regression safe before and after the fix.
+        #[derive(Clone, Debug)]
+        struct DefaultMarker(u64);
+
+        impl Default for DefaultMarker {
+            fn default() -> Self {
+                Self(7)
+            }
+        }
+
+        let mut values = ChunkedVecSized::<DefaultMarker>::with_capacity(1);
+        values.push(None);
+
+        assert_eq!(values.len(), 1);
+        assert!(!values.bitmap.get(0));
+        assert!(values.get(0).is_none());
+        assert_eq!(
+            values.data[0].0, 7,
+            "NULL backing payload must use T::default(), not all-zero bytes"
+        );
+    }
+
+    #[test]
+    fn test_owned_payload_clone_append_truncate_and_drop() {
+        let first = OwnedPayload::default();
+        let first_drops = first.drops.clone();
+        let mut left = ChunkedVecSized::from_vec(vec![Some(first), None]);
+        let hidden_drops = left.data[1].drops.clone();
+        assert!(!left.bitmap.get(1));
+        assert!(left.get(1).is_none());
+        assert_eq!(left.data[1].bytes, vec![7]);
+        assert_eq!(*left.data[1].boxed, 7);
+
+        let mut cloned = left.clone();
+        cloned.data[0].bytes.push(9);
+        *cloned.data[0].boxed = 9;
+        assert_eq!(left.data[0].bytes, vec![7]);
+        assert_eq!(*left.data[0].boxed, 7);
+        assert!(cloned.get(1).is_none());
+        drop(cloned);
+        assert_eq!(first_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(hidden_drops.load(Ordering::SeqCst), 1);
+
+        let last = OwnedPayload::default();
+        let last_drops = last.drops.clone();
+        let mut right = ChunkedVecSized::from_vec(vec![Some(last)]);
+        left.append(&mut right);
+        assert_eq!(left.len(), 3);
+        assert!(right.is_empty());
+        assert_eq!(last_drops.load(Ordering::SeqCst), 0);
+
+        left.truncate(1);
+        assert_eq!(first_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(hidden_drops.load(Ordering::SeqCst), 2);
+        assert_eq!(last_drops.load(Ordering::SeqCst), 1);
+        drop(right);
+        drop(left);
+        assert_eq!(first_drops.load(Ordering::SeqCst), 2);
+        assert_eq!(hidden_drops.load(Ordering::SeqCst), 2);
+        assert_eq!(last_drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_set_none_drops_old_payload_and_retains_default() {
+        let old = OwnedPayload::default();
+        let old_drops = old.drops.clone();
+        let mut values = ChunkedVecSized::from_vec(vec![Some(old)]);
+
+        values.set(0, None);
+        assert_eq!(old_drops.load(Ordering::SeqCst), 1);
+        assert!(!values.bitmap.get(0));
+        assert!(values.get(0).is_none());
+        assert_eq!(values.data[0].bytes, vec![7]);
+        assert_eq!(*values.data[0].boxed, 7);
+        let hidden_drops = values.data[0].drops.clone();
+        assert_eq!(hidden_drops.load(Ordering::SeqCst), 0);
+
+        // Repeated NULL replacement drops the previous hidden owned value;
+        // the new Default value remains allocated until replacement or drop.
+        values.set(0, None);
+        assert_eq!(hidden_drops.load(Ordering::SeqCst), 1);
+        let next_hidden_drops = values.data[0].drops.clone();
+        assert_eq!(next_hidden_drops.load(Ordering::SeqCst), 0);
+
+        let replacement = OwnedPayload::default();
+        let replacement_drops = replacement.drops.clone();
+        values.set(0, Some(replacement));
+        assert_eq!(next_hidden_drops.load(Ordering::SeqCst), 1);
+        assert!(values.bitmap.get(0));
+        assert!(values.get(0).is_some());
+        drop(values);
+        assert_eq!(replacement_drops.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn test_slice_vec() {

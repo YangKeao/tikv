@@ -22,7 +22,7 @@ pub use utf8mb4_binary::*;
 pub use utf8mb4_general_ci::*;
 pub use utf8mb4_uca::*;
 
-use super::{Collator, LikePatternMode, charset::*};
+use super::{Collator, KeyOptions, LikePatternMode, charset::*};
 use crate::codec::Result;
 
 pub const PADDING_SPACE: char = 0x20 as char;
@@ -34,25 +34,199 @@ pub(crate) fn trim_end_padding(mut s: &[u8]) -> &[u8] {
     s
 }
 
-pub(crate) fn next_utf8_char(s: &[u8]) -> Option<(char, &[u8])> {
-    let len = match s.first()? {
-        0x00..=0x7F => 1,
-        0xC2..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        0xF0..=0xF4 => 4,
-        _ => return None,
-    };
-    if s.len() < len {
-        return None;
+fn prepare_padded_key(s: &[u8], options: KeyOptions) -> &[u8] {
+    match options {
+        KeyOptions::Default => trim_end_padding(s),
+        KeyOptions::NoPad => s,
     }
-    let (head, tail) = s.split_at(len);
-    let ch = std::str::from_utf8(head).ok()?.chars().next()?;
-    Some((ch, tail))
+}
+
+pub(crate) fn next_utf8_char(s: &[u8]) -> Option<(char, &[u8])> {
+    let (ch, width) = decode_utf8_rune_strict(s)?;
+    Some((ch, &s[width..]))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Collation, codec::collation::Collator, match_template_collator};
+    use std::{borrow::Cow, hash::Hasher};
+
+    use super::*;
+    use crate::{
+        Collation,
+        codec::collation::{Collator, SortKey},
+        match_template_collator,
+    };
+
+    fn check_key<C: Collator>(input: &[u8], options: KeyOptions, expected: &[u8], borrowed: bool) {
+        let mut output = vec![0xa5];
+        let written = C::write_sort_key_with_options(&mut output, input, options).unwrap();
+        assert_eq!(written, expected.len());
+        assert_eq!(output[0], 0xa5);
+        assert_eq!(&output[1..], expected);
+        assert_eq!(C::sort_key_with_options(input, options).unwrap(), expected);
+        let cow = C::sort_key_cow(input, options).unwrap();
+        assert_eq!(cow.as_ref(), expected);
+        assert_eq!(matches!(cow, Cow::Borrowed(_)), borrowed);
+        if borrowed {
+            assert_eq!(cow.as_ptr(), input.as_ptr());
+        }
+        if options == KeyOptions::Default {
+            assert_eq!(C::sort_key(input).unwrap(), expected);
+            let mut legacy_writer = Vec::new();
+            assert_eq!(
+                C::write_sort_key(&mut legacy_writer, input).unwrap(),
+                expected.len()
+            );
+            assert_eq!(legacy_writer, expected);
+        }
+    }
+
+    #[test]
+    fn test_shared_key_options_and_cow() {
+        for input in [
+            b"".as_slice(),
+            b"a ",
+            b"a\t",
+            b"a\0",
+            b"\xff ",
+            "a\u{a0}".as_bytes(),
+            "a\u{3000}".as_bytes(),
+        ] {
+            for option in [KeyOptions::Default, KeyOptions::NoPad] {
+                check_key::<CollatorBinary>(input, option, input, true);
+                check_key::<CollatorUtf8Mb4BinNoPadding>(input, option, input, true);
+                let padded = if option == KeyOptions::Default {
+                    trim_end_padding(input)
+                } else {
+                    input
+                };
+                check_key::<CollatorUtf8Mb4Bin>(input, option, padded, true);
+                check_key::<CollatorLatin1Bin>(input, option, padded, true);
+            }
+        }
+        check_key::<CollatorUtf8Mb4GeneralCi>(b"a ", KeyOptions::Default, b"\0A", false);
+        check_key::<CollatorUtf8Mb4GeneralCi>(b"a ", KeyOptions::NoPad, b"\0A\0 ", false);
+        check_key::<CollatorUtf8Mb4UnicodeCi>(b"a ", KeyOptions::Default, b"\x0e\x33", false);
+        check_key::<CollatorUtf8Mb4UnicodeCi>(b"a ", KeyOptions::NoPad, b"\x0e\x33\x02\x09", false);
+        for option in [KeyOptions::Default, KeyOptions::NoPad] {
+            check_key::<CollatorUtf8Mb40900AiCi>(b"a ", option, b"\x1c\x47\x02\x09", false);
+        }
+        assert!(CollatorBinary::CAN_USE_RAW_MEM_AS_KEY);
+        assert!(CollatorUtf8Mb4BinNoPadding::CAN_USE_RAW_MEM_AS_KEY);
+        assert!(!CollatorUtf8Mb4Bin::CAN_USE_RAW_MEM_AS_KEY);
+        assert!(!CollatorLatin1Bin::CAN_USE_RAW_MEM_AS_KEY);
+    }
+
+    #[test]
+    fn test_shared_max_key_len_go_rune_count() {
+        for (input, runes) in [
+            (b"a ".as_slice(), 2),
+            ("中😀".as_bytes(), 2),
+            (b"\xff", 1),
+            (b"\xc3\x28", 2),
+        ] {
+            assert_eq!(CollatorBinary::max_sort_key_len(input), input.len());
+            assert_eq!(CollatorUtf8Mb4Bin::max_sort_key_len(input), input.len());
+            assert_eq!(CollatorLatin1Bin::max_sort_key_len(input), input.len());
+            assert_eq!(CollatorUtf8Mb4GeneralCi::max_sort_key_len(input), runes * 2);
+            assert_eq!(
+                CollatorUtf8Mb4UnicodeCi::max_sort_key_len(input),
+                runes * 16
+            );
+            assert_eq!(CollatorUtf8Mb40900AiCi::max_sort_key_len(input), runes * 16);
+            assert_eq!(CollatorGbkBin::max_sort_key_len(input), runes * 2);
+            assert_eq!(CollatorGb18030Bin::max_sort_key_len(input), runes * 4);
+        }
+    }
+
+    #[test]
+    fn test_shared_raw_kernels_do_not_validate_utf8() {
+        assert!(SortKey::<_, CollatorUtf8Mb4GeneralCi>::new(b"\xff").is_err());
+        assert_eq!(
+            CollatorUtf8Mb4GeneralCi::sort_compare(b"\xff", b"x", false).unwrap(),
+            Ordering::Equal
+        );
+        check_key::<CollatorUtf8Mb4GeneralCi>(b"\xff", KeyOptions::Default, b"", false);
+        check_key::<CollatorUtf8Mb4UnicodeCi>(b"a\xffz", KeyOptions::Default, b"\x0e\x33", false);
+        check_key::<CollatorUtf8Mb4Bin>(b"\xff ", KeyOptions::Default, b"\xff", true);
+    }
+
+    #[derive(Default)]
+    struct RecordingHasher(Vec<String>);
+
+    impl Hasher for RecordingHasher {
+        fn finish(&self) -> u64 {
+            0
+        }
+        fn write(&mut self, bytes: &[u8]) {
+            self.0.push(format!("bytes:{bytes:?}"));
+        }
+        fn write_usize(&mut self, value: usize) {
+            self.0.push(format!("usize:{value}"));
+        }
+        fn write_u16(&mut self, value: u16) {
+            self.0.push(format!("u16:{value}"));
+        }
+        fn write_u128(&mut self, value: u128) {
+            self.0.push(format!("u128:{value}"));
+        }
+    }
+
+    #[test]
+    fn test_shared_hash_protocol_is_not_key_hash() {
+        let mut weights = RecordingHasher::default();
+        CollatorUtf8Mb4GeneralCi::sort_hash(&mut weights, b"a ").unwrap();
+        assert_eq!(weights.0, ["u16:65"]);
+        let mut key_hash = RecordingHasher::default();
+        CollatorUtf8Mb4GeneralCi::sort_key(b"a ")
+            .unwrap()
+            .hash(&mut key_hash);
+        assert_eq!(key_hash.0, ["usize:2", "bytes:[0, 65]"]);
+        let mut uca = RecordingHasher::default();
+        CollatorUtf8Mb4UnicodeCi::sort_hash(&mut uca, b"a ").unwrap();
+        assert_eq!(uca.0, ["u128:3635"]);
+        let mut binary = RecordingHasher::default();
+        CollatorBinary::sort_hash(&mut binary, b"a ").unwrap();
+        assert_eq!(binary.0, ["usize:2", "bytes:[97, 32]"]);
+    }
+
+    #[test]
+    fn test_shared_signed_ids_keep_padding_and_like_modes() {
+        for (id, expected) in [
+            (46, Ordering::Less),
+            (-46, Ordering::Equal),
+            (63, Ordering::Less),
+            (-63, Ordering::Less),
+            (-45, Ordering::Equal),
+            (-192, Ordering::Equal),
+            (-224, Ordering::Equal),
+            (-255, Ordering::Less),
+            (-309, Ordering::Less),
+            (-47, Ordering::Equal),
+            (-65, Ordering::Equal),
+            (-83, Ordering::Equal),
+        ] {
+            let actual = match_template_collator! {
+                TT, match Collation::from_i32(id).unwrap() {
+                    Collation::TT => TT::sort_compare(b"a", b"a ", false).unwrap(),
+                }
+            };
+            assert_eq!(actual, expected, "signed ID {id}");
+        }
+        assert!(Collation::from_i32(i32::MIN).is_err());
+        assert_eq!(
+            CollatorGb18030Bin::LIKE_PATTERN_MODE,
+            LikePatternMode::Bytes
+        );
+        assert_eq!(
+            CollatorGbkBin::LIKE_PATTERN_MODE,
+            LikePatternMode::BinaryRunes
+        );
+        assert_eq!(
+            CollatorLatin1Bin::LIKE_PATTERN_MODE,
+            LikePatternMode::BinaryRunes
+        );
+    }
 
     #[test]
     #[allow(clippy::string_lit_as_bytes)]

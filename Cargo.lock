@@ -8365,6 +8365,7 @@ dependencies = [
  "serde_json",
  "slog",
  "slog-global",
+ "smallvec",
  "static_assertions",
  "thiserror 1.0.40",
  "tidb_query_common",

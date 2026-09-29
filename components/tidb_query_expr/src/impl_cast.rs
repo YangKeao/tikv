@@ -28,11 +28,11 @@ use tidb_query_datatype::{
 use tipb::{Expr, FieldType};
 
 use crate::{
-    RpnExpressionNode, RpnFnCallExtra, RpnFnMeta, RpnStackNode, types::RpnExpressionBuilder,
+    RpnExpressionNode, RpnFnCallExtra, RpnFnMeta, RpnStackNode, types::function::CallShape,
 };
 
 fn get_cast_fn_rpn_meta(
-    is_from_constant: bool,
+    binary_literal_numeric: bool,
     from_field_type: &FieldType,
     to_field_type: &FieldType,
 ) -> Result<RpnFnMeta> {
@@ -55,7 +55,7 @@ fn get_cast_fn_rpn_meta(
             }
         }
         (EvalType::Bytes, EvalType::Int) => {
-            if is_from_constant && from_field_type.is_binary_string_like() {
+            if binary_literal_numeric {
                 cast_binary_string_as_int_fn_meta()
             } else {
                 cast_string_as_int_fn_meta()
@@ -97,10 +97,7 @@ fn get_cast_fn_rpn_meta(
             }
         }
         (EvalType::Bytes, EvalType::Real) => {
-            match (
-                is_from_constant && from_field_type.is_binary_string_like(),
-                to_field_type.is_unsigned(),
-            ) {
+            match (binary_literal_numeric, to_field_type.is_unsigned()) {
                 (true, true) => cast_binary_string_as_unsigned_real_fn_meta(),
                 (true, false) => cast_binary_string_as_signed_real_fn_meta(),
                 (false, true) => cast_string_as_unsigned_real_fn_meta(),
@@ -238,7 +235,11 @@ pub fn get_cast_fn_rpn_node(
     from_field_type: &FieldType,
     to_field_type: FieldType,
 ) -> Result<RpnExpressionNode> {
-    let func_meta = get_cast_fn_rpn_meta(is_from_constant, from_field_type, &to_field_type)?;
+    let func_meta = get_cast_fn_rpn_meta(
+        is_from_constant && from_field_type.is_binary_string_like(),
+        from_field_type,
+        &to_field_type,
+    )?;
     // This cast function is inserted by `Coprocessor` automatically,
     // the `inUnion` flag always false in this situation. Ideally,
     // the cast function should be inserted by TiDB and pushed down
@@ -253,18 +254,27 @@ pub fn get_cast_fn_rpn_node(
 
 /// Gets the RPN function meta
 pub fn map_cast_func(expr: &Expr) -> Result<RpnFnMeta> {
-    let children = expr.get_children();
+    map_cast_call(&CallShape::from_expr(expr))
+}
+
+pub(crate) fn map_cast_call(call: &CallShape) -> Result<RpnFnMeta> {
+    let children = call.args();
     if children.len() != 1 {
+        let function = call.function();
+        let signature: &dyn std::fmt::Debug = match &function {
+            crate::FunctionRef::TiPb(sig) => sig,
+            crate::FunctionRef::Local(id) => id,
+        };
         return Err(other_err!(
             "Unexpected arguments: sig {:?} with {} args",
-            expr.get_sig(),
+            signature,
             children.len()
         ));
     }
     get_cast_fn_rpn_meta(
-        RpnExpressionBuilder::is_expr_eval_to_scalar(&children[0])?,
-        children[0].get_field_type(),
-        expr.get_field_type(),
+        children[0].uses_binary_literal_cast()?,
+        children[0].field_type(),
+        call.return_type(),
     )
 }
 
@@ -879,7 +889,7 @@ fn cast_decimal_as_signed_decimal(
         None => Ok(None),
         Some(val) => Ok(Some(produce_dec_with_specified_tp(
             ctx,
-            *val,
+            val.clone(),
             extra.ret_field_type,
         )?)),
     }
@@ -899,7 +909,7 @@ fn cast_decimal_as_unsigned_decimal(
             let res = if metadata.get_in_union() && val.is_negative() {
                 Decimal::zero()
             } else {
-                *val
+                val.clone()
             };
             Ok(Some(produce_dec_with_specified_tp(
                 ctx,
@@ -4992,6 +5002,12 @@ mod tests {
             ) in cs.clone()
             {
                 let (origin_flen, origin_decimal) = base_res.prec_and_frac();
+                // These fixtures are bounded to legacy decimal widths; retain the
+                // existing u8 arithmetic and max_decimal/max_or_min_dec expectations.
+                let origin_flen =
+                    u8::try_from(origin_flen).expect("bounded test fixture precision fits u8");
+                let origin_decimal =
+                    u8::try_from(origin_decimal).expect("bounded test fixture scale fits u8");
 
                 // some test case in `cs` is just for unsigned result or signed result,
                 // some is just for negative/positive base_res
@@ -5006,12 +5022,12 @@ mod tests {
                         if base_res.is_negative() {
                             continue;
                         } else {
-                            base_res
+                            base_res.clone()
                         }
                     }
                     Sign::Negative => {
                         if base_res.is_negative() {
-                            base_res
+                            base_res.clone()
                         } else {
                             continue;
                         }
@@ -5034,7 +5050,9 @@ mod tests {
                         }
                         // TODO: if add test case for Decimal::round failure,
                         //  then should check whether this setting is right.
-                        let res = base_res.round((origin_decimal - 1) as i8, RoundMode::HalfEven);
+                        let res = base_res
+                            .clone()
+                            .round((origin_decimal - 1) as i8, RoundMode::HalfEven);
                         if res.is_zero() {
                             truncate_as_warning = false;
                             overflow_as_warning = false;
@@ -5046,11 +5064,12 @@ mod tests {
                 };
                 let expect = match res_type {
                     ResType::Zero => Decimal::zero(),
-                    ResType::Same => base_res,
+                    ResType::Same => base_res.clone(),
                     ResType::TruncateToMax => max_decimal(res_flen, res_decimal),
                     ResType::TruncateToMin => max_or_min_dec(true, res_flen, res_decimal),
                     ResType::Round => {
                         let r = base_res
+                            .clone()
                             .round(res_decimal as i8, RoundMode::HalfEven)
                             .unwrap();
                         if r == base_res {
@@ -5094,7 +5113,7 @@ mod tests {
                         ..CtxConfig::default()
                     }
                     .into();
-                    let pd_res = produce_dec_with_specified_tp(&mut ctx, base_res, &rft);
+                    let pd_res = produce_dec_with_specified_tp(&mut ctx, base_res.clone(), &rft);
 
                     // make log
                     let cast_func_res_log = cast_func_res

@@ -3,14 +3,17 @@
 mod charset;
 pub mod collator;
 pub mod encoding;
+pub mod pattern;
 
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     hash::{Hash, Hasher},
     marker::PhantomData,
     ops::Deref,
 };
 
+pub use charset::{decode_utf8_rune_strict, utf8_rune_count};
 use codec::prelude::*;
 use num::Unsigned;
 
@@ -113,6 +116,17 @@ pub enum LikePatternMode {
     CollatorDefined,
 }
 
+/// Sort-key padding policy. This does not change the collation or its LIKE
+/// mode.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum KeyOptions {
+    /// Apply the collator's normal PAD SPACE or NO PAD behavior.
+    #[default]
+    Default,
+    /// Preserve trailing ASCII spaces, including for PAD SPACE collations.
+    NoPad,
+}
+
 pub trait Collator: 'static + std::marker::Send + std::marker::Sync + std::fmt::Debug {
     type Charset: Charset;
     type Weight: Unsigned;
@@ -133,15 +147,62 @@ pub trait Collator: 'static + std::marker::Send + std::marker::Sync + std::fmt::
         Ok(Self::sort_compare(a, b, true)? == Ordering::Equal)
     }
 
+    /// The prepared input itself is the key, so immutable keys can borrow it.
+    const SORT_KEY_IS_BYTES: bool = false;
+
+    /// The default key is the entire, unmodified input (stronger than
+    /// borrowing).
+    const CAN_USE_RAW_MEM_AS_KEY: bool = false;
+
+    /// Prepare key input once. Raw kernels do not perform SortKey validation.
+    fn preprocess_sort_key(bstr: &[u8], _options: KeyOptions) -> &[u8] {
+        bstr
+    }
+
+    /// Implementation hook: append weights for already-prepared bytes.
+    fn write_sort_key_unpadded<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize>;
+
+    /// Append a key, returning its byte count, without validating UTF-8.
+    fn write_sort_key_with_options<W: BufferWriter>(
+        writer: &mut W,
+        bstr: &[u8],
+        options: KeyOptions,
+    ) -> Result<usize> {
+        Self::write_sort_key_unpadded(writer, Self::preprocess_sort_key(bstr, options))
+    }
+
     /// Writes the SortKey of `bstr` into `writer`.
-    fn write_sort_key<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize>;
+    fn write_sort_key<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
+        Self::write_sort_key_with_options(writer, bstr, KeyOptions::Default)
+    }
 
     /// Returns the SortKey of `bstr` as an owned byte vector.
     fn sort_key(bstr: &[u8]) -> Result<Vec<u8>> {
-        let mut v = Vec::default();
-        Self::write_sort_key(&mut v, bstr)?;
-        Ok(v)
+        Self::sort_key_with_options(bstr, KeyOptions::Default)
     }
+
+    /// Return an owned key with an explicit padding policy.
+    fn sort_key_with_options(bstr: &[u8], options: KeyOptions) -> Result<Vec<u8>> {
+        let mut key = Vec::new();
+        Self::write_sort_key_with_options(&mut key, bstr, options)?;
+        Ok(key)
+    }
+
+    /// Borrow byte keys (possibly a trimmed prefix), otherwise own the weights.
+    fn sort_key_cow(bstr: &[u8], options: KeyOptions) -> Result<Cow<'_, [u8]>> {
+        let prepared = Self::preprocess_sort_key(bstr, options);
+        if Self::SORT_KEY_IS_BYTES {
+            Ok(Cow::Borrowed(prepared))
+        } else {
+            let mut key = Vec::new();
+            Self::write_sort_key_unpadded(&mut key, prepared)?;
+            Ok(Cow::Owned(key))
+        }
+    }
+
+    /// Source-compatible allocation estimate, counting malformed bytes as
+    /// runes. Count the original input, before padding is removed.
+    fn max_sort_key_len(bstr: &[u8]) -> usize;
 
     /// Compares `a` and `b` based on their SortKey.
     fn sort_compare(a: &[u8], b: &[u8], force_no_pad: bool) -> Result<Ordering>;

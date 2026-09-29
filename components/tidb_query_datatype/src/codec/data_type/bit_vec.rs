@@ -1,5 +1,9 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::{alloc::Layout, mem};
+
+use crate::codec::{Error, Result};
+
 /// A boolean vector, which consolidates 64 booleans into 1 u64 to save space.
 ///
 /// `BitVec` is mainly used to implement bitmap in ChunkedVec.
@@ -67,6 +71,37 @@ impl BitVec {
         self.data.len() << 6
     }
 
+    /// Returns the retained element-buffer bytes, including unused capacity.
+    ///
+    /// This excludes inline fields and allocator bookkeeping. Unlike
+    /// `capacity()`, it measures the backing Vec's capacity, not initialized
+    /// words. `None` means the byte count cannot be represented by `usize`.
+    pub fn retained_heap_bytes(&self) -> Option<usize> {
+        self.data.capacity().checked_mul(mem::size_of::<u64>())
+    }
+
+    // Shared with the Bytes reservation preflight so every buffer layout is
+    // checked before the first allocation. Division avoids `total_bits + 63`.
+    pub(super) fn checked_word_len(total_bits: usize) -> Result<usize> {
+        let words = total_bits / BITS + usize::from(total_bits % BITS != 0);
+        words
+            .checked_mul(mem::size_of::<u64>())
+            .ok_or_else(|| Error::Other("bitmap reservation byte count overflow".into()))?;
+        Layout::array::<u64>(words)
+            .map_err(|_| Error::Other("bitmap reservation layout overflow".into()))?;
+        Ok(words)
+    }
+
+    /// Reserves enough words for `total_bits` without changing any bits or len.
+    /// The allocator may grant more capacity than requested; this is not a heap
+    /// budget or a bound on transient old/new allocation overlap.
+    pub(super) fn try_reserve_len(&mut self, total_bits: usize) -> Result<()> {
+        let words = Self::checked_word_len(total_bits)?;
+        self.data
+            .try_reserve_exact(words.saturating_sub(self.data.len()))
+            .map_err(|error| Error::Other(Box::new(error)))
+    }
+
     pub fn append(&mut self, other: &mut Self) {
         for i in 0..other.len() {
             self.push(other.get(i));
@@ -131,6 +166,88 @@ impl Iterator for BitAndIterator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_retained_heap_bytes_and_reserved_word_boundaries() {
+        for bits in [0, 1, 63, 64, 65] {
+            let mut values = BitVec::with_capacity(0);
+            values.try_reserve_len(bits).unwrap();
+            assert_eq!(values.len(), 0);
+            assert_eq!(values.capacity(), 0);
+            let words = values.data.capacity();
+            assert!(words >= BitVec::checked_word_len(bits).unwrap());
+            assert_eq!(
+                values.retained_heap_bytes(),
+                Some(words * mem::size_of::<u64>())
+            );
+            for index in 0..bits {
+                values.push(index % 2 == 0);
+            }
+            assert_eq!(values.data.capacity(), words);
+            assert_eq!(values.data.len(), BitVec::checked_word_len(bits).unwrap());
+            assert_eq!(values.len(), bits);
+            for index in 0..bits {
+                assert_eq!(values.get(index), index % 2 == 0);
+            }
+            values.try_reserve_len(0).unwrap();
+            assert_eq!(values.len(), bits);
+            values.truncate(0);
+            assert_eq!(values.capacity(), 0);
+            assert_eq!(
+                values.retained_heap_bytes(),
+                Some(words * mem::size_of::<u64>())
+            );
+        }
+
+        let values = BitVec::with_capacity(65);
+        assert_eq!(values.capacity(), 0);
+        assert_eq!(
+            values.retained_heap_bytes(),
+            Some(values.data.capacity() * mem::size_of::<u64>())
+        );
+        assert!(values.retained_heap_bytes().unwrap() >= 2 * mem::size_of::<u64>());
+    }
+
+    #[test]
+    fn test_retained_heap_bytes_after_append_and_clone() {
+        let mut left = BitVec::with_capacity(63);
+        for _ in 0..63 {
+            left.push(true);
+        }
+        let mut right = BitVec::with_capacity(65);
+        right.push(false);
+        right.push(true);
+        let right_bytes = right.retained_heap_bytes();
+        left.append(&mut right);
+        assert_eq!(left.len(), 65);
+        assert!(!left.get(63));
+        assert!(left.get(64));
+        assert!(right.is_empty());
+        assert_eq!(right.capacity(), 0);
+        assert_eq!(right.retained_heap_bytes(), right_bytes);
+        assert_eq!(
+            left.retained_heap_bytes(),
+            Some(left.data.capacity() * mem::size_of::<u64>())
+        );
+        let cloned = left.clone();
+        assert_eq!(cloned, left);
+        assert_eq!(
+            cloned.retained_heap_bytes(),
+            Some(cloned.data.capacity() * mem::size_of::<u64>())
+        );
+    }
+
+    #[test]
+    fn test_checked_word_len_does_not_overflow_ceil() {
+        for (bits, words) in [(0, 0), (1, 1), (63, 1), (64, 1), (65, 2)] {
+            assert_eq!(BitVec::checked_word_len(bits).unwrap(), words);
+        }
+        // Validate the plan only: do not attempt a huge allocation to test OOM.
+        assert_eq!(
+            BitVec::checked_word_len(usize::MAX).unwrap(),
+            usize::MAX / BITS + 1
+        );
+    }
 
     #[test]
     fn test_with_capacity() {

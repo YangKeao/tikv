@@ -2,7 +2,7 @@
 
 mod expr;
 mod expr_builder;
-mod expr_eval;
+pub(crate) mod expr_eval;
 pub mod function;
 #[cfg(test)]
 pub mod test_util;
@@ -11,5 +11,8 @@ pub use self::{
     expr::{RpnExpression, RpnExpressionNode},
     expr_builder::RpnExpressionBuilder,
     expr_eval::{BATCH_MAX_SIZE, RpnStackNode, RpnStackNodeVectorValue},
-    function::{RpnFnCallExtra, RpnFnMeta, ShortCircuitFnMeta},
+    function::{
+        CallMetadata, FunctionRef, LiteralKind, LocalFunctionId, RpnFnCallExtra, RpnFnMeta,
+        ShortCircuitFnMeta,
+    },
 };

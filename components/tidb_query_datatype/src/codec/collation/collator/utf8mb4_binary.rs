@@ -19,9 +19,18 @@ impl Collator for CollatorUtf8Mb4Bin {
         ch as u32
     }
 
+    const SORT_KEY_IS_BYTES: bool = true;
+
+    fn preprocess_sort_key(bstr: &[u8], options: KeyOptions) -> &[u8] {
+        prepare_padded_key(bstr, options)
+    }
+
+    fn max_sort_key_len(bstr: &[u8]) -> usize {
+        bstr.len()
+    }
+
     #[inline]
-    fn write_sort_key<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
-        let bstr = trim_end_padding(bstr);
+    fn write_sort_key_unpadded<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
         writer.write_bytes(bstr)?;
         Ok(bstr.len())
     }
@@ -57,8 +66,15 @@ impl Collator for CollatorUtf8Mb4BinNoPadding {
         ch as u32
     }
 
+    const SORT_KEY_IS_BYTES: bool = true;
+    const CAN_USE_RAW_MEM_AS_KEY: bool = true;
+
+    fn max_sort_key_len(bstr: &[u8]) -> usize {
+        bstr.len()
+    }
+
     #[inline]
-    fn write_sort_key<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
+    fn write_sort_key_unpadded<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
         writer.write_bytes(bstr)?;
         Ok(bstr.len())
     }

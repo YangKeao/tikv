@@ -43,29 +43,37 @@ impl Charset for CharsetUtf8mb4 {
     fn decode_one(data: &[u8]) -> Option<(Self::Char, usize)> {
         // Match Go's utf8.DecodeRune behavior used by TiDB: malformed UTF-8
         // produces the replacement character and consumes one byte.
-        let first = *data.first()?;
-        if first < 0x80 {
-            return Some((first as char, 1));
-        }
-        let width = match first {
-            0xC2..=0xDF => 2,
-            0xE0..=0xEF => 3,
-            0xF0..=0xF4 => 4,
-            _ => return Some((char::REPLACEMENT_CHARACTER, 1)),
-        };
-        match data
-            .get(..width)
-            .and_then(|bytes| str::from_utf8(bytes).ok())
-            .and_then(|s| s.chars().next())
-        {
-            Some(ch) => Some((ch, width)),
-            None => Some((char::REPLACEMENT_CHARACTER, 1)),
-        }
+        data.first()?;
+        Some(decode_utf8_rune_strict(data).unwrap_or((char::REPLACEMENT_CHARACTER, 1)))
     }
 
     fn charset() -> crate::Charset {
         crate::Charset::Utf8Mb4
     }
+}
+
+/// Decode one valid UTF-8 scalar, without validating the remaining suffix.
+/// Malformed and empty prefixes return None; callers choose their error policy.
+pub fn decode_utf8_rune_strict(data: &[u8]) -> Option<(char, usize)> {
+    let width = match *data.first()? {
+        0x00..=0x7F => 1,
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => return None,
+    };
+    let ch = str::from_utf8(data.get(..width)?).ok()?.chars().next()?;
+    Some((ch, width))
+}
+
+/// Go's RuneCountInString: every malformed byte counts as one RuneError.
+pub fn utf8_rune_count(mut input: &[u8]) -> usize {
+    let mut count = 0;
+    while let Some((_, width)) = CharsetUtf8mb4::decode_one(input) {
+        input = &input[width..];
+        count += 1;
+    }
+    count
 }
 
 // gbk character data actually stored with utf8mb4 character encoding.

@@ -23,7 +23,10 @@ extern crate tidb_query_common;
 #[cfg(test)]
 extern crate test;
 
+pub mod local;
 pub mod types;
+
+use types::function::{CallArg, CallShape, ControlKind, SelectedCall};
 
 pub mod impl_arithmetic;
 pub mod impl_cast;
@@ -64,9 +67,10 @@ use self::{
     impl_op::*, impl_other::*, impl_regexp::*, impl_string::*, impl_time::*, impl_vec::*,
 };
 
-fn map_to_binary_fn_sig(expr: &Expr) -> Result<RpnFnMeta> {
-    let children = expr.get_children();
-    let ret_field_type = children[0].get_field_type();
+fn map_to_binary_fn_sig(call: &CallShape) -> Result<RpnFnMeta> {
+    let children = call.args();
+    types::function::validate_argument_count_eq(children.len(), 1)?;
+    let ret_field_type = children[0].field_type();
     Ok(match_template_charset! {
         TT, match Charset::from_name(ret_field_type.get_charset()).map_err(tidb_query_datatype::codec::Error::from)? {
             Charset::TT => to_binary_fn_meta::<TT>(),
@@ -74,8 +78,7 @@ fn map_to_binary_fn_sig(expr: &Expr) -> Result<RpnFnMeta> {
     })
 }
 
-fn map_from_binary_fn_sig(expr: &Expr) -> Result<RpnFnMeta> {
-    let ret_field_type = expr.get_field_type();
+fn map_from_binary_fn_sig(ret_field_type: &FieldType) -> Result<RpnFnMeta> {
     Ok(match_template_charset! {
         TT, match Charset::from_name(ret_field_type.get_charset()).map_err(tidb_query_datatype::codec::Error::from)? {
             Charset::TT => from_binary_fn_meta::<TT>(),
@@ -99,19 +102,20 @@ fn map_compare_in_string_sig(ret_field_type: &FieldType) -> Result<RpnFnMeta> {
     })
 }
 
-fn map_like_sig(ret_field_type: &FieldType, children: &[Expr]) -> Result<RpnFnMeta> {
+fn map_like_sig(ret_field_type: &FieldType, children: &[CallArg]) -> Result<RpnFnMeta> {
+    types::function::validate_argument_count_eq(children.len(), 3)?;
     let ret_collation_id = ret_field_type.get_collate();
     let ret_collation = ret_field_type
         .as_accessor()
         .collation()
         .map_err(tidb_query_datatype::codec::Error::from)?;
     let target_collation = children[0]
-        .get_field_type()
+        .field_type()
         .as_accessor()
         .collation()
         .map_err(tidb_query_datatype::codec::Error::from)?;
     let pattern_collation = children[1]
-        .get_field_type()
+        .field_type()
         .as_accessor()
         .collation()
         .map_err(tidb_query_datatype::codec::Error::from)?;
@@ -231,7 +235,7 @@ fn map_ord_sig(ret_field_type: &FieldType) -> Result<RpnFnMeta> {
     })
 }
 
-fn map_int_sig<F>(value: ScalarFuncSig, children: &[Expr], mapper: F) -> Result<RpnFnMeta>
+fn map_int_sig<F>(value: ScalarFuncSig, children: &[CallArg], mapper: F) -> Result<RpnFnMeta>
 where
     F: Fn(bool, bool) -> RpnFnMeta,
 {
@@ -245,12 +249,12 @@ where
         ));
     }
     let lhs_is_unsigned = children[0]
-        .get_field_type()
+        .field_type()
         .as_accessor()
         .flag()
         .contains(FieldTypeFlag::UNSIGNED);
     let rhs_is_unsigned = children[1]
-        .get_field_type()
+        .field_type()
         .as_accessor()
         .flag()
         .contains(FieldTypeFlag::UNSIGNED);
@@ -318,7 +322,7 @@ fn divide_decimal_mapper(lhs_is_unsigned: bool, rhs_is_unsigned: bool) -> RpnFnM
     }
 }
 
-fn map_rhs_int_sig<F>(value: ScalarFuncSig, children: &[Expr], mapper: F) -> Result<RpnFnMeta>
+fn map_rhs_int_sig<F>(value: ScalarFuncSig, children: &[CallArg], mapper: F) -> Result<RpnFnMeta>
 where
     F: Fn(bool) -> RpnFnMeta,
 {
@@ -332,7 +336,7 @@ where
         ));
     }
     let rhs_is_unsigned = children[1]
-        .get_field_type()
+        .field_type()
         .as_accessor()
         .flag()
         .contains(FieldTypeFlag::UNSIGNED);
@@ -372,6 +376,11 @@ fn truncate_decimal_mapper(rhs_is_unsigned: bool) -> RpnFnMeta {
 }
 
 pub fn map_unary_minus_int_func(value: ScalarFuncSig, children: &[Expr]) -> Result<RpnFnMeta> {
+    let args: Vec<_> = children.iter().map(CallArg::from_expr).collect();
+    map_unary_minus_int_call(value, &args)
+}
+
+fn map_unary_minus_int_call(value: ScalarFuncSig, children: &[CallArg]) -> Result<RpnFnMeta> {
     if children.len() != 1 {
         return Err(other_err!(
             "ScalarFunction {:?} (params = {}) is not supported in batch mode",
@@ -380,7 +389,7 @@ pub fn map_unary_minus_int_func(value: ScalarFuncSig, children: &[Expr]) -> Resu
         ));
     }
     if children[0]
-        .get_field_type()
+        .field_type()
         .as_accessor()
         .flag()
         .contains(FieldTypeFlag::UNSIGNED)
@@ -391,7 +400,7 @@ pub fn map_unary_minus_int_func(value: ScalarFuncSig, children: &[Expr]) -> Resu
     }
 }
 
-fn map_upper_utf8_sig(value: ScalarFuncSig, children: &[Expr]) -> Result<RpnFnMeta> {
+fn map_upper_utf8_sig(value: ScalarFuncSig, children: &[CallArg]) -> Result<RpnFnMeta> {
     if children.len() != 1 {
         return Err(other_err!(
             "ScalarFunction {:?} (params = {}) is not supported in batch mode",
@@ -399,7 +408,7 @@ fn map_upper_utf8_sig(value: ScalarFuncSig, children: &[Expr]) -> Result<RpnFnMe
             children.len()
         ));
     }
-    let ret_field_type = children[0].get_field_type();
+    let ret_field_type = children[0].field_type();
     Ok(match_template_charset! {
      TT, match Charset::from_name(ret_field_type.get_charset()).map_err(tidb_query_datatype::codec::Error::from)? {
            Charset::TT => upper_utf8_fn_meta::<TT>(),
@@ -407,7 +416,7 @@ fn map_upper_utf8_sig(value: ScalarFuncSig, children: &[Expr]) -> Result<RpnFnMe
     })
 }
 
-fn map_lower_utf8_sig(value: ScalarFuncSig, children: &[Expr]) -> Result<RpnFnMeta> {
+fn map_lower_utf8_sig(value: ScalarFuncSig, children: &[CallArg]) -> Result<RpnFnMeta> {
     if children.len() != 1 {
         return Err(other_err!(
             "ScalarFunction {:?} (params = {}) is not supported in batch mode",
@@ -415,7 +424,7 @@ fn map_lower_utf8_sig(value: ScalarFuncSig, children: &[Expr]) -> Result<RpnFnMe
             children.len()
         ));
     }
-    let ret_field_type = children[0].get_field_type();
+    let ret_field_type = children[0].field_type();
     Ok(match_template_charset! {
      TT, match Charset::from_name(ret_field_type.get_charset()).map_err(tidb_query_datatype::codec::Error::from)? {
            Charset::TT => lower_utf8_fn_meta::<TT>(),
@@ -431,12 +440,34 @@ fn map_field_string_sig(ret_field_type: &FieldType) -> Result<RpnFnMeta> {
     })
 }
 
-#[rustfmt::skip]
 fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
-    let value = expr.get_sig();
-    let children = expr.get_children();
-    let ft = expr.get_field_type();
-    Ok(match value {
+    map_call_to_rpn_func(&CallShape::from_expr(expr))
+}
+
+pub(crate) fn map_call_to_rpn_func(call: &CallShape) -> Result<RpnFnMeta> {
+    select_call(call).map(|selected| selected.func_meta)
+}
+
+fn select_expr_node(expr: &Expr) -> Result<SelectedCall> {
+    select_call(&CallShape::from_expr(expr))
+}
+
+pub(crate) fn select_call(call: &CallShape) -> Result<SelectedCall> {
+    match call.function() {
+        FunctionRef::TiPb(value) => select_tipb_call(value, call),
+        FunctionRef::Local(id) => {
+            local::registry::map_local_call_to_rpn_func(id, call).map(Into::into)
+        }
+    }
+}
+
+#[rustfmt::skip]
+fn select_tipb_call(value: ScalarFuncSig, call: &CallShape) -> Result<SelectedCall> {
+    let children = call.args();
+    let ft = call.return_type();
+    let mut control = None;
+    let mut lazy = |kind, func_meta| { control = Some(kind); func_meta };
+    let func_meta = match value {
         // impl_arithmetic
         ScalarFuncSig::PlusInt => map_int_sig(value, children, plus_mapper)?,
         ScalarFuncSig::PlusIntUnsignedUnsigned => arithmetic_fn_meta::<UintUintPlus>(),
@@ -515,9 +546,9 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::CastJsonAsDuration |
         ScalarFuncSig::CastJsonAsJson |
         ScalarFuncSig::CastVectorFloat32AsString |
-        ScalarFuncSig::CastVectorFloat32AsVectorFloat32 => map_cast_func(expr)?,
-        ScalarFuncSig::ToBinary => map_to_binary_fn_sig(expr)?,
-        ScalarFuncSig::FromBinary => map_from_binary_fn_sig(expr)?,
+        ScalarFuncSig::CastVectorFloat32AsVectorFloat32 => map_cast_call(call)?,
+        ScalarFuncSig::ToBinary => map_to_binary_fn_sig(call)?,
+        ScalarFuncSig::FromBinary => map_from_binary_fn_sig(ft)?,
 
         // impl_compare
         ScalarFuncSig::LtInt => map_int_sig(value, children, compare_mapper::<CmpOpLt>)?,
@@ -596,13 +627,13 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::NullEqDuration => compare_fn_meta::<BasicComparer<Duration, CmpOpNullEq>>(),
         ScalarFuncSig::NullEqJson => compare_json_fn_meta::<CmpOpNullEq>(),
         ScalarFuncSig::NullEqVectorFloat32 => compare_vector_float32_fn_meta::<CmpOpNullEq>(),
-        ScalarFuncSig::CoalesceInt => coalesce_fn_meta::<Int>(),
-        ScalarFuncSig::CoalesceReal => coalesce_fn_meta::<Real>(),
-        ScalarFuncSig::CoalesceString => coalesce_bytes_fn_meta(),
-        ScalarFuncSig::CoalesceDecimal => coalesce_fn_meta::<Decimal>(),
-        ScalarFuncSig::CoalesceTime => coalesce_fn_meta::<DateTime>(),
-        ScalarFuncSig::CoalesceDuration => coalesce_fn_meta::<Duration>(),
-        ScalarFuncSig::CoalesceJson => coalesce_json_fn_meta(),
+        ScalarFuncSig::CoalesceInt => lazy(ControlKind::Coalesce, coalesce_fn_meta::<Int>()),
+        ScalarFuncSig::CoalesceReal => lazy(ControlKind::Coalesce, coalesce_fn_meta::<Real>()),
+        ScalarFuncSig::CoalesceString => lazy(ControlKind::Coalesce, coalesce_bytes_fn_meta()),
+        ScalarFuncSig::CoalesceDecimal => lazy(ControlKind::Coalesce, coalesce_fn_meta::<Decimal>()),
+        ScalarFuncSig::CoalesceTime => lazy(ControlKind::Coalesce, coalesce_fn_meta::<DateTime>()),
+        ScalarFuncSig::CoalesceDuration => lazy(ControlKind::Coalesce, coalesce_fn_meta::<Duration>()),
+        ScalarFuncSig::CoalesceJson => lazy(ControlKind::Coalesce, coalesce_json_fn_meta()),
         // impl_compare_in
         ScalarFuncSig::InInt => compare_in_int_type_by_hash_fn_meta(),
         ScalarFuncSig::InReal => compare_in_by_hash_fn_meta::<NormalInByHash::<Real>>(),
@@ -612,27 +643,27 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::InDuration => compare_in_by_hash_fn_meta::<NormalInByHash::<Duration>>(),
         ScalarFuncSig::InJson => compare_in_by_compare_json_fn_meta(),
         // impl_control
-        ScalarFuncSig::IfNullInt => if_null_fn_meta::<Int>(),
-        ScalarFuncSig::IfNullReal => if_null_fn_meta::<Real>(),
-        ScalarFuncSig::IfNullString => if_null_bytes_fn_meta(),
-        ScalarFuncSig::IfNullDecimal => if_null_fn_meta::<Decimal>(),
-        ScalarFuncSig::IfNullTime => if_null_fn_meta::<DateTime>(),
-        ScalarFuncSig::IfNullDuration => if_null_fn_meta::<Duration>(),
-        ScalarFuncSig::IfNullJson => if_null_json_fn_meta(),
-        ScalarFuncSig::IfInt => if_condition_fn_meta::<Int>(),
-        ScalarFuncSig::IfReal => if_condition_fn_meta::<Real>(),
-        ScalarFuncSig::IfDecimal => if_condition_fn_meta::<Decimal>(),
-        ScalarFuncSig::IfTime => if_condition_fn_meta::<DateTime>(),
-        ScalarFuncSig::IfString => if_condition_bytes_fn_meta(),
-        ScalarFuncSig::IfDuration => if_condition_fn_meta::<Duration>(),
-        ScalarFuncSig::IfJson => if_condition_json_fn_meta(),
-        ScalarFuncSig::CaseWhenInt => case_when_fn_meta::<Int>(),
-        ScalarFuncSig::CaseWhenReal => case_when_fn_meta::<Real>(),
-        ScalarFuncSig::CaseWhenString => case_when_bytes_fn_meta(),
-        ScalarFuncSig::CaseWhenDecimal => case_when_fn_meta::<Decimal>(),
-        ScalarFuncSig::CaseWhenTime => case_when_fn_meta::<DateTime>(),
-        ScalarFuncSig::CaseWhenDuration => case_when_fn_meta::<Duration>(),
-        ScalarFuncSig::CaseWhenJson => case_when_json_fn_meta(),
+        ScalarFuncSig::IfNullInt => lazy(ControlKind::IfNull, if_null_fn_meta::<Int>()),
+        ScalarFuncSig::IfNullReal => lazy(ControlKind::IfNull, if_null_fn_meta::<Real>()),
+        ScalarFuncSig::IfNullString => lazy(ControlKind::IfNull, if_null_bytes_fn_meta()),
+        ScalarFuncSig::IfNullDecimal => lazy(ControlKind::IfNull, if_null_fn_meta::<Decimal>()),
+        ScalarFuncSig::IfNullTime => lazy(ControlKind::IfNull, if_null_fn_meta::<DateTime>()),
+        ScalarFuncSig::IfNullDuration => lazy(ControlKind::IfNull, if_null_fn_meta::<Duration>()),
+        ScalarFuncSig::IfNullJson => lazy(ControlKind::IfNull, if_null_json_fn_meta()),
+        ScalarFuncSig::IfInt => lazy(ControlKind::If, if_condition_fn_meta::<Int>()),
+        ScalarFuncSig::IfReal => lazy(ControlKind::If, if_condition_fn_meta::<Real>()),
+        ScalarFuncSig::IfDecimal => lazy(ControlKind::If, if_condition_fn_meta::<Decimal>()),
+        ScalarFuncSig::IfTime => lazy(ControlKind::If, if_condition_fn_meta::<DateTime>()),
+        ScalarFuncSig::IfString => lazy(ControlKind::If, if_condition_bytes_fn_meta()),
+        ScalarFuncSig::IfDuration => lazy(ControlKind::If, if_condition_fn_meta::<Duration>()),
+        ScalarFuncSig::IfJson => lazy(ControlKind::If, if_condition_json_fn_meta()),
+        ScalarFuncSig::CaseWhenInt => lazy(ControlKind::CaseWhen, case_when_fn_meta::<Int>()),
+        ScalarFuncSig::CaseWhenReal => lazy(ControlKind::CaseWhen, case_when_fn_meta::<Real>()),
+        ScalarFuncSig::CaseWhenString => lazy(ControlKind::CaseWhen, case_when_bytes_fn_meta()),
+        ScalarFuncSig::CaseWhenDecimal => lazy(ControlKind::CaseWhen, case_when_fn_meta::<Decimal>()),
+        ScalarFuncSig::CaseWhenTime => lazy(ControlKind::CaseWhen, case_when_fn_meta::<DateTime>()),
+        ScalarFuncSig::CaseWhenDuration => lazy(ControlKind::CaseWhen, case_when_fn_meta::<Duration>()),
+        ScalarFuncSig::CaseWhenJson => lazy(ControlKind::CaseWhen, case_when_json_fn_meta()),
         // impl_encryption
         ScalarFuncSig::UncompressedLength => uncompressed_length_fn_meta(),
         ScalarFuncSig::Md5 => md5_fn_meta(),
@@ -772,14 +803,14 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::RealIsFalseWithNull => real_is_false_fn_meta::<KeepNullOn>(),
         ScalarFuncSig::DecimalIsFalse => decimal_is_false_fn_meta::<KeepNullOff>(),
         ScalarFuncSig::DecimalIsFalseWithNull => decimal_is_false_fn_meta::<KeepNullOn>(),
-        ScalarFuncSig::LogicalAnd => logical_and_fn_meta(),
-        ScalarFuncSig::LogicalOr => logical_or_fn_meta(),
+        ScalarFuncSig::LogicalAnd => lazy(ControlKind::And, logical_and_fn_meta()),
+        ScalarFuncSig::LogicalOr => lazy(ControlKind::Or, logical_or_fn_meta()),
         ScalarFuncSig::LogicalXor => logical_xor_fn_meta(),
         ScalarFuncSig::UnaryNotInt => unary_not_int_fn_meta(),
         ScalarFuncSig::UnaryNotReal => unary_not_real_fn_meta(),
         ScalarFuncSig::UnaryNotDecimal => unary_not_decimal_fn_meta(),
         ScalarFuncSig::UnaryNotJson => unary_not_json_fn_meta(),
-        ScalarFuncSig::UnaryMinusInt => map_unary_minus_int_func(value, children)?,
+        ScalarFuncSig::UnaryMinusInt => map_unary_minus_int_call(value, children)?,
         ScalarFuncSig::UnaryMinusReal => unary_minus_real_fn_meta(),
         ScalarFuncSig::UnaryMinusDecimal => unary_minus_decimal_fn_meta(),
         ScalarFuncSig::BitAndSig => bit_and_fn_meta(),
@@ -970,20 +1001,6 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
             "ScalarFunction {:?} is not supported in batch mode",
             value
         )),
-    })
-}
-
-fn map_expr_node_to_sc_func(expr: &Expr) -> Option<ShortCircuitFnMeta> {
-    match expr.get_sig() {
-        ScalarFuncSig::LogicalOr => Some(ShortCircuitFnMeta {
-            sig: ScalarFuncSig::LogicalOr,
-            fn_ptr: sc_logical_or,
-        }),
-        ScalarFuncSig::LogicalAnd => Some(ShortCircuitFnMeta {
-            sig: ScalarFuncSig::LogicalAnd,
-            fn_ptr: sc_logical_and,
-        }),
-        // TODO: Support IF, IFNULL, CASE WHEN, COALESCE, etc.
-        _ => None,
-    }
+    };
+    Ok(SelectedCall { func_meta, control })
 }

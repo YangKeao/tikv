@@ -6,7 +6,8 @@ use regex::Regex;
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::codec::{Error, collation::Collator, data_type::*};
-use tipb::{Expr, ExprType};
+
+use crate::types::function::CallBuild;
 
 const PATTERN_IDX: usize = 1;
 const LIKE_MATCH_IDX: usize = 2;
@@ -91,26 +92,22 @@ fn build_regexp_from_args<C: Collator>(
     build_regexp::<C>(pattern, match_type).map(Some)
 }
 
-fn init_regexp_data<C: Collator, const N: usize>(expr: &mut Expr) -> Result<Option<Regex>> {
-    let children = expr.mut_children();
+fn init_regexp_data<C: Collator, const N: usize>(expr: &mut CallBuild) -> Result<Option<Regex>> {
+    let children = expr.args();
     if children.len() <= PATTERN_IDX {
         return Ok(None);
     }
-
-    let pattern = match children[PATTERN_IDX].get_tp() {
-        ExprType::Bytes | ExprType::String => children[PATTERN_IDX].get_val(),
-        _ => return Ok(None),
+    let Some(pattern) = children[PATTERN_IDX].constant_bytes() else {
+        return Ok(None);
     };
-
     let match_type = if children.len() > N {
-        match children[N].get_tp() {
-            ExprType::Bytes | ExprType::String => children[N].get_val(),
-            _ => return Ok(None),
-        }
+        let Some(value) = children[N].constant_bytes() else {
+            return Ok(None);
+        };
+        value
     } else {
         b""
     };
-
     build_regexp::<C>(pattern, match_type).map(Some)
 }
 
@@ -283,20 +280,15 @@ pub struct ReplaceMetaData {
     instructions: Option<Vec<ReplaceInstruction>>,
 }
 
-fn init_regexp_replace_data<C: Collator>(expr: &mut Expr) -> Result<ReplaceMetaData> {
+fn init_regexp_replace_data<C: Collator>(expr: &mut CallBuild) -> Result<ReplaceMetaData> {
     let mut meta = ReplaceMetaData {
         regex: init_regexp_data::<C, REPLACE_MATCH_IDX>(expr)?,
         instructions: None,
     };
 
-    let children = expr.mut_children();
-    if children.len() >= 3 {
-        match children[2].get_tp() {
-            ExprType::Bytes | ExprType::String => {
-                meta.instructions = Some(init_replace_instructions(children[2].get_val()));
-            }
-            _ => {}
-        };
+    let children = expr.args();
+    if let Some(value) = children.get(2).and_then(|arg| arg.constant_bytes()) {
+        meta.instructions = Some(init_replace_instructions(value));
     }
 
     Ok(meta)

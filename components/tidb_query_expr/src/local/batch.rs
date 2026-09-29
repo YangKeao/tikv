@@ -1,0 +1,1655 @@
+// Copyright 2026 TiKV Project Authors. Licensed under Apache-2.0.
+
+use std::{
+    mem,
+    sync::{Arc, atomic::AtomicUsize},
+};
+
+use tidb_query_datatype::{
+    EvalType,
+    codec::{
+        batch::LazyBatchColumnVec,
+        data_type::{BATCH_MAX_SIZE, ChunkedVecBytes, ScalarValue, ScalarValueRef, VectorValue},
+        mysql::{DEFAULT_DIV_FRAC_INCR, Tz},
+    },
+    expr::{EvalConfig, EvalContext},
+};
+
+use super::{
+    ExecutionLimits, FailureRecorder, LineageCarrier, LineagedBatch, LocalCompileContext,
+    LocalControlProgram, LocalError, LocalProgram, LocalResult, LocalRuntimeServices,
+    ReportedLocalFailure, ResultMetaId,
+    compile::{
+        LocalNumericBatchProgram, ProgramEntry, compile_evaluated_ascii,
+        evaluated_ascii_bytes_type, evaluated_ascii_int_type,
+    },
+    runtime::{EvalBudget, bytes_min_storage_bytes, int_min_storage_bytes, vector_storage_bytes},
+};
+use crate::{
+    RpnExpressionNode, RpnStackNode, RpnStackNodeVectorValue,
+    types::expr_eval::{EvalInput, EvaluatedAsciiWitness, FrameResult},
+};
+
+pub struct LocalBatch<'a> {
+    pub columns: &'a LazyBatchColumnVec,
+    pub physical_rows: usize,
+    pub selection: &'a [usize],
+}
+
+/// Reusable index-only scratch and Demo limits. No input/program borrow or
+/// mutable service survives evaluation. The external ctx retains its warnings.
+pub struct LocalEvalState {
+    row: [usize; 1],
+    limits: ExecutionLimits,
+}
+
+impl LocalEvalState {
+    pub fn new(max_steps: u64) -> Self {
+        Self::with_limits(ExecutionLimits {
+            max_steps,
+            ..ExecutionLimits::default()
+        })
+    }
+    pub fn with_limits(limits: ExecutionLimits) -> Self {
+        Self { row: [0], limits }
+    }
+}
+
+impl Default for LocalEvalState {
+    fn default() -> Self {
+        Self::new(u64::MAX)
+    }
+}
+
+fn validate_selection(physical_rows: usize, selection: &[usize]) -> LocalResult<()> {
+    if selection.iter().any(|&row| row >= physical_rows) {
+        return Err(LocalError::InvalidBatch(
+            "selection is outside the physical row universe".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum OutputMode {
+    ConservativeInt,
+    Lineaged,
+}
+
+/// Collection policy only: both variants use the same preflight and occurrence
+/// loop, and the same RPN driver evaluates every demanded descendant.
+enum RowCollector {
+    ConservativeInt(VectorValue),
+    Lineaged(LineageOutput),
+}
+
+impl RowCollector {
+    fn append(&mut self, result: FrameResult<'_>, budget: &mut EvalBudget) -> LocalResult<()> {
+        match self {
+            Self::ConservativeInt(output) => {
+                // Keep the original Int collector, including its materialization
+                // and donor behavior, outside the new exact-storage policy.
+                let mut values = match result.node {
+                    RpnStackNode::Scalar { value, .. } => VectorValue::from_scalar(value, 1),
+                    RpnStackNode::Vector { value, .. } => {
+                        value.take_vector_value().map_err(LocalError::Evaluation)?
+                    }
+                };
+                if values.eval_type() != EvalType::Int || values.len() != 1 {
+                    return Err(LocalError::InvalidBatch(
+                        "RPN returned an invalid result shape".into(),
+                    ));
+                }
+                output.append(&mut values);
+                Ok(())
+            }
+            Self::Lineaged(output) => output.append(result, budget),
+        }
+    }
+
+    fn finish(&self, budget: &mut EvalBudget) -> LocalResult<()> {
+        if let Self::Lineaged(output) = self {
+            if output.values.len() != output.rows || output.result_metadata.len() != output.rows {
+                return Err(LocalError::InvalidBatch(
+                    "lineaged output value/metadata count differs from selection".into(),
+                ));
+            }
+            // Remeasure actual capacity before publication, including empty
+            // Bytes' sentinel. There is no donor/reset allocation at this edge.
+            let bytes = output.storage_bytes(budget)?;
+            budget.check_output(bytes, 0)?;
+            budget.set_output_bytes(bytes)?;
+        }
+        Ok(())
+    }
+
+    fn into_legacy(self) -> LocalResult<VectorValue> {
+        match self {
+            Self::ConservativeInt(values) => Ok(values),
+            Self::Lineaged(_) => Err(LocalError::InvalidSpec(
+                "lineaged output cannot discard its result metadata".into(),
+            )),
+        }
+    }
+
+    fn into_lineaged(self) -> LocalResult<LineagedBatch> {
+        match self {
+            Self::Lineaged(output) => Ok(LineagedBatch {
+                values: output.values,
+                result_metadata: output.result_metadata,
+            }),
+            Self::ConservativeInt(_) => Err(LocalError::InvalidSpec(
+                "legacy output has no checked result metadata".into(),
+            )),
+        }
+    }
+}
+
+struct LineageOutput {
+    values: VectorValue,
+    result_metadata: Vec<ResultMetaId>,
+    rows: usize,
+    payload_bytes: usize,
+}
+
+fn output_size(bytes: Option<usize>) -> LocalResult<usize> {
+    bytes
+        .filter(|&bytes| bytes != usize::MAX)
+        .ok_or_else(|| LocalError::ResourceLimit("lineaged output storage size overflow".into()))
+}
+
+fn add_output_size(left: usize, right: usize) -> LocalResult<usize> {
+    output_size(left.checked_add(right))
+}
+
+impl LineageOutput {
+    fn new(carrier: LineageCarrier, rows: usize, budget: &mut EvalBudget) -> LocalResult<Self> {
+        let ids_min = output_size(rows.checked_mul(mem::size_of::<ResultMetaId>()))?;
+        let values_min = output_size(match carrier {
+            LineageCarrier::Int => int_min_storage_bytes(rows),
+            LineageCarrier::Bytes => bytes_min_storage_bytes(rows, 0),
+        })?;
+        budget.check_output(add_output_size(ids_min, values_min)?, 0)?;
+
+        let mut result_metadata = Vec::new();
+        result_metadata.try_reserve_exact(rows).map_err(|_| {
+            LocalError::ResourceLimit("lineaged result metadata allocation failed".into())
+        })?;
+        let ids_actual = output_size(
+            result_metadata
+                .capacity()
+                .checked_mul(mem::size_of::<ResultMetaId>()),
+        )?;
+        // A successful try_reserve_exact is not a promise of exact capacity.
+        budget.check_output(add_output_size(ids_actual, values_min)?, 0)?;
+        let values = match carrier {
+            LineageCarrier::Int => VectorValue::with_capacity(rows, EvalType::Int),
+            LineageCarrier::Bytes => {
+                VectorValue::Bytes(ChunkedVecBytes::try_with_capacities(rows, 0).map_err(|_| {
+                    LocalError::ResourceLimit("lineaged Bytes output allocation failed".into())
+                })?)
+            }
+        };
+        let output = Self {
+            values,
+            result_metadata,
+            rows,
+            payload_bytes: 0,
+        };
+        let bytes = output.storage_bytes(budget)?;
+        budget.check_output(bytes, 0)?;
+        budget.set_output_bytes(bytes)?;
+        Ok(output)
+    }
+
+    fn id_bytes(&self) -> LocalResult<usize> {
+        output_size(
+            self.result_metadata
+                .capacity()
+                .checked_mul(mem::size_of::<ResultMetaId>()),
+        )
+    }
+
+    fn storage_bytes(&self, budget: &EvalBudget) -> LocalResult<usize> {
+        add_output_size(
+            self.id_bytes()?,
+            vector_storage_bytes(&self.values, budget.mode()),
+        )
+    }
+
+    fn append(&mut self, result: FrameResult<'_>, budget: &mut EvalBudget) -> LocalResult<()> {
+        let id = result.meta.ok_or_else(|| {
+            LocalError::InvalidSpec("lineaged RPN result is missing its checked metadata ID".into())
+        })?;
+        if self.values.len() != self.result_metadata.len() || self.values.len() >= self.rows {
+            return Err(LocalError::InvalidBatch(
+                "lineaged output occurrence count changed".into(),
+            ));
+        }
+        // Check the logical singleton before using the scalar-ref accessor. A
+        // selected child's FieldType may differ from the declared root type;
+        // its already-checked ID, not a new type/kind probe, owns that identity.
+        let singleton = match &result.node {
+            RpnStackNode::Scalar { .. } => true,
+            RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Generated { physical_value },
+                ..
+            } => physical_value.len() == 1,
+            RpnStackNode::Vector {
+                value:
+                    RpnStackNodeVectorValue::Ref {
+                        physical_value,
+                        logical_rows,
+                    },
+                ..
+            } => logical_rows.len() == 1 && logical_rows[0] < physical_value.len(),
+        };
+        if !singleton {
+            return Err(LocalError::InvalidBatch(
+                "lineaged RPN returned an invalid result shape".into(),
+            ));
+        }
+        let scalar = result.node.get_logical_scalar_ref(0);
+        if scalar.eval_type() != self.values.eval_type() {
+            return Err(LocalError::InvalidBatch(
+                "lineaged RPN result differs from its checked carrier".into(),
+            ));
+        }
+        let source = result.retained_heap_bytes(budget.mode());
+        let ids = self.id_bytes()?;
+        let old_heap = vector_storage_bytes(&self.values, budget.mode());
+        budget.check_output(add_output_size(ids, old_heap)?, source)?;
+
+        match (&mut self.values, scalar) {
+            (values @ VectorValue::Int(_), ScalarValueRef::Int(value)) => {
+                // All rows were reserved initially. Copy only the nullable bits,
+                // without a scalar/vector donor or native signedness inference.
+                values.push_int(value.copied());
+            }
+            (VectorValue::Bytes(values), ScalarValueRef::Bytes(value)) => {
+                let added = value.map_or(0, |bytes| bytes.len());
+                let payload = output_size(self.payload_bytes.checked_add(added))?;
+                let minimum = output_size(bytes_min_storage_bytes(self.rows, payload))?;
+                budget.check_output(add_output_size(ids, old_heap.max(minimum))?, source)?;
+                // Reserve with the selected source still alive. The minimum is
+                // not a capacity prediction, and a failed reserve may grow some
+                // buffers: failure aborts this invocation rather than rollback.
+                values.try_reserve_append(1, added).map_err(|_| {
+                    LocalError::ResourceLimit("lineaged Bytes output reservation failed".into())
+                })?;
+                let actual = output_size(values.retained_heap_bytes())?;
+                let overlap = if actual > old_heap {
+                    add_output_size(source, old_heap)?
+                } else {
+                    source
+                };
+                let output = add_output_size(ids, actual)?;
+                // Account for old/new allocation overlap before copying the
+                // payload or performing any later occurrence's input effect.
+                budget.check_output(output, overlap)?;
+                budget.set_output_bytes(output)?;
+                values.push_ref(value);
+                self.payload_bytes = payload;
+            }
+            _ => {
+                return Err(LocalError::InvalidBatch(
+                    "lineaged RPN result differs from its checked carrier".into(),
+                ));
+            }
+        }
+        // The ID buffer has full selection capacity. Remeasure the value heap
+        // while the selected source is still live, even on the final row.
+        self.result_metadata.push(id);
+        let bytes = self.storage_bytes(budget)?;
+        budget.check_output(bytes, source)?;
+        budget.set_output_bytes(bytes)?;
+        Ok(())
+    }
+}
+
+impl LocalProgram {
+    pub fn eval(
+        &mut self,
+        state: &mut LocalEvalState,
+        ctx: &mut EvalContext,
+        batch: LocalBatch<'_>,
+    ) -> LocalResult<VectorValue> {
+        if batch.columns.columns_len() != self.schema.len() {
+            return Err(LocalError::InvalidBatch(
+                "column count differs from compiled schema".into(),
+            ));
+        }
+        for index in 0..batch.columns.columns_len() {
+            let column = &batch.columns[index];
+            if !column.is_decoded() {
+                return Err(LocalError::InvalidBatch(format!(
+                    "column {} is not decoded",
+                    index
+                )));
+            }
+            if column.decoded().eval_type() != EvalType::Int || column.len() != batch.physical_rows
+            {
+                return Err(LocalError::InvalidBatch(format!(
+                    "column {} has incorrect type/length",
+                    index
+                )));
+            }
+        }
+        validate_selection(batch.physical_rows, batch.selection)?;
+        self.check_entry(ProgramEntry::Row)?;
+        if self.host_catalog.is_some() {
+            return Err(LocalError::HostContract(
+                "host program requires runtime services".into(),
+            ));
+        }
+        self.eval_rows(
+            state,
+            ctx,
+            batch.selection,
+            EvalInput::Decoded(batch.columns),
+            None,
+            OutputMode::ConservativeInt,
+        )?
+        .into_legacy()
+    }
+
+    /// Validates static layout and row bounds before effects, but imports
+    /// values only through a demanded ColumnRef in the same official RPN
+    /// driver.
+    pub fn eval_with_bindings(
+        &mut self,
+        state: &mut LocalEvalState,
+        ctx: &mut EvalContext,
+        physical_rows: usize,
+        selection: &[usize],
+        services: &mut dyn LocalRuntimeServices,
+    ) -> LocalResult<VectorValue> {
+        self.eval_bindings(
+            state,
+            ctx,
+            physical_rows,
+            selection,
+            services,
+            None,
+            OutputMode::ConservativeInt,
+        )?
+        .into_legacy()
+    }
+
+    /// Runs the same binding evaluator, retaining the original owned error and
+    /// an exact site only when read_input or a checked ordinary kernel fails.
+    /// Hosts are outside this reporting slice; the original entry still admits
+    /// them. Unannotated eager errors, validation and budgets gain no fake
+    /// site.
+    ///
+    /// Nothing is retained in state/program/ctx between calls. Warning count
+    /// and stored details stay untouched by reporting; callers may snapshot
+    /// both before/after normal return. Panic remains unwind, not a
+    /// reported error.
+    pub fn eval_with_bindings_reported(
+        &mut self,
+        state: &mut LocalEvalState,
+        ctx: &mut EvalContext,
+        physical_rows: usize,
+        selection: &[usize],
+        services: &mut dyn LocalRuntimeServices,
+    ) -> std::result::Result<VectorValue, ReportedLocalFailure> {
+        let mut recorder = FailureRecorder::default();
+        // Exactly one invocation; no recovery/retry after a captured failure.
+        let result = self
+            .eval_bindings(
+                state,
+                ctx,
+                physical_rows,
+                selection,
+                services,
+                Some(&mut recorder),
+                OutputMode::ConservativeInt,
+            )
+            .and_then(RowCollector::into_legacy);
+        result.map_err(|error| recorder.into_failure(error))
+    }
+
+    /// Only stable schema and row-bound checks: no value import, host hook or
+    /// kernel. Every facade follows this with its compiled entry-tag check.
+    fn validate_bindings_preflight(
+        &self,
+        physical_rows: usize,
+        selection: &[usize],
+        services: &dyn LocalRuntimeServices,
+    ) -> LocalResult<()> {
+        if services.binding_schema() != self.schema.as_slice() {
+            return Err(LocalError::InvalidBatch(
+                "binding schema differs from compiled complete field types".into(),
+            ));
+        }
+        validate_selection(physical_rows, selection)
+    }
+
+    fn eval_bindings(
+        &mut self,
+        state: &mut LocalEvalState,
+        ctx: &mut EvalContext,
+        physical_rows: usize,
+        selection: &[usize],
+        services: &mut dyn LocalRuntimeServices,
+        recorder: Option<&mut FailureRecorder>,
+        mode: OutputMode,
+    ) -> LocalResult<RowCollector> {
+        self.validate_bindings_preflight(physical_rows, selection, services)?;
+        self.check_entry(match mode {
+            OutputMode::ConservativeInt => ProgramEntry::Row,
+            OutputMode::Lineaged => ProgramEntry::ControlLineage,
+        })?;
+        if recorder.is_some() && self.host_catalog.is_some() {
+            return Err(LocalError::HostContract(
+                "host programs are outside reported evaluation admission".into(),
+            ));
+        }
+        if matches!(mode, OutputMode::Lineaged) && self.host_catalog.is_some() {
+            return Err(LocalError::HostContract(
+                "host programs are outside lineaged evaluation admission".into(),
+            ));
+        }
+        // Pure capability validation, including empty batches. A host-free D1
+        // program never calls this optional hook at all.
+        if let Some(expected) = self.host_catalog {
+            let host = services.host_services().ok_or_else(|| {
+                LocalError::HostContract("compiled host catalog has no runtime provider".into())
+            })?;
+            if host.catalog_key() != &expected {
+                return Err(LocalError::HostContract(
+                    "runtime host catalog differs from compiled identity".into(),
+                ));
+            }
+        }
+        self.eval_rows(
+            state,
+            ctx,
+            selection,
+            EvalInput::Bindings(services),
+            recorder,
+            mode,
+        )
+    }
+
+    fn eval_rows(
+        &mut self,
+        state: &mut LocalEvalState,
+        ctx: &mut EvalContext,
+        selection: &[usize],
+        mut input: EvalInput<'_, '_>,
+        mut recorder: Option<&mut FailureRecorder>,
+        mode: OutputMode,
+    ) -> LocalResult<RowCollector> {
+        // One occurrence loop and one work budget for both facades. Lineage
+        // adds collection/storage policy, never another expression evaluator.
+        let (mut budget, mut output) = match mode {
+            OutputMode::ConservativeInt => (
+                EvalBudget::local(state.limits, selection.len())?,
+                RowCollector::ConservativeInt(VectorValue::with_capacity(
+                    selection.len(),
+                    EvalType::Int,
+                )),
+            ),
+            OutputMode::Lineaged => {
+                let flow = self.expression.checked_result_flow().ok_or_else(|| {
+                    LocalError::InvalidSpec(
+                        "lineaged program has no checked root result flow".into(),
+                    )
+                })?;
+                let mut budget = EvalBudget::lineaged(state.limits)?;
+                let output = LineageOutput::new(flow.carrier(), selection.len(), &mut budget)?;
+                (budget, RowCollector::Lineaged(output))
+            }
+        };
+        // Empty selection imports no values or frames, but exact Bytes output
+        // still reserves and checks its offset sentinel before publication.
+        for (occurrence, &row) in selection.iter().enumerate() {
+            state.row[0] = row;
+            let result = match mode {
+                OutputMode::ConservativeInt => FrameResult {
+                    node: self.expression.eval_with_input_recording(
+                        ctx,
+                        &self.schema,
+                        &mut input,
+                        &state.row,
+                        1,
+                        occurrence,
+                        self.host_catalog,
+                        &mut budget,
+                        recorder.as_deref_mut(),
+                    )?,
+                    meta: None,
+                },
+                OutputMode::Lineaged => self.expression.eval_with_input_lineaged(
+                    ctx,
+                    &self.schema,
+                    &mut input,
+                    &state.row,
+                    1,
+                    occurrence,
+                    self.host_catalog,
+                    &mut budget,
+                    recorder.as_deref_mut(),
+                )?,
+            };
+            output.append(result, &mut budget)?;
+        }
+        output.finish(&mut budget)?;
+        Ok(output)
+    }
+}
+
+impl LocalControlProgram {
+    /// Evaluates checked control lineage in selection-occurrence order. Values
+    /// and result IDs are collected together; no source-kind callback, decoded
+    /// facade or untagged RPN escape is provided.
+    pub fn eval_with_bindings(
+        &mut self,
+        state: &mut LocalEvalState,
+        ctx: &mut EvalContext,
+        physical_rows: usize,
+        selection: &[usize],
+        services: &mut dyn LocalRuntimeServices,
+    ) -> LocalResult<LineagedBatch> {
+        self.inner
+            .eval_bindings(
+                state,
+                ctx,
+                physical_rows,
+                selection,
+                services,
+                None,
+                OutputMode::Lineaged,
+            )?
+            .into_lineaged()
+    }
+
+    /// Uses the same collector and driver, with a fresh failure-only recorder.
+    /// Validation/output-budget failures gain no input/kernel site; warnings
+    /// stay in the caller's existing context, including on a refused final row.
+    pub fn eval_with_bindings_reported(
+        &mut self,
+        state: &mut LocalEvalState,
+        ctx: &mut EvalContext,
+        physical_rows: usize,
+        selection: &[usize],
+        services: &mut dyn LocalRuntimeServices,
+    ) -> std::result::Result<LineagedBatch, ReportedLocalFailure> {
+        let mut recorder = FailureRecorder::default();
+        let result = self
+            .inner
+            .eval_bindings(
+                state,
+                ctx,
+                physical_rows,
+                selection,
+                services,
+                Some(&mut recorder),
+                OutputMode::Lineaged,
+            )
+            .and_then(RowCollector::into_lineaged);
+        result.map_err(|error| recorder.into_failure(error))
+    }
+}
+
+/// Publishes the already-owned root without a second collector or donor copy.
+/// Driver frames have been dropped, so the root is charged once as output.
+fn finish_numeric_output(
+    output: VectorValue,
+    rows: usize,
+    budget: &mut EvalBudget,
+) -> LocalResult<VectorValue> {
+    if output.eval_type() != EvalType::Int || output.len() != rows {
+        return Err(LocalError::InvalidBatch(
+            "numeric batch RPN returned an invalid Int result shape".into(),
+        ));
+    }
+    let bytes = vector_storage_bytes(&output, budget.mode());
+    budget.check_output(bytes, 0)?;
+    budget.set_output_bytes(bytes)?;
+    Ok(output)
+}
+
+impl LocalNumericBatchProgram {
+    /// Evaluates the checked SQL numeric batch domain once over the whole
+    /// borrowed selection. The original owned error is returned unchanged.
+    pub fn eval_with_bindings(
+        &mut self,
+        state: &mut LocalEvalState,
+        ctx: &mut EvalContext,
+        physical_rows: usize,
+        selection: &[usize],
+        services: &mut dyn LocalRuntimeServices,
+    ) -> LocalResult<VectorValue> {
+        self.eval_with_bindings_reported(state, ctx, physical_rows, selection, services)
+            .map_err(ReportedLocalFailure::into_error)
+    }
+
+    /// Uses the same single invocation with a fresh, failure-only recorder.
+    /// Pure preflight, resource and publication failures remain unsited; the
+    /// caller's warning count and stored warnings are never reset or replayed.
+    pub fn eval_with_bindings_reported(
+        &mut self,
+        state: &mut LocalEvalState,
+        ctx: &mut EvalContext,
+        physical_rows: usize,
+        selection: &[usize],
+        services: &mut dyn LocalRuntimeServices,
+    ) -> std::result::Result<VectorValue, ReportedLocalFailure> {
+        let mut recorder = FailureRecorder::default();
+        let result = self.eval_numeric_bindings(
+            state,
+            ctx,
+            physical_rows,
+            selection,
+            services,
+            &mut recorder,
+        );
+        result.map_err(|error| recorder.into_failure(error))
+    }
+
+    fn eval_numeric_bindings(
+        &mut self,
+        state: &mut LocalEvalState,
+        ctx: &mut EvalContext,
+        physical_rows: usize,
+        selection: &[usize],
+        services: &mut dyn LocalRuntimeServices,
+        recorder: &mut FailureRecorder,
+    ) -> LocalResult<VectorValue> {
+        self.inner
+            .validate_bindings_preflight(physical_rows, selection, services)?;
+        self.inner.check_entry(ProgramEntry::SqlNumericBatch)?;
+        if self.inner.host_catalog.is_some()
+            || self.inner.expression.checked_result_flow().is_some()
+        {
+            return Err(LocalError::InvalidSpec(
+                "numeric batch program carries host or result-lineage state".into(),
+            ));
+        }
+        // Bound selected occurrences, not the caller's physical row universe.
+        // Route validation above applies even when no values will be demanded.
+        let rows = selection.len();
+        if rows > BATCH_MAX_SIZE {
+            return Err(LocalError::ResourceLimit(
+                "numeric batch selection exceeds 1024 occurrences".into(),
+            ));
+        }
+        let mut budget = EvalBudget::exact(state.limits)?;
+        if rows == 0 {
+            return finish_numeric_output(
+                VectorValue::with_capacity(0, EvalType::Int),
+                0,
+                &mut budget,
+            );
+        }
+
+        let mut input = EvalInput::Bindings(services);
+        // Exactly one driver invocation. The driver owns all intermediate and
+        // root charges until it returns; there is no per-occurrence root loop.
+        let result = self.inner.expression.eval_with_input_numeric_batch(
+            ctx,
+            &self.inner.schema,
+            &mut input,
+            selection,
+            &mut budget,
+            Some(recorder),
+        )?;
+        let output = match result {
+            RpnStackNode::Scalar { value, .. } => {
+                let ScalarValue::Int(value) = value else {
+                    return Err(LocalError::InvalidBatch(
+                        "numeric batch scalar result is not Int".into(),
+                    ));
+                };
+                let minimum = int_min_storage_bytes(rows).ok_or_else(|| {
+                    LocalError::ResourceLimit("numeric batch output layout overflow".into())
+                })?;
+                budget.check_output(minimum, 0)?;
+                let mut output = VectorValue::with_capacity(rows, EvalType::Int);
+                // Requested rows are not an actual-capacity prediction. All
+                // Int/bitmap capacity is checked before filling reserved slots.
+                budget.check_output(vector_storage_bytes(&output, budget.mode()), 0)?;
+                for _ in 0..rows {
+                    output.push_int(*value);
+                }
+                output
+            }
+            RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Generated { physical_value },
+                ..
+            } => physical_value,
+            RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Ref { .. },
+                ..
+            } => {
+                return Err(LocalError::InvalidBatch(
+                    "numeric batch bindings returned a borrowed root".into(),
+                ));
+            }
+        };
+        finish_numeric_output(output, rows, &mut budget)
+    }
+}
+
+/// The fixed computed result identity, including for a NULL result. It is not
+/// the operand's metadata, a SQL return descriptor, or a control-lineage ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputedIntMetadata {
+    OwnSignedInt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComputedInt {
+    value: Option<i64>,
+}
+
+impl ComputedInt {
+    pub fn value(&self) -> Option<i64> {
+        self.value
+    }
+
+    pub fn into_option(self) -> Option<i64> {
+        self.value
+    }
+
+    pub fn metadata(&self) -> ComputedIntMetadata {
+        ComputedIntMetadata::OwnSignedInt
+    }
+}
+
+/// Checked retained storage for one worker. Inline bytes are separate so a
+/// caller does not charge them twice inside an idle Vec's allocated slots.
+/// Allocator rounding/bookkeeping and caller-owned pool allocations are not
+/// included. This is an admitted-boundary observation, not an allocator peak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkerStorage {
+    inline_bytes: usize,
+    owned_heap_bytes: usize,
+    total_bytes: usize,
+}
+
+impl WorkerStorage {
+    fn new(inline_bytes: usize, owned_heap_bytes: usize) -> LocalResult<Self> {
+        let total_bytes = inline_bytes
+            .checked_add(owned_heap_bytes)
+            .ok_or_else(evaluated_ascii_storage_overflow)?;
+        Ok(Self {
+            inline_bytes,
+            owned_heap_bytes,
+            total_bytes,
+        })
+    }
+
+    pub fn inline_bytes(&self) -> usize {
+        self.inline_bytes
+    }
+
+    pub fn owned_heap_bytes(&self) -> usize {
+        self.owned_heap_bytes
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+}
+
+// ACCOUNTING ONLY: the approved allocation-request extent proxy. January's
+// ArcInner source uses this representation; both supported pins require the
+// parent's isolated allocation-request probe. This does NOT assert the other
+// pin's private offsets or a portable Arc ABI. No pointer/offset access uses
+// this proxy. Re-review on standard-library/EvalConfig changes; January's
+// Atomic<usize> maps to AtomicUsize. No observed numeric byte count is
+// hardcoded.
+#[repr(C, align(2))]
+struct EvaluatedAsciiConfigAllocation {
+    _strong: AtomicUsize,
+    _weak: AtomicUsize,
+    _data: EvalConfig,
+}
+
+fn evaluated_ascii_storage_overflow() -> LocalError {
+    LocalError::ResourceLimit("evaluated ASCII worker storage overflow".into())
+}
+
+fn evaluated_ascii_owned_heap_bytes(
+    node_capacity: usize,
+    schema_capacity: usize,
+    metadata_bytes: usize,
+    warning_capacity: usize,
+) -> LocalResult<usize> {
+    node_capacity
+        .checked_mul(mem::size_of::<RpnExpressionNode>())
+        .and_then(|bytes| {
+            schema_capacity
+                .checked_mul(mem::size_of::<tipb::FieldType>())
+                .and_then(|schema| bytes.checked_add(schema))
+        })
+        .and_then(|bytes| bytes.checked_add(metadata_bytes))
+        .and_then(|bytes| bytes.checked_add(mem::size_of::<EvaluatedAsciiConfigAllocation>()))
+        .and_then(|bytes| {
+            warning_capacity
+                .checked_mul(mem::size_of::<tipb::Error>())
+                .and_then(|warnings| bytes.checked_add(warnings))
+        })
+        .ok_or_else(evaluated_ascii_storage_overflow)
+}
+
+fn evaluated_ascii_context_is_sealed(ctx: &EvalContext) -> bool {
+    let cfg = &ctx.cfg;
+    // The only config Arc is moved into this private context at construction.
+    // Its UTC enum and the remaining scalar config fields own no nested heap.
+    Arc::strong_count(cfg) == 1
+        && Arc::weak_count(cfg) == 0
+        && matches!(&cfg.tz, Tz::Name(tz) if *tz == chrono_tz::UTC)
+        && cfg.flag.is_empty()
+        && cfg.sql_mode.is_empty()
+        && cfg.max_warning_cnt == 0
+        && cfg.paging_size.is_none()
+        && cfg.max_keys_read.is_none()
+        && cfg.div_precision_increment == DEFAULT_DIV_FRAC_INCR
+        && !cfg.is_test
+        && ctx.warnings.warning_cnt == 0
+        && ctx.warnings.warnings.is_empty()
+}
+
+/// An exclusively owned, reusable ready-Bytes ASCII runtime. It is Send, not
+/// Sync, and exposes no program, context, services, native graph or mutable
+/// configuration. A caller may move idle workers through a synchronized owner;
+/// it must drop an unhealthy or unwinding worker rather than recycle it.
+///
+/// Per-call execution limits cover ready input and driver temporaries, NOT this
+/// persistent program/context/state. The caller separately reserves and charges
+/// worker/pool ownership. No operand, result or invocation borrow is cached.
+pub struct EvaluatedAsciiWorker {
+    program: LocalProgram,
+    state: LocalEvalState,
+    ctx: EvalContext,
+    witness: EvaluatedAsciiWitness,
+    max_worker_retained_bytes: usize,
+    accepted_storage: WorkerStorage,
+    poisoned: bool,
+}
+
+impl std::fmt::Debug for EvaluatedAsciiWorker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EvaluatedAsciiWorker")
+            .field("kernel_invocations", &self.kernel_invocations())
+            .field("healthy", &self.is_healthy())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Prepare only after the original frontend has produced a demanded ready
+/// value, under the caller's creating-worker reservation. This does not
+/// evaluate a kernel (not even a fake NULL), retain native descriptors, or make
+/// a SQL context. The private default/UTC configuration is justified only by
+/// ASCII's sealed context-free ABI; warning storage is disabled but its count
+/// is checked.
+pub fn prepare_evaluated_ascii(
+    cx: LocalCompileContext,
+    execution: ExecutionLimits,
+    max_worker_retained_bytes: usize,
+) -> LocalResult<EvaluatedAsciiWorker> {
+    let program = compile_evaluated_ascii(cx)?;
+    program.check_entry(ProgramEntry::EvaluatedAscii)?;
+    // Fully warm the fixed program's owned metadata BEFORE publication. These
+    // getters only inspect source structure; none dispatches an RPN function.
+    if program.expression.node_count() != 2
+        || program.expression.work_count() != 2
+        || program.expression.column_ref_count() != 1
+        || program.expression.referenced_column_offsets() != [0]
+    {
+        return Err(LocalError::InvalidSpec(
+            "evaluated ASCII compiled metadata differs from its fixed recipe".into(),
+        ));
+    }
+    let mut cfg = EvalConfig::new();
+    cfg.set_max_warning_cnt(0);
+    let mut worker = EvaluatedAsciiWorker {
+        program,
+        state: LocalEvalState::with_limits(execution),
+        ctx: EvalContext::new(Arc::new(cfg)),
+        witness: EvaluatedAsciiWitness::default(),
+        max_worker_retained_bytes,
+        accepted_storage: WorkerStorage::new(0, 0)?,
+        poisoned: false,
+    };
+    let storage = worker.retained_storage()?;
+    if storage.total_bytes() > max_worker_retained_bytes {
+        return Err(LocalError::ResourceLimit(
+            "evaluated ASCII worker retained storage exceeded".into(),
+        ));
+    }
+    worker.accepted_storage = storage;
+    Ok(worker)
+}
+
+impl EvaluatedAsciiWorker {
+    pub fn kernel_invocations(&self) -> u64 {
+        self.witness.invocations()
+    }
+
+    /// Includes sticky unwind/contract poison and unexpected retained-owner
+    /// changes, even when the new allocation would fit the configured maximum.
+    pub fn is_healthy(&self) -> bool {
+        self.retained_storage().is_ok_and(|storage| {
+            storage == self.accepted_storage
+                && storage.total_bytes() <= self.max_worker_retained_bytes
+        })
+    }
+
+    /// Observe ACTUAL current capacities without allocating a metadata cache or
+    /// returning a cached size. Healthy but externally fault-injected spare
+    /// capacity is observable; reuse still rejects any post-publication change.
+    /// A dirty/poisoned context is refused, never reported as a partial count.
+    pub fn retained_storage(&self) -> LocalResult<WorkerStorage> {
+        if self.poisoned {
+            return Err(LocalError::InvalidSpec(
+                "evaluated ASCII worker is poisoned".into(),
+            ));
+        }
+        self.observe_storage()
+    }
+
+    fn observe_storage(&self) -> LocalResult<WorkerStorage> {
+        self.program.check_entry(ProgramEntry::EvaluatedAscii)?;
+        if !evaluated_ascii_context_is_sealed(&self.ctx) {
+            return Err(LocalError::InvalidSpec(
+                "evaluated ASCII private context is not clean and sealed".into(),
+            ));
+        }
+        let bytes_type = evaluated_ascii_bytes_type();
+        let int_type = evaluated_ascii_int_type();
+        let [
+            RpnExpressionNode::ColumnRef { offset: 0 },
+            RpnExpressionNode::FnCall {
+                func_meta,
+                args_len: 1,
+                field_type,
+                metadata,
+            },
+        ] = self.program.expression.as_ref()
+        else {
+            return Err(LocalError::InvalidSpec(
+                "evaluated ASCII worker no longer owns its fixed recipe".into(),
+            ));
+        };
+        if self.program.host_catalog.is_some()
+            || self.program.expression.checked_result_flow().is_some()
+            || self.program.schema.as_slice() != std::slice::from_ref(&bytes_type)
+            || self.program.return_type() != &int_type
+            || field_type != &int_type
+            || func_meta.name != "ascii"
+            || !metadata.is::<()>()
+        {
+            return Err(LocalError::InvalidSpec(
+                "evaluated ASCII worker ownership invariants changed".into(),
+            ));
+        }
+        let metadata_bytes = self
+            .program
+            .expression
+            .retained_metadata_heap_bytes()
+            .ok_or_else(evaluated_ascii_storage_overflow)?;
+        if metadata_bytes == 0 {
+            return Err(LocalError::InvalidSpec(
+                "evaluated ASCII worker metadata was not prewarmed".into(),
+            ));
+        }
+        // Fresh scalar-only canonical descriptors are heap-free BY CONSTRUCTION,
+        // not because their values compare equal or serialize to a small size.
+        // There is no parse/clear/reuse/mutable descriptor escape. Unit Any owns
+        // no allocation. State and witness contain only inline scalar counters.
+        let owned_heap_bytes = evaluated_ascii_owned_heap_bytes(
+            self.program.expression.capacity(),
+            self.program.schema.capacity(),
+            metadata_bytes,
+            self.ctx.warnings.warnings.capacity(),
+        )?;
+        WorkerStorage::new(mem::size_of::<Self>(), owned_heap_bytes)
+    }
+
+    fn check_owner_footprint(&self, storage: WorkerStorage) -> LocalResult<()> {
+        if storage.total_bytes() > self.max_worker_retained_bytes {
+            return Err(LocalError::ResourceLimit(
+                "evaluated ASCII worker retained storage exceeded".into(),
+            ));
+        }
+        if storage != self.accepted_storage {
+            return Err(LocalError::InvalidSpec(
+                "evaluated ASCII retained ownership changed after publication".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn begin_invocation(&mut self) -> LocalResult<()> {
+        // Arm BEFORE any operation that could unwind. Only the normal checked
+        // exit below disarms it; a caller catching a panic cannot reuse us.
+        if self.poisoned {
+            return Err(LocalError::InvalidSpec(
+                "evaluated ASCII worker is poisoned".into(),
+            ));
+        }
+        self.poisoned = true;
+        self.check_owner_footprint(self.observe_storage()?)
+    }
+
+    /// Consume one already-coerced nullable byte buffer. Even NULL must enter
+    /// the official generated nullable wrapper. The computed result contains
+    /// only a nullable signed Int; original frontend return coercion stays out
+    /// of this worker and runs after its exclusive borrow has ended.
+    pub fn eval_one(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedInt> {
+        self.begin_invocation()?;
+        let result = self.eval_ready(bytes);
+        self.finish_invocation(result)
+    }
+
+    fn finish_invocation(&mut self, result: LocalResult<ComputedInt>) -> LocalResult<ComputedInt> {
+        // eval_ready has dropped both input and physical output on every normal
+        // Result exit. No warning reset, context rebuild or native replay occurs.
+        let postflight = self
+            .observe_storage()
+            .and_then(|storage| self.check_owner_footprint(storage));
+        match result {
+            Err(error) => {
+                // A cleanup/health refusal must never replace an already-owned
+                // primary error. It only prevents this worker from recycling.
+                if postflight.is_ok()
+                    && !matches!(
+                        &error,
+                        LocalError::InvalidSpec(_)
+                            | LocalError::InvalidBatch(_)
+                            | LocalError::BindingContract(_)
+                            | LocalError::HostContract(_)
+                    )
+                {
+                    self.poisoned = false;
+                }
+                Err(error)
+            }
+            Ok(value) => {
+                postflight?;
+                self.poisoned = false;
+                Ok(value)
+            }
+        }
+    }
+
+    fn eval_ready(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedInt> {
+        let input_bytes = bytes.as_ref().map_or(0, Vec::capacity);
+        let ready = ScalarValue::Bytes(bytes);
+        self.state.row = [0];
+        let mut budget = EvalBudget::exact(self.state.limits)?;
+        let result = self.program.expression.eval_with_ready_ascii(
+            &mut self.ctx,
+            &self.program.schema,
+            &ready,
+            &self.state.row,
+            &mut self.witness,
+            &mut budget,
+        )?;
+        let output = match result {
+            RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Generated { physical_value },
+                field_type,
+            } if field_type == &evaluated_ascii_int_type() => physical_value,
+            _ => {
+                return Err(LocalError::InvalidBatch(
+                    "evaluated ASCII requires an owned canonical Int result".into(),
+                ));
+            }
+        };
+        if output.eval_type() != EvalType::Int || output.len() != 1 {
+            return Err(LocalError::InvalidBatch(
+                "evaluated ASCII returned an invalid singleton Int result".into(),
+            ));
+        }
+        // TaskGuard is gone, but the call-local ready owner is STILL live.
+        // Check it alongside the actual output once before copying the i64.
+        budget.check_output(vector_storage_bytes(&output, budget.mode()), input_bytes)?;
+        let ScalarValueRef::Int(value) = output.get_scalar_ref(0) else {
+            unreachable!("the owned singleton carrier was checked")
+        };
+        let value = value.copied();
+        drop(output);
+        drop(ready);
+        budget.set_output_bytes(0)?;
+        Ok(ComputedInt { value })
+    }
+}
+
+#[cfg(test)]
+mod evaluated_ascii_tests {
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::Mutex,
+        thread,
+    };
+
+    use tidb_query_datatype::expr::{Flag, SqlMode};
+
+    use super::*;
+    use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    fn new_worker() -> EvaluatedAsciiWorker {
+        prepare_evaluated_ascii(
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_evaluated_ascii_worker_ownership_traits() {
+        static_assertions::assert_impl_all!(EvaluatedAsciiWorker: Send);
+        static_assertions::assert_not_impl_any!(EvaluatedAsciiWorker: Sync, Clone);
+        static_assertions::assert_impl_all!(ComputedInt: Copy, Send, Sync);
+        static_assertions::assert_impl_all!(WorkerStorage: Copy, Send, Sync);
+        type Owner = Arc<Mutex<Vec<EvaluatedAsciiWorker>>>;
+        static_assertions::assert_impl_all!(Owner: Send, Sync);
+    }
+
+    #[test]
+    fn test_evaluated_ascii_factory_fully_prewarms_without_invocation() {
+        let worker = new_worker();
+        let storage = worker.retained_storage().unwrap();
+        assert!(worker.is_healthy());
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(
+            worker
+                .program
+                .expression
+                .retained_metadata_heap_bytes()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(worker.program.expression.node_count(), 2);
+        assert_eq!(worker.program.expression.work_count(), 2);
+        assert_eq!(worker.program.expression.column_ref_count(), 1);
+        assert_eq!(worker.program.expression.referenced_column_offsets(), &[0]);
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        assert_eq!(worker.accepted_storage, storage);
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(evaluated_ascii_context_is_sealed(&worker.ctx));
+        assert_eq!(worker.ctx.cfg.max_warning_cnt, 0);
+        assert_eq!(worker.ctx.warnings.warning_cnt, 0);
+        assert!(worker.ctx.warnings.warnings.is_empty());
+        assert_eq!(
+            storage.inline_bytes(),
+            mem::size_of::<EvaluatedAsciiWorker>()
+        );
+        assert_eq!(
+            storage.total_bytes(),
+            storage.inline_bytes() + storage.owned_heap_bytes()
+        );
+    }
+
+    #[test]
+    fn test_evaluated_ascii_observer_does_not_warm_a_cold_cache() {
+        let mut worker = new_worker();
+        // Private fault injection invalidates metadata without changing nodes.
+        // An observation must refuse this cold published worker, not allocate.
+        let _: &mut [RpnExpressionNode] = worker.program.expression.as_mut();
+        assert_eq!(
+            worker.program.expression.retained_metadata_heap_bytes(),
+            Some(0)
+        );
+        assert!(matches!(
+            worker.retained_storage(),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        assert_eq!(
+            worker.program.expression.retained_metadata_heap_bytes(),
+            Some(0)
+        );
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(!worker.is_healthy());
+    }
+
+    #[test]
+    fn test_evaluated_ascii_observer_measures_actual_spare_capacities() {
+        let mut worker = new_worker();
+        let before = worker.retained_storage().unwrap();
+        worker.program.expression.reserve(17);
+        worker.program.schema.reserve(11);
+        worker.ctx.warnings.warnings.reserve(13);
+        // Mutation above intentionally invalidated the cache. Rewarm explicitly
+        // in this private test, never inside the observation API.
+        assert_eq!(worker.program.expression.node_count(), 2);
+        assert_eq!(worker.program.expression.work_count(), 2);
+        assert_eq!(worker.program.expression.referenced_column_offsets(), &[0]);
+        let storage = worker.retained_storage().unwrap();
+        let expected = worker.program.expression.capacity() * mem::size_of::<RpnExpressionNode>()
+            + worker.program.schema.capacity() * mem::size_of::<tipb::FieldType>()
+            + worker
+                .program
+                .expression
+                .retained_metadata_heap_bytes()
+                .unwrap()
+            + mem::size_of::<EvaluatedAsciiConfigAllocation>()
+            + worker.ctx.warnings.warnings.capacity() * mem::size_of::<tipb::Error>();
+        assert_eq!(storage.owned_heap_bytes(), expected);
+        assert!(storage.owned_heap_bytes() > before.owned_heap_bytes());
+        assert_eq!(worker.program.expression.len(), 2);
+        assert_eq!(worker.program.schema.len(), 1);
+        assert!(worker.ctx.warnings.warnings.is_empty());
+        assert_eq!(worker.ctx.warnings.warning_cnt, 0);
+        assert_eq!(worker.accepted_storage, before);
+        assert!(!worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+
+    #[test]
+    fn test_evaluated_ascii_owner_limit_is_separate_from_execution() {
+        let baseline = new_worker().retained_storage().unwrap();
+        for limit in [0, baseline.total_bytes() - 1] {
+            assert!(matches!(
+                prepare_evaluated_ascii(
+                    LocalCompileContext::default(),
+                    ExecutionLimits::default(),
+                    limit,
+                ),
+                Err(LocalError::ResourceLimit(_))
+            ));
+        }
+        let mut worker = prepare_evaluated_ascii(
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_retained_bytes: 0,
+                ..ExecutionLimits::default()
+            },
+            baseline.total_bytes(),
+        )
+        .unwrap();
+        assert_eq!(worker.retained_storage().unwrap(), baseline);
+        assert!(matches!(
+            worker.eval_one(None),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        // An execution refusal did not change owner storage or rebuild context.
+        assert_eq!(worker.retained_storage().unwrap(), baseline);
+    }
+
+    #[test]
+    fn test_evaluated_ascii_storage_checked_overflow_without_allocations() {
+        let storage = WorkerStorage::new(7, 9).unwrap();
+        assert_eq!(storage.inline_bytes(), 7);
+        assert_eq!(storage.owned_heap_bytes(), 9);
+        assert_eq!(storage.total_bytes(), 16);
+        for (inline, heap) in [(usize::MAX, 1), (1, usize::MAX)] {
+            assert!(matches!(
+                WorkerStorage::new(inline, heap),
+                Err(LocalError::ResourceLimit(_))
+            ));
+        }
+        for (nodes, schema, metadata, warnings) in [
+            (usize::MAX, 0, 0, 0),
+            (0, usize::MAX, 0, 0),
+            (0, 0, usize::MAX, 0),
+            (0, 0, 0, usize::MAX),
+        ] {
+            assert!(matches!(
+                evaluated_ascii_owned_heap_bytes(nodes, schema, metadata, warnings),
+                Err(LocalError::ResourceLimit(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn test_evaluated_ascii_reuses_program_context_and_computed_identity() {
+        let mut worker = new_worker();
+        let storage = worker.retained_storage().unwrap();
+        let cfg = Arc::as_ptr(&worker.ctx.cfg);
+        let nodes = worker.program.expression.as_ptr();
+        let refs = worker
+            .program
+            .expression
+            .referenced_column_offsets()
+            .as_ptr();
+        let cases = [
+            (None, None),
+            (Some(vec![]), Some(0)),
+            (Some(vec![0, b'x']), Some(0)),
+            (Some(vec![0xff, 0xfe]), Some(255)),
+            (Some("你好".as_bytes().to_vec()), Some(228)),
+            (Some(b"2".to_vec()), Some(50)),
+        ];
+        for (index, (input, expected)) in cases.into_iter().enumerate() {
+            worker.state.row = [99];
+            let value = worker.eval_one(input).unwrap();
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(worker.state.row, [0]);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert_eq!(Arc::as_ptr(&worker.ctx.cfg), cfg);
+            assert_eq!(worker.program.expression.as_ptr(), nodes);
+            assert_eq!(
+                worker
+                    .program
+                    .expression
+                    .referenced_column_offsets()
+                    .as_ptr(),
+                refs
+            );
+        }
+    }
+
+    #[test]
+    fn test_evaluated_ascii_count_only_warning_poison_is_not_reset() {
+        let mut worker = new_worker();
+        worker.ctx.warnings.warning_cnt = 1;
+        assert!(worker.ctx.warnings.warnings.is_empty());
+        assert!(!worker.is_healthy());
+        assert!(worker.retained_storage().is_err());
+        assert!(matches!(
+            worker.eval_one(None),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.ctx.warnings.warning_cnt, 1);
+        assert!(worker.ctx.warnings.warnings.is_empty());
+        assert!(worker.poisoned);
+        // The caller must now drop this worker, never reset/recycle it.
+    }
+
+    #[test]
+    fn test_evaluated_ascii_detail_only_warning_poison_is_not_reset() {
+        let mut worker = new_worker();
+        let mut detail = tipb::Error::default();
+        detail.set_msg("unexpected private warning".into());
+        worker.ctx.warnings.warnings.push(detail);
+        assert_eq!(worker.ctx.warnings.warning_cnt, 0);
+        assert!(!worker.is_healthy());
+        assert!(worker.retained_storage().is_err());
+        assert!(matches!(
+            worker.eval_one(Some(b"x".to_vec())),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.ctx.warnings.warning_cnt, 0);
+        assert_eq!(worker.ctx.warnings.warnings.len(), 1);
+        assert_eq!(
+            worker.ctx.warnings.warnings[0].get_msg(),
+            "unexpected private warning"
+        );
+        assert!(worker.poisoned);
+    }
+
+    #[test]
+    fn test_evaluated_ascii_config_seal_and_exclusive_arc() {
+        let mutations: [fn(&mut EvalConfig); 8] = [
+            |cfg| cfg.tz = Tz::from_offset(0).unwrap(),
+            |cfg| cfg.flag = Flag::TRUNCATE_AS_WARNING,
+            |cfg| cfg.sql_mode = SqlMode::STRICT_ALL_TABLES,
+            |cfg| cfg.max_warning_cnt = 1,
+            |cfg| cfg.paging_size = Some(1),
+            |cfg| cfg.max_keys_read = Some(1),
+            |cfg| cfg.div_precision_increment ^= 1,
+            |cfg| cfg.is_test = true,
+        ];
+        for mutate in mutations {
+            let mut worker = new_worker();
+            mutate(Arc::get_mut(&mut worker.ctx.cfg).unwrap());
+            assert!(!worker.is_healthy());
+            assert!(worker.retained_storage().is_err());
+            assert!(matches!(
+                worker.eval_one(None),
+                Err(LocalError::InvalidSpec(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.poisoned);
+        }
+        let mut worker = new_worker();
+        let alias = Arc::clone(&worker.ctx.cfg);
+        assert!(!worker.is_healthy());
+        assert!(worker.retained_storage().is_err());
+        assert!(matches!(
+            worker.eval_one(None),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        drop(alias);
+        assert!(worker.poisoned);
+        assert!(!worker.is_healthy());
+        assert_eq!(worker.kernel_invocations(), 0);
+    }
+
+    #[test]
+    fn test_evaluated_ascii_empty_ready_buffer_charges_capacity() {
+        let input = Vec::<u8>::with_capacity(4096);
+        assert!(input.is_empty());
+        let limit = input.capacity() - 1;
+        let mut worker = prepare_evaluated_ascii(
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_retained_bytes: limit,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_one(Some(input)),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        // No large input buffer stayed in the worker after refusal.
+        worker.state.limits = ExecutionLimits::default();
+        assert_eq!(worker.eval_one(Some(vec![])).unwrap().value(), Some(0));
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+
+    #[test]
+    fn test_evaluated_ascii_caught_unwind_keeps_sticky_poison() {
+        let mut worker = new_worker();
+        // Exercise the exact admission/poison boundary used by eval_one, without
+        // replacing a kernel or installing a production failure callback.
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            worker.begin_invocation().unwrap();
+            panic!("unwind after evaluated ASCII invocation admission");
+        }));
+        assert!(panic.is_err());
+        assert!(worker.poisoned);
+        assert!(evaluated_ascii_context_is_sealed(&worker.ctx));
+        assert!(!worker.is_healthy());
+        assert!(worker.retained_storage().is_err());
+        assert!(matches!(
+            worker.eval_one(None),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+    }
+
+    #[test]
+    fn test_evaluated_ascii_postflight_preserves_owned_primary_error() {
+        let faults: [fn(&mut EvaluatedAsciiWorker); 2] = [
+            |worker| worker.ctx.warnings.warning_cnt = 1,
+            |worker| worker.ctx.warnings.warnings.reserve(1),
+        ];
+        for fault in faults {
+            let mut worker = new_worker();
+            worker.begin_invocation().unwrap();
+            let primary: tidb_query_common::Error =
+                other_err!("original evaluated ASCII primary error");
+            let identity = primary.0.as_ref() as *const _;
+            fault(&mut worker);
+            let error = worker
+                .finish_invocation(Err(LocalError::Evaluation(primary)))
+                .unwrap_err();
+            let LocalError::Evaluation(primary) = error else {
+                panic!("postflight replaced the original evaluation error");
+            };
+            assert!(std::ptr::eq(primary.0.as_ref(), identity));
+            assert!(worker.poisoned);
+            assert!(!worker.is_healthy());
+            assert!(worker.retained_storage().is_err());
+            assert_eq!(worker.kernel_invocations(), 0);
+
+            let mut success = new_worker();
+            success.begin_invocation().unwrap();
+            fault(&mut success);
+            assert!(matches!(
+                success.finish_invocation(Ok(ComputedInt { value: Some(7) })),
+                Err(LocalError::InvalidSpec(_))
+            ));
+            assert!(success.poisoned);
+            assert!(!success.is_healthy());
+            assert_eq!(success.kernel_invocations(), 0);
+        }
+    }
+
+    #[test]
+    fn test_evaluated_ascii_owner_growth_refused_even_below_maximum() {
+        let mut worker = new_worker();
+        let accepted = worker.retained_storage().unwrap();
+        worker.ctx.warnings.warnings.reserve(1);
+        let actual = worker.retained_storage().unwrap();
+        assert!(actual.owned_heap_bytes() > accepted.owned_heap_bytes());
+        assert!(actual.total_bytes() < worker.max_worker_retained_bytes);
+        assert_eq!(worker.accepted_storage, accepted);
+        assert!(!worker.is_healthy());
+        assert!(matches!(
+            worker.eval_one(None),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        assert!(worker.poisoned);
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.ctx.warnings.warnings.is_empty());
+        assert_eq!(worker.ctx.warnings.warning_cnt, 0);
+        assert!(worker.ctx.warnings.warnings.capacity() > 0);
+    }
+
+    #[test]
+    fn test_evaluated_ascii_wrong_compiled_entry_refused_before_invocation() {
+        let mut worker = new_worker();
+        worker.program = compile_local(
+            &LocalExpr::Constant {
+                value: ScalarValue::Int(Some(7)),
+                field_type: evaluated_ascii_int_type(),
+                literal_kind: LiteralKind::Typed,
+            },
+            &[],
+            LocalCompileContext::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            worker.eval_one(None),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.poisoned);
+    }
+
+    #[test]
+    fn test_evaluated_ascii_idle_slots_and_active_owner_charged_once() {
+        let mut idle = Vec::with_capacity(3);
+        idle.push(new_worker());
+        let storage = idle[0].retained_storage().unwrap();
+        let slots = idle.capacity() * mem::size_of::<EvaluatedAsciiWorker>();
+        let parked = slots + storage.owned_heap_bytes();
+        let mut active = idle.pop().unwrap();
+        assert!(idle.is_empty());
+        assert_eq!(idle.capacity() * storage.inline_bytes(), slots);
+        // Popping leaves the Vec's slots allocated. The active worker now
+        // occupies separate inline storage as well as its owned heap.
+        assert_eq!(
+            slots
+                + idle
+                    .iter()
+                    .map(|w| w.retained_storage().unwrap().owned_heap_bytes())
+                    .sum::<usize>()
+                + active.retained_storage().unwrap().total_bytes(),
+            parked + storage.inline_bytes()
+        );
+        assert_eq!(
+            active.eval_one(Some(vec![0xff])).unwrap().value(),
+            Some(255)
+        );
+        assert_eq!(active.retained_storage().unwrap(), storage);
+        assert_eq!(active.kernel_invocations(), 1);
+        idle.push(active);
+        assert_eq!(
+            idle.capacity() * storage.inline_bytes()
+                + idle
+                    .iter()
+                    .map(|w| w.retained_storage().unwrap().owned_heap_bytes())
+                    .sum::<usize>(),
+            parked
+        );
+    }
+
+    #[test]
+    #[ignore = "global body delta: run this exact test alone, never with other ASCII tests"]
+    fn test_evaluated_ascii_wrapper_body_origin_isolated() {
+        let before = crate::impl_string::ascii_test_body_invocations();
+        let mut oversized = Vec::with_capacity(4096);
+        oversized.push(b'x');
+        let mut refused = prepare_evaluated_ascii(
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_retained_bytes: oversized.capacity() - 1,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        assert!(matches!(
+            refused.eval_one(Some(oversized)),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(refused.kernel_invocations(), 0);
+        assert_eq!(crate::impl_string::ascii_test_body_invocations(), before);
+        assert!(refused.is_healthy());
+        drop(refused);
+
+        let mut worker = new_worker();
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(crate::impl_string::ascii_test_body_invocations(), before);
+        assert_eq!(worker.eval_one(None).unwrap().value(), None);
+        assert_eq!(worker.kernel_invocations(), 1);
+        // The actual nullable wrapper ran; only its non-null body was skipped.
+        assert_eq!(crate::impl_string::ascii_test_body_invocations(), before);
+        for (input, expected) in [(vec![], 0), (vec![0], 0), (vec![0xff], 255)] {
+            assert_eq!(
+                worker.eval_one(Some(input)).unwrap().value(),
+                Some(expected)
+            );
+        }
+        assert_eq!(worker.kernel_invocations(), 4);
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                // Each thread owns its worker; no Arc<non-Sync runtime> or
+                // input reference crosses an invocation or enters an idle slot.
+                thread::spawn(|| {
+                    let mut worker = new_worker();
+                    let storage = worker.retained_storage().unwrap();
+                    assert_eq!(worker.eval_one(None).unwrap().value(), None);
+                    assert_eq!(worker.eval_one(Some(vec![b'A'])).unwrap().value(), Some(65));
+                    assert_eq!(worker.kernel_invocations(), 2);
+                    assert_eq!(worker.retained_storage().unwrap(), storage);
+                    worker
+                })
+            })
+            .collect();
+        for thread in threads {
+            assert!(thread.join().unwrap().is_healthy());
+        }
+        assert_eq!(
+            crate::impl_string::ascii_test_body_invocations().checked_sub(before),
+            Some(5)
+        );
+    }
+}

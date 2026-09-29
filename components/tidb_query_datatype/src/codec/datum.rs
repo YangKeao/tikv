@@ -16,7 +16,7 @@ use mysql::VectorFloat32;
 use tikv_util::{codec::BytesSlice, escape};
 
 use super::{
-    Result,
+    Error, Result,
     mysql::{
         self, DEFAULT_FSP, Decimal, DecimalDecoder, DecimalEncoder, Duration, Enum, Json,
         JsonDecoder, JsonEncoder, MAX_FSP, PathExpression, Set, Time, VectorFloat32Decoder,
@@ -65,6 +65,43 @@ pub enum Datum {
     Set(Set),
     Min,
     Max,
+}
+
+// Keep RESULT formatting in Decimal's existing Display implementation. This
+// sink changes only allocation failure at this already-fallible Datum boundary;
+// it neither duplicates the formatter nor substitutes STORAGE text semantics.
+#[derive(Default)]
+struct DecimalDisplayText {
+    text: String,
+    allocation_failed: bool,
+}
+
+impl fmt::Write for DecimalDisplayText {
+    fn write_str(&mut self, chunk: &str) -> fmt::Result {
+        if self.text.try_reserve(chunk.len()).is_err() {
+            self.allocation_failed = true;
+            return Err(fmt::Error);
+        }
+        // The reservation above covers this exact append, including checked
+        // length arithmetic. Partial output stays private on any failure.
+        self.text.push_str(chunk);
+        Ok(())
+    }
+}
+
+fn try_decimal_display_text(value: &Decimal) -> Result<String> {
+    let mut sink = DecimalDisplayText::default();
+    if fmt::write(&mut sink, format_args!("{}", value)).is_err() {
+        let message = if sink.allocation_failed {
+            "Decimal result text allocation failed"
+        } else {
+            "Decimal result text formatting failed"
+        };
+        // Error construction itself can allocate: this is not sustained-OOM
+        // recovery, an allocator peak/quota, or a SQL numeric disposition.
+        return Err(Error::InvalidDataType(message.to_owned()));
+    }
+    Ok(sink.text)
 }
 
 impl Datum {
@@ -408,7 +445,7 @@ impl Datum {
             Datum::Bytes(ref bs) => String::from_utf8(bs.to_vec())?,
             Datum::Time(t) => format!("{}", t),
             Datum::Dur(ref d) => format!("{}", d),
-            Datum::Dec(ref d) => format!("{}", d),
+            Datum::Dec(ref d) => return try_decimal_display_text(d),
             Datum::Json(ref d) => d.to_string_value(),
             Datum::Enum(ref e) => e.to_string_value(),
             Datum::Set(ref s) => s.to_string_value(),
@@ -1014,6 +1051,16 @@ pub trait DatumEncoder:
                     self.write_u8(DECIMAL_FLAG)?;
                     // FIXME: prec and frac should come from field type?
                     let (prec, frac) = d.prec_and_frac();
+                    let prec = u8::try_from(prec).map_err(|_| {
+                        Error::InvalidDataType(
+                            "Decimal precision exceeds the legacy codec's u8 field".to_owned(),
+                        )
+                    })?;
+                    let frac = u8::try_from(frac).map_err(|_| {
+                        Error::InvalidDataType(
+                            "Decimal scale exceeds the legacy codec's u8 field".to_owned(),
+                        )
+                    })?;
                     self.write_decimal(d, prec, frac)?;
                 }
                 Datum::Json(ref j) => {
@@ -1183,6 +1230,58 @@ mod tests {
         codec::mysql::{Decimal, Duration, MAX_FSP, Time},
         expr::{EvalConfig, EvalContext},
     };
+
+    // Bounded characterization of the existing RESULT Display contract. These
+    // are not allocation-failure tests; the isolated target-call probe owns RED.
+    #[test]
+    fn test_decimal_result_text_preserves_raw_display_contract() {
+        for literal in ["0.00", "-0.00", "12.340", "-12.340"] {
+            let value = Decimal::from_str(literal).unwrap();
+            let mut raw = Vec::new();
+            raw.write_decimal_to_chunk(&value).unwrap();
+            if literal.starts_with('-') {
+                raw[3] = 1;
+            }
+            // An initialized inactive word is physical state, not logical parts.
+            raw[36..40].copy_from_slice(&42u32.to_ne_bytes());
+            for visible in [0, 1, 2, 3, 30, 31, 127, 128, 255] {
+                raw[2] = visible;
+                let value = raw.as_slice().read_decimal_from_chunk().unwrap();
+                let expected = format!("{}", value);
+                let datum = Datum::Dec(value);
+                let actual = datum.to_string().unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(datum.clone().into_string().unwrap(), expected);
+                let Datum::Dec(value) = &datum else {
+                    unreachable!()
+                };
+                let mut after = Vec::new();
+                after.write_decimal_to_chunk(value).unwrap();
+                assert_eq!(after, raw);
+                println!(
+                    "K_RESULT literal={literal} visible={visible} text={actual:?} cell={after:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_decimal_result_text_json_key_and_other_datums() {
+        let key = Datum::Dec(Decimal::from_str("12.340").unwrap());
+        let json = mysql::json::json_object(vec![key, Datum::I64(7)]).unwrap();
+        assert_eq!(json, Json::from_str(r#"{"12.340":7}"#).unwrap());
+        for (datum, expected) in [
+            (Datum::I64(-7), "-7"),
+            (Datum::U64(7), "7"),
+            (Datum::F64(1.25), "1.25"),
+            (Datum::Bytes(b"raw".to_vec()), "raw"),
+        ] {
+            assert_eq!(datum.to_string().unwrap(), expected);
+            assert_eq!(datum.into_string().unwrap(), expected);
+        }
+        assert!(Datum::Null.to_string().is_err());
+        assert!(Datum::Bytes(vec![0xff]).to_string().is_err());
+    }
 
     fn same_type(l: &Datum, r: &Datum) -> bool {
         match (l, r) {

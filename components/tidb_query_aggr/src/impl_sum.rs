@@ -217,7 +217,11 @@ where
 
     #[inline]
     fn push_result(&self, _ctx: &mut EvalContext, target: &mut [VectorValue]) -> Result<()> {
-        let result = if self.has_value { Some(self.sum) } else { None };
+        let result = if self.has_value {
+            Some(self.sum.clone())
+        } else {
+            None
+        };
 
         target[0].push(result);
         Ok(())
@@ -294,7 +298,11 @@ where
 
     #[inline]
     fn push_result(&self, _ctx: &mut EvalContext, target: &mut [VectorValue]) -> Result<()> {
-        let result = if self.has_value { Some(self.sum) } else { None };
+        let result = if self.has_value {
+            Some(self.sum.clone())
+        } else {
+            None
+        };
 
         target[0].push(result);
         Ok(())

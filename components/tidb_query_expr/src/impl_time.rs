@@ -25,7 +25,6 @@ use tidb_query_datatype::{
     },
     expr::{EvalContext, SqlMode},
 };
-use tipb::{Expr, ExprType};
 
 use crate::RpnFnCallExtra;
 
@@ -924,25 +923,26 @@ pub struct AddSubDateMeta {
     interval_decimal: isize,
 }
 
-fn build_add_sub_date_meta(expr: &mut Expr) -> Result<AddSubDateMeta> {
-    let children = expr.mut_children();
+fn build_add_sub_date_meta(expr: &mut crate::types::function::CallBuild) -> Result<AddSubDateMeta> {
+    let children = expr.args();
     if children.len() != 3 {
         return Err(box_err!("wrong add/sub_date expr size {}", children.len()));
     }
-    let unit_str = match children[2].get_tp() {
-        ExprType::Bytes | ExprType::String => {
-            std::str::from_utf8(children[2].get_val()).map_err(Error::Encoding)?
-        }
-        _ => return Err(box_err!("unknown unit type {:?}", children[2].get_tp())),
+    let Some(unit_bytes) = children[2].constant_bytes() else {
+        return Err(box_err!(
+            "unknown unit type {}",
+            children[2].source_type_name()
+        ));
     };
+    let unit_str = std::str::from_utf8(unit_bytes).map_err(Error::Encoding)?;
     let unit = IntervalUnit::from_str(unit_str)?;
     let is_clock_unit = unit.is_clock_unit();
     let interval_unsigned = children[1]
-        .get_field_type()
+        .field_type()
         .as_accessor()
         .flag()
         .contains(FieldTypeFlag::UNSIGNED);
-    let interval_decimal = children[1].get_field_type().decimal();
+    let interval_decimal = children[1].field_type().decimal();
 
     Ok(AddSubDateMeta {
         unit,
@@ -1528,7 +1528,7 @@ pub fn from_unixtime_1_arg(
     extra: &RpnFnCallExtra,
     arg0: &Decimal,
 ) -> Result<Option<DateTime>> {
-    eval_from_unixtime(ctx, extra.ret_field_type.get_decimal() as i8, *arg0)
+    eval_from_unixtime(ctx, extra.ret_field_type.get_decimal() as i8, arg0.clone())
 }
 
 #[rpn_fn(capture = [ctx, extra])]
@@ -1539,7 +1539,7 @@ pub fn from_unixtime_2_arg(
     arg0: &Decimal,
     arg1: BytesRef,
 ) -> Result<Option<Bytes>> {
-    let t = eval_from_unixtime(ctx, extra.ret_field_type.get_decimal() as i8, *arg0)?;
+    let t = eval_from_unixtime(ctx, extra.ret_field_type.get_decimal() as i8, arg0.clone())?;
     match t {
         Some(t) => {
             let res = t.date_format(std::str::from_utf8(arg1).map_err(Error::Encoding)?)?;
@@ -1735,20 +1735,21 @@ pub fn unix_timestamp_decimal(
     Ok(Some(res))
 }
 
-fn build_timestamp_diff_meta(expr: &mut Expr) -> Result<IntervalUnit> {
-    let children = expr.mut_children();
+fn build_timestamp_diff_meta(expr: &mut crate::types::function::CallBuild) -> Result<IntervalUnit> {
+    let children = expr.args();
     if children.len() != 3 {
         return Err(box_err!(
             "wrong timestamp_diff expr size {}",
             children.len()
         ));
     }
-    let unit_str = match children[0].get_tp() {
-        ExprType::Bytes | ExprType::String => {
-            std::str::from_utf8(children[0].get_val()).map_err(Error::Encoding)?
-        }
-        _ => return Err(box_err!("unknown unit type {:?}", children[0].get_tp())),
+    let Some(unit_bytes) = children[0].constant_bytes() else {
+        return Err(box_err!(
+            "unknown unit type {}",
+            children[0].source_type_name()
+        ));
     };
+    let unit_str = std::str::from_utf8(unit_bytes).map_err(Error::Encoding)?;
     let unit = IntervalUnit::from_str(unit_str)?;
     if !unit.is_valid_for_timestamp() {
         return Err(box_err!("wrong unit {:?} for timestamp_diff", unit));

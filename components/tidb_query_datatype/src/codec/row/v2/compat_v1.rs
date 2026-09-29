@@ -243,7 +243,7 @@ mod tests {
         ];
         let mut ctx = EvalContext::default();
         for value in cases {
-            let col = Column::new(1, value).with_tp(FieldTypeTp::NewDecimal);
+            let col = Column::new(1, value.clone()).with_tp(FieldTypeTp::NewDecimal);
             let buf = encode_to_v1_compatible(&mut ctx, &col);
             let got: Decimal = buf.decode(col.ft(), &mut ctx).unwrap().unwrap();
             assert_eq!(value, got);

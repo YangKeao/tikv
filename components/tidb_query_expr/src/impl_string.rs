@@ -208,9 +208,23 @@ pub fn concat_ws(args: &[Option<BytesRef>]) -> Result<Option<Bytes>> {
     }
 }
 
+// Observed only by an isolated test that joins all of its workers. Ordinary
+// parallel tests must not assert deltas of this process-wide test-only counter.
+#[cfg(test)]
+static ASCII_TEST_BODY_INVOCATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn ascii_test_body_invocations() -> u64 {
+    ASCII_TEST_BODY_INVOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[rpn_fn]
 #[inline]
 pub fn ascii(arg: BytesRef) -> Result<Option<i64>> {
+    #[cfg(test)]
+    ASCII_TEST_BODY_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let result = match arg.is_empty() {
         true => 0,
         false => i64::from(arg[0]),
@@ -706,12 +720,12 @@ pub fn elt(raw_args: &[ScalarValueRef]) -> Result<Option<Bytes>> {
 }
 
 /// validate the arguments are `(Option<&Int>, &[Option<BytesRef>)])`
-fn elt_validator(expr: &tipb::Expr) -> Result<()> {
-    let children = expr.get_children();
+fn elt_validator(expr: &crate::types::function::CallShape) -> Result<()> {
+    let children = expr.args();
     assert!(children.len() >= 2);
-    super::function::validate_expr_return_type(&children[0], EvalType::Int)?;
+    super::function::validate_field_type(children[0].field_type(), EvalType::Int)?;
     for child in children.iter().skip(1) {
-        super::function::validate_expr_return_type(child, EvalType::Bytes)?;
+        super::function::validate_field_type(child.field_type(), EvalType::Bytes)?;
     }
     Ok(())
 }

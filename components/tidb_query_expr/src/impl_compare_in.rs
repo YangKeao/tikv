@@ -61,6 +61,20 @@ impl<C: Collator> InByHash for CollationAwareBytesInByHash<C> {
 
 pub trait Extract: Sized {
     fn extract(expr_tp: ExprType, val: Vec<u8>, field_type: &FieldType) -> Result<Self>;
+    fn extract_local(value: &ScalarValue) -> Result<Self>;
+}
+
+// Typed construction projects an existing value, never encodes it as a wire
+// literal. Wire decoding below deliberately retains its legacy error policy.
+macro_rules! extract_local {
+    ($variant:ident) => {
+        fn extract_local(value: &ScalarValue) -> Result<Self> {
+            match value {
+                ScalarValue::$variant(Some(value)) => Ok(value.clone()),
+                _ => Err(other_err!("Invalid typed IN key: {:?}", value.eval_type())),
+            }
+        }
+    };
 }
 
 #[inline]
@@ -73,6 +87,7 @@ fn type_error(eval_type: EvalType, expr_type: ExprType) -> Error {
 }
 
 impl Extract for Int {
+    extract_local!(Int);
     #[inline]
     fn extract(expr_tp: ExprType, val: Vec<u8>, _field_type: &FieldType) -> Result<Self> {
         if expr_tp == ExprType::Int64 {
@@ -94,6 +109,7 @@ impl Extract for Int {
 }
 
 impl Extract for Real {
+    extract_local!(Real);
     #[inline]
     fn extract(expr_tp: ExprType, val: Vec<u8>, _field_type: &FieldType) -> Result<Self> {
         if expr_tp != ExprType::Float32 && expr_tp != ExprType::Float64 {
@@ -108,6 +124,7 @@ impl Extract for Real {
 }
 
 impl Extract for Bytes {
+    extract_local!(Bytes);
     #[inline]
     fn extract(expr_tp: ExprType, val: Vec<u8>, field_type: &FieldType) -> Result<Self> {
         match expr_tp {
@@ -125,6 +142,7 @@ impl Extract for Bytes {
 }
 
 impl Extract for Decimal {
+    extract_local!(Decimal);
     #[inline]
     fn extract(expr_tp: ExprType, val: Vec<u8>, _field_type: &FieldType) -> Result<Self> {
         if expr_tp != ExprType::MysqlDecimal {
@@ -140,6 +158,7 @@ impl Extract for Decimal {
 }
 
 impl Extract for Duration {
+    extract_local!(Duration);
     #[inline]
     fn extract(expr_tp: ExprType, val: Vec<u8>, _field_type: &FieldType) -> Result<Self> {
         if expr_tp != ExprType::MysqlDuration {
@@ -291,52 +310,55 @@ pub fn compare_in_by_hash_bytes<C: Collator>(
     }
 }
 
-fn init_compare_in_data<T: InByHash>(expr: &mut Expr) -> Result<CompareInMeta<T::StoreKey>> {
+fn init_compare_in_data<T: InByHash>(
+    expr: &mut crate::types::function::CallBuild,
+) -> Result<CompareInMeta<T::StoreKey>> {
     let mut lookup_map = HashMap::new();
     let mut has_null = false;
-    let children = expr.mut_children();
+    let children = expr.args();
     assert!(!children.is_empty());
     let mut unsigned_flags = vec![false; children.len()];
     unsigned_flags[0] = children[0]
-        .get_field_type()
+        .field_type()
         .as_accessor()
         .flag()
         .contains(FieldTypeFlag::UNSIGNED);
 
     let n = children.len();
+    let mut retained: Vec<_> = (0..n).collect();
     let mut tail_index = n - 1;
-    // try to evaluate and remove all constant nodes except args[0].
+    // Preserve the legacy reverse-scan layout without mutating the source tree.
     for i in (1..n).rev() {
-        let tree_node = &mut children[i];
-        let mut is_constant = true;
-        let is_unsigned = tree_node
-            .get_field_type()
+        let arg = &children[i];
+        let is_constant = !arg.is_dynamic();
+        let is_unsigned = arg
+            .field_type()
             .as_accessor()
             .flag()
             .contains(FieldTypeFlag::UNSIGNED);
         unsigned_flags[i] = is_unsigned;
-        match tree_node.get_tp() {
-            ExprType::ScalarFunc | ExprType::ColumnRef => {
-                is_constant = false;
-            }
-            ExprType::Null => {
-                has_null = true;
-            }
-            expr_type => {
-                let val =
-                    T::Key::extract(expr_type, tree_node.take_val(), tree_node.get_field_type())?;
-                let val = T::map(val)?;
-                lookup_map.insert(val, is_unsigned);
-            }
+        if arg.is_null_literal() {
+            has_null = true;
+        } else if is_constant {
+            let val = if let Some((tp, bytes)) = arg.wire_literal() {
+                T::Key::extract(tp, bytes.to_vec(), arg.field_type())?
+            } else {
+                T::Key::extract_local(
+                    arg.scalar_literal()
+                        .ok_or_else(|| other_err!("Missing IN literal"))?,
+                )?
+            };
+            lookup_map.insert(T::map(val)?, is_unsigned);
         }
         if is_constant {
-            children.as_mut_slice().swap(i, tail_index);
+            retained.swap(i, tail_index);
             unsigned_flags.swap(i, tail_index);
             tail_index -= 1;
         }
     }
-    children.truncate(tail_index + 1);
+    retained.truncate(tail_index + 1);
     unsigned_flags.truncate(tail_index + 1);
+    expr.set_retained_args(retained)?;
 
     Ok(CompareInMeta {
         lookup_map,

@@ -462,6 +462,16 @@ pub trait ScalarValueEncoder: NumberEncoder + DecimalEncoder + JsonEncoder {
             ScalarValue::Int(Some(v)) => self.encode_i64(*v).map_err(Error::from),
             ScalarValue::Decimal(Some(v)) => {
                 let (prec, frac) = v.prec_and_frac();
+                let prec = u8::try_from(prec).map_err(|_| {
+                    Error::InvalidDataType(
+                        "Decimal precision exceeds the legacy codec's u8 field".to_owned(),
+                    )
+                })?;
+                let frac = u8::try_from(frac).map_err(|_| {
+                    Error::InvalidDataType(
+                        "Decimal scale exceeds the legacy codec's u8 field".to_owned(),
+                    )
+                })?;
                 self.write_decimal(v, prec, frac)?;
                 Ok(())
             }

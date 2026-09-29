@@ -8,7 +8,7 @@ use tidb_query_datatype::{
 };
 use tipb::FieldType;
 
-use crate::{RpnExpression, RpnStackNode, RpnStackNodeVectorValue};
+use crate::{RpnExpression, RpnStackNode, RpnStackNodeVectorValue, types::function::ControlKind};
 
 #[rpn_fn(nullable)]
 #[inline]
@@ -42,7 +42,8 @@ pub fn sc_logical_and(
     output_rows: usize,
     args: &[RpnExpression],
 ) -> Result<VectorValue> {
-    eval_logical_short_circuit::<ScLogicalAnd>(
+    crate::types::expr_eval::eval_logical_entry(
+        ControlKind::And,
         ctx,
         schema,
         input_physical_columns,
@@ -62,7 +63,8 @@ pub fn sc_logical_or(
     output_rows: usize,
     args: &[RpnExpression],
 ) -> Result<VectorValue> {
-    eval_logical_short_circuit::<ScLogicalOr>(
+    crate::types::expr_eval::eval_logical_entry(
+        ControlKind::Or,
         ctx,
         schema,
         input_physical_columns,
@@ -247,122 +249,89 @@ fn merge_short_circuit_arg_result<Op: ScLogicalOp>(
     Ok(resolved_count)
 }
 
-fn eval_logical_short_circuit<Op: ScLogicalOp>(
-    ctx: &mut EvalContext,
-    schema: &[FieldType],
-    input_physical_columns: &LazyBatchColumnVec,
-    input_logical_rows: &[usize],
-    output_rows: usize,
-    args: &[RpnExpression],
-) -> Result<VectorValue> {
-    assert!(args.len() >= 2);
-    assert!(input_logical_rows.is_empty() || input_logical_rows.len() == output_rows);
-    if output_rows == 0 {
-        return Ok(VectorValue::from_scalar(&ScalarValue::Int(Some(0)), 0));
+/// Retained SQL three-valued state for the official control-frame driver.
+/// Argument scheduling and row-map ownership remain in `types::expr_eval`.
+#[derive(Debug)]
+pub(crate) struct LogicalAccumulator {
+    kind: ControlKind,
+    result: ChunkedVecSized<Int>,
+}
+
+impl LogicalAccumulator {
+    pub(crate) fn new(kind: ControlKind) -> Self {
+        assert!(kind.is_logical(), "logical accumulator requires AND or OR");
+        Self {
+            kind,
+            result: ChunkedVecSized::with_capacity(0),
+        }
     }
-    let mut result = ChunkedVecSized::<Int>::with_capacity(0);
 
-    // `None` means all output rows are still pending. Keep this state implicit
-    // until an argument resolves only part of the rows, so the common no-short-
-    // circuit path does not allocate or copy row mappings.
-    let mut pending_rows: Option<(Vec<usize>, Vec<usize>)> = None;
-
-    for (arg_index, arg) in args.iter().enumerate() {
-        let (pending_positions, pending_logical_rows, pending_len) = match pending_rows.as_ref() {
-            Some((positions, logical_rows)) => (
-                Some(positions.as_slice()),
-                logical_rows.as_slice(),
-                positions.len(),
+    pub(crate) fn merge(
+        &mut self,
+        arg_result: RpnStackNode<'_>,
+        pending_positions: Option<&[usize]>,
+        pending_len: usize,
+        output_rows: usize,
+    ) -> Result<usize> {
+        match self.kind {
+            ControlKind::And => merge_short_circuit_arg_result::<ScLogicalAnd>(
+                arg_result,
+                pending_positions,
+                pending_len,
+                output_rows,
+                &mut self.result,
             ),
-            None => (None, input_logical_rows, output_rows),
-        };
-
-        let arg_result = arg.eval_decoded(
-            ctx,
-            schema,
-            input_physical_columns,
-            pending_logical_rows,
-            pending_len,
-        )?;
-
-        let resolved_count = merge_short_circuit_arg_result::<Op>(
-            arg_result,
-            pending_positions,
-            pending_len,
-            output_rows,
-            &mut result,
-        )?;
-
-        if resolved_count == 0 {
-            continue;
+            ControlKind::Or => merge_short_circuit_arg_result::<ScLogicalOr>(
+                arg_result,
+                pending_positions,
+                pending_len,
+                output_rows,
+                &mut self.result,
+            ),
+            _ => unreachable!("logical accumulator requires AND or OR"),
         }
-        if resolved_count == pending_len || arg_index + 1 == args.len() {
-            return Ok(VectorValue::Int(result));
-        }
-
-        match &mut pending_rows {
-            Some((positions, logical_rows)) => {
-                let old_pending_len = positions.len();
-                let has_logical_rows = !logical_rows.is_empty();
-                let (mut read_index, mut write_index) = (0, 0);
-                positions.retain(|&output_index| {
-                    let keep = !matches!(
-                        (&result).get_option_ref(output_index),
-                        Some(value) if *value != Op::IDENTITY
-                    );
-                    if keep && has_logical_rows {
-                        logical_rows[write_index] = logical_rows[read_index];
-                        write_index += 1;
-                    }
-
-                    read_index += 1;
-                    keep
-                });
-
-                debug_assert_eq!(read_index, old_pending_len);
-                if has_logical_rows {
-                    logical_rows.truncate(write_index);
-                }
-            }
-            None => {
-                let new_pending_len = pending_len - resolved_count;
-                let mut positions = Vec::with_capacity(new_pending_len);
-                let mut logical_rows = if input_logical_rows.is_empty() {
-                    Vec::new()
-                } else {
-                    Vec::with_capacity(new_pending_len)
-                };
-
-                for output_index in 0..output_rows {
-                    let keep = !matches!(
-                        (&result).get_option_ref(output_index),
-                        Some(value) if *value != Op::IDENTITY
-                    );
-                    if keep {
-                        positions.push(output_index);
-                        if !input_logical_rows.is_empty() {
-                            logical_rows.push(input_logical_rows[output_index]);
-                        }
-                    }
-                }
-
-                debug_assert_eq!(positions.len(), new_pending_len);
-                pending_rows = Some((positions, logical_rows));
-            }
-        }
-
-        let (pending_positions, pending_logical_rows) = pending_rows.as_ref().unwrap();
-        debug_assert_eq!(
-            pending_logical_rows.len(),
-            if input_logical_rows.is_empty() {
-                0
-            } else {
-                pending_positions.len()
-            }
-        );
     }
 
-    Ok(VectorValue::Int(result))
+    pub(crate) fn is_resolved(&self, index: usize) -> bool {
+        let identity = match self.kind {
+            ControlKind::And => ScLogicalAnd::IDENTITY,
+            ControlKind::Or => ScLogicalOr::IDENTITY,
+            _ => unreachable!("logical accumulator requires AND or OR"),
+        };
+        matches!(
+            (&self.result).get_option_ref(index),
+            Some(value) if *value != identity
+        )
+    }
+
+    pub(crate) fn into_vector(self) -> VectorValue {
+        VectorValue::Int(self.result)
+    }
+
+    /// Conservatively accounts for retained heap payload, not this struct's
+    /// inline storage or allocator bookkeeping.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let capacity = self.result.capacity();
+        let values = capacity.saturating_mul(std::mem::size_of::<Int>());
+        // BitVec's public capacity reports its initialized words, not its
+        // allocation. Allow for Vec's twofold word growth and small-allocation
+        // floor, including capacity retained after the result is truncated.
+        let bitmap_words = if capacity == 0 {
+            0
+        } else {
+            capacity
+                .div_ceil(u64::BITS as usize)
+                .saturating_mul(2)
+                .max(4)
+        };
+        values.saturating_add(bitmap_words.saturating_mul(std::mem::size_of::<u64>()))
+    }
+
+    /// Exact retained Int/bitmap element-buffer capacity for lineage
+    /// accounting.
+    pub(crate) fn retained_bytes_exact(&self) -> Option<usize> {
+        crate::local::runtime::int_vector_storage_bytes(&self.result)
+    }
 }
 
 #[rpn_fn(nullable)]
@@ -448,7 +417,7 @@ pub fn unary_minus_real(arg: Option<&Real>) -> Result<Option<Real>> {
 #[rpn_fn(nullable)]
 #[inline]
 pub fn unary_minus_decimal(arg: Option<&Decimal>) -> Result<Option<Decimal>> {
-    Ok(arg.map(|val| -*val))
+    Ok(arg.map(|val| -val.clone()))
 }
 
 #[inline]
@@ -632,6 +601,137 @@ mod tests {
     #[rpn_fn(nullable)]
     fn enum_identity(arg: Option<EnumRef>) -> Result<Option<Enum>> {
         Ok(arg.map(EnumRef::to_owned))
+    }
+
+    #[test]
+    fn test_logical_accumulator_scalar_truth_tables() {
+        let field_type: FieldType = FieldTypeTp::LongLong.into();
+        for kind in [ControlKind::And, ControlKind::Or] {
+            for lhs in [None, Some(0), Some(2)] {
+                for rhs in [None, Some(0), Some(-3)] {
+                    let mut accumulator = LogicalAccumulator::new(kind);
+                    let lhs_value = ScalarValue::Int(lhs);
+                    let resolved = accumulator
+                        .merge(
+                            RpnStackNode::Scalar {
+                                value: &lhs_value,
+                                field_type: &field_type,
+                            },
+                            None,
+                            1,
+                            1,
+                        )
+                        .unwrap();
+                    assert_eq!(resolved, usize::from(accumulator.is_resolved(0)));
+                    if !accumulator.is_resolved(0) {
+                        let rhs_value = ScalarValue::Int(rhs);
+                        accumulator
+                            .merge(
+                                RpnStackNode::Scalar {
+                                    value: &rhs_value,
+                                    field_type: &field_type,
+                                },
+                                None,
+                                1,
+                                1,
+                            )
+                            .unwrap();
+                    }
+                    let expected = match kind {
+                        ControlKind::And => logical_and(lhs.as_ref(), rhs.as_ref()).unwrap(),
+                        ControlKind::Or => logical_or(lhs.as_ref(), rhs.as_ref()).unwrap(),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(accumulator.into_vector().to_int_vec(), vec![expected]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_logical_accumulator_merges_pending_output_positions() {
+        let field_type: FieldType = FieldTypeTp::LongLong.into();
+        let column = VectorValue::Int(vec![Some(0), None, Some(4)].into());
+        let mut accumulator = LogicalAccumulator::new(ControlKind::And);
+        assert_eq!(
+            accumulator
+                .merge(
+                    RpnStackNode::Vector {
+                        value: RpnStackNodeVectorValue::Ref {
+                            physical_value: &column,
+                            logical_rows: &[1, 0, 1, 2],
+                        },
+                        field_type: &field_type,
+                    },
+                    None,
+                    4,
+                    4,
+                )
+                .unwrap(),
+            1
+        );
+        assert!(!accumulator.is_resolved(0));
+        assert!(accumulator.is_resolved(1));
+        assert!(!accumulator.is_resolved(2));
+        assert!(!accumulator.is_resolved(3));
+        assert_eq!(
+            accumulator
+                .merge(
+                    RpnStackNode::Vector {
+                        value: RpnStackNodeVectorValue::Generated {
+                            physical_value: VectorValue::Int(vec![Some(0), Some(7), None].into()),
+                        },
+                        field_type: &field_type,
+                    },
+                    Some(&[0, 2, 3]),
+                    3,
+                    4,
+                )
+                .unwrap(),
+            1
+        );
+        assert!(accumulator.is_resolved(0));
+        assert!(accumulator.is_resolved(1));
+        assert!(!accumulator.is_resolved(2));
+        assert!(!accumulator.is_resolved(3));
+        assert_eq!(
+            accumulator.into_vector().to_int_vec(),
+            vec![Some(0), Some(0), None, None]
+        );
+    }
+
+    #[test]
+    fn test_logical_accumulator_accounts_for_retained_capacity() {
+        assert_eq!(LogicalAccumulator::new(ControlKind::Or).retained_bytes(), 0);
+        let mut result = ChunkedVecSized::<Int>::with_capacity(1_024);
+        result.push(Some(1));
+        result.truncate(0);
+        let capacity = result.capacity();
+        let accumulator = LogicalAccumulator {
+            kind: ControlKind::Or,
+            result,
+        };
+        let values = capacity * std::mem::size_of::<Int>();
+        let bitmap = capacity.div_ceil(u64::BITS as usize) * std::mem::size_of::<u64>();
+        assert!(accumulator.retained_bytes() >= values + bitmap);
+    }
+
+    #[test]
+    fn test_logical_accumulator_exact_retained_capacity() {
+        assert_eq!(
+            LogicalAccumulator::new(ControlKind::Or).retained_bytes_exact(),
+            Some(0)
+        );
+        let mut result = ChunkedVecSized::<Int>::with_capacity(65);
+        result.push(None);
+        result.truncate(0);
+        let expected = result.capacity() * std::mem::size_of::<Int>()
+            + result.get_bit_vec().retained_heap_bytes().unwrap();
+        let accumulator = LogicalAccumulator {
+            kind: ControlKind::Or,
+            result,
+        };
+        assert_eq!(accumulator.retained_bytes_exact(), Some(expected));
     }
 
     #[test]
@@ -842,7 +942,7 @@ mod tests {
         ];
         for (arg, expect_output) in test_cases {
             let output = RpnFnScalarEvaluator::new()
-                .push_param(arg)
+                .push_param(arg.clone())
                 .evaluate(ScalarFuncSig::UnaryNotDecimal)
                 .unwrap();
             assert_eq!(output, expect_output, "{:?}", arg);
@@ -965,7 +1065,7 @@ mod tests {
         ];
         for (arg, expect_output) in test_cases {
             let output = RpnFnScalarEvaluator::new()
-                .push_param(arg)
+                .push_param(arg.clone())
                 .evaluate::<Decimal>(ScalarFuncSig::UnaryMinusDecimal)
                 .unwrap();
             assert_eq!(output, expect_output, "{:?}", arg);

@@ -141,13 +141,14 @@ impl RpnFnScalarEvaluator {
         // use validator_ptr to testing the test arguments.
         let func: RpnFnMeta = super::super::map_expr_node_to_rpn_func(&fun_sig_expr).unwrap();
 
-        if let Err(e) = (func.validator_ptr)(&fun_sig_expr) {
+        let mut call = super::function::CallBuild::from_expr(&fun_sig_expr);
+        if let Err(e) = (func.validator_ptr)(call.shape()) {
             return (Err(e), context);
         }
 
         let metadata = match self.metadata {
             Some(metadata) => metadata,
-            None => match (func.metadata_expr_ptr)(&mut fun_sig_expr) {
+            None => match (func.metadata_ptr)(&mut call) {
                 Ok(metadata) => metadata,
                 Err(e) => {
                     return (Err(e), context);

@@ -129,8 +129,313 @@ collection and finalization are in `src/coprocessor/batch.rs`.
   eagerly decoded; when unavailable, the existing eager path and SQL-mode
   warning/error behavior are preserved.
 
+### In-process expression-library consumers
+
+`components/tidb_query_datatype` owns the scalar representations and collation
+kernels; `components/tidb_query_expr` owns RPN construction and execution. These
+libraries can also be called in-process without constructing a coprocessor
+request or starting a storage/server runtime. This does not change the wire
+short-circuit admission policy described above.
+
+- The wire tree builder and `local::compile_local` share shallow typed
+  `CallShape` / `CallBuild` descriptors, one function selector, and opaque
+  `PreparedCall` metadata. Local construction must not fabricate protobuf
+  expressions or maintain a second signature dispatch table. Prepared calls
+  retain the original argument-index mapping: IN's legacy constant extraction
+  can leave dynamic children in swap-remove order, not source order.
+- A compiled `LocalProgram` is worker-owned. Its existing `Any + Send` function
+  metadata is not `Sync`; share immutable input specifications, not one mutable
+  compiled program between workers. General local routes borrow the caller's
+  persistent `EvalContext` and must not reset statement diagnostics. The closed
+  evaluated-ASCII worker below has a separately sealed context capability.
+- `compile_local` admission remains exact signed LongLong: constants/slots, the initial
+  arithmetic/NULLIF kernels, and explicit AND/OR/IF/IFNULL/searched CASE/COALESCE
+  controls. A private selected-call descriptor attaches control identity in the
+  canonical selector; public `RpnFnMeta` layout and macro construction are
+  unchanged. Wire and local paths share one iterative
+  Program/Control/Host/Ordinary frame driver and one prepared-kernel invocation
+  helper, not another interpreter or native fallback.
+- `LocalBatch` requires decoded columns, an explicit physical row universe and
+  checked selection. `eval_with_bindings` instead invokes `read_input` only at
+  a demanded ColumnRef. Static schema/selection checks precede effects; replies
+  must be exactly one Int value. `InputRow` separates physical row from selection
+  occurrence. Width-one scheduling preserves order/repeats and actual typed
+  `LocalError` variants. Do not pre-convert dead branches or unselected rows.
+- Strict local controls never switch to eager at depth 32. Metadata traversal
+  and program/spec destruction are iterative, including rejected construction;
+  derived deep Clone/Debug are not guaranteed. Arc-share immutable specs instead.
+  Caller-owned decoded root vectors retain their borrow/selection contract;
+  frame-owned selections are materialized before returning child results.
+- Ordinary calls on the existing wire/`compile_local` routes remain eager
+  postfix. The separate `compile_local_profiled` route admits exact PlusInt203,
+  signed LongLong, Typed Int/NULL literals, identity conversion, and explicit
+  TypedRow/PbRow facts only. Its Ordinary frame completes the typed left operand,
+  skips the right on left NULL, otherwise evaluates the right and enters the same
+  prepared-kernel helper as eager calls. It does not substitute the legacy222 ID.
+- `OrdinaryProfileSpec` retains a flat immutable snapshot of the full schema,
+  values, slots and field types. Call records strictly cover ALL-node source
+  preorder ordinals (root0, arguments left-to-right), not call-only or row indices.
+  Compilers revalidate snapshots and source/site assertions; no cache is implied.
+  PB labels and raw signature consistency do not prove actual PB ingestion: the
+  producer owns that proof and native Int/UInt kind checks before transport.
+- The profiled route refuses AST-value and native numeric-batch consumers,
+  controls/hosts, other operators and mixed carriers. Native batch operand-major
+  order cannot be replaced by occurrence loops or whole-expression tiling.
+  Source/site identity and preserved LocalError variants are not a site-aware
+  native SQL diagnostic adapter. The trusted implicit-cast constructor is not an
+  unchecked local entry; further domains require explicit admission.
+- `NumericBatchFacts` / `compile_numeric_batch` are a distinct, closed signed
+  LongLong/PlusInt203 domain. `LocalNumericBatchProgram` has no raw or row escape;
+  compiled Row/ControlLineage/SqlNumericBatch/EvaluatedAscii identities are checked
+  even for empty and leaf programs. A shared flat snapshot worker does not merge row/batch facts.
+  One driver invocation completes the whole left child, whole right child, then
+  parent kernel lanes in selected-occurrence order. There is no left-NULL stop,
+  including width one, and no per-row tree replay or root tiling. The bound is
+  1024 selected occurrences, not physical rows; repeats/reordering remain distinct.
+  The caller must prove the genuine suite/global-vectorization entry on every
+  invocation. Library facts do not prove native eligibility or activate SQL.
+- Execution semantics (`Unannotated`, SQL control lineage, SQL numeric batch,
+  evaluated ASCII) and
+  retained-storage policy (`ConservativeInt`, `ExactRetained`) are independent.
+  Numeric batches use actual retained owners, including both suspended operands
+  and output capacity, checked before the next effect/publication. They do not
+  gain control/result lineage, byte kernels, hosts or a hard allocator-peak bound.
+  Reported numeric calls use the same fresh failure-only recorder and preserve
+  genuine input versus kernel sites without replay or guessed SQL diagnostics.
+- `prepare_evaluated_ascii` constructs only the canonical Bytes-slot/ASCII7003
+  program and returns an opaque owned worker, not a raw program/context/graph.
+  Its distinct compiled and execution domains require ready-Bytes input even
+  for internal empty/no-read misuse. Existing legitimate wire ASCII stays valid.
+  The frontend already evaluated/coerced its operand; this is no original SQL/PB
+  provenance or full FieldType proof. The same compiler and frame/kernel driver
+  consume one borrowed Bytes scalar without copying it to a Bytes vector. NULL
+  still dispatches the official nullable wrapper; there is no NULL shortcut or
+  native retry. Only a checked singleton computed Int with its own signed metadata
+  may leave the worker; native result coercion remains a separate caller operation.
+- This exact context-free ASCII body permits one private UTC/default/zero-detail
+  context per created worker. No session/native context or callback is accepted.
+  Fixed metadata caches are prewarmed before publication without executing a fake
+  NULL call. Owner observation never initializes the cache and includes its Box
+  and referenced-offset Vec capacity; canonical heap-free field/function metadata
+  is established by construction, not serialization or logical equality.
+  Warning count AND details must stay empty. An in-flight sticky state prevents
+  reuse after a panic caught elsewhere; dirty/unmeasurable workers are disposed
+  before native continuation. Cleanup/health failure cannot overwrite an original
+  kernel error. No per-row context recreation, warning drain or silent repair.
+- Evaluated input Vec capacity remains charged through its actual lifetime and
+  overlaps the generated Int output check. Worker inline and owned-heap accounting
+  are separate from per-call storage and caller pool/container/creation ledgers.
+  The private Arc-config accounting proxy is pinned, uses no Arc memory access,
+  and requires independent actual allocation-request validation on each compiler
+  cohort. This is not portable Arc layout, allocator usable slack or peak memory.
+  The caller admits creation after native coercion, keeps live/creating/idle and
+  retirement debt charged, and owns scope/epoch closure and caught-panic placement.
+- The worker's invocation counter observes the actual shared fn_ptr dispatch,
+  including the nullable wrapper, not non-NULL body execution. The cfg(test)-only
+  ASCII body hook has a separate isolated ignored test; run it alone with ignored
+  tests explicitly enabled, never infer body coverage from a facade counter.
+  This library route alone proves no native hot-entry activation, algorithm
+  deletion, whole-family migration or performance acceptance.
+- `eval_with_bindings_reported` uses the same evaluator and moves back the original
+  `LocalError` with an optional owned failure site. Only actual ordinary-kernel
+  errors and `read_input` errors capture a site; first capture wins on immediate
+  propagation. Validation, budgets and checks after success remain unsited.
+  An input's ResourceLimit or code 1690 is still an Input failure, not a kernel
+  overflow. The typed code getter reads the existing EvaluateError code; it never
+  parses Display text, and unannotated eager failures acquire no guessed site.
+- Reports use fresh stack-local failure-only state, not a persistent last-site,
+  ancestor lookup or replay. Input slots identify bindings, not universally unique
+  native leaves. Caller-owned mappings and exact invocation coordinates establish
+  that join. Reporting preserves warnings; callers can observe live count/length
+  endpoints without assuming a configured cap or draining details. Panics are not
+  converted to reports. This new reported entry refuses Host programs after
+  schema/selection validation and before host hooks; the old entry remains intact.
+- `compile_control_with_lineage` is a separate checked SQL TypedRow control-only
+  admission over the same compiler/frame driver: Int/String IF, IFNULL, searched
+  CASE and COALESCE, plus binary AND/OR. `ControlLineageFacts` snapshots full
+  source/schema/producer facts in all-node preorder. It refuses ordinary-call
+  composition, Host, PB/AST/native-batch domains, implicit casts and BinaryLiteral.
+  Possible unsigned selected values remain valid Int values but are conservatively
+  refused in PredicateInt roles; this does not mean native UInt truth is invalid.
+- `LocalControlProgram` has no raw-program escape. Its `LineagedBatch` carries one
+  caller-owned `ResultMetaId` per selected occurrence, including repeated rows.
+  Selection forwards the chosen child's current ID, even for NULL. Exhausted
+  COALESCE and CASE without ELSE generate their own NULL ID; AND/OR own their
+  computed result ID. Parent SQL declaration and selected native Datum metadata
+  are different facts. The caller binds its own program/table and validates native
+  kind/collation on the same demanded read before type erasure; numeric IDs alone
+  cannot authenticate a foreign table or recover erased String/Bytes/UInt kinds.
+- The lineaged mode measures retained Int/Bytes owners, bitmap/offset capacity,
+  frames, accumulators, output and ID vectors before a subsequent effect and
+  publication. `BitVec`/`ChunkedVecBytes` heap getters count actual Vec capacities;
+  checked reserve helpers preserve logical contents on error, not necessarily
+  earlier increased capacities. Empty Bytes still needs its offset sentinel.
+  An unknown provider reply is measured only after that read; no pre-callback or
+  hard allocator-peak bound is claimed. Conservative minimum precharges may
+  over-refuse. Old modes retain conservative payload accounting, but both charge
+  actual frame layout, so enlarging a frame can change fixed-byte-cap refusal
+  prefixes. Output materialization/opaque caller allocations need separate budgets.
+- `compile_local_with_hosts` accepts an immutable typed `HostCatalog`; its opaque
+  key is process-local identity, not signature equality. Slots cannot be forged
+  or remapped between catalogs. Arguments/results remain exact signed LongLong
+  and each host invocation is width one. `PreparedHostCall` contains no native
+  evaluator or expression callbacks. Protocol definitions live in `local/host.rs`
+  and lifecycle fixtures in `local/host_tests.rs`.
+- `LocalRuntimeServices::host_services` defaults to None, preserving host-free
+  callers, whose programs never request that view. An advertised provider must
+  implement catalog/start/resume/cancel. The same frame driver evaluates requested
+  children: Fresh recomputes without an old-value fallback; Reuse keeps only the
+  most recent successful argument value within that invocation. Callback borrows
+  cannot be retained; suspended adapter state is owned and keyed by task IDs.
+- The driver reserves a potential task before start, even for immediate Ready.
+  Pending IDs are tracked before request validation. Errors, limits and unwind
+  cancel reachable tasks inner-first without replacing the primary error; cancel
+  must be nonpanicking, diagnostic-free and idempotent, including completed IDs.
+  Providers must release unpublished state on start error/immediate Ready and
+  finish tasks before resume Ready. Cleanup requires a stable, contract-compliant
+  provider: a vanished/changed namespace cannot be cleaned through another one.
+- Per-invocation Demo limits bound steps, frames, task ledger and retained scratch;
+  they are not an external cancellation or total allocator-memory guarantee.
+  Defaults are unlimited steps, 1024 frames, 64 MiB retained scratch and 256
+  potential live tasks. Adapters meter their own opaque allocations. Mutable
+  services, tasks and evaluation frames never survive into reusable worker state.
+
+### Shared collation and Decimal boundary contracts
+
+- `Collator::write_sort_key_with_options`, owned keys and borrowed `Cow` keys
+  use one unpadded writer after the collator's preprocessing. `KeyOptions::NoPad`
+  preserves trailing ASCII spaces without changing the collation. Allocation
+  estimates count the original input, not its trimmed prefix. A caller must
+  preserve signed protocol collation IDs rather than applying `abs(id)`.
+- `SortKey::new` validates the charset; raw key writers do not implicitly do
+  so. UTF-8 raw decoding retains the Go-style one-byte replacement policy.
+  `sort_hash(value)` is deliberately **not** `hash(sort_key(value))`; do not
+  substitute it for a caller's existing group/join/key byte protocol.
+- `codec::collation::pattern` owns one escape tokenizer and backtracking loop
+  for raw and compiled LIKE paths. Byte, binary-rune and collator-defined modes
+  are distinct (notably GB18030 binary versus GBK binary). Trailing escape is
+  an explicit `Literal`/`Reject` policy; JSON search uses the latter. SQL front
+  ends may retain immutable compiled-pattern caches, not a second matcher.
+- `Decimal` is an owning, Clone/non-Copy value with nine inline `SmallVec`
+  words and checked counters, not a C layout. Existing public arithmetic keeps
+  Fixed(9); private Grow add/sub/mul/division/AVG/rounding share the same workers,
+  not a second arithmetic engine. General wide publication is still closed while
+  legacy trait/domain edges remain unresolved. Checked count/allocation failures
+  stay outside SQL numeric dispositions. Status payloads can need more initialized
+  backing cells than the fixed arithmetic limit. `DecimalWordsRef` exposes exact
+  borrowed logical fields, including independent storage/result scale and
+  initialized inactive words.
+- Fixed multiplication's capacity selection operates on total aligned operand
+  word windows: loss described as fractional can also remove low integer cells.
+  Fixed rounding likewise retains its legacy Truncated partial-selection policy.
+  Do not silently replace either with fraction-only clipping or Grow-then-clamp;
+  exact Grow results are not oracles for these declared Fixed dispositions.
+- `DecimalParts` remains checked bounded logical transport, **not** a raw
+  40-byte layout or FFI type. `try_from_parts` validates capacity/ranges and
+  partial-word shape. The non-consuming `try_to_parts` is fallible: empty active
+  prefixes, oversized status payloads and noncanonical physical shapes do not
+  necessarily fit the strict logical contract. Do not assume that every value
+  visible through `words()` can pass the bounded import/export pair.
+- SQL declared precision/scale belongs to the typed caller, separately from
+  Decimal storage/result scale. Keep `Res::Ok`/`Truncated`/`Overflow` until that
+  caller applies warning/error policy; transport must not erase disposition by
+  unconditionally unwrapping it. Successful zero multiplication retains scale
+  (`0 * -1.1` becomes `0.0`), but overflow negative zero remains meaningful.
+  This correction is not a claim of complete Go multiplication equivalence:
+  hidden storage/result-scale and truncated-zero policies still need review.
+- `ChunkedVecSized<T>` stores initialized, owned `T::default()` values behind
+  NULL bitmap entries, never generic all-zero memory. The five owned `Evaluable`
+  kinds require `Default`; borrowed `EvaluableRet` does not. Clone, replacement,
+  append, truncation and drop retain normal ownership, even for a hidden NULL
+  payload, so heap accounting cannot ignore hidden owned allocations. Encoders
+  consult validity: a NULL Decimal chunk cell is still 40 zero bytes, whereas a
+  non-NULL default Decimal has its valid integer-digit count of one.
+- The physical chunk cell remains exactly 40 bytes, encoded/decoded through
+  explicit header bytes and native-endian words, never a copy of the owning
+  Rust object. Its transport admission is separate: empty counts, noncanonical
+  partial-word shape/padding, all nine inactive words, and result-header bytes
+  0..255 are retained. Invalid bool, overcapacity active counts and out-of-base
+  active words are rejected before constructing an owner. This is not full
+  compatibility with unchecked raw-like-Go negative counts/arbitrary words.
+  Display selects legacy signed-byte/Fixed30 formatting only when active extent
+  is at most nine words and result scale at most 255; otherwise it uses the full
+  result-scale writer. No hidden origin tag decides the policy. The reviewed
+  overcapacity Overflow(81/2/2) negative-zero payload now displays `-0.00`
+  instead of `0`, without changing its status/fields; this is not Go string
+  equivalence (that Go state panics). Storage/result writers share one emitter
+  with bounded 128-byte staging; a rejecting sink stops before huge zero padding.
+  Fixed MOD now selects the full integer/fraction extent, including leading
+  fraction gaps, and stores selected fractional words as digits (times nine).
+  Its capped quotient/early/sign rules stay intact. Legacy zero visible scales
+  through 255 retain their storage policy; newly wider visible scales use input
+  storage scale rather than densely allocating from display metadata. These
+  checked fixes are not a claim of equivalent arithmetic for every raw physical
+  shape or permission for general wide publication.
+
+- Fixed MAX factories require both precision >= scale and separately aligned
+  integer/fraction words fitting nine words; precision <= 81 alone is insufficient.
+  The checked conversion path validates before fast paths/narrowing and copies all
+  initialized raw cells on a no-op, not just active logical cells. Wire encoding
+  rejects precision < scale before writing a header. Its overflow/truncation logs
+  intentionally emit bounded scalar shape metadata, never full Decimal Display.
+- Native Decimal-to-f64 remains a storage-text conversion: count through the same
+  emitter, reserve fallibly, then use Rust parsing. Visible padding is ignored;
+  infinity and signed underflow zero retain existing behavior without new context
+  warnings. This is not TiDB/Go result-scale projection or an inverse of the bounded
+  finite-only from-f64 path.
+- Generic Decimal `ConvertTo<String>` / `ConvertTo<Bytes>` Result wrappers consult
+  a codec-private fallible adapter backed by that same checked STORAGE emitter.
+  Bytes moves the returned String allocation. Public traits/bounds/defaultness and
+  old infallible ToStringValue remain unchanged; non-Decimal default and specialized
+  value formatting stay intact. Resource errors propagate as codec errors without
+  context disposition. This is not RESULT Display, physical ENOMEM validation,
+  general fallibility for other types, temporal input or public-wide admission.
+- Inherent `Datum::to_string` (and its `into_string` consumer) renders Decimal
+  RESULT text through one private fallible String sink and the untouched Display
+  dispatch, not the STORAGE adapter above. Each append reserves before writing;
+  failed output stays private and returns an outer codec error, never SQL Overflow.
+  Existing legacy signed-byte/Fixed30 display behavior and physical owner state
+  remain intact. A bounded isolated one-shot allocation refusal validates this
+  target boundary; allocating the error message can still fail under sustained
+  OOM. Other Datum formatting, temporal consumers and public-wide admission are
+  not made generally fallible by this change.
+- `produce_dec_with_specified_tp` checks fully specified declared targets before
+  no-op/overflow effects: preserve precision < scale error priority, then checked
+  narrowing and the existing separate-word Fixed9 limit. Either-UNSPECIFIED
+  bypass stays unchanged. Codec-scoped checked MAX and borrowed Fixed-round
+  helpers share the existing fill/round workers and copy all initialized raw
+  cells fallibly. Overflow context disposition still precedes saturation;
+  truncation/DML ordering and unsigned handling last are unchanged. Do not add a
+  SQL65/30 cap, post-carry integer check, or delegate this policy to `convert_to`.
+  This producer gate does not authorize wide diagnostic or temporal consumers.
+- Contextual `Res` disposition has one shared worker. The eager overflow-error
+  API remains compatible; `into_result_with_overflow_err_lazy` invokes its
+  `FnOnce` factory only on Overflow. MOD/DIV supply their unchanged diagnostics
+  lazily; Ok and Truncated do not render unused operand messages. Simple Decimal
+  interval units likewise retain their existing round/as_i64 path without first
+  formatting discarded Decimal text; Second/composite formatting is unchanged.
+  This does not bound true overflow diagnostics or temporal/parser input, alter
+  Display, or authorize a new-wide synopsis/resource policy.
+
+Relevant targeted tests, from the TiKV repository root:
+
+```sh
+cargo test --locked -p tidb_query_datatype --lib
+cargo test --locked -p tidb_query_codegen --lib
+cargo test --locked -p tidb_query_expr --lib
+cargo test --locked -p tidb_query_aggr --lib
+```
+
+These cover existing wire behavior, checked local controls/selection/demand,
+owning Decimal and physical NULL contracts, plus aggregate ownership consumers.
+They do not establish general SQL lowering, ordinary-call scalar NULL-stop,
+wide Decimal arithmetic, complete raw physical compatibility or performance.
+
 ## Start Here
 
+- `components/tidb_query_datatype/src/codec/collation/mod.rs` and `pattern.rs`
+- `components/tidb_query_datatype/src/codec/mysql/decimal.rs`
+- `components/tidb_query_expr/src/types/function.rs` and `local/`
 - `src/coprocessor/mod.rs`
 - `src/coprocessor/endpoint.rs`
 - `src/coprocessor/batch.rs`

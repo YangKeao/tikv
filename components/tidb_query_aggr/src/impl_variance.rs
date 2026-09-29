@@ -327,7 +327,7 @@ where
         assert_eq!(target.len(), 3);
         target[0].push_int(Some(self.count as Int));
         if self.count > 0 {
-            target[1].push(Some(self.sum));
+            target[1].push(Some(self.sum.clone()));
             target[2].push(Some(V::compute_final_variance(&self.variance, self.count)?));
         } else {
             target[1].push(None as Option<Decimal>);
@@ -438,7 +438,7 @@ where
         assert_eq!(target.len(), 3);
         target[0].push_int(Some(self.count as Int));
         if self.count > 0 {
-            target[1].push(Some(self.sum));
+            target[1].push(Some(self.sum.clone()));
             target[2].push(Some(V::compute_final_variance(&self.variance, self.count)?));
         } else {
             target[1].push(None as Option<Decimal>);

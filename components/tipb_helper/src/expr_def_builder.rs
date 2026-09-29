@@ -54,10 +54,17 @@ impl ExprDefBuilder {
         Self(expr)
     }
 
+    /// Builds a trusted test literal in the legacy Decimal wire format.
+    ///
+    /// # Panics
+    ///
+    /// The literal's precision and scale must fit the legacy u8 codec fields.
     pub fn constant_decimal(v: Decimal) -> Self {
         let mut expr = Expr::default();
         expr.set_tp(ExprType::MysqlDecimal);
         let (prec, frac) = v.prec_and_frac();
+        let prec = u8::try_from(prec).expect("test Decimal precision must fit the legacy u8 field");
+        let frac = u8::try_from(frac).expect("test Decimal scale must fit the legacy u8 field");
         expr.mut_val().write_decimal(&v, prec, frac).unwrap();
         expr.mut_field_type()
             .as_mut_accessor()

@@ -299,10 +299,9 @@ impl ArithmeticOpWithCtx for DecimalMod {
     fn calc(ctx: &mut EvalContext, lhs: &Decimal, rhs: &Decimal) -> Result<Option<Decimal>> {
         Ok(if let Some(value) = lhs % rhs {
             value
-                .into_result_with_overflow_err(
-                    ctx,
-                    Error::overflow("DECIMAL", format!("({} % {})", lhs, rhs)),
-                )
+                .into_result_with_overflow_err_lazy(ctx, || {
+                    Error::overflow("DECIMAL", format!("({} % {})", lhs, rhs))
+                })
                 .map(Some)
         } else {
             ctx.handle_division_by_zero().map(|_| None)
@@ -499,10 +498,9 @@ impl ArithmeticOpWithCtx for DecimalDivide {
         Ok(
             if let Some(value) = lhs.div(rhs, ctx.cfg.div_precision_increment) {
                 value
-                    .into_result_with_overflow_err(
-                        ctx,
-                        Error::overflow("DECIMAL", format!("({} / {})", lhs, rhs)),
-                    )
+                    .into_result_with_overflow_err_lazy(ctx, || {
+                        Error::overflow("DECIMAL", format!("({} / {})", lhs, rhs))
+                    })
                     .map(Some)
             } else {
                 // TODO: handle RpnFuncExtra's field_type, round the result if is needed.
@@ -546,6 +544,88 @@ mod tests {
 
     use super::*;
     use crate::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_decimal_mod_div_lazy_bounded_compatibility() {
+        use std::sync::Arc;
+
+        use tidb_query_datatype::codec::mysql::DecimalDecoder;
+
+        // The previous eager adapter is a bounded compatibility reference,
+        // not a second arithmetic engine or an oversized-text policy.
+        fn eager(
+            ctx: &mut EvalContext,
+            lhs: &Decimal,
+            rhs: &Decimal,
+            divide: bool,
+        ) -> Result<Option<Decimal>> {
+            let result = if divide {
+                lhs.div(rhs, ctx.cfg.div_precision_increment)
+            } else {
+                lhs % rhs
+            };
+            Ok(if let Some(value) = result {
+                let error = if divide {
+                    Error::overflow("DECIMAL", format!("({} / {})", lhs, rhs))
+                } else {
+                    Error::overflow("DECIMAL", format!("({} % {})", lhs, rhs))
+                };
+                value.into_result_with_overflow_err(ctx, error).map(Some)
+            } else {
+                ctx.handle_division_by_zero().map(|_| None)
+            }?)
+        }
+        let mut pairs = vec![
+            (Decimal::from_str("12.345").unwrap(), Decimal::from(2)),
+            (Decimal::from_str("-12.345").unwrap(), Decimal::from(-2)),
+            (Decimal::from(1), Decimal::from(3)),
+            (Decimal::from(1), Decimal::zero()),
+            (
+                Decimal::from_str(&format!("1{}", "0".repeat(80))).unwrap(),
+                Decimal::from_str("0.01").unwrap(),
+            ),
+        ];
+        for visible in [0, 30, 81, 127, 128, 255] {
+            let mut cell = [0; 40];
+            cell[..4].copy_from_slice(&[2, 1, visible, 1]);
+            cell[4..8].copy_from_slice(&12_u32.to_ne_bytes());
+            cell[8..12].copy_from_slice(&300_000_000_u32.to_ne_bytes());
+            pairs.push((
+                cell.as_slice().read_decimal_from_chunk().unwrap(),
+                Decimal::from(2),
+            ));
+        }
+        for (lhs, rhs) in pairs {
+            for flags in [
+                Flag::empty(),
+                Flag::TRUNCATE_AS_WARNING | Flag::OVERFLOW_AS_WARNING,
+                Flag::IN_INSERT_STMT,
+            ] {
+                for divide in [false, true] {
+                    let mut config = EvalConfig::from_flag(flags);
+                    config.set_max_warning_cnt(1);
+                    config.sql_mode =
+                        SqlMode::ERROR_FOR_DIVISION_BY_ZERO | SqlMode::STRICT_ALL_TABLES;
+                    let config = Arc::new(config);
+                    let mut before = EvalContext::new(config.clone());
+                    let mut after = EvalContext::new(config);
+                    for ctx in [&mut before, &mut after] {
+                        ctx.warnings
+                            .append_warning(Error::truncated_wrong_val("prefix", "retained"));
+                    }
+                    let expected = eager(&mut before, &lhs, &rhs, divide);
+                    let actual = if divide {
+                        DecimalDivide::calc(&mut after, &lhs, &rhs)
+                    } else {
+                        DecimalMod::calc(&mut after, &lhs, &rhs)
+                    };
+                    assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                    assert_eq!(after.warnings.warning_cnt, before.warnings.warning_cnt);
+                    assert_eq!(after.warnings.warnings, before.warnings.warnings);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_plus_int() {
@@ -1020,8 +1100,8 @@ mod tests {
 
         for (lhs, rhs) in test_cases {
             let output: Result<Option<Int>> = RpnFnScalarEvaluator::new()
-                .push_param(lhs)
-                .push_param(rhs)
+                .push_param(lhs.clone())
+                .push_param(rhs.clone())
                 .evaluate(ScalarFuncSig::IntDivideDecimal);
 
             assert!(output.is_err(), "lhs={:?}, rhs={:?}", lhs, rhs);

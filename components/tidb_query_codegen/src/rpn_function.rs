@@ -61,9 +61,9 @@
 //! ### `extra_validator`
 //!
 //! A function name for custom validation code to be run when an operation is
-//! validated. The validator function should have the signature `&tipb::Expr ->
-//! Result<()>`. E.g., `#[rpn_fn(raw_varg, extra_validator =
-//! json_object_validator)]`
+//! validated. Its signature is `fn(&crate::types::function::CallShape) ->
+//! Result<()>`, shared by wire and typed local calls. E.g.,
+//! `#[rpn_fn(raw_varg, extra_validator = json_object_validator)]`
 //!
 //! ### `metadata_type`
 //!
@@ -77,16 +77,18 @@
 //! structure into a desired form. The function signatures varies according to
 //! the existence of `metadata_mapper` and `metadata_type` as follows.
 //!
-//! - `metadata_mapper ` exists, `metadata_type` missing: `fn(&mut tipb::Expr)
-//!   -> T`
+//! - `metadata_mapper` exists, `metadata_type` missing: `fn(&mut
+//!   crate::types::function::CallBuild) -> Result<T>`.
 //!
-//! Constructs a new metadata in type `T`.
+//! Constructs metadata of type `T` from original argument facts and may record
+//! retained original argument indices in the build input.
 //!
-//! - `metadata_mapper ` exists, `metadata_type` exists: `fn(MetaDataType, &mut
-//!   tipb::Expr) -> T`
+//! - Both exist: `fn(&mut crate::types::function::CallBuild, MetaDataType) ->
+//!   Result<T>`.
 //!
-//! Transforms a protobuf metadata type `MetaDataType` specified by
-//! `metadata_type` into a new type `T`.
+//! Transforms the metadata specified by `metadata_type` into a new type `T`.
+//! The common extractor decodes actual wire bytes or accepts typed local
+//! metadata through the internal FromCallMetadata adapter, never a fake Expr.
 //!
 //! ### `capture`
 //!
@@ -684,7 +686,7 @@ impl ValidatorFnGenerator {
 
     fn validate_return_type(mut self, evaluable: &TypePath) -> Self {
         self.tokens.push(quote! {
-            function::validate_expr_return_type(expr, <#evaluable as EvaluableRet>::EVAL_TYPE)?;
+            function::validate_field_type(expr.return_type(), <#evaluable as EvaluableRet>::EVAL_TYPE)?;
         });
         self
     }
@@ -692,7 +694,7 @@ impl ValidatorFnGenerator {
     fn validate_max_args(mut self, max_args: Option<usize>) -> Self {
         if let Some(max_args) = max_args {
             self.tokens.push(quote! {
-                function::validate_expr_arguments_lte(expr, #max_args)?;
+                function::validate_argument_count_lte(expr.args().len(), #max_args)?;
             });
         }
         self
@@ -701,7 +703,7 @@ impl ValidatorFnGenerator {
     fn validate_min_args(mut self, min_args: Option<usize>) -> Self {
         if let Some(min_args) = min_args {
             self.tokens.push(quote! {
-                function::validate_expr_arguments_gte(expr, #min_args)?;
+                function::validate_argument_count_gte(expr.args().len(), #min_args)?;
             });
         }
         self
@@ -709,8 +711,8 @@ impl ValidatorFnGenerator {
 
     fn validate_args_identical_type(mut self, args_evaluable: &TokenStream) -> Self {
         self.tokens.push(quote! {
-            for child in expr.get_children() {
-                function::validate_expr_return_type(child, <#args_evaluable as EvaluableRef>::EVAL_TYPE)?;
+            for child in expr.args() {
+                function::validate_field_type(child.field_type(), <#args_evaluable as EvaluableRef>::EVAL_TYPE)?;
             }
         });
         self
@@ -720,11 +722,11 @@ impl ValidatorFnGenerator {
         let args_len = args_evaluables.len();
         let args_n = 0..args_len;
         self.tokens.push(quote! {
-            function::validate_expr_arguments_eq(expr, #args_len)?;
-            let children = expr.get_children();
+            function::validate_argument_count_eq(expr.args().len(), #args_len)?;
+            let children = expr.args();
             #(
-                function::validate_expr_return_type(
-                    &children[#args_n],
+                function::validate_field_type(
+                    children[#args_n].field_type(),
                     <#args_evaluables as EvaluableRef>::EVAL_TYPE
                 )?;
             )*
@@ -749,7 +751,7 @@ impl ValidatorFnGenerator {
         let inners = self.tokens;
         quote! {
             fn validate #impl_generics (
-                expr: &tipb::Expr
+                expr: &crate::types::function::CallShape
             ) -> tidb_query_common::Result<()> #where_clause {
                 use tidb_query_datatype::codec::data_type::Evaluable;
                 use crate::function;
@@ -768,12 +770,12 @@ fn generate_init_metadata_fn(
 ) -> TokenStream {
     let fn_body = match (metadata_type, metadata_mapper) {
         (Some(metadata_type), Some(metadata_mapper)) => quote! {
-            crate::types::function::extract_metadata_from_val::<#metadata_type>(expr.get_val())
+            crate::types::function::extract_call_metadata::<#metadata_type>(expr)
                 .and_then(|metadata| #metadata_mapper(expr, metadata))
                 .map(|metadata| Box::new(metadata) as Box<(dyn std::any::Any + std::marker::Send + 'static)>)
         },
         (Some(metadata_type), None) => quote! {
-            crate::types::function::extract_metadata_from_val::<#metadata_type>(expr.get_val())
+            crate::types::function::extract_call_metadata::<#metadata_type>(expr)
                 .map_err(|e| other_err!("Decode metadata failed: {}", e))
                 .map(|metadata| Box::new(metadata) as Box<(dyn std::any::Any + std::marker::Send + 'static)>)
         },
@@ -784,7 +786,7 @@ fn generate_init_metadata_fn(
         (None, None) => quote! { Ok(Box::new(())) },
     };
     quote! {
-        fn init_metadata #impl_generics (expr: &mut ::tipb::Expr)
+        fn init_metadata #impl_generics (expr: &mut crate::types::function::CallBuild)
             -> Result<Box<dyn std::any::Any + Send>> #where_clause {
             #fn_body
         }
@@ -811,7 +813,7 @@ fn generate_metadata_type_checker(
     if metadata_type.is_some() || metadata_mapper.is_some() {
         let metadata_expr = match (metadata_type, metadata_mapper) {
             (Some(_), Some(metadata_mapper)) => quote! {
-                &#metadata_mapper(Default::default(), expr).unwrap()
+                &#metadata_mapper(expr, Default::default()).unwrap()
             },
             (Some(_), None) => quote! { &Default::default() },
             (None, Some(metadata_mapper)) => quote! { &#metadata_mapper(expr).unwrap() },
@@ -824,7 +826,7 @@ fn generate_metadata_type_checker(
                     output_rows: usize,
                     args: &[crate::RpnStackNode<'_>],
                     extra: &mut crate::RpnFnCallExtra<'_>,
-                    expr: &mut ::tipb::Expr,
+                    expr: &mut crate::types::function::CallBuild,
                 ) #where_clause {
                     for row_index in 0..output_rows {
                         let metadata = #metadata_expr;
@@ -1176,7 +1178,7 @@ impl VargsRpnFn {
 
                 crate::RpnFnMeta {
                     name: #fn_name,
-                    metadata_expr_ptr: init_metadata #ty_generics_turbofish,
+                    metadata_ptr: init_metadata #ty_generics_turbofish,
                     validator_ptr: validate #ty_generics_turbofish,
                     fn_ptr: run #ty_generics_turbofish,
                 }
@@ -1317,7 +1319,7 @@ impl RawVargsRpnFn {
 
                 crate::RpnFnMeta {
                     name: #fn_name,
-                    metadata_expr_ptr: init_metadata #ty_generics_turbofish,
+                    metadata_ptr: init_metadata #ty_generics_turbofish,
                     validator_ptr: validate #ty_generics_turbofish,
                     fn_ptr: run #ty_generics_turbofish,
                 }
@@ -1738,7 +1740,7 @@ impl NormalRpnFn {
 
                 crate::RpnFnMeta {
                     name: #fn_name,
-                    metadata_expr_ptr: init_metadata #ty_generics_turbofish,
+                    metadata_ptr: init_metadata #ty_generics_turbofish,
                     validator_ptr: validate #ty_generics_turbofish,
                     fn_ptr: run #ty_generics_turbofish,
                 }
@@ -1909,28 +1911,28 @@ mod tests_normal {
                     )
                     .eval(Null, ctx, output_rows, args, extra, metadata)
                 }
-                fn init_metadata(expr: &mut ::tipb::Expr) -> Result<Box<dyn std::any::Any + Send>> {
+                fn init_metadata(expr: &mut crate::types::function::CallBuild) -> Result<Box<dyn std::any::Any + Send>> {
                     Ok(Box::new(()))
                 }
-                fn validate(expr: &tipb::Expr) -> tidb_query_common::Result<()> {
+                fn validate(expr: &crate::types::function::CallShape) -> tidb_query_common::Result<()> {
                     use tidb_query_datatype::codec::data_type::Evaluable;
                     use crate::function;
-                    function::validate_expr_return_type(expr, <Decimal as EvaluableRet>::EVAL_TYPE)?;
-                    function::validate_expr_arguments_eq(expr, 2usize)?;
-                    let children = expr.get_children();
-                    function::validate_expr_return_type(
-                        &children[0usize],
+                    function::validate_field_type(expr.return_type(), <Decimal as EvaluableRet>::EVAL_TYPE)?;
+                    function::validate_argument_count_eq(expr.args().len(), 2usize)?;
+                    let children = expr.args();
+                    function::validate_field_type(
+                        children[0usize].field_type(),
                         <&'_ Int as EvaluableRef>::EVAL_TYPE
                     )?;
-                    function::validate_expr_return_type(
-                        &children[1usize],
+                    function::validate_field_type(
+                        children[1usize].field_type(),
                         <&'_ Real as EvaluableRef>::EVAL_TYPE
                     )?;
                     Ok(())
                 }
                 crate::RpnFnMeta {
                     name: "foo",
-                    metadata_expr_ptr: init_metadata,
+                    metadata_ptr: init_metadata,
                     validator_ptr: validate,
                     fn_ptr: run,
                 }
@@ -2083,30 +2085,30 @@ mod tests_normal {
                     <ArgConstructor<&'_ A::X, _>>::new(0usize, Foo_Evaluator::<A, B>(std::marker::PhantomData))
                         .eval(Null, ctx, output_rows, args, extra, metadata)
                 }
-                fn init_metadata<A: M, B>(expr: &mut ::tipb::Expr) -> Result<Box<dyn std::any::Any + Send>>
+                fn init_metadata<A: M, B>(expr: &mut crate::types::function::CallBuild) -> Result<Box<dyn std::any::Any + Send>>
                 where
                     B: N<A>
                 {
                     Ok(Box::new(()))
                 }
-                fn validate<A: M, B>(expr: &tipb::Expr) -> tidb_query_common::Result<()>
+                fn validate<A: M, B>(expr: &crate::types::function::CallShape) -> tidb_query_common::Result<()>
                 where
                     B: N<A>
                 {
                     use tidb_query_datatype::codec::data_type::Evaluable;
                     use crate::function;
-                    function::validate_expr_return_type(expr, <B as EvaluableRet>::EVAL_TYPE)?;
-                    function::validate_expr_arguments_eq(expr, 1usize)?;
-                    let children = expr.get_children();
-                    function::validate_expr_return_type(
-                        &children[0usize],
+                    function::validate_field_type(expr.return_type(), <B as EvaluableRet>::EVAL_TYPE)?;
+                    function::validate_argument_count_eq(expr.args().len(), 1usize)?;
+                    let children = expr.args();
+                    function::validate_field_type(
+                        children[0usize].field_type(),
                         <&'_ A::X as EvaluableRef>::EVAL_TYPE
                     )?;
                     Ok(())
                 }
                 crate::RpnFnMeta {
                     name: "foo",
-                    metadata_expr_ptr: init_metadata::<A, B>,
+                    metadata_ptr: init_metadata::<A, B>,
                     validator_ptr: validate::<A, B>,
                     fn_ptr: run::<A, B>,
                 }

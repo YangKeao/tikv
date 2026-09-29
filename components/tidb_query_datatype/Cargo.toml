@@ -37,6 +37,7 @@ serde = "1.0"
 serde_json = "1.0"
 slog = { workspace = true }
 slog-global = { workspace = true }
+smallvec = "1.4"
 static_assertions = { version = "1.0", features = ["nightly"] }
 thiserror = "1.0"
 tidb_query_common = { workspace = true }

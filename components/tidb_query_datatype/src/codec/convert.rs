@@ -11,11 +11,7 @@ use super::{
 // use crate::{self, FieldTypeTp, UNSPECIFIED_LENGTH};
 use crate::{
     Collation, FieldTypeAccessor, FieldTypeTp, UNSPECIFIED_LENGTH,
-    codec::{
-        data_type::*,
-        error::ERR_DATA_OUT_OF_RANGE,
-        mysql::{Res, decimal::max_or_min_dec},
-    },
+    codec::{data_type::*, error::ERR_DATA_OUT_OF_RANGE, mysql::Res},
     expr::{EvalContext, Flag},
 };
 
@@ -38,6 +34,16 @@ pub trait ToStringValue {
 impl<T: ToString> ToStringValue for T {
     default fn to_string_value(&self) -> String {
         self.to_string()
+    }
+}
+
+pub(in crate::codec) trait TryToStringValue {
+    fn try_to_string_value(&self) -> Result<String>;
+}
+
+impl<T: ToStringValue> TryToStringValue for T {
+    default fn try_to_string_value(&self) -> Result<String> {
+        Ok(self.to_string_value())
     }
 }
 
@@ -97,7 +103,7 @@ where
     #[inline]
     fn convert(&self, _: &mut EvalContext) -> Result<String> {
         // FIXME: There is an additional step `ProduceStrWithSpecifiedTp` in TiDB.
-        Ok(self.to_string_value())
+        <T as TryToStringValue>::try_to_string_value(self)
     }
 }
 
@@ -107,7 +113,7 @@ where
 {
     #[inline]
     fn convert(&self, _: &mut EvalContext) -> Result<Bytes> {
-        Ok(self.to_string_value().into_bytes())
+        <T as TryToStringValue>::try_to_string_value(self).map(String::into_bytes)
     }
 }
 
@@ -443,7 +449,7 @@ impl ToInt for Bytes {
 impl ToInt for Decimal {
     #[inline]
     fn to_int(&self, ctx: &mut EvalContext, tp: FieldTypeTp) -> Result<i64> {
-        let dec = round_decimal_with_ctx(ctx, *self)?;
+        let dec = round_decimal_with_ctx(ctx, self.clone())?;
         let val = dec.as_i64();
         let err = Error::truncated_wrong_val("DECIMAL", dec);
         let r = val.into_result_with_overflow_err(ctx, err)?;
@@ -452,7 +458,7 @@ impl ToInt for Decimal {
 
     #[inline]
     fn to_uint(&self, ctx: &mut EvalContext, tp: FieldTypeTp) -> Result<u64> {
-        let dec = round_decimal_with_ctx(ctx, *self)?;
+        let dec = round_decimal_with_ctx(ctx, self.clone())?;
         let val = dec.as_u64();
         let err = Error::truncated_wrong_val("DECIMAL", dec);
         let r = val.into_result_with_overflow_err(ctx, err)?;
@@ -650,27 +656,34 @@ pub fn produce_dec_with_specified_tp(
 ) -> Result<Decimal> {
     let (flen, decimal) = (ft.as_accessor().flen(), ft.as_accessor().decimal());
     if flen != UNSPECIFIED_LENGTH && decimal != UNSPECIFIED_LENGTH {
-        if flen < decimal {
-            return Err(Error::m_bigger_than_d(""));
-        }
+        // Reject malformed fully specified targets before warnings, mutation,
+        // fast paths or narrowing. Either unspecified field still bypasses.
+        let (target_precision, target_scale) =
+            Decimal::checked_declared_fixed_target(flen, decimal)?;
         let (prec, frac) = dec.prec_and_frac();
-        let (prec, frac) = (prec as isize, frac as isize);
-        if !dec.is_zero() && prec - frac > flen - decimal {
+        // Counts and field lengths are at most 64 bits on supported targets.
+        // Compare in i128 without narrowing the natural precision to isize.
+        let (prec, frac) = (prec as i128, i128::from(frac));
+        let (flen_wide, decimal_wide) = (flen as i128, decimal as i128);
+        if !dec.is_zero() && prec - frac > flen_wide - decimal_wide {
             // select (cast 111 as decimal(1)) causes a warning in MySQL.
             ctx.handle_overflow_err(Error::overflow(
                 "Decimal",
                 format!("({}, {})", flen, decimal),
             ))?;
-            dec = max_or_min_dec(dec.is_negative(), flen as u8, decimal as u8)
-        } else if frac != decimal {
-            let old = dec;
+            dec = Decimal::try_max_or_min_for_target(
+                dec.is_negative(),
+                target_precision,
+                target_scale,
+            )?
+        } else if frac != decimal_wide {
             let rounded = dec
-                .round(decimal as i8, RoundMode::HalfEven)
+                .try_round_fixed(target_scale, RoundMode::HalfEven)?
                 .into_result_with_overflow_err(
                     ctx,
                     Error::overflow("Decimal", format!("({}, {})", flen, decimal)),
                 )?;
-            if !rounded.is_zero() && frac > decimal && rounded != old {
+            if !rounded.is_zero() && frac > decimal_wide && rounded != dec {
                 if ctx.cfg.flag.contains(Flag::IN_INSERT_STMT)
                     || ctx.cfg.flag.contains(Flag::IN_UPDATE_OR_DELETE_STMT)
                 {
@@ -1164,10 +1177,158 @@ mod tests {
                 ERR_DATA_OUT_OF_RANGE, ERR_M_BIGGER_THAN_D, ERR_TRUNCATE_WRONG_VALUE,
                 WARN_DATA_TRUNCATED,
             },
-            mysql::{Res, UNSPECIFIED_FSP, charset},
+            mysql::{Res, UNSPECIFIED_FSP, charset, decimal::max_or_min_dec},
         },
         expr::{EvalConfig, EvalContext, Flag},
     };
+
+    const STORAGE_BRIDGE_SENTINEL: usize = 731;
+
+    #[derive(Clone, Default, Debug)]
+    struct FallibleStorageBridgeProbe;
+
+    impl ToStringValue for FallibleStorageBridgeProbe {
+        fn to_string_value(&self) -> String {
+            "J infallible marker".to_owned()
+        }
+    }
+
+    impl TryToStringValue for FallibleStorageBridgeProbe {
+        fn try_to_string_value(&self) -> Result<String> {
+            Err(Error::ColumnOffset(STORAGE_BRIDGE_SENTINEL))
+        }
+    }
+
+    impl EvaluableRet for FallibleStorageBridgeProbe {
+        const EVAL_TYPE: crate::EvalType = crate::EvalType::Bytes;
+        type ChunkedType = ChunkedVecSized<Self>;
+
+        fn cast_chunk_into_vector_value(_: Self::ChunkedType) -> VectorValue {
+            unreachable!("test-only conversion fixture is never vectorized")
+        }
+    }
+
+    #[derive(Clone, Default, Debug)]
+    struct StorageBridgeFallbackProbe;
+
+    impl Display for StorageBridgeFallbackProbe {
+        fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            output.write_str("J DISPLAY marker")
+        }
+    }
+
+    impl ToStringValue for StorageBridgeFallbackProbe {
+        fn to_string_value(&self) -> String {
+            "J STORAGE marker".to_owned()
+        }
+    }
+
+    impl EvaluableRet for StorageBridgeFallbackProbe {
+        const EVAL_TYPE: crate::EvalType = crate::EvalType::Bytes;
+        type ChunkedType = ChunkedVecSized<Self>;
+
+        fn cast_chunk_into_vector_value(_: Self::ChunkedType) -> VectorValue {
+            unreachable!("test-only conversion fixture is never vectorized")
+        }
+    }
+
+    fn storage_bridge_contexts() -> Vec<EvalContext> {
+        let mut contexts = Vec::new();
+        for flag in [
+            Flag::empty(),
+            Flag::TRUNCATE_AS_WARNING | Flag::OVERFLOW_AS_WARNING,
+            Flag::IGNORE_TRUNCATE,
+        ] {
+            for cap in [0, 1, 4] {
+                let mut config = EvalConfig::from_flag(flag);
+                config.set_max_warning_cnt(cap);
+                let mut context = EvalContext::new(Arc::new(config));
+                context
+                    .warnings
+                    .append_warning(Error::truncated_wrong_val("prefix", "retained"));
+                contexts.push(context);
+            }
+        }
+        contexts
+    }
+
+    #[test]
+    fn test_storage_bridge_propagates_string_error() {
+        let value = FallibleStorageBridgeProbe;
+        assert!(matches!(
+            <FallibleStorageBridgeProbe as TryToStringValue>::try_to_string_value(&value),
+            Err(Error::ColumnOffset(STORAGE_BRIDGE_SENTINEL))
+        ));
+        for mut context in storage_bridge_contexts() {
+            let count = context.warnings.warning_cnt;
+            let prefix = context.warnings.warnings.clone();
+            // These are the ACTUAL generic wrappers, not fake ConvertTo impls.
+            // The test-only prerequisite exists; the old wrapper ignores it.
+            let actual =
+                <FallibleStorageBridgeProbe as ConvertTo<String>>::convert(&value, &mut context);
+            assert_eq!(context.warnings.warning_cnt, count);
+            assert_eq!(context.warnings.warnings, prefix);
+            assert!(
+                matches!(actual, Err(Error::ColumnOffset(STORAGE_BRIDGE_SENTINEL))),
+                "String wrapper did not propagate the sentinel: {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_storage_bridge_propagates_bytes_error() {
+        let value = FallibleStorageBridgeProbe;
+        assert!(matches!(
+            <FallibleStorageBridgeProbe as TryToStringValue>::try_to_string_value(&value),
+            Err(Error::ColumnOffset(STORAGE_BRIDGE_SENTINEL))
+        ));
+        for mut context in storage_bridge_contexts() {
+            let count = context.warnings.warning_cnt;
+            let prefix = context.warnings.warnings.clone();
+            let actual =
+                <FallibleStorageBridgeProbe as ConvertTo<Bytes>>::convert(&value, &mut context);
+            assert_eq!(context.warnings.warning_cnt, count);
+            assert_eq!(context.warnings.warnings, prefix);
+            assert!(
+                matches!(actual, Err(Error::ColumnOffset(STORAGE_BRIDGE_SENTINEL))),
+                "Bytes wrapper did not propagate the sentinel: {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_storage_bridge_fallback_current_observations() {
+        fn observe<T: ToStringValue + EvaluableRet>(label: &str, value: &T, expected: &str) {
+            assert_eq!(value.to_string_value(), expected);
+            assert_eq!(
+                <T as TryToStringValue>::try_to_string_value(value).unwrap(),
+                expected
+            );
+            for mut context in storage_bridge_contexts() {
+                let count = context.warnings.warning_cnt;
+                let prefix = context.warnings.warnings.clone();
+                let text = <T as ConvertTo<String>>::convert(value, &mut context).unwrap();
+                let bytes = <T as ConvertTo<Bytes>>::convert(value, &mut context).unwrap();
+                assert_eq!(text, expected);
+                assert_eq!(bytes, expected.as_bytes());
+                assert_eq!(context.warnings.warning_cnt, count);
+                assert_eq!(context.warnings.warnings, prefix);
+            }
+            eprintln!("storage bridge fallback {label}: value={expected:?} contexts=9 unchanged");
+        }
+        let fallback = StorageBridgeFallbackProbe;
+        assert_eq!(fallback.to_string(), "J DISPLAY marker");
+        observe(
+            "specialized-value-not-display",
+            &fallback,
+            "J STORAGE marker",
+        );
+        observe("integer", &42_i64, "42");
+        observe("real", &Real::new(1.25).unwrap(), "1.25");
+        let json: Json = r#"{"a":1,"b":[true,null]}"#.parse().unwrap();
+        let expected = json.to_string_value();
+        observe("owned-json-value-format", &json, &expected);
+    }
 
     #[test]
     fn test_int_to_int() {
@@ -2356,6 +2517,144 @@ mod tests {
     }
 
     #[test]
+    fn test_producer_boundary_rejects_fully_specified_target() {
+        for (input, precision, scale) in [
+            ("0.0", 81, 1),
+            ("0", 82, 0),
+            ("0", 128, 128),
+            ("0", 256, 0),
+            ("0", -2, -2),
+        ] {
+            let mut target = FieldType::default();
+            target
+                .as_mut_accessor()
+                .set_flen(precision)
+                .set_decimal(scale);
+            let config =
+                EvalConfig::from_flag(Flag::OVERFLOW_AS_WARNING | Flag::TRUNCATE_AS_WARNING);
+            let mut context = EvalContext::new(Arc::new(config));
+            let result = produce_dec_with_specified_tp(
+                &mut context,
+                input.parse::<Decimal>().unwrap(),
+                &target,
+            );
+            assert!(
+                result.is_err(),
+                "fully specified target=({precision},{scale})"
+            );
+            assert_eq!(context.warnings.warning_cnt, 0);
+        }
+    }
+
+    #[test]
+    fn test_producer_boundary_rejects_before_overflow_warning() {
+        // A bounded81-digit source is enough: no wide/huge formatter probe.
+        let input = format!("1{}", "0".repeat(80)).parse::<Decimal>().unwrap();
+        let mut target = FieldType::default();
+        target.as_mut_accessor().set_flen(81).set_decimal(1);
+        let config = EvalConfig::from_flag(Flag::OVERFLOW_AS_WARNING | Flag::TRUNCATE_AS_WARNING);
+        let mut context = EvalContext::new(Arc::new(config));
+        let result = produce_dec_with_specified_tp(&mut context, input, &target);
+        assert!(result.is_err());
+        assert_eq!(context.warnings.warning_cnt, 0);
+    }
+
+    #[test]
+    fn test_producer_policy_current_observations() {
+        fn observe(
+            label: &str,
+            input: &str,
+            precision: isize,
+            scale: isize,
+            unsigned: bool,
+            flags: Flag,
+        ) {
+            let mut target = FieldType::default();
+            let accessor = target.as_mut_accessor();
+            accessor.set_flen(precision).set_decimal(scale);
+            if unsigned {
+                accessor.set_flag(FieldTypeFlag::UNSIGNED);
+            }
+            let mut context = EvalContext::new(Arc::new(EvalConfig::from_flag(flags)));
+            let result = produce_dec_with_specified_tp(
+                &mut context,
+                input.parse::<Decimal>().unwrap(),
+                &target,
+            );
+            let observation = result
+                .as_ref()
+                .map(|value| {
+                    (
+                        value.to_string_value(),
+                        value.words().int_digits,
+                        value.storage_scale(),
+                        value.result_scale(),
+                        value.is_negative(),
+                    )
+                })
+                .map_err(|error| format!("{error:?}"));
+            let warnings: Vec<_> = context
+                .warnings
+                .warnings
+                .iter()
+                .map(|warning| warning.get_code())
+                .collect();
+            eprintln!(
+                "producer {label}: target=({precision},{scale}) unsigned={unsigned} result={observation:?} warning_count={} codes={warnings:?}",
+                context.warnings.warning_cnt
+            );
+        }
+        let warning = Flag::OVERFLOW_AS_WARNING | Flag::TRUNCATE_AS_WARNING;
+        for (precision, scale) in [
+            (UNSPECIFIED_LENGTH, 128),
+            (256, UNSPECIFIED_LENGTH),
+            (UNSPECIFIED_LENGTH, -2),
+            (-2, UNSPECIFIED_LENGTH),
+        ] {
+            observe(
+                "either-unspecified",
+                "-12.345",
+                precision,
+                scale,
+                false,
+                Flag::empty(),
+            );
+            observe(
+                "unspecified-unsigned-last",
+                "-12.345",
+                precision,
+                scale,
+                true,
+                Flag::empty(),
+            );
+        }
+        for target in [(1, 2), (-2, 0), (255, 256)] {
+            observe(
+                "ordered-count-priority",
+                "0",
+                target.0,
+                target.1,
+                false,
+                warning,
+            );
+        }
+        observe("integer81-domain", "1", 81, 0, false, warning);
+        observe("fraction81-round-cap", "0.1", 81, 81, false, warning);
+        observe("post-carry-no-new-check", "9.995", 3, 2, false, warning);
+        for flags in [
+            Flag::empty(),
+            warning,
+            Flag::IN_INSERT_STMT,
+            Flag::IN_UPDATE_OR_DELETE_STMT,
+        ] {
+            observe("overflow-order", "12.34", 2, 1, false, flags);
+            observe("truncate-order", "1.234", 3, 2, false, flags);
+            observe("overflow-unsigned-last", "-12.34", 2, 1, true, flags);
+            observe("truncate-unsigned-last", "-1.234", 3, 2, true, flags);
+        }
+    }
+
+    #[test]
     fn test_produce_dec_with_specified_tp() {
         use std::str::FromStr;
 
@@ -2395,7 +2694,7 @@ mod tests {
         for (dec, flen, decimal, want) in cases {
             ft.set_flen(flen);
             ft.set_decimal(decimal);
-            let nd = produce_dec_with_specified_tp(&mut ctx, dec, &ft).unwrap();
+            let nd = produce_dec_with_specified_tp(&mut ctx, dec.clone(), &ft).unwrap();
             assert_eq!(
                 nd.frac_cnt(),
                 nd.result_frac_cnt(),
@@ -2792,7 +3091,7 @@ mod tests {
                 }
 
                 // call produce_dec_with_specified_tp
-                let r = produce_dec_with_specified_tp(&mut ctx, input, &rft);
+                let r = produce_dec_with_specified_tp(&mut ctx, input.clone(), &rft);
 
                 // make log
                 let rs = r.as_ref().map(|x| x.to_string_value());

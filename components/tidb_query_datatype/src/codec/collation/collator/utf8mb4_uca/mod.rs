@@ -46,9 +46,20 @@ impl<T: UnicodeVersion> Collator for CollatorUca<T> {
         Ok(matches!((a, b), (Some(a), Some(b)) if T::like_pattern_match(a, b)))
     }
 
+    fn preprocess_sort_key(bstr: &[u8], options: KeyOptions) -> &[u8] {
+        match options {
+            KeyOptions::Default => T::preprocess(bstr),
+            KeyOptions::NoPad => bstr,
+        }
+    }
+
+    fn max_sort_key_len(bstr: &[u8]) -> usize {
+        utf8_rune_count(bstr) * 16
+    }
+
     #[inline]
-    fn write_sort_key<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
-        let mut bstr_rest = T::preprocess(bstr);
+    fn write_sort_key_unpadded<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
+        let mut bstr_rest = bstr;
 
         let mut n = 0;
 

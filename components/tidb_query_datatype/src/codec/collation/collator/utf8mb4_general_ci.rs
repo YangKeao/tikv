@@ -27,9 +27,17 @@ impl Collator for CollatorUtf8Mb4GeneralCi {
         }
     }
 
+    fn preprocess_sort_key(bstr: &[u8], options: KeyOptions) -> &[u8] {
+        prepare_padded_key(bstr, options)
+    }
+
+    fn max_sort_key_len(bstr: &[u8]) -> usize {
+        utf8_rune_count(bstr) * 2
+    }
+
     #[inline]
-    fn write_sort_key<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
-        let mut bstr_rest = trim_end_padding(bstr);
+    fn write_sort_key_unpadded<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
+        let mut bstr_rest = bstr;
         let mut n = 0;
 
         while !bstr_rest.is_empty() {

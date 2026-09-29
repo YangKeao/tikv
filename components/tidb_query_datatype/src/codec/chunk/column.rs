@@ -1081,7 +1081,10 @@ mod tests {
     use tipb::FieldType;
 
     use super::*;
-    use crate::codec::datum::Datum;
+    use crate::codec::{
+        data_type::{ChunkedVec, ChunkedVecSized},
+        datum::Datum,
+    };
 
     #[test]
     fn test_column_i64() {
@@ -1192,6 +1195,60 @@ mod tests {
         let dec: Decimal = "1234.00".parse().unwrap();
         let data = vec![Datum::Null, Datum::Dec(dec)];
         test_colum_datum(fields, data);
+    }
+
+    #[test]
+    fn test_decimal_selected_null_cells_are_zero_bytes() {
+        let field: FieldType = FieldTypeTp::NewDecimal.into();
+        let mut values = ChunkedVecSized::<Decimal>::from_vec(vec![
+            Some("5".parse().unwrap()),
+            None,
+            Some(Decimal::default()),
+        ]);
+        values.set(0, None);
+        values.set(1, Some("7".parse().unwrap()));
+        values.push(None);
+        let vector = VectorValue::Decimal(values);
+        let selected = [3, 1, 0, 2, 3];
+        let column = Column::from_vector_value(&field, &vector, &selected).unwrap();
+
+        assert_eq!(column.fixed_len, 40);
+        assert_eq!(column.length, 5);
+        assert_eq!(column.null_cnt, 3);
+        assert_eq!(column.null_bitmap, vec![0b0000_1010]);
+
+        // Non-NULL zero has int_digits=1. A NULL slot must instead emit forty
+        // zero bytes, not the valid Default Decimal hidden behind its bitmap.
+        let null_cell = [0u8; 40];
+        let mut zero_cell = [0u8; 40];
+        zero_cell[0] = 1;
+        let mut seven_cell = zero_cell;
+        seven_cell[4..8].copy_from_slice(&7u32.to_ne_bytes());
+        let mut expected_data = Vec::new();
+        for cell in [null_cell, seven_cell, null_cell, zero_cell, null_cell] {
+            expected_data.extend_from_slice(&cell);
+        }
+        assert_eq!(column.data, expected_data);
+        for row in [0, 2, 4] {
+            assert!(column.is_null(row));
+            assert_eq!(column.get_datum(row, &field).unwrap(), Datum::Null);
+        }
+        assert!(!column.is_null(3));
+        assert_eq!(
+            column.get_datum(3, &field).unwrap(),
+            Datum::Dec(Decimal::zero())
+        );
+
+        let mut encoded = Vec::new();
+        encoded.write_chunk_column(&column).unwrap();
+        let mut expected = vec![5, 0, 0, 0, 3, 0, 0, 0, 0b0000_1010];
+        expected.extend_from_slice(&expected_data);
+        assert_eq!(encoded, expected);
+
+        let empty = Column::from_vector_value(&field, &vector, &[]).unwrap();
+        let mut encoded_empty = Vec::new();
+        encoded_empty.write_chunk_column(&empty).unwrap();
+        assert_eq!(encoded_empty, vec![0; 8]);
     }
 
     #[test]

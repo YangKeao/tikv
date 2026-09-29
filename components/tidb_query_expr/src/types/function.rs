@@ -26,29 +26,50 @@ use std::{any::Any, convert::TryFrom, marker::PhantomData};
 
 use static_assertions::assert_eq_size;
 use tidb_query_common::Result;
-use tidb_query_datatype::{
-    EvalType, FieldTypeAccessor,
-    codec::{batch::LazyBatchColumnVec, data_type::*},
-    expr::EvalContext,
-};
-use tipb::{Expr, FieldType, ScalarFuncSig};
+use tidb_query_datatype::{EvalType, FieldTypeAccessor, codec::data_type::*, expr::EvalContext};
+use tipb::{Expr, ExprType, FieldType, ScalarFuncSig};
 
 use super::{RpnStackNode, expr_eval::LogicalRows};
 use crate::RpnExpression;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlKind {
+    And,
+    Or,
+    If,
+    IfNull,
+    CaseWhen,
+    Coalesce,
+}
+
+impl ControlKind {
+    pub(crate) fn is_logical(self) -> bool {
+        matches!(self, Self::And | Self::Or)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ShortCircuitFnMeta {
     pub sig: ScalarFuncSig,
+    // Scheduling belongs to the official iterative driver, not a callback
+    // which recursively invokes another evaluator.
+    pub(crate) kind: ControlKind,
+}
 
-    /// A function that evaluates its arguments on demand for selected rows.
-    pub fn_ptr: fn(
-        ctx: &mut EvalContext,
-        schema: &[FieldType],
-        input_physical_columns: &LazyBatchColumnVec,
-        input_logical_rows: &[usize],
-        output_rows: usize,
-        args: &[RpnExpression],
-    ) -> Result<VectorValue>,
+/// Selector-only information, deliberately not part of the public RpnFnMeta
+/// constructed by rpn_fn (including consumers outside this crate).
+pub(crate) struct SelectedCall {
+    pub(crate) func_meta: RpnFnMeta,
+    pub(crate) control: Option<ControlKind>,
+}
+
+impl From<RpnFnMeta> for SelectedCall {
+    fn from(func_meta: RpnFnMeta) -> Self {
+        Self {
+            func_meta,
+            control: None,
+        }
+    }
 }
 
 /// Metadata of an RPN function.
@@ -57,11 +78,12 @@ pub struct RpnFnMeta {
     /// The display name of the RPN function. Mainly used in tests.
     pub name: &'static str,
 
-    /// Validator against input expression tree.
-    pub validator_ptr: fn(expr: &Expr) -> Result<()>,
+    /// Validator shared by wire and typed local construction.
+    pub(crate) validator_ptr: fn(call: &CallShape) -> Result<()>,
 
-    /// The metadata constructor of the RPN function.
-    pub metadata_expr_ptr: fn(expr: &mut Expr) -> Result<Box<dyn Any + Send>>,
+    /// The sole metadata constructor, operating on original argument
+    /// identities.
+    pub(crate) metadata_ptr: fn(call: &mut CallBuild) -> Result<Box<dyn Any + Send>>,
 
     #[allow(clippy::type_complexity)]
     /// The RPN function.
@@ -79,6 +101,414 @@ pub struct RpnFnMeta {
 impl std::fmt::Debug for RpnFnMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name)
+    }
+}
+
+/// A function identity for in-process construction, without reserving wire IDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FunctionRef {
+    TiPb(ScalarFuncSig),
+    Local(LocalFunctionId),
+}
+
+/// Closed, TiKV-owned local signatures. Each variant has a checked support
+/// domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalFunctionId {
+    NullIfIntSignedSigned,
+}
+
+/// Source provenance, not a deduction from the value's collation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiteralKind {
+    Typed,
+    Text,
+    BinaryLiteral,
+}
+
+/// Public metadata inputs are typed; compiled `Any` metadata is never supplied
+/// by a local caller.
+#[derive(Clone, Debug, Default)]
+pub enum CallMetadata {
+    #[default]
+    None,
+    InUnion {
+        in_union: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum CallArgValue {
+    Wire(ExprType, Vec<u8>),
+    Constant(ScalarValue, LiteralKind),
+    Dynamic,
+}
+
+/// A shallow argument descriptor. It never contains an evaluable child program.
+#[derive(Clone, Debug)]
+pub(crate) struct CallArg {
+    field_type: FieldType,
+    value: CallArgValue,
+}
+
+impl CallArg {
+    pub(crate) fn from_expr(expr: &Expr) -> Self {
+        Self {
+            field_type: expr.get_field_type().clone(),
+            value: CallArgValue::Wire(expr.get_tp(), expr.get_val().to_vec()),
+        }
+    }
+
+    pub(crate) fn constant(value: ScalarValue, field_type: FieldType, kind: LiteralKind) -> Self {
+        Self {
+            field_type,
+            value: CallArgValue::Constant(value, kind),
+        }
+    }
+
+    pub(crate) fn dynamic(field_type: FieldType) -> Self {
+        Self {
+            field_type,
+            value: CallArgValue::Dynamic,
+        }
+    }
+
+    pub(crate) fn field_type(&self) -> &FieldType {
+        &self.field_type
+    }
+
+    pub(crate) fn constant_bytes(&self) -> Option<&[u8]> {
+        match &self.value {
+            CallArgValue::Wire(ExprType::Bytes | ExprType::String, value) => Some(value),
+            CallArgValue::Constant(ScalarValue::Bytes(Some(value)), _) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn wire_literal(&self) -> Option<(ExprType, &[u8])> {
+        match &self.value {
+            CallArgValue::Wire(tp, value) => Some((*tp, value)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn source_type_name(&self) -> String {
+        match &self.value {
+            CallArgValue::Wire(tp, _) => format!("{:?}", tp),
+            CallArgValue::Constant(value, _) => format!("{:?}", value.eval_type()),
+            CallArgValue::Dynamic => "dynamic input".to_owned(),
+        }
+    }
+
+    pub(crate) fn scalar_literal(&self) -> Option<&ScalarValue> {
+        match &self.value {
+            CallArgValue::Constant(value, _) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_dynamic(&self) -> bool {
+        matches!(
+            self.value,
+            CallArgValue::Dynamic
+                | CallArgValue::Wire(ExprType::ScalarFunc | ExprType::ColumnRef, _)
+        )
+    }
+
+    pub(crate) fn is_null_literal(&self) -> bool {
+        match &self.value {
+            CallArgValue::Wire(ExprType::Null, _) => true,
+            CallArgValue::Constant(value, _) => value.is_none(),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn uses_binary_literal_cast(&self) -> Result<bool> {
+        match &self.value {
+            CallArgValue::Wire(tp, _) => {
+                Ok(wire_expr_type_is_scalar(*tp)? && self.field_type.is_binary_string_like())
+            }
+            CallArgValue::Constant(_, kind) => Ok(*kind == LiteralKind::BinaryLiteral),
+            CallArgValue::Dynamic => Ok(false),
+        }
+    }
+}
+
+pub(crate) fn wire_expr_type_is_scalar(tp: ExprType) -> Result<bool> {
+    match tp {
+        ExprType::Null
+        | ExprType::Int64
+        | ExprType::Uint64
+        | ExprType::String
+        | ExprType::Bytes
+        | ExprType::Float32
+        | ExprType::Float64
+        | ExprType::MysqlTime
+        | ExprType::MysqlDuration
+        | ExprType::MysqlDecimal
+        | ExprType::MysqlJson
+        | ExprType::MysqlEnum
+        | ExprType::TiDbVectorFloat32 => Ok(true),
+        ExprType::ScalarFunc | ExprType::ColumnRef => Ok(false),
+        _ => Err(other_err!("Unsupported expression type {:?}", tp)),
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CallShape {
+    function: FunctionRef,
+    return_type: FieldType,
+    args: Vec<CallArg>,
+}
+
+impl CallShape {
+    pub(crate) fn from_expr(expr: &Expr) -> Self {
+        Self::new(
+            FunctionRef::TiPb(expr.get_sig()),
+            expr.get_field_type().clone(),
+            expr.get_children().iter().map(CallArg::from_expr).collect(),
+        )
+    }
+
+    pub(crate) fn new(function: FunctionRef, return_type: FieldType, args: Vec<CallArg>) -> Self {
+        Self {
+            function,
+            return_type,
+            args,
+        }
+    }
+    pub(crate) fn function(&self) -> FunctionRef {
+        self.function
+    }
+    pub(crate) fn return_type(&self) -> &FieldType {
+        &self.return_type
+    }
+    pub(crate) fn args(&self) -> &[CallArg] {
+        &self.args
+    }
+}
+
+enum MetadataSource {
+    Wire(Vec<u8>),
+    Local(CallMetadata),
+}
+
+/// Retention is independent of immutable source-order argument facts.
+pub(crate) struct CallBuild {
+    shape: CallShape,
+    metadata: MetadataSource,
+    retained_args: Vec<usize>,
+}
+
+impl CallBuild {
+    pub(crate) fn from_expr(expr: &Expr) -> Self {
+        Self {
+            shape: CallShape::from_expr(expr),
+            metadata: MetadataSource::Wire(expr.get_val().to_vec()),
+            retained_args: (0..expr.get_children().len()).collect(),
+        }
+    }
+
+    pub(crate) fn local(shape: CallShape, metadata: CallMetadata) -> Self {
+        let retained_args = (0..shape.args.len()).collect();
+        Self {
+            shape,
+            metadata: MetadataSource::Local(metadata),
+            retained_args,
+        }
+    }
+
+    pub(crate) fn shape(&self) -> &CallShape {
+        &self.shape
+    }
+    pub(crate) fn args(&self) -> &[CallArg] {
+        self.shape.args()
+    }
+    pub(crate) fn set_retained_args(&mut self, retained: Vec<usize>) -> Result<()> {
+        let mut seen = vec![false; self.args().len()];
+        for &index in &retained {
+            if index >= seen.len() || seen[index] {
+                return Err(other_err!("Invalid retained function argument {}", index));
+            }
+            seen[index] = true;
+        }
+        self.retained_args = retained;
+        Ok(())
+    }
+}
+
+/// Only common preparation can pair a function with its validated metadata.
+pub(crate) struct PreparedCall {
+    function: FunctionRef,
+    control: Option<ControlKind>,
+    func_meta: RpnFnMeta,
+    field_type: FieldType,
+    metadata: Box<dyn Any + Send>,
+    retained_args: Vec<usize>,
+}
+
+/// Opaque ordinary-demand call prepared by the canonical selector/validator.
+/// Source/site facts are retained assertions, not proof of native PB ingestion
+/// or a site-aware native diagnostic adapter. No evaluator closure is stored.
+#[derive(Debug)]
+pub struct PreparedOrdinaryCall {
+    function: FunctionRef,
+    func_meta: RpnFnMeta,
+    field_type: FieldType,
+    metadata: Box<dyn Any + Send>,
+    site: crate::local::OrdinaryCallSite,
+}
+
+impl PreparedOrdinaryCall {
+    pub fn function(&self) -> FunctionRef {
+        self.function
+    }
+    pub fn return_type(&self) -> &FieldType {
+        &self.field_type
+    }
+    pub fn site(&self) -> &crate::local::OrdinaryCallSite {
+        &self.site
+    }
+    pub(crate) fn kernel(&self) -> (RpnFnMeta, &(dyn Any + Send)) {
+        (self.func_meta, &*self.metadata)
+    }
+}
+
+impl PreparedCall {
+    pub(crate) fn into_ordinary(
+        self,
+        site: crate::local::OrdinaryCallSite,
+    ) -> Result<PreparedOrdinaryCall> {
+        if self.function != FunctionRef::TiPb(ScalarFuncSig::PlusInt)
+            || self.control.is_some()
+            || self.retained_args != [0, 1]
+            || !self.metadata.is::<()>()
+        {
+            return Err(other_err!(
+                "Ordinary demand requires checked203, unit metadata and source-order arguments"
+            ));
+        }
+        Ok(PreparedOrdinaryCall {
+            function: self.function,
+            func_meta: self.func_meta,
+            field_type: self.field_type,
+            metadata: self.metadata,
+            site,
+        })
+    }
+
+    pub(crate) fn short_circuit_meta(&self) -> Option<ShortCircuitFnMeta> {
+        let FunctionRef::TiPb(sig) = self.function else {
+            return None;
+        };
+        self.control.map(|kind| ShortCircuitFnMeta { sig, kind })
+    }
+
+    pub(crate) fn into_control(
+        self,
+        args: Box<[RpnExpression]>,
+    ) -> Result<crate::RpnExpressionNode> {
+        let func_meta = self
+            .short_circuit_meta()
+            .ok_or_else(|| other_err!("Call is not a checked control"))?;
+        if args.len() != self.retained_args.len() {
+            return Err(other_err!("Control child count changed after preparation"));
+        }
+        Ok(crate::RpnExpressionNode::ShortCircuitFnCall {
+            func_meta,
+            args,
+            field_type: self.field_type,
+        })
+    }
+
+    pub(crate) fn retained_args(&self) -> &[usize] {
+        &self.retained_args
+    }
+    pub(crate) fn into_node(self) -> crate::RpnExpressionNode {
+        crate::RpnExpressionNode::FnCall {
+            func_meta: self.func_meta,
+            args_len: self.retained_args.len(),
+            field_type: self.field_type,
+            metadata: self.metadata,
+        }
+    }
+}
+
+pub(crate) fn prepare_call(call: &mut CallBuild) -> Result<PreparedCall> {
+    let selected = crate::select_call(call.shape())?;
+    prepare_selected_call(call, selected)
+}
+
+pub(crate) fn prepare_selected_call(
+    call: &mut CallBuild,
+    selected: SelectedCall,
+) -> Result<PreparedCall> {
+    let func_meta = selected.func_meta;
+    (func_meta.validator_ptr)(call.shape()).map_err(|error| match call.shape.function {
+        FunctionRef::TiPb(sig) => other_err!(
+            "Invalid {} (sig = {:?}) signature: {}",
+            func_meta.name,
+            sig,
+            error
+        ),
+        FunctionRef::Local(id) => other_err!(
+            "Invalid {} (local = {:?}) signature: {}",
+            func_meta.name,
+            id,
+            error
+        ),
+    })?;
+    let metadata = (func_meta.metadata_ptr)(call)?;
+    if selected.control.is_some()
+        && (!metadata.is::<()>()
+            || call.retained_args.len() != call.args().len()
+            || call
+                .retained_args
+                .iter()
+                .enumerate()
+                .any(|(position, &index)| position != index))
+    {
+        return Err(other_err!(
+            "Control preparation requires unit metadata and source-order arguments"
+        ));
+    }
+    let retained_shape = CallShape::new(
+        call.shape.function,
+        call.shape.return_type.clone(),
+        call.retained_args
+            .iter()
+            .map(|&i| call.shape.args[i].clone())
+            .collect(),
+    );
+    (func_meta.validator_ptr)(&retained_shape)?;
+    Ok(PreparedCall {
+        function: call.shape.function,
+        control: selected.control,
+        func_meta,
+        field_type: call.shape.return_type.clone(),
+        metadata,
+        retained_args: call.retained_args.clone(),
+    })
+}
+
+pub(crate) trait FromCallMetadata: protobuf::Message + Default {
+    fn from_local(metadata: &CallMetadata) -> Result<Self>;
+}
+
+impl FromCallMetadata for tipb::InUnionMetadata {
+    fn from_local(metadata: &CallMetadata) -> Result<Self> {
+        let mut value = Self::default();
+        if let CallMetadata::InUnion { in_union } = metadata {
+            value.set_in_union(*in_union);
+        }
+        Ok(value)
+    }
+}
+
+pub(crate) fn extract_call_metadata<T: FromCallMetadata>(call: &CallBuild) -> Result<T> {
+    match &call.metadata {
+        MetadataSource::Wire(value) => extract_metadata_from_val(value),
+        MetadataSource::Local(value) => T::from_local(value),
     }
 }
 
@@ -287,7 +717,11 @@ impl<'a, A: EvaluableRef<'a>, E: Evaluator<'a>> Evaluator<'a> for ArgConstructor
 
 /// Validates whether the return type of an expression node meets expectation.
 pub fn validate_expr_return_type(expr: &Expr, et: EvalType) -> Result<()> {
-    let received_et = box_try!(EvalType::try_from(expr.get_field_type().as_accessor().tp()));
+    validate_field_type(expr.get_field_type(), et)
+}
+
+pub(crate) fn validate_field_type(field_type: &FieldType, et: EvalType) -> Result<()> {
+    let received_et = box_try!(EvalType::try_from(field_type.as_accessor().tp()));
     if et == received_et {
         Ok(())
     } else {
@@ -301,7 +735,10 @@ pub fn validate_expr_return_type(expr: &Expr, et: EvalType) -> Result<()> {
 /// Validates whether the number of arguments of an expression node meets
 /// expectation.
 pub fn validate_expr_arguments_eq(expr: &Expr, args: usize) -> Result<()> {
-    let received_args = expr.get_children().len();
+    validate_argument_count_eq(expr.get_children().len(), args)
+}
+
+pub(crate) fn validate_argument_count_eq(received_args: usize, args: usize) -> Result<()> {
     if received_args == args {
         Ok(())
     } else {
@@ -316,7 +753,10 @@ pub fn validate_expr_arguments_eq(expr: &Expr, args: usize) -> Result<()> {
 /// Validates whether the number of arguments of an expression node >=
 /// expectation.
 pub fn validate_expr_arguments_gte(expr: &Expr, args: usize) -> Result<()> {
-    let received_args = expr.get_children().len();
+    validate_argument_count_gte(expr.get_children().len(), args)
+}
+
+pub(crate) fn validate_argument_count_gte(received_args: usize, args: usize) -> Result<()> {
     if received_args >= args {
         Ok(())
     } else {
@@ -331,7 +771,10 @@ pub fn validate_expr_arguments_gte(expr: &Expr, args: usize) -> Result<()> {
 /// Validates whether the number of arguments of an expression node <=
 /// expectation.
 pub fn validate_expr_arguments_lte(expr: &Expr, args: usize) -> Result<()> {
-    let received_args = expr.get_children().len();
+    validate_argument_count_lte(expr.get_children().len(), args)
+}
+
+pub(crate) fn validate_argument_count_lte(received_args: usize, args: usize) -> Result<()> {
     if received_args <= args {
         Ok(())
     } else {

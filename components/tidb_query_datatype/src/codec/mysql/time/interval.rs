@@ -728,12 +728,12 @@ impl ConvertToIntervalStr for Decimal {
         _is_unsigned: bool,
         _decimal: isize,
     ) -> Result<String> {
-        let mut interval = self.to_string();
         use IntervalUnit::*;
-        match unit {
+        let interval = match unit {
             HourMinute | MinuteSecond | YearMonth | DayHour | DayMinute | DaySecond
             | DayMicrosecond | HourMicrosecond | HourSecond | MinuteMicrosecond
             | SecondMicrosecond => {
+                let mut interval = self.to_string();
                 let mut neg = false;
                 if !interval.is_empty() && interval.starts_with('-') {
                     neg = true;
@@ -755,14 +755,18 @@ impl ConvertToIntervalStr for Decimal {
                 if neg {
                     interval = "-".to_string() + &interval;
                 }
+                interval
             }
-            Second => (),
+            Second => self.to_string(),
             _ => {
-                let rounded = self.round(0, RoundMode::HalfEven).into_result(ctx)?;
+                let rounded = self
+                    .clone()
+                    .round(0, RoundMode::HalfEven)
+                    .into_result(ctx)?;
                 let int_val = rounded.as_i64().into_result(ctx)?;
-                interval = int_val.to_string();
+                int_val.to_string()
             }
-        }
+        };
         Ok(interval)
     }
 }
@@ -884,6 +888,86 @@ mod tests {
                 .to_interval_string(&mut ctx, IntervalUnit::Second, false, decimal)
                 .unwrap();
             assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn test_decimal_interval_deferred_format_bounded_compatibility() {
+        use std::sync::Arc;
+
+        use IntervalUnit::*;
+
+        use crate::codec::mysql::DecimalDecoder;
+
+        let mut values: Vec<_> = [
+            "12.5",
+            "-12.5",
+            "9223372036854775808",
+            "-9223372036854775809",
+        ]
+        .iter()
+        .map(|value| Decimal::from_str(value).unwrap())
+        .collect();
+        for visible in [0, 30, 81, 127, 128, 255] {
+            let mut cell = [0; 40];
+            cell[..4].copy_from_slice(&[2, 1, visible, 1]);
+            cell[4..8].copy_from_slice(&12_u32.to_ne_bytes());
+            cell[8..12].copy_from_slice(&300_000_000_u32.to_ne_bytes());
+            values.push(cell.as_slice().read_decimal_from_chunk().unwrap());
+        }
+        for value in values {
+            for unit in [Year, Quarter, Month, Week, Day, Hour, Minute, Microsecond] {
+                for flags in [
+                    Flag::empty(),
+                    Flag::TRUNCATE_AS_WARNING | Flag::OVERFLOW_AS_WARNING,
+                    Flag::IGNORE_TRUNCATE,
+                ] {
+                    let mut config = EvalConfig::from_flag(flags);
+                    config.set_max_warning_cnt(1);
+                    let config = Arc::new(config);
+                    let mut before = EvalContext::new(config.clone());
+                    let mut after = EvalContext::new(config);
+                    for ctx in [&mut before, &mut after] {
+                        ctx.warnings
+                            .append_warning(Error::truncated_wrong_val("prefix", "retained"));
+                    }
+                    // Old simple-unit path formatted this bounded string then
+                    // discarded it. Its numeric/context operations are the oracle.
+                    let _discarded = value.to_string();
+                    let expected: Result<String> = (|| {
+                        let rounded = value
+                            .clone()
+                            .round(0, RoundMode::HalfEven)
+                            .into_result(&mut before)?;
+                        let integer = rounded.as_i64().into_result(&mut before)?;
+                        Ok(integer.to_string())
+                    })();
+                    let actual = value.to_interval_string(&mut after, unit, false, 0);
+                    assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                    assert_eq!(after.warnings.warning_cnt, before.warnings.warning_cnt);
+                    assert_eq!(after.warnings.warnings, before.warnings.warnings);
+                }
+            }
+            // Text-consuming paths keep legacy Display projection, signs,
+            // separators and prefixes; the original full compound matrix stays.
+            let text = value.to_string();
+            let (sign, body) = if let Some(body) = text.strip_prefix('-') {
+                ("-", body)
+            } else {
+                ("", text.as_str())
+            };
+            for (unit, expected) in [
+                (Second, text.clone()),
+                (HourMinute, format!("{sign}{}", body.replace('.', ":"))),
+                (DayMicrosecond, format!("{sign}0 00:00:{body}")),
+            ] {
+                let mut ctx = EvalContext::default();
+                assert_eq!(
+                    value.to_interval_string(&mut ctx, unit, false, 0).unwrap(),
+                    expected
+                );
+                assert_eq!(ctx.warnings.warning_cnt, 0);
+            }
         }
     }
 
