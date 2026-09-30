@@ -247,6 +247,17 @@ short-circuit admission policy described above.
   text/raw-byte coercion, integer warnings, UInt bit transport and result tags.
   Malformed raw INET6 bytes reach the kernel unchanged. Four IS_IP predicates
   are not included: native NULL behavior and IPv4 leading-zero parsing differ.
+  ASIN/ACOS/SQRT/SIGN/RADIANS/DEGREES additionally use a sealed IEEE754Bits role,
+  with nullable eight-byte little-endian physical transport and owned bit results
+  (SIGN remains signed Int). Ordinary Bytes cannot impersonate this role, even
+  with length eight or NULL. Six private LocalFunctionId values are rejected by
+  the ordinary registry; only the closed factory chooses their fixed getters via
+  existing common preparation, validation and metadata construction.
+  The six raw-f64 primitives live once in impl_math.rs and serve both original
+  Real wrappers and private wrappers, without widening Real/NotNan. The frontend
+  owns conversion and output policy: ordinary inverse trig maps NaN to NULL,
+  legacy real consumers retain NaN, and native finite-result errors retain their
+  original diagnostics. No alternate driver, callback or native fallback is added.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake

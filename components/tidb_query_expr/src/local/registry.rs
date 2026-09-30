@@ -68,5 +68,14 @@ pub(crate) fn map_local_call_to_rpn_func(
             }
             Ok(crate::impl_control::local_nullif_int_signed_signed_fn_meta())
         }
+        LocalFunctionId::AsinRaw
+        | LocalFunctionId::AcosRaw
+        | LocalFunctionId::SqrtRaw
+        | LocalFunctionId::SignRaw
+        | LocalFunctionId::RadiansRaw
+        | LocalFunctionId::DegreesRaw => Err(other_err!(
+            "Function {:?} requires the closed raw math factory",
+            id
+        )),
     }
 }

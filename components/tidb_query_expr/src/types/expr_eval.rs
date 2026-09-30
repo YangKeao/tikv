@@ -18,10 +18,11 @@ use super::{
 use crate::{
     impl_op::LogicalAccumulator,
     local::{
-        ArgMode, CheckedResultFlow, EvaluatedBytesOp, FailureRecorder, HostArgReply,
-        HostArgRequest, HostCatalogKey, HostInvocation, HostStart, HostStep, HostTaskId, InputRow,
-        LineageCarrier, LocalError, LocalHostServices, LocalResult, LocalRuntimeServices,
-        OrdinaryProfile, PreparedHostCall, PreparedOrdinaryCall, ResultMetaId,
+        ArgMode, CheckedResultFlow, EvaluatedArgsRole, EvaluatedBytesOp, FailureRecorder,
+        HostArgReply, HostArgRequest, HostCatalogKey, HostInvocation, HostStart, HostStep,
+        HostTaskId, InputRow, LineageCarrier, LocalError, LocalHostServices, LocalResult,
+        LocalRuntimeServices, OrdinaryProfile, PreparedHostCall, PreparedOrdinaryCall,
+        ResultMetaId,
         runtime::{
             EvalBudget, StorageMode, bytes_min_storage_bytes, int_min_storage_bytes,
             int_storage_bytes, int_vector_storage_bytes, vector_storage_bytes,
@@ -280,6 +281,7 @@ pub(crate) enum EvalInput<'data, 'services> {
     },
     ReadyArgs {
         values: &'data [ScalarValue],
+        role: EvaluatedArgsRole,
         witness: &'services mut EvaluatedAsciiWitness,
     },
 }
@@ -302,9 +304,14 @@ impl EvalInput<'_, '_> {
     }
 }
 
-fn evaluated_ready_args_match(operation: EvaluatedBytesOp, values: &[ScalarValue]) -> bool {
+fn evaluated_ready_args_match(
+    operation: EvaluatedBytesOp,
+    values: &[ScalarValue],
+    role: EvaluatedArgsRole,
+) -> bool {
     let types = operation.input_types();
-    (1..=3).contains(&types.len())
+    operation.input_role() == role
+        && (1..=3).contains(&types.len())
         && values.len() == types.len()
         && values.iter().zip(types).all(|(value, eval_type)| {
             matches!(
@@ -313,6 +320,14 @@ fn evaluated_ready_args_match(operation: EvaluatedBytesOp, values: &[ScalarValue
                     | (ScalarValue::Bytes(_), tidb_query_datatype::EvalType::Bytes)
             )
         })
+        && match role {
+            EvaluatedArgsRole::Values => true,
+            EvaluatedArgsRole::Ieee754Bits => match values {
+                [ScalarValue::Bytes(None)] => true,
+                [ScalarValue::Bytes(Some(bytes))] => bytes.len() == 8,
+                _ => false,
+            },
+        }
 }
 
 /// Per-worker evidence at the actual generated-wrapper dispatch, including
@@ -379,11 +394,12 @@ impl EvalExecution {
         let valid = match (self.evaluated_bytes_operation(), input) {
             (None, EvalInput::Decoded(_) | EvalInput::Bindings(_)) => true,
             (Some(operation), EvalInput::ReadyBytes { value, .. }) => {
-                operation.input_types() == [tidb_query_datatype::EvalType::Bytes]
+                operation.input_role() == EvaluatedArgsRole::Values
+                    && operation.input_types() == [tidb_query_datatype::EvalType::Bytes]
                     && matches!(value, ScalarValue::Bytes(_))
             }
-            (Some(operation), EvalInput::ReadyArgs { values, .. }) => {
-                evaluated_ready_args_match(operation, values)
+            (Some(operation), EvalInput::ReadyArgs { values, role, .. }) => {
+                evaluated_ready_args_match(operation, values, *role)
             }
             _ => false,
         };
@@ -2420,7 +2436,9 @@ impl RpnExpression {
         witness: &mut EvaluatedAsciiWitness,
         budget: &mut EvalBudget,
     ) -> LocalResult<RpnStackNode<'a>> {
-        if operation.input_types() != [tidb_query_datatype::EvalType::Bytes] {
+        if operation.input_role() != EvaluatedArgsRole::Values
+            || operation.input_types() != [tidb_query_datatype::EvalType::Bytes]
+        {
             return Err(LocalError::InvalidSpec(
                 "evaluated Bytes compatibility entry requires one Bytes operand".into(),
             ));
@@ -2430,6 +2448,7 @@ impl RpnExpression {
             ctx,
             schema,
             std::slice::from_ref(ready),
+            EvaluatedArgsRole::Values,
             input_logical_rows,
             witness,
             budget,
@@ -2445,6 +2464,7 @@ impl RpnExpression {
         ctx: &mut EvalContext,
         schema: &'a [FieldType],
         ready: &'data [ScalarValue],
+        role: EvaluatedArgsRole,
         input_logical_rows: &'a [usize],
         witness: &mut EvaluatedAsciiWitness,
         budget: &mut EvalBudget,
@@ -2466,6 +2486,7 @@ impl RpnExpression {
         }
         let mut input = EvalInput::ReadyArgs {
             values: ready,
+            role,
             witness,
         };
         let execution = match operation {
@@ -3046,6 +3067,85 @@ mod tests {
                         &mut EvalContext::default(),
                         &schema,
                         &ready,
+                        EvaluatedArgsRole::Values,
+                        &[0],
+                        &mut witness,
+                        &mut budget,
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+            }
+        }
+        assert_eq!(witness.invocations(), 0);
+    }
+
+    #[test]
+    fn test_evaluated_raw_rejects_role_length_and_kernel_drift() {
+        use crate::local::ExecutionLimits;
+        let schema = [FieldType::from(FieldTypeTp::Blob)];
+        let mut witness = EvaluatedAsciiWitness::default();
+        assert!(evaluated_ready_args_match(
+            EvaluatedBytesOp::AsinRaw,
+            &[ScalarValue::Bytes(None)],
+            EvaluatedArgsRole::Ieee754Bits,
+        ));
+        for mismatch in 0..4 {
+            let operation = if mismatch == 3 {
+                EvaluatedBytesOp::Md5
+            } else {
+                EvaluatedBytesOp::AsinRaw
+            };
+            let role = if mismatch == 0 {
+                EvaluatedArgsRole::Values
+            } else {
+                EvaluatedArgsRole::Ieee754Bits
+            };
+            let ready = [ScalarValue::Bytes(Some(vec![
+                0;
+                if mismatch == 1 {
+                    7
+                } else {
+                    8
+                }
+            ]))];
+            let mut func_meta = operation.fn_meta();
+            if mismatch == 2 {
+                assert!(evaluated_ready_args_match(operation, &ready, role));
+                func_meta.fn_ptr = EvaluatedBytesOp::AcosRaw.fn_meta().fn_ptr;
+            }
+            let program = RpnExpression::from(vec![
+                RpnExpressionNode::ColumnRef { offset: 0 },
+                RpnExpressionNode::FnCall {
+                    func_meta,
+                    args_len: 1,
+                    field_type: operation.return_type(),
+                    metadata: Box::new(()),
+                },
+            ]);
+            if mismatch != 2 {
+                assert!(evaluated_bytes_shape(operation, program.as_ref(), &schema));
+            }
+            let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+            assert!(matches!(
+                program.eval_with_ready_args(
+                    operation,
+                    &mut EvalContext::default(),
+                    &schema,
+                    &ready,
+                    role,
+                    &[0],
+                    &mut witness,
+                    &mut budget,
+                ),
+                Err(LocalError::InvalidSpec(_))
+            ));
+            if mismatch == 0 {
+                assert!(matches!(
+                    program.eval_with_ready_bytes(
+                        operation,
+                        &mut EvalContext::default(),
+                        &schema,
+                        &ready[0],
                         &[0],
                         &mut witness,
                         &mut budget,

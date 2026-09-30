@@ -1,6 +1,6 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::cell::RefCell;
+use std::{cell::RefCell, convert::TryFrom};
 
 use num::traits::Pow;
 use tidb_query_codegen::rpn_fn;
@@ -250,37 +250,82 @@ fn abs_decimal(arg: &Decimal) -> Result<Option<Decimal>> {
     Ok(Some(res?))
 }
 
+// Factory-only transport: these bytes are IEEE-754 bits, not SQL strings.
+#[inline]
+fn decode_raw_f64(arg: Option<BytesRef>) -> Result<Option<f64>> {
+    let bytes = match arg {
+        Some(bytes) => bytes,
+        None => return Ok(None),
+    };
+    let bits = <[u8; 8]>::try_from(bytes).map_err(|_| {
+        other_err!(
+            "Internal raw f64 transport requires exactly 8 bytes, received {}",
+            bytes.len()
+        )
+    })?;
+    Ok(Some(f64::from_bits(u64::from_le_bytes(bits))))
+}
+
+#[inline]
+fn encode_raw_f64(value: f64) -> Bytes {
+    value.to_bits().to_le_bytes().to_vec()
+}
+
+#[inline]
+fn sign_f64(arg: f64) -> i64 {
+    if arg > 0f64 {
+        1
+    } else if arg < 0f64 {
+        -1
+    } else {
+        0
+    }
+}
+
 #[inline]
 #[rpn_fn]
 fn sign(arg: &Real) -> Result<Option<Int>> {
-    Ok(Some({
-        if **arg > 0f64 {
-            1
-        } else if **arg == 0f64 {
-            0
-        } else {
-            -1
-        }
-    }))
+    Ok(Some(sign_f64(**arg)))
+}
+
+#[inline]
+#[rpn_fn(nullable)]
+fn sign_raw(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    Ok(decode_raw_f64(arg)?.map(sign_f64))
+}
+
+#[inline]
+fn sqrt_f64(arg: f64) -> Option<f64> {
+    if arg < 0f64 { None } else { Some(arg.sqrt()) }
 }
 
 #[inline]
 #[rpn_fn]
 fn sqrt(arg: &Real) -> Result<Option<Real>> {
-    Ok({
-        if **arg < 0f64 {
-            None
-        } else {
-            let res = arg.sqrt();
-            Real::new(res).ok()
-        }
-    })
+    Ok(sqrt_f64(**arg).and_then(|value| Real::new(value).ok()))
+}
+
+#[inline]
+#[rpn_fn(nullable)]
+fn sqrt_raw(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?.and_then(sqrt_f64).map(encode_raw_f64))
+}
+
+#[inline]
+fn radians_f64(arg: f64) -> f64 {
+    arg * (std::f64::consts::PI / 180_f64)
 }
 
 #[inline]
 #[rpn_fn]
 fn radians(arg: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(**arg * (std::f64::consts::PI / 180_f64)).ok())
+    Ok(Real::new(radians_f64(**arg)).ok())
+}
+
+#[inline]
+#[rpn_fn(nullable)]
+fn radians_raw(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?.map(radians_f64).map(encode_raw_f64))
 }
 
 #[inline]
@@ -351,9 +396,14 @@ fn rand_with_seed_first_gen(seed: Option<&i64>) -> Result<Option<Real>> {
 }
 
 #[inline]
+fn degrees_f64(arg: f64) -> f64 {
+    arg.to_degrees()
+}
+
+#[inline]
 #[rpn_fn]
 fn degrees(arg: &Real) -> Result<Option<Real>> {
-    let ret = arg.to_degrees();
+    let ret = degrees_f64(**arg);
     if ret.is_infinite() {
         Err(Error::overflow("DOUBLE", format!("degrees({})", arg)).into())
     } else {
@@ -362,15 +412,43 @@ fn degrees(arg: &Real) -> Result<Option<Real>> {
 }
 
 #[inline]
+#[rpn_fn(nullable)]
+fn degrees_raw(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?.map(degrees_f64).map(encode_raw_f64))
+}
+
+#[inline]
+fn asin_f64(arg: f64) -> f64 {
+    arg.asin()
+}
+
+#[inline]
 #[rpn_fn]
 pub fn asin(arg: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(arg.asin()).ok())
+    Ok(Real::new(asin_f64(**arg)).ok())
+}
+
+#[inline]
+#[rpn_fn(nullable)]
+fn asin_raw(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?.map(asin_f64).map(encode_raw_f64))
+}
+
+#[inline]
+fn acos_f64(arg: f64) -> f64 {
+    arg.acos()
 }
 
 #[inline]
 #[rpn_fn]
 pub fn acos(arg: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(arg.acos()).ok())
+    Ok(Real::new(acos_f64(**arg)).ok())
+}
+
+#[inline]
+#[rpn_fn(nullable)]
+fn acos_raw(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?.map(acos_f64).map(encode_raw_f64))
 }
 
 #[inline]

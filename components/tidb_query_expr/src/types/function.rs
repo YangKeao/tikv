@@ -112,10 +112,17 @@ pub enum FunctionRef {
 }
 
 /// Closed, TiKV-owned local signatures. Each variant has a checked support
-/// domain.
+/// domain. The raw math variants are non-wire, factory-only identities, not
+/// ordinary local kernels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalFunctionId {
     NullIfIntSignedSigned,
+    AsinRaw,
+    AcosRaw,
+    SqrtRaw,
+    SignRaw,
+    RadiansRaw,
+    DegreesRaw,
 }
 
 /// Source provenance, not a deduction from the value's collation.

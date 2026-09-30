@@ -41,12 +41,20 @@
 //! OR(true, _) may that frontend supply an irrelevant representative instead
 //! of evaluating RHS. A representative is not a claim that RHS was NULL.
 //! Normal wire/control execution stays lazy. Recipes admit only ordered
-//! canonical ColumnRefs and their exact official calls: one call, or the fixed
+//! canonical ColumnRefs and their exact prepared calls: one call, or the fixed
 //! NOT(IS NULL/TRUE/FALSE) pair for IsNotNull/IsNotTrue/IsNotFalse. These pairs
 //! require compile depth 3 and perform two real wrapper dispatches, including
 //! for NULL; they are not arbitrary programs. QUOTE(NULL) returns owned
 //! non-NULL bytes "NULL". All ready owners remain charged through result
-//! extraction. Results are owned Int/Bytes, not native SQL descriptors.
+//! extraction. The six private AsinRaw/AcosRaw/SqrtRaw/SignRaw/RadiansRaw/
+//! DegreesRaw recipes instead require explicit nullable Ieee754Bits. Their
+//! internal little-endian Byte8 transport never admits ordinary Bytes or Int.
+//! They share one math helper per operation with the unchanged official Real
+//! wrappers, without broadening Real or registering a wire signature. ASIN/
+//! ACOS preserve operation NaNs, SQRT nulls negative inputs, SIGN maps NaN to
+//! zero, and radians/degrees apply no finite-result policy. Float results own
+//! IEEE bits; SIGN owns Int. Frontends keep their NULL/NaN/overflow policies.
+//! Results are owned values, not native SQL descriptors.
 //! Frontends retain demand/coercion order, normalization, signature selection
 //! and result packing (including CRC32/bitwise UInt). The old single-Bytes
 //! eval_one and ASCII-only facade use the same compiler/worker/driver. No
@@ -80,9 +88,10 @@ mod tests;
 
 pub use self::{
     batch::{
-        ComputedBytes, ComputedBytesMetadata, ComputedInt, ComputedIntMetadata, ComputedValue,
-        EvaluatedArgs, EvaluatedAsciiWorker, EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch,
-        LocalEvalState, WorkerStorage, prepare_evaluated_ascii, prepare_evaluated_bytes,
+        ComputedBytes, ComputedBytesMetadata, ComputedIeee754Bits, ComputedIeee754BitsMetadata,
+        ComputedInt, ComputedIntMetadata, ComputedValue, EvaluatedArgs, EvaluatedAsciiWorker,
+        EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState, WorkerStorage,
+        prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,
@@ -104,7 +113,11 @@ pub use self::{
     runtime::{ExecutionLimits, InputRow, LocalRuntimeServices},
     spec::{CompileLimits, LocalCompileContext, LocalError, LocalExpr, LocalResult},
 };
-pub(crate) use self::{diagnostic::FailureRecorder, lineage::CheckedResultFlow};
+pub(crate) use self::{
+    batch::{EvaluatedArgsRole, EvaluatedKernelKind},
+    diagnostic::FailureRecorder,
+    lineage::CheckedResultFlow,
+};
 pub use crate::{
     CallMetadata, FunctionRef, LiteralKind, LocalFunctionId, types::function::PreparedOrdinaryCall,
 };

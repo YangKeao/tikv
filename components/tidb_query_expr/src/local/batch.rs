@@ -734,7 +734,9 @@ impl LocalNumericBatchProgram {
     }
 }
 
-/// Closed operations over already-evaluated nullable Int/Bytes arguments.
+/// Closed operations over already-evaluated nullable Int/Bytes or explicit
+/// IEEE754 bit arguments. The raw math variants are private local identities,
+/// not wire signatures; their Byte8 storage never admits ordinary Bytes.
 /// LENGTH/OCTET_LENGTH share Length and SHA/SHA1 share Sha1; no arbitrary
 /// signature or SQL descriptor is accepted. Hashes consume raw ready Bytes.
 /// UTF8 variants require the caller's normalized UTF8;
@@ -790,12 +792,33 @@ pub enum EvaluatedBytesOp {
     InetNtoa,
     Inet6Aton,
     Inet6Ntoa,
+    AsinRaw,
+    AcosRaw,
+    SqrtRaw,
+    SignRaw,
+    RadiansRaw,
+    DegreesRaw,
+}
+
+/// A private recipe identity, never a consumer-provided function descriptor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EvaluatedKernelKind {
+    Wire(tipb::ScalarFuncSig),
+    PrivateRawMath(crate::LocalFunctionId),
+}
+
+/// Logical admission remains distinct even when transport uses the same Bytes
+/// storage. In particular, ordinary Bytes cannot impersonate IEEE754 bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EvaluatedArgsRole {
+    Values,
+    Ieee754Bits,
 }
 
 impl EvaluatedBytesOp {
-    pub(crate) fn signature(self) -> tipb::ScalarFuncSig {
+    pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
-        match self {
+        let signature = match self {
             Self::Ascii => ScalarFuncSig::Ascii,
             Self::Length => ScalarFuncSig::Length,
             Self::BitLength => ScalarFuncSig::BitLength,
@@ -839,12 +862,53 @@ impl EvaluatedBytesOp {
             Self::InetNtoa => ScalarFuncSig::InetNtoa,
             Self::Inet6Aton => ScalarFuncSig::Inet6Aton,
             Self::Inet6Ntoa => ScalarFuncSig::Inet6Ntoa,
+            Self::AsinRaw => {
+                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::AsinRaw);
+            }
+            Self::AcosRaw => {
+                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::AcosRaw);
+            }
+            Self::SqrtRaw => {
+                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::SqrtRaw);
+            }
+            Self::SignRaw => {
+                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::SignRaw);
+            }
+            Self::RadiansRaw => {
+                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::RadiansRaw);
+            }
+            Self::DegreesRaw => {
+                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::DegreesRaw);
+            }
+        };
+        EvaluatedKernelKind::Wire(signature)
+    }
+
+    pub(crate) fn function_ref(self) -> crate::FunctionRef {
+        match self.kernel_kind() {
+            EvaluatedKernelKind::Wire(signature) => crate::FunctionRef::TiPb(signature),
+            EvaluatedKernelKind::PrivateRawMath(id) => crate::FunctionRef::Local(id),
         }
     }
 
+    pub(crate) fn input_role(self) -> EvaluatedArgsRole {
+        match self.kernel_kind() {
+            EvaluatedKernelKind::Wire(_) => EvaluatedArgsRole::Values,
+            EvaluatedKernelKind::PrivateRawMath(_) => EvaluatedArgsRole::Ieee754Bits,
+        }
+    }
+
+    fn returns_ieee754_bits(self) -> bool {
+        matches!(
+            self,
+            Self::AsinRaw | Self::AcosRaw | Self::SqrtRaw | Self::RadiansRaw | Self::DegreesRaw
+        )
+    }
+
     pub(crate) fn fn_meta(self) -> crate::RpnFnMeta {
-        // Defensive identity witnesses for calls selected by prepare_call, not
-        // alternative algorithms or another public signature registry.
+        // Fixed identity witnesses for common preparation. Only the closed
+        // factory also uses the private raw getters to select a non-wire call;
+        // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
             Self::Ascii => crate::impl_string::ascii_fn_meta(),
             Self::Length => crate::impl_string::length_fn_meta(),
@@ -893,6 +957,12 @@ impl EvaluatedBytesOp {
             Self::InetNtoa => crate::impl_miscellaneous::inet_ntoa_fn_meta(),
             Self::Inet6Aton => crate::impl_miscellaneous::inet6_aton_fn_meta(),
             Self::Inet6Ntoa => crate::impl_miscellaneous::inet6_ntoa_fn_meta(),
+            Self::AsinRaw => crate::impl_math::asin_raw_fn_meta(),
+            Self::AcosRaw => crate::impl_math::acos_raw_fn_meta(),
+            Self::SqrtRaw => crate::impl_math::sqrt_raw_fn_meta(),
+            Self::SignRaw => crate::impl_math::sign_raw_fn_meta(),
+            Self::RadiansRaw => crate::impl_math::radians_raw_fn_meta(),
+            Self::DegreesRaw => crate::impl_math::degrees_raw_fn_meta(),
         }
     }
 
@@ -922,7 +992,8 @@ impl EvaluatedBytesOp {
             | Self::LogicalAnd
             | Self::LogicalOr
             | Self::LogicalXor
-            | Self::InetAton => EvalType::Int,
+            | Self::InetAton
+            | Self::SignRaw => EvalType::Int,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -941,7 +1012,12 @@ impl EvaluatedBytesOp {
             | Self::Sha1
             | Self::InetNtoa
             | Self::Inet6Aton
-            | Self::Inet6Ntoa => EvalType::Bytes,
+            | Self::Inet6Ntoa
+            | Self::AsinRaw
+            | Self::AcosRaw
+            | Self::SqrtRaw
+            | Self::RadiansRaw
+            | Self::DegreesRaw => EvalType::Bytes,
         }
     }
 
@@ -997,7 +1073,13 @@ impl EvaluatedBytesOp {
             | Self::Sha1
             | Self::InetAton
             | Self::Inet6Aton
-            | Self::Inet6Ntoa => &[EvalType::Bytes],
+            | Self::Inet6Ntoa
+            | Self::AsinRaw
+            | Self::AcosRaw
+            | Self::SqrtRaw
+            | Self::SignRaw
+            | Self::RadiansRaw
+            | Self::DegreesRaw => &[EvalType::Bytes],
         }
     }
 
@@ -1010,8 +1092,9 @@ impl EvaluatedBytesOp {
         }
     }
 
-    /// Primitive kernel identities in postfix order. signature()/fn_meta() on
-    /// a composite denote its root; each stage must instead use this selector.
+    /// Primitive kernel identities in postfix order. function_ref()/fn_meta()
+    /// on a composite denote its root; each stage must instead use this
+    /// selector.
     pub(crate) fn call_operation(self, index: usize) -> Option<Self> {
         match (self, index) {
             (Self::IsNotNull, 0) => Some(Self::IsNull),
@@ -1054,20 +1137,54 @@ pub enum EvaluatedArgs {
     BytesInt(Option<Vec<u8>>, Option<i64>),
     Bytes3([Option<Vec<u8>>; 3]),
     Int2(Option<i64>, Option<i64>),
+    /// Nullable IEEE754 binary64 bits, not a SQL integer or ordinary Bytes.
+    /// All bit patterns are admitted; only None represents an absent input.
+    Ieee754Bits(Option<u64>),
 }
 
 impl EvaluatedArgs {
-    fn into_values(self) -> ([ScalarValue; 3], usize) {
-        // A fixed inline owner, not an extra per-invocation Vec allocation.
-        // Unused slots are inline NULL Ints and never enter the driver slice.
-        use ScalarValue::{Bytes, Int};
+    fn role(&self) -> EvaluatedArgsRole {
         match self {
+            Self::Ieee754Bits(_) => EvaluatedArgsRole::Ieee754Bits,
+            _ => EvaluatedArgsRole::Values,
+        }
+    }
+
+    fn input_types(&self) -> &'static [EvalType] {
+        match self {
+            Self::Bytes(_) | Self::Ieee754Bits(_) => &[EvalType::Bytes],
+            Self::Int(_) => &[EvalType::Int],
+            Self::BytesInt(..) => &[EvalType::Bytes, EvalType::Int],
+            Self::Bytes3(_) => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
+            Self::Int2(..) => &[EvalType::Int, EvalType::Int],
+        }
+    }
+
+    fn into_values(self) -> LocalResult<([ScalarValue; 3], usize)> {
+        // The owner array stays inline. Only IEEE754's private physical Byte8
+        // payload needs allocation, and its actual capacity is charged like
+        // every other ready Bytes owner. Unused slots never enter the driver.
+        use ScalarValue::{Bytes, Int};
+        Ok(match self {
             Self::Bytes(value) => ([Bytes(value), Int(None), Int(None)], 1),
             Self::Int(value) => ([Int(value), Int(None), Int(None)], 1),
             Self::BytesInt(bytes, int) => ([Bytes(bytes), Int(int), Int(None)], 2),
             Self::Bytes3([a, b, c]) => ([Bytes(a), Bytes(b), Bytes(c)], 3),
             Self::Int2(lhs, rhs) => ([Int(lhs), Int(rhs), Int(None)], 2),
-        }
+            Self::Ieee754Bits(value) => {
+                let value = value
+                    .map(|bits| -> LocalResult<Vec<u8>> {
+                        let mut bytes = Vec::new();
+                        bytes.try_reserve_exact(8).map_err(|_| {
+                            LocalError::ResourceLimit("IEEE754 input allocation failed".into())
+                        })?;
+                        bytes.extend_from_slice(&bits.to_le_bytes());
+                        Ok(bytes)
+                    })
+                    .transpose()?;
+                ([Bytes(value), Int(None), Int(None)], 1)
+            }
+        })
     }
 }
 
@@ -1123,12 +1240,40 @@ impl ComputedBytes {
     }
 }
 
-/// The complete result domain of the closed ready-value worker. Both carriers
-/// own their computed result, including NULL; neither borrows the input/worker.
+/// IEEE754 output identity, not a SQL integer, Bytes descriptor or input donor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputedIeee754BitsMetadata {
+    OwnIeee754Bits,
+}
+
+/// Owned nullable IEEE754 binary64 bits. NaN/Inf/signed zero remain values;
+/// equality here is bitwise identity, not floating-point SQL comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComputedIeee754Bits {
+    value: Option<u64>,
+}
+
+impl ComputedIeee754Bits {
+    pub fn value(&self) -> Option<u64> {
+        self.value
+    }
+
+    pub fn into_option(self) -> Option<u64> {
+        self.value
+    }
+
+    pub fn metadata(&self) -> ComputedIeee754BitsMetadata {
+        ComputedIeee754BitsMetadata::OwnIeee754Bits
+    }
+}
+
+/// The complete result domain of the closed ready-value worker. Every carrier
+/// owns its computed result, including NULL; none borrows the input/worker.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ComputedValue {
     Int(ComputedInt),
     Bytes(ComputedBytes),
+    Ieee754Bits(ComputedIeee754Bits),
 }
 
 /// Checked retained storage for one worker. Inline bytes are separate so a
@@ -1359,7 +1504,7 @@ impl EvaluatedAsciiWorker {
     pub fn eval_one(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedInt> {
         match self.inner.eval_one(bytes)? {
             ComputedValue::Int(value) => Ok(value),
-            ComputedValue::Bytes(_) => {
+            ComputedValue::Bytes(_) | ComputedValue::Ieee754Bits(_) => {
                 self.inner.poisoned = true;
                 Err(LocalError::InvalidBatch(
                     "evaluated ASCII requires an owned canonical Int result".into(),
@@ -1481,23 +1626,22 @@ impl EvaluatedBytesWorker {
 
     /// Consume the complete ready argument shape selected by this worker's
     /// operation. Shape refusal is pure preflight; valid NULL arguments still
-    /// reach the official nullable wrapper. Frontend demand/coercion order and
+    /// reach the selected generated wrapper. Frontend demand/coercion order and
     /// return charset/type policy remain outside this owned-value boundary.
     pub fn eval_args(&mut self, args: EvaluatedArgs) -> LocalResult<ComputedValue> {
-        let (ready, arity) = args.into_values();
-        let expected = self.operation.input_types();
-        if arity != expected.len()
-            || ready[..arity]
-                .iter()
-                .zip(expected)
-                .any(|(value, kind)| value.eval_type() != *kind)
+        // Preserve the semantic tag until after refusal. In particular, even
+        // NULL or an eight-byte ordinary Bytes value cannot enter raw math.
+        if args.role() != self.operation.input_role()
+            || args.input_types() != self.operation.input_types()
         {
             return Err(LocalError::InvalidBatch(
                 "evaluated arguments differ from the operation's closed input shape".into(),
             ));
         }
         self.begin_invocation()?;
-        let result = self.eval_ready(ready, arity);
+        let result = args
+            .into_values()
+            .and_then(|(ready, arity)| self.eval_ready(ready, arity));
         self.finish_invocation(result)
     }
 
@@ -1549,6 +1693,7 @@ impl EvaluatedBytesWorker {
             &mut self.ctx,
             &self.program.schema,
             &ready[..arity],
+            self.operation.input_role(),
             &self.state.row,
             &mut self.witness,
             &mut budget,
@@ -1587,6 +1732,23 @@ impl EvaluatedBytesWorker {
                 }),
                 0,
             ),
+            ScalarValueRef::Bytes(value) if self.operation.returns_ieee754_bits() => {
+                // The physical vector and input remain charged above while we
+                // copy an inline bit owner. No Bytes/SQL-Int result escapes.
+                let value = value
+                    .map(|source| {
+                        <[u8; 8]>::try_from(source)
+                            .map(u64::from_le_bytes)
+                            .map_err(|_| {
+                                LocalError::InvalidBatch(
+                                    "IEEE754 result transport must contain exactly eight bytes"
+                                        .into(),
+                                )
+                            })
+                    })
+                    .transpose()?;
+                (ComputedValue::Ieee754Bits(ComputedIeee754Bits { value }), 0)
+            }
             ScalarValueRef::Bytes(value) => {
                 let value = match value {
                     None => None,

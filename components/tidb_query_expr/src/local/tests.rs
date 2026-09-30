@@ -1504,3 +1504,179 @@ fn local_evaluated_bytes_inet6_preserves_binary_and_text_forms() {
         }
     }
 }
+
+#[test]
+fn local_evaluated_args_raw_math_preserves_ieee754_classes() {
+    let asin_cases: &[(Option<f64>, Option<f64>)] = &[
+        (None, None),
+        (Some(2.0), Some(f64::NAN)),
+        (Some(0.0), Some(0.0)),
+    ];
+    let acos_cases: &[(Option<f64>, Option<f64>)] = &[
+        (None, None),
+        (Some(f64::NAN), Some(f64::NAN)),
+        (Some(2.0), Some(f64::NAN)),
+        (Some(1.0), Some(0.0)),
+    ];
+    let sqrt_cases: &[(Option<f64>, Option<f64>)] = &[
+        (None, None),
+        (Some(-1.0), None),
+        (Some(f64::NAN), Some(f64::NAN)),
+        (Some(f64::INFINITY), Some(f64::INFINITY)),
+        (Some(-0.0), Some(-0.0)),
+        (Some(4.0), Some(2.0)),
+    ];
+    let angle_cases: &[(Option<f64>, Option<f64>)] = &[
+        (None, None),
+        (Some(f64::NAN), Some(f64::NAN)),
+        (Some(f64::INFINITY), Some(f64::INFINITY)),
+        (Some(f64::NEG_INFINITY), Some(f64::NEG_INFINITY)),
+        (Some(-0.0), Some(-0.0)),
+        (Some(0.0), Some(0.0)),
+    ];
+    for (operation, cases) in [
+        (EvaluatedBytesOp::AsinRaw, asin_cases),
+        (EvaluatedBytesOp::AcosRaw, acos_cases),
+        (EvaluatedBytesOp::SqrtRaw, sqrt_cases),
+        (EvaluatedBytesOp::RadiansRaw, angle_cases),
+        (EvaluatedBytesOp::DegreesRaw, angle_cases),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let args = EvaluatedArgs::Ieee754Bits(input.map(f64::to_bits));
+            let ComputedValue::Ieee754Bits(value) = worker.eval_args(args).unwrap() else {
+                panic!("raw math returned a non-IEEE-754 value");
+            };
+            let bits = value.value();
+            match expected {
+                Some(expected) if expected.is_nan() => {
+                    assert!(bits.is_some_and(|bits| f64::from_bits(bits).is_nan()));
+                }
+                _ => assert_eq!(bits, expected.map(f64::to_bits)),
+            }
+            assert_eq!(
+                value.metadata(),
+                ComputedIeee754BitsMetadata::OwnIeee754Bits
+            );
+            assert_eq!(value.into_option(), bits);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_sign_raw_returns_owned_signed_int() {
+    let cases: &[(Option<f64>, Option<i64>)] = &[
+        (None, None),
+        (Some(f64::NAN), Some(0)),
+        (Some(f64::NEG_INFINITY), Some(-1)),
+        (Some(f64::INFINITY), Some(1)),
+        (Some(-0.0), Some(0)),
+        (Some(-3.0), Some(-1)),
+        (Some(3.0), Some(1)),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::SignRaw,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::SignRaw);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(input, expected)) in cases.iter().enumerate() {
+        let args = EvaluatedArgs::Ieee754Bits(input.map(f64::to_bits));
+        let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+            panic!("SIGN raw returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_ieee754_roles_reject_other_carriers() {
+    let mut raw = prepare_evaluated_bytes(
+        EvaluatedBytesOp::AsinRaw,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(raw.operation(), EvaluatedBytesOp::AsinRaw);
+    assert_eq!(raw.kernel_invocations(), 0);
+    let raw_storage = raw.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::Bytes(None),
+        EvaluatedArgs::Bytes(Some(vec![0; 8])),
+        EvaluatedArgs::Int(Some(1.0_f64.to_bits() as i64)),
+    ] {
+        assert!(matches!(
+            raw.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(raw.kernel_invocations(), 0);
+        assert!(raw.is_healthy());
+        assert_eq!(raw.retained_storage().unwrap(), raw_storage);
+    }
+    let ComputedValue::Ieee754Bits(value) = raw
+        .eval_args(EvaluatedArgs::Ieee754Bits(Some(0.0_f64.to_bits())))
+        .unwrap()
+    else {
+        panic!("raw worker returned a non-IEEE-754 value");
+    };
+    assert_eq!(value.value(), Some(0.0_f64.to_bits()));
+    assert_eq!(
+        value.metadata(),
+        ComputedIeee754BitsMetadata::OwnIeee754Bits
+    );
+    assert_eq!(value.into_option(), Some(0.0_f64.to_bits()));
+    assert_eq!(raw.kernel_invocations(), 1);
+    assert!(raw.is_healthy());
+    assert_eq!(raw.retained_storage().unwrap(), raw_storage);
+
+    let mut bytes = prepare_evaluated_bytes(
+        EvaluatedBytesOp::Md5,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(bytes.operation(), EvaluatedBytesOp::Md5);
+    assert_eq!(bytes.kernel_invocations(), 0);
+    let bytes_storage = bytes.retained_storage().unwrap();
+    for input in [None, Some(1.0_f64.to_bits())] {
+        assert!(matches!(
+            bytes.eval_args(EvaluatedArgs::Ieee754Bits(input)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(bytes.kernel_invocations(), 0);
+        assert!(bytes.is_healthy());
+        assert_eq!(bytes.retained_storage().unwrap(), bytes_storage);
+    }
+    let ComputedValue::Bytes(value) = bytes.eval_one(None).unwrap() else {
+        panic!("MD5 returned a non-Bytes value");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(bytes.kernel_invocations(), 1);
+    assert!(bytes.is_healthy());
+    assert_eq!(bytes.retained_storage().unwrap(), bytes_storage);
+}

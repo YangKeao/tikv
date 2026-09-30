@@ -4,13 +4,16 @@ use tidb_query_datatype::codec::data_type::ScalarValue;
 use tipb::{FieldType, ScalarFuncSig};
 
 use super::{
-    CheckedResultFlow, ControlLineageFacts, EvaluatedBytesOp, HostCatalog, HostCatalogKey,
-    LocalCompileContext, LocalControlProgram, LocalError, LocalExpr, LocalResult,
+    CheckedResultFlow, ControlLineageFacts, EvaluatedBytesOp, EvaluatedKernelKind, HostCatalog,
+    HostCatalogKey, LocalCompileContext, LocalControlProgram, LocalError, LocalExpr, LocalResult,
     NumericBatchFacts, OrdinaryProfileSpec, PreparedHostCall, PreparedOrdinaryCall, registry,
 };
 use crate::{
     FunctionRef, RpnExpression, RpnExpressionNode,
-    types::function::{CallArg, CallBuild, CallShape, ControlKind, PreparedCall, prepare_call},
+    types::function::{
+        CallArg, CallBuild, CallShape, ControlKind, PreparedCall, prepare_call,
+        prepare_selected_call,
+    },
 };
 
 /// Compiled ownership domain, not inferred from a root node or its annotations.
@@ -147,7 +150,7 @@ fn check_evaluated_bytes_source(
         else {
             return Err(invalid_shape());
         };
-        if *function != FunctionRef::TiPb(primitive.signature())
+        if *function != primitive.function_ref()
             || return_type != &primitive.return_type()
             || !matches!(metadata, crate::CallMetadata::None)
             || args.len() != (if index == 0 { arity } else { 1 })
@@ -518,7 +521,7 @@ pub(super) fn compile_evaluated_bytes(
         .call_operation(0)
         .ok_or_else(|| LocalError::InvalidSpec("evaluated operation has no first call".into()))?;
     let mut spec = LocalExpr::Call {
-        function: FunctionRef::TiPb(first.signature()),
+        function: first.function_ref(),
         args: schema
             .iter()
             .enumerate()
@@ -536,7 +539,7 @@ pub(super) fn compile_evaluated_bytes(
             LocalError::InvalidSpec("evaluated operation has no call at this position".into())
         })?;
         spec = LocalExpr::Call {
-            function: FunctionRef::TiPb(primitive.signature()),
+            function: primitive.function_ref(),
             args: vec![spec].into_boxed_slice(),
             return_type: primitive.return_type(),
             metadata: crate::CallMetadata::None,
@@ -777,7 +780,20 @@ fn compile(
                             | CompileMode::EvaluatedBytes(_) => None,
                         };
                         let mut call = CallBuild::local(shape, metadata.clone());
-                        let prepared = prepare_call(&mut call).map_err(invalid)?;
+                        let prepared = match mode.evaluated_bytes_operation() {
+                            Some(operation)
+                                if matches!(
+                                    operation.kernel_kind(),
+                                    EvaluatedKernelKind::PrivateRawMath(_)
+                                ) =>
+                            {
+                                // The closed source has fixed this private identity.
+                                // Reuse both validators and its real metadata constructor.
+                                prepare_selected_call(&mut call, operation.fn_meta().into())
+                            }
+                            _ => prepare_call(&mut call),
+                        }
+                        .map_err(invalid)?;
                         let mut ready_eager_control = false;
                         if let Some(operation) = mode.evaluated_bytes_operation() {
                             // Only the exact closed Int2 ready recipes may retain a
@@ -1514,6 +1530,12 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::InetNtoa,
             EvaluatedBytesOp::Inet6Aton,
             EvaluatedBytesOp::Inet6Ntoa,
+            EvaluatedBytesOp::AsinRaw,
+            EvaluatedBytesOp::AcosRaw,
+            EvaluatedBytesOp::SqrtRaw,
+            EvaluatedBytesOp::SignRaw,
+            EvaluatedBytesOp::RadiansRaw,
+            EvaluatedBytesOp::DegreesRaw,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
@@ -1549,7 +1571,7 @@ mod evaluated_ascii_compile_tests {
 
             let first = operation.call_operation(0).unwrap();
             let mut spec = LocalExpr::Call {
-                function: FunctionRef::TiPb(first.signature()),
+                function: first.function_ref(),
                 args: program
                     .schema
                     .iter()
@@ -1566,7 +1588,7 @@ mod evaluated_ascii_compile_tests {
             for index in 1..calls {
                 let primitive = operation.call_operation(index).unwrap();
                 spec = LocalExpr::Call {
-                    function: FunctionRef::TiPb(primitive.signature()),
+                    function: primitive.function_ref(),
                     args: vec![spec].into_boxed_slice(),
                     return_type: primitive.return_type(),
                     metadata: crate::CallMetadata::None,
@@ -1575,9 +1597,26 @@ mod evaluated_ascii_compile_tests {
             if operation != EvaluatedBytesOp::Ascii {
                 assert_closed_source_rejected(&spec, &program.schema);
             }
+            if let EvaluatedKernelKind::PrivateRawMath(id) = operation.kernel_kind() {
+                assert_eq!(operation.function_ref(), FunctionRef::Local(id));
+                let mut raw_call = CallBuild::local(
+                    CallShape::new(
+                        operation.function_ref(),
+                        operation.return_type(),
+                        program
+                            .schema
+                            .iter()
+                            .cloned()
+                            .map(CallArg::dynamic)
+                            .collect(),
+                    ),
+                    crate::CallMetadata::None,
+                );
+                assert!(prepare_call(&mut raw_call).is_err());
+            }
             if matches!(
-                operation,
-                EvaluatedBytesOp::LogicalAnd | EvaluatedBytesOp::LogicalOr
+                operation.function_ref(),
+                FunctionRef::TiPb(ScalarFuncSig::LogicalAnd | ScalarFuncSig::LogicalOr)
             ) {
                 let row =
                     compile_local(&spec, &program.schema, LocalCompileContext::default()).unwrap();
