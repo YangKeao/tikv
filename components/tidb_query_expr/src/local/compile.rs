@@ -778,9 +778,29 @@ fn compile(
                         };
                         let mut call = CallBuild::local(shape, metadata.clone());
                         let prepared = prepare_call(&mut call).map_err(invalid)?;
+                        let mut ready_eager_control = false;
                         if let Some(operation) = mode.evaluated_bytes_operation() {
+                            // Only the exact closed Int2 ready recipes may retain a
+                            // canonical AND/OR tag while emitting the prepared kernel.
+                            let tag_matches = match operation {
+                                EvaluatedBytesOp::LogicalAnd => {
+                                    args.len() == 2
+                                        && prepared.short_circuit_meta().is_some_and(|control| {
+                                            control.sig == ScalarFuncSig::LogicalAnd
+                                                && control.kind == ControlKind::And
+                                        })
+                                }
+                                EvaluatedBytesOp::LogicalOr => {
+                                    args.len() == 2
+                                        && prepared.short_circuit_meta().is_some_and(|control| {
+                                            control.sig == ScalarFuncSig::LogicalOr
+                                                && control.kind == ControlKind::Or
+                                        })
+                                }
+                                _ => prepared.short_circuit_meta().is_none(),
+                            };
                             if !prepared.retained_args().iter().copied().eq(0..args.len())
-                                || prepared.short_circuit_meta().is_some()
+                                || !tag_matches
                             {
                                 return Err(evaluated_bytes_error(
                                     operation,
@@ -788,6 +808,10 @@ fn compile(
                                     "evaluated Bytes preparation changed its operand or control shape",
                                 ));
                             }
+                            ready_eager_control = matches!(
+                                operation,
+                                EvaluatedBytesOp::LogicalAnd | EvaluatedBytesOp::LogicalOr
+                            );
                         }
                         if mode.is_lineaged() {
                             check_lineaged_control(
@@ -816,7 +840,7 @@ fn compile(
                                     output: child_output,
                                 });
                             }
-                        } else if prepared.short_circuit_meta().is_some() {
+                        } else if prepared.short_circuit_meta().is_some() && !ready_eager_control {
                             let children: Vec<_> = retained
                                 .iter()
                                 .map(|_| add_buffer(&mut buffers, &mut result_flows))
@@ -840,8 +864,9 @@ fn compile(
                                         .into(),
                                 ));
                             }
-                            // Legacy ordinary calls remain eager. Only the explicit
-                            // profile route above changes ordinary operand demand.
+                            // Ready AND/OR have only already-evaluated slots; source
+                            // control demand stays on the structured branch above.
+                            // Legacy ordinary calls remain eager here.
                             steps.push(BuildStep::Emit {
                                 call: prepared,
                                 output,
@@ -1482,6 +1507,9 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::IsNotFalse,
             EvaluatedBytesOp::Md5,
             EvaluatedBytesOp::Sha1,
+            EvaluatedBytesOp::LogicalAnd,
+            EvaluatedBytesOp::LogicalOr,
+            EvaluatedBytesOp::LogicalXor,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
@@ -1542,6 +1570,18 @@ mod evaluated_ascii_compile_tests {
             }
             if operation != EvaluatedBytesOp::Ascii {
                 assert_closed_source_rejected(&spec, &program.schema);
+            }
+            if matches!(
+                operation,
+                EvaluatedBytesOp::LogicalAnd | EvaluatedBytesOp::LogicalOr
+            ) {
+                let row =
+                    compile_local(&spec, &program.schema, LocalCompileContext::default()).unwrap();
+                assert!(row.check_entry(ProgramEntry::Row).is_ok());
+                assert!(matches!(
+                    row.expression.as_ref(),
+                    [RpnExpressionNode::ShortCircuitFnCall { .. }]
+                ));
             }
             let other = if operation == EvaluatedBytesOp::Length {
                 EvaluatedBytesOp::BitLength

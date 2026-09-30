@@ -783,6 +783,9 @@ pub enum EvaluatedBytesOp {
     IsNotFalse,
     Md5,
     Sha1,
+    LogicalAnd,
+    LogicalOr,
+    LogicalXor,
 }
 
 impl EvaluatedBytesOp {
@@ -825,6 +828,9 @@ impl EvaluatedBytesOp {
             Self::IsTrueWithNull => ScalarFuncSig::IntIsTrueWithNull,
             Self::Md5 => ScalarFuncSig::Md5,
             Self::Sha1 => ScalarFuncSig::Sha1,
+            Self::LogicalAnd => ScalarFuncSig::LogicalAnd,
+            Self::LogicalOr => ScalarFuncSig::LogicalOr,
+            Self::LogicalXor => ScalarFuncSig::LogicalXor,
         }
     }
 
@@ -872,6 +878,9 @@ impl EvaluatedBytesOp {
             }
             Self::Md5 => crate::impl_encryption::md5_fn_meta(),
             Self::Sha1 => crate::impl_encryption::sha1_fn_meta(),
+            Self::LogicalAnd => crate::impl_op::logical_and_fn_meta(),
+            Self::LogicalOr => crate::impl_op::logical_or_fn_meta(),
+            Self::LogicalXor => crate::impl_op::logical_xor_fn_meta(),
         }
     }
 
@@ -897,7 +906,10 @@ impl EvaluatedBytesOp {
             | Self::IsTrueWithNull
             | Self::IsNotNull
             | Self::IsNotTrue
-            | Self::IsNotFalse => EvalType::Int,
+            | Self::IsNotFalse
+            | Self::LogicalAnd
+            | Self::LogicalOr
+            | Self::LogicalXor => EvalType::Int,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -939,9 +951,14 @@ impl EvaluatedBytesOp {
             | Self::IsNotNull
             | Self::IsNotTrue
             | Self::IsNotFalse => &[EvalType::Int],
-            Self::BitAnd | Self::BitOr | Self::BitXor | Self::LeftShift | Self::RightShift => {
-                &[EvalType::Int, EvalType::Int]
-            }
+            Self::BitAnd
+            | Self::BitOr
+            | Self::BitXor
+            | Self::LeftShift
+            | Self::RightShift
+            | Self::LogicalAnd
+            | Self::LogicalOr
+            | Self::LogicalXor => &[EvalType::Int, EvalType::Int],
             Self::Left | Self::LeftUtf8 | Self::Right | Self::RightUtf8 => {
                 &[EvalType::Bytes, EvalType::Int]
             }
@@ -1006,7 +1023,10 @@ impl EvaluatedBytesOp {
 /// Owned, already-evaluated arguments for the closed operation recipes. Int
 /// carries the original 64-bit pattern: callers may pass a u64 as i64 without
 /// numeric narrowing. Coercion, diagnostics, argument demand and text
-/// normalization have already happened in the original frontend.
+/// normalization belong to the original frontend. For logical AND(false, _)
+/// or OR(true, _), only its validated undemanded-RHS marker may authorize an
+/// irrelevant representative; this boundary does not claim RHS evaluated to
+/// NULL.
 #[derive(Debug)]
 pub enum EvaluatedArgs {
     Bytes(Option<Vec<u8>>),

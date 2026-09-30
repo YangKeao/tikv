@@ -235,6 +235,13 @@ short-circuit admission policy described above.
   their lowercase hex output and OpenSSL errors. Native text conversion/packing is
   outside the kernel; no retry or second digest implementation is provided here.
   SHA2 and warning-producing compression operations are not admitted by this step.
+  Logical AND/OR/XOR consume normalized ready Int2 and execute the official eager
+  FnCall. Only closed-ready AND/OR may retain the exact signature/control tag and
+  complete ordered arguments while bypassing FinishControl; ordinary Row/wire
+  lowering keeps its original lazy control node. The frontend owns original child
+  demand. It may supply an irrelevant RHS representative only after validating
+  explicit AND(false, undemanded) or OR(true, undemanded); this is not a claim that
+  RHS was evaluated as NULL. The real kernel still computes every result.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake

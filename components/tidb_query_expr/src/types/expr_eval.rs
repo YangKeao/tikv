@@ -3009,44 +3009,48 @@ mod tests {
     #[test]
     fn test_evaluated_int2_rejects_kernel_identity_and_wrong_kind() {
         use crate::local::ExecutionLimits;
-        let operation = EvaluatedBytesOp::BitAnd;
-        let other = EvaluatedBytesOp::BitOr.fn_meta();
         let schema = [
             FieldType::from(FieldTypeTp::LongLong),
             FieldType::from(FieldTypeTp::LongLong),
         ];
         let mut witness = EvaluatedAsciiWitness::default();
-        for mismatch in 0..3 {
-            let mut func_meta = operation.fn_meta();
-            let mut ready = [ScalarValue::Int(Some(6)), ScalarValue::Int(Some(3))];
-            match mismatch {
-                0 => func_meta.name = other.name,
-                1 => func_meta.fn_ptr = other.fn_ptr,
-                _ => ready[1] = ScalarValue::Bytes(None),
+        for (operation, other) in [
+            (EvaluatedBytesOp::BitAnd, EvaluatedBytesOp::BitOr),
+            (EvaluatedBytesOp::LogicalAnd, EvaluatedBytesOp::LogicalOr),
+        ] {
+            let other = other.fn_meta();
+            for mismatch in 0..3 {
+                let mut func_meta = operation.fn_meta();
+                let mut ready = [ScalarValue::Int(Some(6)), ScalarValue::Int(Some(3))];
+                match mismatch {
+                    0 => func_meta.name = other.name,
+                    1 => func_meta.fn_ptr = other.fn_ptr,
+                    _ => ready[1] = ScalarValue::Bytes(None),
+                }
+                let program = RpnExpression::from(vec![
+                    RpnExpressionNode::ColumnRef { offset: 0 },
+                    RpnExpressionNode::ColumnRef { offset: 1 },
+                    RpnExpressionNode::FnCall {
+                        func_meta,
+                        args_len: 2,
+                        field_type: operation.return_type(),
+                        metadata: Box::new(()),
+                    },
+                ]);
+                let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+                assert!(matches!(
+                    program.eval_with_ready_args(
+                        operation,
+                        &mut EvalContext::default(),
+                        &schema,
+                        &ready,
+                        &[0],
+                        &mut witness,
+                        &mut budget,
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
             }
-            let program = RpnExpression::from(vec![
-                RpnExpressionNode::ColumnRef { offset: 0 },
-                RpnExpressionNode::ColumnRef { offset: 1 },
-                RpnExpressionNode::FnCall {
-                    func_meta,
-                    args_len: 2,
-                    field_type: operation.return_type(),
-                    metadata: Box::new(()),
-                },
-            ]);
-            let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
-            assert!(matches!(
-                program.eval_with_ready_args(
-                    operation,
-                    &mut EvalContext::default(),
-                    &schema,
-                    &ready,
-                    &[0],
-                    &mut witness,
-                    &mut budget,
-                ),
-                Err(LocalError::InvalidSpec(_))
-            ));
         }
         assert_eq!(witness.invocations(), 0);
     }

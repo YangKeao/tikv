@@ -1329,3 +1329,58 @@ fn local_evaluated_bytes_digests_preserve_raw_bytes_and_nulls() {
         }
     }
 }
+
+#[test]
+fn local_evaluated_args_logical_ops_use_ready_three_valued_inputs() {
+    // Both operands are ready values; None here is an actual SQL NULL.
+    let cases: &[(Option<i64>, Option<i64>, [Option<i64>; 3])] = &[
+        (None, None, [None, None, None]),
+        (None, Some(0), [Some(0), None, None]),
+        (None, Some(1), [None, Some(1), None]),
+        (Some(0), None, [Some(0), None, None]),
+        (Some(0), Some(0), [Some(0), Some(0), Some(0)]),
+        (Some(0), Some(1), [Some(0), Some(1), Some(1)]),
+        (Some(1), None, [None, Some(1), None]),
+        (Some(1), Some(0), [Some(0), Some(1), Some(1)]),
+        (Some(1), Some(1), [Some(1), Some(1), Some(0)]),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::LogicalAnd,
+        EvaluatedBytesOp::LogicalOr,
+        EvaluatedBytesOp::LogicalXor,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::BytesInt(None, None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        for (index, &(lhs, rhs, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Int(value) =
+                worker.eval_args(EvaluatedArgs::Int2(lhs, rhs)).unwrap()
+            else {
+                panic!("logical operation returned Bytes");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected[column]);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

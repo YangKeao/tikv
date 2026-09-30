@@ -28,12 +28,17 @@
 //! a closed operation on ready nullable Int/Bytes: ASCII, LENGTH/OCTET_LENGTH,
 //! BIT_LENGTH, LTRIM, RTRIM, UNHEX, CRC32, REVERSE, CHAR_LENGTH, QUOTE, HEX,
 //! BIN, LEFT, RIGHT, REPLACE, BIT_COUNT, bitwise NOT/AND/OR/XOR, shifts and
-//! normalized truth/presence predicates, MD5 and SHA/SHA1. Hashes consume ready
-//! raw Bytes; native hash-input conversion and text packing remain frontend
-//! responsibilities. Numeric/byte/UTF8 variants are explicit. `EvaluatedArgs`
-//! owns fixed shapes, including Int2; Int preserves
+//! normalized truth/presence predicates, logical AND/OR/XOR, MD5 and SHA/SHA1.
+//! Hashes consume ready raw Bytes; hash-input conversion and text packing
+//! remain frontend responsibilities. Numeric/byte/UTF8 variants are explicit.
+//! `EvaluatedArgs` owns fixed shapes, including Int2; Int preserves
 //! all 64 bits. Boolean operations instead consume frontend-normalized Int
-//! None/0/1, not Real/Decimal/string values. Recipes admit only ordered
+//! None/0/1, not Real/Decimal/string values. Logical binaries use the real
+//! eager official wrapper on ready Int2; native code preserves child demand.
+//! Only after checking an explicit undemanded-RHS marker and AND(false, _) or
+//! OR(true, _) may that frontend supply an irrelevant representative instead
+//! of evaluating RHS. A representative is not a claim that RHS was NULL.
+//! Normal wire/control execution stays lazy. Recipes admit only ordered
 //! canonical ColumnRefs and their exact official calls: one call, or the fixed
 //! NOT(IS NULL/TRUE/FALSE) pair for IsNotNull/IsNotTrue/IsNotFalse. These pairs
 //! require compile depth 3 and perform two real wrapper dispatches, including
