@@ -280,28 +280,7 @@ pub fn rtrim(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
 #[rpn_fn(writer)]
 #[inline]
 pub fn lpad(arg: BytesRef, len: &Int, pad: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
-    match validate_target_len_for_pad(*len < 0, *len, arg.len(), 1, pad.is_empty()) {
-        None => Ok(writer.write(None)),
-        Some(0) => Ok(writer.write_ref(Some(b""))),
-        Some(target_len) if target_len < arg.len() => {
-            Ok(writer.write_ref(Some(&arg[..target_len])))
-        }
-        Some(target_len) => {
-            let mut writer = writer.begin();
-            // Write full pads
-            let num_pads = (target_len - arg.len()) / pad.len();
-            for _ in 0..num_pads {
-                writer.partial_write(pad);
-            }
-
-            // Write last incomplete pad (might be none)
-            let last_pad_len = (target_len - arg.len()) % pad.len();
-            writer.partial_write(&pad[..last_pad_len]);
-
-            writer.partial_write(arg);
-            Ok(writer.finish())
-        }
-    }
+    pad_impl(arg, len, pad, PadMode::Bytes, PadPolicy::Wire, true, writer)
 }
 
 #[rpn_fn(writer)]
@@ -312,62 +291,21 @@ pub fn lpad_utf8(
     pad: BytesRef,
     writer: BytesWriter,
 ) -> Result<BytesGuard> {
-    let input = str::from_utf8(arg)?;
-    let pad = str::from_utf8(pad)?;
-    let input_len = input.chars().count();
-    let pad_len = pad.chars().count();
-
-    match validate_target_len_for_pad(*len < 0, *len, input_len, 4, pad.is_empty()) {
-        None => Ok(writer.write(None)),
-        Some(0) => Ok(writer.write_ref(Some(b""))),
-        Some(target_len) if target_len < input_len => {
-            let utf8_byte_end = get_utf8_byte_index(input, target_len);
-            Ok(writer.write_ref(Some(&input.as_bytes()[..utf8_byte_end])))
-        }
-        Some(target_len) => {
-            let mut writer = writer.begin();
-            // Write full pads
-            let num_pads = (target_len - input_len) / pad_len;
-            for _ in 0..num_pads {
-                writer.partial_write(pad.as_bytes());
-            }
-
-            // Write last incomplete pad (might be none)
-            let last_pad_len = (target_len - input_len) % pad_len;
-            let utf8_byte_end = get_utf8_byte_index(pad, last_pad_len);
-            writer.partial_write(&pad.as_bytes()[..utf8_byte_end]);
-
-            writer.partial_write(input.as_bytes());
-            Ok(writer.finish())
-        }
-    }
+    pad_impl(arg, len, pad, PadMode::Utf8, PadPolicy::Wire, true, writer)
 }
 
 #[rpn_fn(writer)]
 #[inline]
 pub fn rpad(arg: BytesRef, len: &Int, pad: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
-    match validate_target_len_for_pad(*len < 0, *len, arg.len(), 1, pad.is_empty()) {
-        None => Ok(writer.write(None)),
-        Some(0) => Ok(writer.write_ref(Some(b""))),
-        Some(target_len) if target_len < arg.len() => {
-            Ok(writer.write_ref(Some(&arg[..target_len])))
-        }
-        Some(target_len) => {
-            let mut writer = writer.begin();
-            writer.partial_write(arg);
-
-            // Write full pads
-            let num_pads = (target_len - arg.len()) / pad.len();
-            for _ in 0..num_pads {
-                writer.partial_write(pad);
-            }
-
-            // Write last incomplete pad (might be none)
-            let last_pad_len = (target_len - arg.len()) % pad.len();
-            writer.partial_write(&pad[..last_pad_len]);
-            Ok(writer.finish())
-        }
-    }
+    pad_impl(
+        arg,
+        len,
+        pad,
+        PadMode::Bytes,
+        PadPolicy::Wire,
+        false,
+        writer,
+    )
 }
 
 #[rpn_fn(writer)]
@@ -378,32 +316,145 @@ pub fn rpad_utf8(
     pad: BytesRef,
     writer: BytesWriter,
 ) -> Result<BytesGuard> {
-    let input = str::from_utf8(arg)?;
-    let pad = str::from_utf8(pad)?;
-    let input_len = input.chars().count();
-    let pad_len = pad.chars().count();
+    pad_impl(arg, len, pad, PadMode::Utf8, PadPolicy::Wire, false, writer)
+}
 
-    match validate_target_len_for_pad(*len < 0, *len, input_len, 4, pad.is_empty()) {
+#[rpn_fn(writer)]
+#[inline]
+fn lpad_bytes_native(
+    arg: BytesRef,
+    len: &Int,
+    pad: BytesRef,
+    disposition: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    pad_native(arg, len, pad, disposition, PadMode::Bytes, true, writer)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn rpad_bytes_native(
+    arg: BytesRef,
+    len: &Int,
+    pad: BytesRef,
+    disposition: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    pad_native(arg, len, pad, disposition, PadMode::Bytes, false, writer)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn lpad_utf8_native(
+    arg: BytesRef,
+    len: &Int,
+    pad: BytesRef,
+    disposition: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    pad_native(arg, len, pad, disposition, PadMode::Utf8, true, writer)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn rpad_utf8_native(
+    arg: BytesRef,
+    len: &Int,
+    pad: BytesRef,
+    disposition: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    pad_native(arg, len, pad, disposition, PadMode::Utf8, false, writer)
+}
+
+#[derive(Clone, Copy)]
+enum PadMode {
+    Bytes,
+    Utf8,
+}
+
+#[derive(Clone, Copy)]
+enum PadPolicy {
+    Wire,
+    Native,
+}
+
+#[inline]
+fn pad_native(
+    arg: BytesRef,
+    len: &Int,
+    pad: BytesRef,
+    disposition: &Int,
+    mode: PadMode,
+    left: bool,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    if suppress_native_string(disposition)? {
+        return Ok(writer.write(None));
+    }
+    if *len < 0 || *len > i64::from(MAX_BLOB_WIDTH) {
+        return Ok(writer.write(None));
+    }
+    pad_impl(arg, len, pad, mode, PadPolicy::Native, left, writer)
+}
+
+#[inline]
+fn pad_impl(
+    arg: BytesRef,
+    len: &Int,
+    pad: BytesRef,
+    mode: PadMode,
+    policy: PadPolicy,
+    left: bool,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    // Wire UTF-8 calls must decode both operands before validating the length.
+    let (input_utf8, pad_utf8, size_of_type) = match mode {
+        PadMode::Bytes => (None, None, 1),
+        PadMode::Utf8 => (Some(str::from_utf8(arg)?), Some(str::from_utf8(pad)?), 4),
+    };
+    let input_len = input_utf8.map_or(arg.len(), |input| input.chars().count());
+    let pad_len = pad_utf8.map_or(pad.len(), |pad| pad.chars().count());
+    let target_len = match policy {
+        PadPolicy::Wire => {
+            validate_target_len_for_pad(*len < 0, *len, input_len, size_of_type, pad.is_empty())
+        }
+        // The native range was checked before decoding in pad_native.
+        PadPolicy::Native => Some(*len as usize),
+    };
+    match target_len {
         None => Ok(writer.write(None)),
         Some(0) => Ok(writer.write_ref(Some(b""))),
-        Some(target_len) if target_len < input_len => {
-            let utf8_byte_end = get_utf8_byte_index(input, target_len);
-            Ok(writer.write_ref(Some(&input.as_bytes()[..utf8_byte_end])))
+        Some(target_len)
+            if target_len < input_len
+                || (matches!(policy, PadPolicy::Native) && target_len == input_len) =>
+        {
+            let byte_end =
+                input_utf8.map_or(target_len, |input| get_utf8_byte_index(input, target_len));
+            Ok(writer.write_ref(Some(&arg[..byte_end])))
         }
         Some(target_len) => {
+            if matches!(policy, PadPolicy::Native) && pad.is_empty() {
+                return Ok(writer.write_ref(Some(b"")));
+            }
             let mut writer = writer.begin();
-            writer.partial_write(input.as_bytes());
-
-            // Write full pads
-            let num_pads = (target_len - input_len) / pad_len;
-            for _ in 0..num_pads {
-                writer.partial_write(pad.as_bytes());
+            if !left {
+                writer.partial_write(arg);
             }
 
-            // Write last incomplete pad (might be none)
+            // Keep the wire equal-length/empty-pad case on its original
+            // quotient path; only native equality takes the truncation arm.
+            let num_pads = (target_len - input_len) / pad_len;
+            for _ in 0..num_pads {
+                writer.partial_write(pad);
+            }
             let last_pad_len = (target_len - input_len) % pad_len;
-            let utf8_byte_end = get_utf8_byte_index(pad, last_pad_len);
-            writer.partial_write(&pad.as_bytes()[..utf8_byte_end]);
+            let byte_end =
+                pad_utf8.map_or(last_pad_len, |pad| get_utf8_byte_index(pad, last_pad_len));
+            writer.partial_write(&pad[..byte_end]);
+            if left {
+                writer.partial_write(arg);
+            }
             Ok(writer.finish())
         }
     }
@@ -784,21 +835,107 @@ pub fn substring_index(
     count: &Int,
     writer: BytesWriter,
 ) -> Result<BytesGuard> {
+    substring_index_impl(s, delim, count, SubstringIndexPolicy::Wire, writer)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn substring_index_signed_native(
+    s: BytesRef,
+    delim: BytesRef,
+    count: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    substring_index_impl(s, delim, count, SubstringIndexPolicy::NativeSigned, writer)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn substring_index_unsigned_native(
+    s: BytesRef,
+    delim: BytesRef,
+    count: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    substring_index_impl(
+        s,
+        delim,
+        count,
+        SubstringIndexPolicy::NativeUnsigned,
+        writer,
+    )
+}
+
+enum SubstringIndexPolicy {
+    Wire,
+    NativeSigned,
+    NativeUnsigned,
+}
+
+#[inline]
+fn substring_index_impl(
+    s: BytesRef,
+    delim: BytesRef,
+    count: &Int,
+    policy: SubstringIndexPolicy,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
     let count = *count;
     if count == 0 || s.is_empty() || delim.is_empty() {
         return Ok(writer.write_ref(Some(b"")));
     }
-    let finder = if count > 0 {
+    match policy {
+        SubstringIndexPolicy::NativeUnsigned if count < 0 => {
+            return Ok(writer.write_ref(Some(s)));
+        }
+        SubstringIndexPolicy::NativeSigned if count < 0 => {
+            if count == i64::MIN {
+                return Ok(writer.write_ref(Some(s)));
+            }
+            // Native suffixes use the same left-to-right non-overlapping
+            // delimiters as prefixes, not the wire reverse scan.
+            let (_, remaining) = substring_index_scan(s, delim, i64::MAX, true);
+            let matches = i64::MAX - remaining;
+            let wanted = count.abs();
+            if wanted > matches {
+                return Ok(writer.write_ref(Some(s)));
+            }
+            let (bound, _) = substring_index_scan(s, delim, matches - wanted + 1, true);
+            return Ok(writer.write_ref(Some(&s[bound..])));
+        }
+        _ => {}
+    }
+
+    // Preserve the wire count.abs() behavior, including i64::MIN.
+    let (bound, remaining_pattern_count) = substring_index_scan(s, delim, count.abs(), count > 0);
+    let result = if remaining_pattern_count > 0 {
+        s
+    } else if count > 0 {
+        &s[..bound - delim.len()]
+    } else {
+        &s[bound + delim.len()..]
+    };
+
+    Ok(writer.write_ref(Some(result)))
+}
+
+#[inline]
+fn substring_index_scan(
+    s: BytesRef,
+    delim: BytesRef,
+    mut remaining_pattern_count: Int,
+    from_left: bool,
+) -> (usize, Int) {
+    let finder = if from_left {
         memmem::find
     } else {
         memmem::rfind
     };
     let mut remaining = s;
-    let mut remaining_pattern_count = count.abs();
     let mut bound = 0;
     while remaining_pattern_count > 0 {
         if let Some(offset) = finder(remaining, delim) {
-            if count > 0 {
+            if from_left {
                 bound += offset + delim.len();
                 remaining = &s[bound..];
             } else {
@@ -810,16 +947,7 @@ pub fn substring_index(
         }
         remaining_pattern_count -= 1;
     }
-
-    let result = if remaining_pattern_count > 0 {
-        s
-    } else if count > 0 {
-        &s[..bound - delim.len()]
-    } else {
-        &s[bound + delim.len()..]
-    };
-
-    Ok(writer.write_ref(Some(result)))
+    (bound, remaining_pattern_count)
 }
 
 #[rpn_fn]
@@ -893,7 +1021,7 @@ pub fn trim_1_arg(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
 #[rpn_fn(writer)]
 #[inline]
 pub fn trim_2_args(arg: BytesRef, pat: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
-    let trimmed = trim(arg, pat, TrimDirection::Both);
+    let trimmed = trim(arg, pat, TrimDirection::Both, TrimPolicy::WireIndependent);
     Ok(writer.write_ref(Some(trimmed)))
 }
 
@@ -907,11 +1035,48 @@ pub fn trim_3_args(
 ) -> Result<BytesGuard> {
     match TrimDirection::from_i64(*direction) {
         Some(d) => {
-            let trimmed = trim(arg, pat, d);
+            let trimmed = trim(arg, pat, d, TrimPolicy::WireIndependent);
             Ok(writer.write_ref(Some(trimmed)))
         }
         _ => Err(box_err!("invalid direction value: {}", direction)),
     }
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn trim_both_native(arg: BytesRef, pat: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    let trimmed = trim(arg, pat, TrimDirection::Both, TrimPolicy::NativeSequential);
+    Ok(writer.write_ref(Some(trimmed)))
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn trim_leading_native(arg: BytesRef, pat: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    let trimmed = trim(
+        arg,
+        pat,
+        TrimDirection::Leading,
+        TrimPolicy::NativeSequential,
+    );
+    Ok(writer.write_ref(Some(trimmed)))
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn trim_trailing_native(arg: BytesRef, pat: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    let trimmed = trim(
+        arg,
+        pat,
+        TrimDirection::Trailing,
+        TrimPolicy::NativeSequential,
+    );
+    Ok(writer.write_ref(Some(trimmed)))
+}
+
+#[derive(Clone, Copy)]
+enum TrimPolicy {
+    WireIndependent,
+    NativeSequential,
 }
 
 enum TrimDirection {
@@ -932,7 +1097,12 @@ impl TrimDirection {
 }
 
 #[inline]
-fn trim<'a>(string: &'a [u8], pattern: &[u8], direction: TrimDirection) -> &'a [u8] {
+fn trim<'a>(
+    string: &'a [u8],
+    pattern: &[u8],
+    direction: TrimDirection,
+    policy: TrimPolicy,
+) -> &'a [u8] {
     if pattern.is_empty() {
         return string;
     }
@@ -948,16 +1118,24 @@ fn trim<'a>(string: &'a [u8], pattern: &[u8], direction: TrimDirection) -> &'a [
             .unwrap_or(s_length - (s_length % pat_length)),
     };
 
+    let right_source = match policy {
+        TrimPolicy::WireIndependent => string,
+        TrimPolicy::NativeSequential => &string[left_position..],
+    };
+    let right_length = right_source.len();
     let right_position = match direction {
-        TrimDirection::Leading => s_length,
-        _ => string
+        TrimDirection::Leading => right_length,
+        _ => right_source
             .rchunks(pat_length)
             .position(|chunk| chunk != pattern)
-            .map(|pos| s_length - pos * pat_length)
-            .unwrap_or(s_length % pat_length),
+            .map(|pos| right_length - pos * pat_length)
+            .unwrap_or(right_length % pat_length),
     };
 
-    let right_position = right_position.max(left_position);
+    let right_position = match policy {
+        TrimPolicy::WireIndependent => right_position.max(left_position),
+        TrimPolicy::NativeSequential => left_position + right_position,
+    };
 
     &string[left_position..right_position]
 }

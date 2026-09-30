@@ -206,7 +206,7 @@ short-circuit admission policy described above.
   slots and returns an opaque worker, not a raw program/context/graph. Its legacy
   name also covers fixed Int and multi-input string operations. `EvaluatedArgs`
   admits only nullable Bytes, Int (including an explicitly normalized bit pattern),
-  two Ints, Bytes+Int or three Bytes operands. The operation fixes ordered slot
+  two Ints, Bytes+Int, two/three Bytes, or typed ready-count/packet operands. The operation fixes ordered slot
   types/arity and an exact call recipe; callers cannot supply arbitrary FieldTypes.
   Existing operations use one FnCall. Closed negated boolean tests use only
   base+UnaryNot, checking each stage's signature, name, function pointer, arity and
@@ -294,6 +294,27 @@ short-circuit admission policy described above.
   native preparation retains argument-charset behavior, including existing
   byte-preserving latin1. The public facade and both ready matchers validate
   prepared NULL or at most four bytes before invocation, never truncate input.
+  TRIM has three native direction recipes over Bytes2. One trim core selects
+  independent wire right bounds or native right bounds after removing the left
+  prefix. SUBSTRING_INDEX adds ReadyBytesBytesInt: signed/unsigned recipes keep
+  raw bits and original native MIN behavior, and use the same find/rfind scanner
+  with native forward non-overlapping suffix policy. A genuinely NULL count
+  remains NULL; an undemanded count needs checked NULL-string/empty-delimiter
+  conditions, not fabricated NULL inputs.
+  Four native pad recipes use PadPacket with physical Bytes/Int/Bytes/Int(flag).
+  ReadyBytesArg strings are either both evaluated values or both undemanded;
+  only NULL count, packet suppression or out-of-range count permits the latter,
+  lowered after validation to irrelevant non-NULL empty-byte representatives.
+  Zero/valid width still demands both strings. Three closed shape guards admit
+  arity four/call one only for these four operations; two inline arrays grow to
+  four slots without publishing extra operands on old recipes. Caller compile
+  limits are five nodes only for pad, otherwise four, with depth three unchanged.
+  One quotient/remainder construction core retains Wire < versus Native <=
+  truncation, wire empty-pad-growth NULL versus native empty, and wire UTF8 *4
+  versus native character-count limits. Existing wire nonzero equal-length
+  empty-pad division and SUBSTRING_INDEX MIN abs behavior are left unchanged;
+  this is neither a hidden bug fix nor a new artificial panic. General graph
+  admission, the driver, pool and canonical zero-heap metadata are unchanged.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake

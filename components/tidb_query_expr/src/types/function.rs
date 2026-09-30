@@ -137,6 +137,15 @@ pub enum LocalFunctionId {
     UpperUtf8Ready,
     Sha2Native,
     OrdNative,
+    TrimBothNative,
+    TrimLeadingNative,
+    TrimTrailingNative,
+    SubstringIndexSignedNative,
+    SubstringIndexUnsignedNative,
+    LpadBytesNative,
+    RpadBytesNative,
+    LpadUtf8Native,
+    RpadUtf8Native,
 }
 
 /// Source provenance, not a deduction from the value's collation.

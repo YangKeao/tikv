@@ -85,15 +85,36 @@
 //! resource limit; oversize inputs are refused, never truncated. Wire ORD keeps
 //! its original decoder selection and NULL-to-zero policy; OrdNative propagates
 //! NULL and shares only the base-256 fold.
-//! Results are owned values, not native SQL descriptors.
-//! Frontends retain demand/coercion order, normalization, signature selection
-//! and result packing (including CRC32/bitwise UInt). The old single-Bytes
-//! eval_one and ASCII-only facade use the same compiler/worker/driver. No
-//! native child, binding-service or Host callback, arbitrary signature,
-//! original SQL/PB schema, or raw-program escape is exposed. The sealed context
-//! and actual wrapper-dispatch witness persist per worker, not per row;
-//! diagnostics and execution-owner lifetime stay outside. Wrapper counts are
-//! not body counts.
+//! TrimBothNative/TrimLeadingNative/TrimTrailingNative consume Bytes2,
+//! including syntax-default space patterns, and share the trim core with wire.
+//! Native BOTH trims right only after left; wire keeps its independent end
+//! bounds. SubstringIndexSignedNative/SubstringIndexUnsignedNative use
+//! BytesBytesIntReady and a distinct role. Their count can be Undemanded only
+//! for a NULL string operand or an empty delimiter; the caller must preserve a
+//! genuinely NULL count as Value(None) before applying the empty-delimiter
+//! rule. Native suffixes use forward non-overlapping matches; wire keeps its
+//! original reverse search and signed-abs behavior. Unsigned counts retain
+//! their raw bits. The four Lpad/Rpad Bytes/Utf8Native recipes alone admit four
+//! ready columns and five nodes, via PacketBytesIntBytes and PadPacket.
+//! ReadyBytesArg pairs must both be Value, or both Undemanded for NULL/invalid
+//! length or packet suppression. Even zero length or truncation requires both
+//! evaluated strings when Allow applies. Validated undemanded strings use
+//! empty, non-NULL representatives; these do not claim original string values.
+//! Frontends keep length-cast/packet/range/coercion order and select binary for
+//! source OR pad. PAD shares its original quotient/remainder writer, with
+//! separate policies: native equality truncates and empty-pad growth returns
+//! empty; wire keeps its old strict-less truncation, NULL growth and UTF8
+//! four-byte bound. Its existing nonzero equal-length/empty-pad
+//! division-by-zero bug is not fixed or replaced by an artificial panic here.
+//! No general graph or driver limit is widened. Results are owned values, not
+//! native SQL descriptors. Frontends retain demand/coercion order,
+//! normalization, signature selection and result packing (including
+//! CRC32/bitwise UInt). The old single-Bytes eval_one and ASCII-only facade use
+//! the same compiler/worker/driver. No native child, binding-service or Host
+//! callback, arbitrary signature, original SQL/PB schema, or raw-program escape
+//! is exposed. The sealed context and actual wrapper-dispatch witness persist
+//! per worker, not per row; diagnostics and execution-owner lifetime stay
+//! outside. Wrapper counts are not body counts.
 
 mod batch;
 mod compile;
@@ -122,7 +143,8 @@ pub use self::{
         ComputedBytes, ComputedBytesMetadata, ComputedIeee754Bits, ComputedIeee754BitsMetadata,
         ComputedInt, ComputedIntMetadata, ComputedValue, EvaluatedArgs, EvaluatedAsciiWorker,
         EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState, OutputDisposition,
-        ReadyIntArg, WorkerStorage, prepare_evaluated_ascii, prepare_evaluated_bytes,
+        ReadyBytesArg, ReadyIntArg, WorkerStorage, prepare_evaluated_ascii,
+        prepare_evaluated_bytes,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,

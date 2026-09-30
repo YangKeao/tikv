@@ -315,7 +315,10 @@ fn evaluated_ready_args_match(
             types.is_empty() && operation.call_count() == 1
         }
         (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
-        _ => (1..=3).contains(&types.len()),
+        (_, EvaluatedArgsRole::PadPacket) => {
+            operation.is_pad_native() && types.len() == 4 && operation.call_count() == 1
+        }
+        _ => !operation.is_pad_native() && (1..=3).contains(&types.len()),
     };
     operation.input_role() == role
         && arity_matches
@@ -335,6 +338,15 @@ fn evaluated_ready_args_match(
             EvaluatedArgsRole::NoArgs => values.is_empty(),
             EvaluatedArgsRole::Values => true,
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
+            EvaluatedArgsRole::ReadyBytesBytesInt => matches!(
+                operation,
+                EvaluatedBytesOp::SubstringIndexSignedNative
+                    | EvaluatedBytesOp::SubstringIndexUnsignedNative
+            ),
+            EvaluatedArgsRole::PadPacket => {
+                operation.is_pad_native()
+                    && matches!(values.last(), Some(ScalarValue::Int(Some(0 | 1))))
+            }
             EvaluatedArgsRole::Packet => {
                 matches!(
                     operation,
@@ -482,7 +494,8 @@ pub(crate) fn evaluated_bytes_shape(
     let arity_matches = match (operation, operation.input_role()) {
         (EvaluatedBytesOp::PiRaw, EvaluatedArgsRole::NoArgs) => arity == 0 && calls == 1,
         (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
-        _ => (1..=3).contains(&arity),
+        (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
+        _ => !operation.is_pad_native() && (1..=3).contains(&arity),
     };
     if !arity_matches
         || !(1..=2).contains(&calls)
@@ -3133,7 +3146,7 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..16 {
+        for mismatch in 0..22 {
             let operation = match mismatch {
                 3 | 5 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
@@ -3141,15 +3154,20 @@ mod tests {
                 11 => EvaluatedBytesOp::BitAnd,
                 12 => EvaluatedBytesOp::ToBase64Native,
                 13 => EvaluatedBytesOp::Sha2Native,
-                14 => EvaluatedBytesOp::Left,
+                14 | 21 => EvaluatedBytesOp::Left,
                 15 => EvaluatedBytesOp::OrdNative,
+                16 => EvaluatedBytesOp::SubstringIndexSignedNative,
+                17..=19 => EvaluatedBytesOp::LpadBytesNative,
+                20 => EvaluatedBytesOp::Replace,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
-                0 | 6 | 8 | 13 | 15 => EvaluatedArgsRole::Values,
+                0 | 6 | 8 | 13 | 15 | 16 => EvaluatedArgsRole::Values,
                 4 | 5 => EvaluatedArgsRole::NoArgs,
-                9..=12 => EvaluatedArgsRole::Packet,
+                9..=12 | 17 => EvaluatedArgsRole::Packet,
                 14 => EvaluatedArgsRole::ReadyBytesInt,
+                18 | 19 | 21 => EvaluatedArgsRole::PadPacket,
+                20 => EvaluatedArgsRole::ReadyBytesBytesInt,
                 _ => EvaluatedArgsRole::Ieee754Bits,
             };
             let schema: Vec<_> = (0..operation.input_types().len())
@@ -3176,12 +3194,17 @@ mod tests {
             } else if mismatch == 10 {
                 ready[1] = ScalarValue::Int(Some(2));
             }
-            if matches!(mismatch, 13 | 14) {
+            if matches!(mismatch, 13 | 14 | 16..=21) {
                 assert!(evaluated_ready_args_match(
                     operation,
                     &ready,
                     operation.input_role()
                 ));
+            }
+            if mismatch == 18 {
+                ready[3] = ScalarValue::Int(None);
+            } else if mismatch == 19 {
+                ready[3] = ScalarValue::Int(Some(2));
             }
             if mismatch == 15 {
                 let input = EvalInput::ReadyBytes {

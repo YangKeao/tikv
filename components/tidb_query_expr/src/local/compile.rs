@@ -131,7 +131,8 @@ fn check_evaluated_bytes_source(
     let arity_matches = match (operation, operation.input_role()) {
         (EvaluatedBytesOp::PiRaw, EvaluatedArgsRole::NoArgs) => arity == 0 && calls == 1,
         (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
-        _ => (1..=3).contains(&arity),
+        (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
+        _ => !operation.is_pad_native() && (1..=3).contains(&arity),
     };
     if !arity_matches
         || !(1..=2).contains(&calls)
@@ -1558,6 +1559,15 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::UpperUtf8Ready,
             EvaluatedBytesOp::Sha2Native,
             EvaluatedBytesOp::OrdNative,
+            EvaluatedBytesOp::TrimBothNative,
+            EvaluatedBytesOp::TrimLeadingNative,
+            EvaluatedBytesOp::TrimTrailingNative,
+            EvaluatedBytesOp::SubstringIndexSignedNative,
+            EvaluatedBytesOp::SubstringIndexUnsignedNative,
+            EvaluatedBytesOp::LpadBytesNative,
+            EvaluatedBytesOp::RpadBytesNative,
+            EvaluatedBytesOp::LpadUtf8Native,
+            EvaluatedBytesOp::RpadUtf8Native,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
@@ -1590,6 +1600,20 @@ mod evaluated_ascii_compile_tests {
                     .unwrap();
             }
             assert!(operation.call_operation(calls).is_none());
+            if operation.is_pad_native() {
+                assert_eq!(arity, 4);
+                assert_eq!(calls, 1);
+                assert!(matches!(
+                    program.expression.as_ref(),
+                    [
+                        RpnExpressionNode::ColumnRef { offset: 0 },
+                        RpnExpressionNode::ColumnRef { offset: 1 },
+                        RpnExpressionNode::ColumnRef { offset: 2 },
+                        RpnExpressionNode::ColumnRef { offset: 3 },
+                        RpnExpressionNode::FnCall { args_len: 4, .. },
+                    ]
+                ));
+            }
             if operation == EvaluatedBytesOp::PiRaw {
                 assert_eq!(arity, 0);
                 assert_eq!(calls, 1);

@@ -815,6 +815,15 @@ pub enum EvaluatedBytesOp {
     UpperUtf8Ready,
     Sha2Native,
     OrdNative,
+    TrimBothNative,
+    TrimLeadingNative,
+    TrimTrailingNative,
+    SubstringIndexSignedNative,
+    SubstringIndexUnsignedNative,
+    LpadBytesNative,
+    RpadBytesNative,
+    LpadUtf8Native,
+    RpadUtf8Native,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -833,6 +842,8 @@ pub(crate) enum EvaluatedArgsRole {
     NoArgs,
     Packet,
     ReadyBytesInt,
+    ReadyBytesBytesInt,
+    PadPacket,
 }
 
 impl EvaluatedBytesOp {
@@ -952,6 +963,41 @@ impl EvaluatedBytesOp {
             Self::OrdNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::OrdNative);
             }
+            Self::TrimBothNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::TrimBothNative);
+            }
+            Self::TrimLeadingNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TrimLeadingNative,
+                );
+            }
+            Self::TrimTrailingNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TrimTrailingNative,
+                );
+            }
+            Self::SubstringIndexSignedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubstringIndexSignedNative,
+                );
+            }
+            Self::SubstringIndexUnsignedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubstringIndexUnsignedNative,
+                );
+            }
+            Self::LpadBytesNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::LpadBytesNative);
+            }
+            Self::RpadBytesNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::RpadBytesNative);
+            }
+            Self::LpadUtf8Native => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::LpadUtf8Native);
+            }
+            Self::RpadUtf8Native => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::RpadUtf8Native);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -969,6 +1015,13 @@ impl EvaluatedBytesOp {
         match self {
             Self::PiRaw => EvaluatedArgsRole::NoArgs,
             Self::Sha2Native => EvaluatedArgsRole::ReadyBytesInt,
+            Self::SubstringIndexSignedNative | Self::SubstringIndexUnsignedNative => {
+                EvaluatedArgsRole::ReadyBytesBytesInt
+            }
+            Self::LpadBytesNative
+            | Self::RpadBytesNative
+            | Self::LpadUtf8Native
+            | Self::RpadUtf8Native => EvaluatedArgsRole::PadPacket,
             Self::SpaceNative
             | Self::RepeatNative
             | Self::ToBase64Native
@@ -981,6 +1034,16 @@ impl EvaluatedBytesOp {
             | Self::DegreesRaw => EvaluatedArgsRole::Ieee754Bits,
             _ => EvaluatedArgsRole::Values,
         }
+    }
+
+    pub(crate) fn is_pad_native(self) -> bool {
+        matches!(
+            self,
+            Self::LpadBytesNative
+                | Self::RpadBytesNative
+                | Self::LpadUtf8Native
+                | Self::RpadUtf8Native
+        )
     }
 
     /// ORD receives one already-encoded native character, never an arbitrary
@@ -1083,6 +1146,19 @@ impl EvaluatedBytesOp {
             >(),
             Self::Sha2Native => crate::impl_encryption::sha2_native_fn_meta(),
             Self::OrdNative => crate::impl_string::ord_native_fn_meta(),
+            Self::TrimBothNative => crate::impl_string::trim_both_native_fn_meta(),
+            Self::TrimLeadingNative => crate::impl_string::trim_leading_native_fn_meta(),
+            Self::TrimTrailingNative => crate::impl_string::trim_trailing_native_fn_meta(),
+            Self::SubstringIndexSignedNative => {
+                crate::impl_string::substring_index_signed_native_fn_meta()
+            }
+            Self::SubstringIndexUnsignedNative => {
+                crate::impl_string::substring_index_unsigned_native_fn_meta()
+            }
+            Self::LpadBytesNative => crate::impl_string::lpad_bytes_native_fn_meta(),
+            Self::RpadBytesNative => crate::impl_string::rpad_bytes_native_fn_meta(),
+            Self::LpadUtf8Native => crate::impl_string::lpad_utf8_native_fn_meta(),
+            Self::RpadUtf8Native => crate::impl_string::rpad_utf8_native_fn_meta(),
         }
     }
 
@@ -1153,7 +1229,16 @@ impl EvaluatedBytesOp {
             | Self::Upper
             | Self::LowerUtf8Ready
             | Self::UpperUtf8Ready
-            | Self::Sha2Native => EvalType::Bytes,
+            | Self::Sha2Native
+            | Self::TrimBothNative
+            | Self::TrimLeadingNative
+            | Self::TrimTrailingNative
+            | Self::SubstringIndexSignedNative
+            | Self::SubstringIndexUnsignedNative
+            | Self::LpadBytesNative
+            | Self::RpadBytesNative
+            | Self::LpadUtf8Native
+            | Self::RpadUtf8Native => EvalType::Bytes,
         }
     }
 
@@ -1198,6 +1283,21 @@ impl EvaluatedBytesOp {
             | Self::FromBase64Native
             | Self::Sha2Native => &[EvalType::Bytes, EvalType::Int],
             Self::RepeatNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
+            Self::TrimBothNative | Self::TrimLeadingNative | Self::TrimTrailingNative => {
+                &[EvalType::Bytes, EvalType::Bytes]
+            }
+            Self::SubstringIndexSignedNative | Self::SubstringIndexUnsignedNative => {
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Int]
+            }
+            Self::LpadBytesNative
+            | Self::RpadBytesNative
+            | Self::LpadUtf8Native
+            | Self::RpadUtf8Native => &[
+                EvalType::Bytes,
+                EvalType::Int,
+                EvalType::Bytes,
+                EvalType::Int,
+            ],
             Self::Replace => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::Ascii
             | Self::Length
@@ -1294,12 +1394,21 @@ impl OutputDisposition {
     }
 }
 
-/// Integer-argument demand is independent of SQL nullability. Undemanded
-/// requires a NULL left operand and either Sha2Native or RepeatNative with
-/// Allow disposition; it never claims that the argument evaluated to NULL.
+/// Integer-argument demand is independent of SQL nullability. The facade
+/// checks each recipe's undemanded-input condition before supplying an
+/// irrelevant representative; Undemanded never claims an evaluated SQL NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadyIntArg {
     Value(Option<i64>),
+    Undemanded,
+}
+
+/// PAD's two string arguments are either both evaluated values or both
+/// explicitly undemanded. The latter requires an earlier length/packet exit;
+/// it is not a claim that either original argument was SQL NULL.
+#[derive(Debug)]
+pub enum ReadyBytesArg {
+    Value(Option<Vec<u8>>),
     Undemanded,
 }
 
@@ -1315,11 +1424,19 @@ pub enum EvaluatedArgs {
     /// A genuine zero-operand invocation, not a nullable dummy argument.
     NoArgs,
     Bytes(Option<Vec<u8>>),
+    Bytes2(Option<Vec<u8>>, Option<Vec<u8>>),
     Int(Option<i64>),
     BytesInt(Option<Vec<u8>>, Option<i64>),
     /// Ready values with an explicit integer-demand marker, not packet policy.
     BytesIntReady {
         bytes: Option<Vec<u8>>,
+        count: ReadyIntArg,
+    },
+    /// SUBSTRING_INDEX checks a genuinely NULL count before empty delimiter.
+    /// Only a non-NULL count may be undemanded due to an empty delimiter.
+    BytesBytesIntReady {
+        bytes: Option<Vec<u8>>,
+        delimiter: Option<Vec<u8>>,
         count: ReadyIntArg,
     },
     Bytes3([Option<Vec<u8>>; 3]),
@@ -1338,6 +1455,12 @@ pub enum EvaluatedArgs {
         count: ReadyIntArg,
         disposition: OutputDisposition,
     },
+    PacketBytesIntBytes {
+        bytes: ReadyBytesArg,
+        count: Option<i64>,
+        pad: ReadyBytesArg,
+        disposition: OutputDisposition,
+    },
     /// Nullable IEEE754 binary64 bits, not a SQL integer or ordinary Bytes.
     /// All bit patterns are admitted; only None represents an absent input.
     Ieee754Bits(Option<u64>),
@@ -1349,6 +1472,8 @@ impl EvaluatedArgs {
             Self::NoArgs => EvaluatedArgsRole::NoArgs,
             Self::Ieee754Bits(_) => EvaluatedArgsRole::Ieee754Bits,
             Self::BytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesInt,
+            Self::BytesBytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesBytesInt,
+            Self::PacketBytesIntBytes { .. } => EvaluatedArgsRole::PadPacket,
             Self::PacketInt { .. } | Self::PacketBytes { .. } | Self::PacketBytesInt { .. } => {
                 EvaluatedArgsRole::Packet
             }
@@ -1360,6 +1485,14 @@ impl EvaluatedArgs {
         match self {
             Self::NoArgs => &[],
             Self::Bytes(_) | Self::Ieee754Bits(_) => &[EvalType::Bytes],
+            Self::Bytes2(..) => &[EvalType::Bytes, EvalType::Bytes],
+            Self::BytesBytesIntReady { .. } => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
+            Self::PacketBytesIntBytes { .. } => &[
+                EvalType::Bytes,
+                EvalType::Int,
+                EvalType::Bytes,
+                EvalType::Int,
+            ],
             Self::Int(_) => &[EvalType::Int],
             Self::BytesInt(..) | Self::BytesIntReady { .. } | Self::PacketBytes { .. } => {
                 &[EvalType::Bytes, EvalType::Int]
@@ -1377,6 +1510,36 @@ impl EvaluatedArgs {
                 bytes,
                 count: ReadyIntArg::Undemanded,
             } => operation == EvaluatedBytesOp::Sha2Native && bytes.is_none(),
+            Self::BytesBytesIntReady {
+                bytes,
+                delimiter,
+                count: ReadyIntArg::Undemanded,
+            } => {
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::SubstringIndexSignedNative
+                        | EvaluatedBytesOp::SubstringIndexUnsignedNative
+                ) && (bytes.is_none()
+                    || delimiter.is_none()
+                    || delimiter.as_ref().is_some_and(Vec::is_empty))
+            }
+            Self::PacketBytesIntBytes {
+                bytes,
+                count,
+                pad,
+                disposition,
+            } => {
+                operation.is_pad_native()
+                    && match (bytes, pad) {
+                        (ReadyBytesArg::Value(_), ReadyBytesArg::Value(_)) => true,
+                        (ReadyBytesArg::Undemanded, ReadyBytesArg::Undemanded) => {
+                            count.is_none()
+                                || *disposition == OutputDisposition::SuppressByPacket
+                                || count.is_some_and(|value| !(0..=16_777_216).contains(&value))
+                        }
+                        _ => false,
+                    }
+            }
             Self::PacketBytesInt {
                 bytes,
                 count: ReadyIntArg::Undemanded,
@@ -1390,33 +1553,57 @@ impl EvaluatedArgs {
         }
     }
 
-    fn into_values(self) -> LocalResult<([ScalarValue; 3], usize)> {
-        // The owner array stays inline. Only IEEE754's private physical Byte8
-        // payload needs allocation, and its actual capacity is charged like
-        // every other ready Bytes owner. Unused slots never enter the driver.
+    fn into_values(self) -> LocalResult<([ScalarValue; 4], usize)> {
+        // The fixed owner stays inline. Only the four PAD recipes publish all
+        // four slots; unused slots of older recipes never enter the driver.
+        // IEEE754's physical Byte8 allocation is charged like any Bytes owner.
         use ScalarValue::{Bytes, Int};
         Ok(match self {
-            // No slot from this inline owner enters the empty ready slice.
-            Self::NoArgs => ([Int(None), Int(None), Int(None)], 0),
-            Self::Bytes(value) => ([Bytes(value), Int(None), Int(None)], 1),
-            Self::Int(value) => ([Int(value), Int(None), Int(None)], 1),
-            Self::BytesInt(bytes, int) => ([Bytes(bytes), Int(int), Int(None)], 2),
+            Self::NoArgs => ([Int(None), Int(None), Int(None), Int(None)], 0),
+            Self::Bytes(value) => ([Bytes(value), Int(None), Int(None), Int(None)], 1),
+            Self::Bytes2(a, b) => ([Bytes(a), Bytes(b), Int(None), Int(None)], 2),
+            Self::Int(value) => ([Int(value), Int(None), Int(None), Int(None)], 1),
+            Self::BytesInt(bytes, int) => ([Bytes(bytes), Int(int), Int(None), Int(None)], 2),
             Self::BytesIntReady { bytes, count } => {
                 let count = match count {
                     ReadyIntArg::Value(value) => value,
                     // Validated Sha2Native + NULL left: irrelevant, not SQL NULL.
                     ReadyIntArg::Undemanded => Some(0),
                 };
-                ([Bytes(bytes), Int(count), Int(None)], 2)
+                ([Bytes(bytes), Int(count), Int(None), Int(None)], 2)
             }
-            Self::Bytes3([a, b, c]) => ([Bytes(a), Bytes(b), Bytes(c)], 3),
-            Self::Int2(lhs, rhs) => ([Int(lhs), Int(rhs), Int(None)], 2),
-            Self::PacketInt { value, disposition } => {
-                ([Int(value), Int(Some(disposition.flag())), Int(None)], 2)
+            Self::BytesBytesIntReady {
+                bytes,
+                delimiter,
+                count,
+            } => {
+                let count = match count {
+                    ReadyIntArg::Value(value) => value,
+                    // Validated SUBSTRING_INDEX early exit; not a NULL count.
+                    ReadyIntArg::Undemanded => Some(0),
+                };
+                ([Bytes(bytes), Bytes(delimiter), Int(count), Int(None)], 3)
             }
-            Self::PacketBytes { value, disposition } => {
-                ([Bytes(value), Int(Some(disposition.flag())), Int(None)], 2)
-            }
+            Self::Bytes3([a, b, c]) => ([Bytes(a), Bytes(b), Bytes(c), Int(None)], 3),
+            Self::Int2(lhs, rhs) => ([Int(lhs), Int(rhs), Int(None), Int(None)], 2),
+            Self::PacketInt { value, disposition } => (
+                [
+                    Int(value),
+                    Int(Some(disposition.flag())),
+                    Int(None),
+                    Int(None),
+                ],
+                2,
+            ),
+            Self::PacketBytes { value, disposition } => (
+                [
+                    Bytes(value),
+                    Int(Some(disposition.flag())),
+                    Int(None),
+                    Int(None),
+                ],
+                2,
+            ),
             Self::PacketBytesInt {
                 bytes,
                 count,
@@ -1424,11 +1611,40 @@ impl EvaluatedArgs {
             } => {
                 let count = match count {
                     ReadyIntArg::Value(value) => value,
-                    // The facade has validated RepeatNative + NULL left + Allow.
-                    // This zero is irrelevant, not an evaluated RHS or SQL NULL.
+                    // Validated RepeatNative + NULL left + Allow; not SQL NULL.
                     ReadyIntArg::Undemanded => Some(0),
                 };
-                ([Bytes(bytes), Int(count), Int(Some(disposition.flag()))], 3)
+                (
+                    [
+                        Bytes(bytes),
+                        Int(count),
+                        Int(Some(disposition.flag())),
+                        Int(None),
+                    ],
+                    3,
+                )
+            }
+            Self::PacketBytesIntBytes {
+                bytes,
+                count,
+                pad,
+                disposition,
+            } => {
+                // Admission checked the pair and the earlier length/packet exit.
+                // Empty representatives do not label original strings as NULL.
+                let into_ready = |arg: ReadyBytesArg| match arg {
+                    ReadyBytesArg::Value(value) => value,
+                    ReadyBytesArg::Undemanded => Some(Vec::new()),
+                };
+                (
+                    [
+                        Bytes(into_ready(bytes)),
+                        Int(count),
+                        Bytes(into_ready(pad)),
+                        Int(Some(disposition.flag())),
+                    ],
+                    4,
+                )
             }
             Self::Ieee754Bits(value) => {
                 let value = value
@@ -1441,7 +1657,7 @@ impl EvaluatedArgs {
                         Ok(bytes)
                     })
                     .transpose()?;
-                ([Bytes(value), Int(None), Int(None)], 1)
+                ([Bytes(value), Int(None), Int(None), Int(None)], 1)
             }
         })
     }
@@ -1936,7 +2152,7 @@ impl EvaluatedBytesWorker {
         }
     }
 
-    fn eval_ready(&mut self, ready: [ScalarValue; 3], arity: usize) -> LocalResult<ComputedValue> {
+    fn eval_ready(&mut self, ready: [ScalarValue; 4], arity: usize) -> LocalResult<ComputedValue> {
         let input_bytes = ready[..arity].iter().try_fold(0usize, |total, value| {
             let bytes = match value {
                 ScalarValue::Bytes(Some(bytes)) => bytes.capacity(),

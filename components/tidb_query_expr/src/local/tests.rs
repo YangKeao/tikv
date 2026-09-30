@@ -2343,3 +2343,355 @@ fn local_evaluated_args_ready_int_roles_reject_plain_carriers() {
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
 }
+
+#[test]
+fn local_evaluated_args_trim_native_handles_overlapping_ends() {
+    use tidb_query_datatype::codec::data_type::Bytes;
+
+    let wire = crate::test_util::RpnFnScalarEvaluator::new()
+        .push_param(Some(b"ababa".to_vec()))
+        .push_param(Some(b"aba".to_vec()))
+        .evaluate::<Bytes>(ScalarFuncSig::Trim2Args)
+        .unwrap();
+    assert_eq!(wire, Some(Vec::new()));
+    let cases: &[(Option<&[u8]>, Option<&[u8]>, [Option<&[u8]>; 3])] = &[
+        (
+            Some(b"ababa"),
+            Some(b"aba"),
+            [Some(b"ba"), Some(b"ba"), Some(b"ab")],
+        ),
+        (
+            Some(b" a "),
+            Some(b" "),
+            [Some(b"a"), Some(b"a "), Some(b" a")],
+        ),
+        (Some(b"abc"), Some(b""), [Some(b"abc"); 3]),
+        (None, Some(b" "), [None; 3]),
+        (Some(b"abc"), None, [None; 3]),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::TrimBothNative,
+        EvaluatedBytesOp::TrimLeadingNative,
+        EvaluatedBytesOp::TrimTrailingNative,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, remove, expected)) in cases.iter().enumerate() {
+            let args = EvaluatedArgs::Bytes2(
+                input.map(|bytes| bytes.to_vec()),
+                remove.map(|bytes| bytes.to_vec()),
+            );
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("TRIM native returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_substring_index_native_preserves_count_roles() {
+    use tidb_query_datatype::codec::data_type::Bytes;
+
+    let wire = crate::test_util::RpnFnScalarEvaluator::new()
+        .push_param(Some(b"aaa".to_vec()))
+        .push_param(Some(b"aa".to_vec()))
+        .push_param(Some(-1_i64))
+        .evaluate::<Bytes>(ScalarFuncSig::SubstringIndex)
+        .unwrap();
+    assert_eq!(wire, Some(Vec::new()));
+    for (column, operation) in [
+        EvaluatedBytesOp::SubstringIndexSignedNative,
+        EvaluatedBytesOp::SubstringIndexUnsignedNative,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let cases: [(
+            Option<&[u8]>,
+            Option<&[u8]>,
+            ReadyIntArg,
+            [Option<&[u8]>; 2],
+        ); 7] = [
+            (
+                Some(b"a.b.c"),
+                Some(b"."),
+                ReadyIntArg::Value(Some(2)),
+                [Some(b"a.b"); 2],
+            ),
+            (
+                Some(b"aaa"),
+                Some(b"aa"),
+                ReadyIntArg::Value(Some(-1)),
+                [Some(b"a"), Some(b"aaa")],
+            ),
+            (
+                Some(b"aaa"),
+                Some(b"aa"),
+                ReadyIntArg::Value(Some(i64::MIN)),
+                [Some(b"aaa"); 2],
+            ),
+            (Some(b"abc"), Some(b""), ReadyIntArg::Value(None), [None; 2]),
+            (
+                Some(b"abc"),
+                Some(b""),
+                ReadyIntArg::Undemanded,
+                [Some(b""); 2],
+            ),
+            (None, Some(b"."), ReadyIntArg::Undemanded, [None; 2]),
+            (Some(b"abc"), None, ReadyIntArg::Undemanded, [None; 2]),
+        ];
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::BytesBytesIntReady {
+                bytes: Some(b"aaa".to_vec()),
+                delimiter: Some(b"aa".to_vec()),
+                count: ReadyIntArg::Undemanded,
+            },
+            EvaluatedArgs::Bytes3([
+                Some(b"aaa".to_vec()),
+                Some(b"aa".to_vec()),
+                Some(b"2".to_vec()),
+            ]),
+        ] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        for (index, (input, delimiter, count, expected)) in cases.into_iter().enumerate() {
+            let args = EvaluatedArgs::BytesBytesIntReady {
+                bytes: input.map(|bytes| bytes.to_vec()),
+                delimiter: delimiter.map(|bytes| bytes.to_vec()),
+                count,
+            };
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("SUBSTRING_INDEX native returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_pad_native_preserves_units_and_empty_pad() {
+    use OutputDisposition::{Allow, SuppressByPacket};
+    use ReadyBytesArg::{Undemanded, Value};
+    use tidb_query_datatype::codec::data_type::Bytes;
+
+    // Growth with an empty pad is safe to compare; do not call the wire
+    // equal-length case.
+    let wire = crate::test_util::RpnFnScalarEvaluator::new()
+        .push_param(Some(b"ab".to_vec()))
+        .push_param(Some(3_i64))
+        .push_param(Some(Vec::<u8>::new()))
+        .evaluate::<Bytes>(ScalarFuncSig::Lpad)
+        .unwrap();
+    assert_eq!(wire, None);
+    for (column, operation) in [
+        EvaluatedBytesOp::LpadBytesNative,
+        EvaluatedBytesOp::RpadBytesNative,
+        EvaluatedBytesOp::LpadUtf8Native,
+        EvaluatedBytesOp::RpadUtf8Native,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let cases: [(
+            ReadyBytesArg,
+            Option<i64>,
+            ReadyBytesArg,
+            OutputDisposition,
+            [Option<&[u8]>; 4],
+        ); 7] = [
+            (
+                Value(Some("é".as_bytes().to_vec())),
+                Some(3),
+                Value(Some(b"x".to_vec())),
+                Allow,
+                [
+                    Some("xé".as_bytes()),
+                    Some("éx".as_bytes()),
+                    Some("xxé".as_bytes()),
+                    Some("éxx".as_bytes()),
+                ],
+            ),
+            (
+                Value(Some("éab".as_bytes().to_vec())),
+                Some(2),
+                Value(Some(b"x".to_vec())),
+                Allow,
+                [
+                    Some("é".as_bytes()),
+                    Some("é".as_bytes()),
+                    Some("éa".as_bytes()),
+                    Some("éa".as_bytes()),
+                ],
+            ),
+            (
+                Value(Some(b"ab".to_vec())),
+                Some(3),
+                Value(Some(Vec::new())),
+                Allow,
+                [Some(b""); 4],
+            ),
+            (
+                Value(Some(b"a".to_vec())),
+                Some(4_194_305),
+                Value(Some(Vec::new())),
+                Allow,
+                [Some(b""); 4],
+            ),
+            (
+                Value(Some(b"ab".to_vec())),
+                Some(2),
+                Value(Some(Vec::new())),
+                Allow,
+                [Some(b"ab"); 4],
+            ),
+            (
+                Value(None),
+                Some(2),
+                Value(Some(b"x".to_vec())),
+                Allow,
+                [None; 4],
+            ),
+            (
+                Undemanded,
+                Some(i64::MAX),
+                Undemanded,
+                SuppressByPacket,
+                [None; 4],
+            ),
+        ];
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, (bytes, count, pad, disposition, expected)) in cases.into_iter().enumerate() {
+            let args = EvaluatedArgs::PacketBytesIntBytes {
+                bytes,
+                count,
+                pad,
+                disposition,
+            };
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("padding native returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_pad_marker_admission_is_preflight() {
+    use OutputDisposition::{Allow, SuppressByPacket};
+    use ReadyBytesArg::{Undemanded, Value};
+
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::LpadBytesNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::LpadBytesNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (bytes, count, pad, disposition) in [
+        (Undemanded, Some(0), Undemanded, Allow),
+        (Undemanded, Some(1), Undemanded, Allow),
+        (Value(None), None, Undemanded, Allow),
+        (
+            Undemanded,
+            Some(i64::MAX),
+            Value(Some(b"x".to_vec())),
+            SuppressByPacket,
+        ),
+    ] {
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::PacketBytesIntBytes {
+                bytes,
+                count,
+                pad,
+                disposition,
+            }),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    for (index, count) in [None, Some(-1), Some(16_777_217)].into_iter().enumerate() {
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::PacketBytesIntBytes {
+                bytes: Undemanded,
+                count,
+                pad: Undemanded,
+                disposition: Allow,
+            })
+            .unwrap()
+        else {
+            panic!("padding marker returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), None);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), None);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
