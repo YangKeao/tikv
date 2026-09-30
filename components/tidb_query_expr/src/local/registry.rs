@@ -78,7 +78,12 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::IsIpv4Nullable
         | LocalFunctionId::IsIpv6Nullable
         | LocalFunctionId::IsIpv4CompatNullable
-        | LocalFunctionId::IsIpv4MappedNullable => Err(other_err!(
+        | LocalFunctionId::IsIpv4MappedNullable
+        | LocalFunctionId::SpaceNative
+        | LocalFunctionId::RepeatNative
+        | LocalFunctionId::ToBase64Native
+        | LocalFunctionId::FromBase64Native
+        | LocalFunctionId::FromBase64ValueNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

@@ -61,6 +61,17 @@
 //! wire NULL-to-zero behavior remains unchanged. IPv4 lexical normalization
 //! and native argument coercion remain frontend responsibilities. A closed
 //! private identity therefore never implies an IEEE input role.
+//! SpaceNative/RepeatNative/ToBase64Native/FromBase64Native instead use typed
+//! PacketInt/PacketBytes/PacketBytesInt carriers with OutputDisposition. The
+//! frontend keeps warning 1301 and original values; a real wrapper dispatch
+//! applies SuppressByPacket without running the potentially huge algorithm.
+//! The internal non-NULL Int flag is not an original argument or SQL NULL.
+//! ReadyPacketCount::Undemanded is allowed only for RepeatNative with NULL
+//! bytes and Allow: its validated irrelevant zero representative does not
+//! claim that RHS was coerced or NULL. FromBase64ValueNative uses ordinary
+//! Bytes without packet policy or its signed raw-length guard; execution
+//! context availability never selects packet semantics. Wire policies and the
+//! shared string/base64 algorithms remain in their original kernel module.
 //! Results are owned values, not native SQL descriptors.
 //! Frontends retain demand/coercion order, normalization, signature selection
 //! and result packing (including CRC32/bitwise UInt). The old single-Bytes
@@ -97,8 +108,8 @@ pub use self::{
     batch::{
         ComputedBytes, ComputedBytesMetadata, ComputedIeee754Bits, ComputedIeee754BitsMetadata,
         ComputedInt, ComputedIntMetadata, ComputedValue, EvaluatedArgs, EvaluatedAsciiWorker,
-        EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState, WorkerStorage,
-        prepare_evaluated_ascii, prepare_evaluated_bytes,
+        EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState, OutputDisposition,
+        ReadyPacketCount, WorkerStorage, prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,

@@ -730,6 +730,16 @@ fn elt_validator(expr: &crate::types::function::CallShape) -> Result<()> {
     Ok(())
 }
 
+// The closed factory transports Allow as 0 and SuppressByPacket as 1.
+#[inline]
+fn suppress_native_string(disposition: &Int) -> Result<bool> {
+    match *disposition {
+        0 => Ok(false),
+        1 => Ok(true),
+        value => Err(other_err!("Invalid native string disposition {}", value)),
+    }
+}
+
 #[rpn_fn(writer)]
 #[inline]
 pub fn space(len: &Int, writer: BytesWriter) -> Result<BytesGuard> {
@@ -742,6 +752,15 @@ pub fn space(len: &Int, writer: BytesWriter) -> Result<BytesGuard> {
     };
 
     Ok(guard)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn space_native(len: &Int, disposition: &Int, writer: BytesWriter) -> Result<BytesGuard> {
+    if suppress_native_string(disposition)? {
+        return Ok(writer.write(None));
+    }
+    space(len, writer)
 }
 
 #[rpn_fn(writer)]
@@ -950,14 +969,33 @@ pub fn to_base64(bs: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
         return Ok(writer.write_ref(Some(b"")));
     }
 
-    if let Some(size) = encoded_size(bs.len()) {
-        let mut buf = vec![0; size];
-        let len_without_wrap = base64::encode_config_slice(bs, base64::STANDARD, &mut buf);
-        line_wrap(&mut buf, len_without_wrap);
+    if let Some(buf) = to_base64_impl(bs) {
         Ok(writer.write(Some(buf)))
     } else {
         Ok(writer.write_ref(Some(b"")))
     }
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn to_base64_native(bs: BytesRef, disposition: &Int, writer: BytesWriter) -> Result<BytesGuard> {
+    if suppress_native_string(disposition)? {
+        return Ok(writer.write(None));
+    }
+    // Native encoded-length overflow is silent NULL, not a packet warning.
+    if bs.len() as u64 > 6_827_690_988_321_067_803_u64 {
+        return Ok(writer.write(None));
+    }
+    Ok(writer.write(to_base64_impl(bs)))
+}
+
+#[inline]
+fn to_base64_impl(bs: BytesRef) -> Option<Bytes> {
+    let size = encoded_size(bs.len())?;
+    let mut buf = vec![0; size];
+    let len_without_wrap = base64::encode_config_slice(bs, base64::STANDARD, &mut buf);
+    line_wrap(&mut buf, len_without_wrap);
+    Some(buf)
 }
 
 // similar logic to crate `line-wrap`, since we had call `encoded_size` before,
@@ -1002,7 +1040,7 @@ fn encoded_size(len: usize) -> Option<usize> {
 #[rpn_fn(writer)]
 #[inline]
 pub fn from_base64(bs: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
-    let input_copy = strip_whitespace(bs);
+    let input_copy = strip_whitespace(bs, b" \n\t\r\x0b\x0c");
     let will_overflow = input_copy
         .len()
         .checked_mul(BASE64_INPUT_CHUNK_LENGTH)
@@ -1012,14 +1050,47 @@ pub fn from_base64(bs: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
     if will_overflow || invalid_padding {
         Ok(writer.write_ref(Some(b"")))
     } else {
-        Ok(writer.write(base64::decode_config(&input_copy, base64::STANDARD).ok()))
+        Ok(writer.write(from_base64_impl(&input_copy)))
     }
 }
 
+#[rpn_fn(writer)]
 #[inline]
-fn strip_whitespace(input: &[u8]) -> Vec<u8> {
+fn from_base64_native(bs: BytesRef, disposition: &Int, writer: BytesWriter) -> Result<BytesGuard> {
+    if suppress_native_string(disposition)? {
+        return Ok(writer.write(None));
+    }
+    // The packet-aware native entry checks the original length before cleanup.
+    if bs.len() > (isize::MAX as usize) / BASE64_INPUT_CHUNK_LENGTH {
+        return Ok(writer.write(None));
+    }
+    Ok(writer.write(from_base64_native_impl(bs)))
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn from_base64_value_native(bs: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    Ok(writer.write(from_base64_native_impl(bs)))
+}
+
+#[inline]
+fn from_base64_native_impl(bs: BytesRef) -> Option<Bytes> {
+    let input_copy = strip_whitespace(bs, b" \t\r\n");
+    if !input_copy.len().is_multiple_of(BASE64_ENCODED_CHUNK_LENGTH) {
+        return None;
+    }
+    from_base64_impl(&input_copy)
+}
+
+#[inline]
+fn from_base64_impl(bs: BytesRef) -> Option<Bytes> {
+    base64::decode_config(bs, base64::STANDARD).ok()
+}
+
+#[inline]
+fn strip_whitespace(input: &[u8], whitespace: &[u8]) -> Vec<u8> {
     let mut input_copy = Vec::<u8>::with_capacity(input.len());
-    input_copy.extend(input.iter().filter(|b| !b" \n\t\r\x0b\x0c".contains(b)));
+    input_copy.extend(input.iter().filter(|b| !whitespace.contains(b)));
     input_copy
 }
 
@@ -1055,6 +1126,28 @@ pub fn quote(input: Option<BytesRef>) -> Result<Option<Bytes>> {
 #[rpn_fn(writer)]
 #[inline]
 pub fn repeat(input: BytesRef, cnt: &Int, writer: BytesWriter) -> Result<BytesGuard> {
+    repeat_impl(input, cnt, writer)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn repeat_native(
+    input: BytesRef,
+    cnt: &Int,
+    disposition: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    if suppress_native_string(disposition)? {
+        return Ok(writer.write(None));
+    }
+    repeat_impl(input, cnt, writer)
+}
+
+#[inline]
+fn repeat_impl(input: BytesRef, cnt: &Int, writer: BytesWriter) -> Result<BytesGuard> {
+    if input.is_empty() || *cnt <= 0 {
+        return Ok(writer.write_ref(Some(b"")));
+    }
     let cnt = if *cnt > i32::MAX.into() {
         i32::MAX.into()
     } else {

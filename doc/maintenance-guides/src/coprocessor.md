@@ -267,6 +267,20 @@ short-circuit admission policy described above.
   owns conversion and output policy: ordinary inverse trig maps NaN to NULL,
   legacy real consumers retain NaN, and native finite-result errors retain their
   original diagnostics. No alternate driver, callback or native fallback is added.
+  SPACE/REPEAT/TO_BASE64/FROM_BASE64 add an independent Packet argument role,
+  carrying real nullable values plus typed Allow/SuppressByPacket (physical
+  non-NULL 0/1). The private wrapper is actually invoked for suppressed NULL;
+  native1301 policy remains frontend-owned, never disguised as resource failure.
+  REPEAT's ReadyPacketCount distinguishes actual nullable Int from Undemanded;
+  only RepeatNative + NULL bytes + Allow admits the latter, before invocation,
+  then uses a documented irrelevant Some(0), not an evaluated SQL NULL.
+  impl_string.rs owns unique repeat/encode/decode cores. Empty REPEAT has a fast
+  return without changing wire values. Official Base64 retains its 16MiB,
+  six-whitespace and invalid-length-empty policies; native wrappers retain their
+  distinct limits, four-whitespace and invalid-length-NULL policies. FROM's
+  value-only private entry uses ordinary Bytes without packet/raw-length guards;
+  execution capability is independent of this policy. Silent length overflow
+  reaches the appropriate kernel with real arguments and Allow, not fake NULL.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake

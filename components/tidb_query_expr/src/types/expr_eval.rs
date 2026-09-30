@@ -330,6 +330,15 @@ fn evaluated_ready_args_match(
         && match role {
             EvaluatedArgsRole::NoArgs => values.is_empty(),
             EvaluatedArgsRole::Values => true,
+            EvaluatedArgsRole::Packet => {
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::SpaceNative
+                        | EvaluatedBytesOp::RepeatNative
+                        | EvaluatedBytesOp::ToBase64Native
+                        | EvaluatedBytesOp::FromBase64Native
+                ) && matches!(values.last(), Some(ScalarValue::Int(Some(0 | 1))))
+            }
             EvaluatedArgsRole::Ieee754Bits => match values {
                 [ScalarValue::Bytes(None)] => true,
                 [ScalarValue::Bytes(Some(bytes))] => bytes.len() == 8,
@@ -2956,6 +2965,10 @@ mod tests {
             ),
             (EvaluatedBytesOp::Quote, EvaluatedBytesOp::UnHex),
             (EvaluatedBytesOp::Md5, EvaluatedBytesOp::Sha1),
+            (
+                EvaluatedBytesOp::FromBase64ValueNative,
+                EvaluatedBytesOp::Md5,
+            ),
             (EvaluatedBytesOp::InetAton, EvaluatedBytesOp::Crc32),
             (EvaluatedBytesOp::Inet6Aton, EvaluatedBytesOp::Inet6Ntoa),
             (
@@ -3110,28 +3123,48 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..8 {
+        for mismatch in 0..13 {
             let operation = match mismatch {
                 3 | 5 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
+                8..=10 => EvaluatedBytesOp::SpaceNative,
+                11 => EvaluatedBytesOp::BitAnd,
+                12 => EvaluatedBytesOp::ToBase64Native,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
-                0 | 6 => EvaluatedArgsRole::Values,
+                0 | 6 | 8 => EvaluatedArgsRole::Values,
                 4 | 5 => EvaluatedArgsRole::NoArgs,
+                9..=12 => EvaluatedArgsRole::Packet,
                 _ => EvaluatedArgsRole::Ieee754Bits,
             };
             let schema: Vec<_> = (0..operation.input_types().len())
                 .map(|slot| operation.input_field_type(slot).unwrap())
                 .collect();
-            let ready: Vec<_> = schema
+            let mut ready: Vec<_> = operation
+                .input_types()
                 .iter()
-                .map(|_| ScalarValue::Bytes(Some(vec![0; if mismatch == 1 { 7 } else { 8 }])))
+                .map(|eval_type| match *eval_type {
+                    tidb_query_datatype::EvalType::Int => ScalarValue::Int(Some(0)),
+                    tidb_query_datatype::EvalType::Bytes => {
+                        ScalarValue::Bytes(Some(vec![0; if mismatch == 1 { 7 } else { 8 }]))
+                    }
+                    _ => unreachable!("closed ready guard fixture requires Int or Bytes"),
+                })
                 .collect();
+            if mismatch == 9 {
+                ready[1] = ScalarValue::Int(None);
+            } else if mismatch == 10 {
+                ready[1] = ScalarValue::Int(Some(2));
+            }
             let mut func_meta = operation.fn_meta();
-            if mismatch == 2 {
+            if matches!(mismatch, 2 | 12) {
                 assert!(evaluated_ready_args_match(operation, &ready, role));
-                func_meta.fn_ptr = EvaluatedBytesOp::AcosRaw.fn_meta().fn_ptr;
+                func_meta.fn_ptr = if mismatch == 2 {
+                    EvaluatedBytesOp::AcosRaw.fn_meta().fn_ptr
+                } else {
+                    EvaluatedBytesOp::FromBase64Native.fn_meta().fn_ptr
+                };
             }
             let mut nodes: Vec<_> = (0..schema.len())
                 .map(|offset| RpnExpressionNode::ColumnRef { offset })
@@ -3143,7 +3176,7 @@ mod tests {
                 metadata: Box::new(()),
             });
             let program = RpnExpression::from(nodes);
-            if mismatch != 2 {
+            if !matches!(mismatch, 2 | 12) {
                 assert!(evaluated_bytes_shape(operation, program.as_ref(), &schema));
             }
             let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();

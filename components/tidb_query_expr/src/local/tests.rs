@@ -1843,3 +1843,284 @@ fn local_evaluated_bytes_ip_prefix_predicates_keep_null_private() {
         }
     }
 }
+
+#[test]
+fn local_evaluated_args_space_native_respects_packet_disposition() {
+    use OutputDisposition::{Allow, SuppressByPacket};
+
+    let cases: [(Option<i64>, OutputDisposition, Option<&[u8]>); 5] = [
+        (None, Allow, None),
+        (Some(0), Allow, Some(b"")),
+        (Some(3), Allow, Some(b"   ")),
+        (Some(16_777_217), Allow, None),
+        (Some(i64::MAX), SuppressByPacket, None),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::SpaceNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::SpaceNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, (input, disposition, expected)) in cases.into_iter().enumerate() {
+        let args = EvaluatedArgs::PacketInt {
+            value: input,
+            disposition,
+        };
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("SPACE native returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_repeat_native_handles_empty_and_suppressed_output() {
+    use OutputDisposition::{Allow, SuppressByPacket};
+
+    let cases: [(
+        Option<&[u8]>,
+        ReadyPacketCount,
+        OutputDisposition,
+        Option<&[u8]>,
+    ); 5] = [
+        (
+            Some(b"ab"),
+            ReadyPacketCount::Value(Some(3)),
+            Allow,
+            Some(b"ababab"),
+        ),
+        (
+            Some(b""),
+            ReadyPacketCount::Value(Some(i64::MAX)),
+            Allow,
+            Some(b""),
+        ),
+        (Some(b"ab"), ReadyPacketCount::Value(None), Allow, None),
+        (
+            Some(b"ab"),
+            ReadyPacketCount::Value(Some(i64::MAX)),
+            SuppressByPacket,
+            None,
+        ),
+        (None, ReadyPacketCount::Undemanded, Allow, None),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::RepeatNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::RepeatNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (bytes, disposition) in [(Some(b"ab".to_vec()), Allow), (None, SuppressByPacket)] {
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::PacketBytesInt {
+                bytes,
+                count: ReadyPacketCount::Undemanded,
+                disposition,
+            }),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    for (index, (input, count, disposition, expected)) in cases.into_iter().enumerate() {
+        let args = EvaluatedArgs::PacketBytesInt {
+            bytes: input.map(|bytes| bytes.to_vec()),
+            count,
+            disposition,
+        };
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("REPEAT native returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_base64_native_keeps_wire_behavior_separate() {
+    use OutputDisposition::{Allow, SuppressByPacket};
+    use tidb_query_datatype::codec::data_type::Bytes;
+
+    for (input, expected) in [
+        (b"YQ".as_slice(), b"".as_slice()),
+        (b"YQ==\x0b".as_slice(), b"a".as_slice()),
+    ] {
+        let output = crate::test_util::RpnFnScalarEvaluator::new()
+            .push_param(Some(input.to_vec()))
+            .evaluate::<Bytes>(ScalarFuncSig::FromBase64)
+            .unwrap();
+        assert_eq!(output, Some(expected.to_vec()));
+    }
+    let encode_cases: Vec<(Option<&[u8]>, OutputDisposition, Option<&[u8]>)> = vec![
+        (None, Allow, None),
+        (Some(b""), Allow, Some(b"")),
+        (Some(b"a"), Allow, Some(b"YQ==")),
+        (Some(b"a"), SuppressByPacket, None),
+    ];
+    let decode_cases: Vec<(Option<&[u8]>, OutputDisposition, Option<&[u8]>)> = vec![
+        (None, Allow, None),
+        (Some(b"YQ=="), Allow, Some(b"a")),
+        (Some(b"YQ"), Allow, None),
+        (Some(b"YQ==\x0b"), Allow, None),
+        (Some(b"YR=="), Allow, None),
+        (Some(b" \t\r\nYQ== \t\r\n"), Allow, Some(b"a")),
+        (Some(b"YQ=="), SuppressByPacket, None),
+    ];
+    let mut value_decoder = prepare_evaluated_bytes(
+        EvaluatedBytesOp::FromBase64ValueNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(
+        value_decoder.operation(),
+        EvaluatedBytesOp::FromBase64ValueNative
+    );
+    assert_eq!(value_decoder.kernel_invocations(), 0);
+    let value_storage = value_decoder.retained_storage().unwrap();
+    let mut value_invocations = 0;
+    for (operation, cases) in [
+        (EvaluatedBytesOp::ToBase64Native, encode_cases),
+        (EvaluatedBytesOp::FromBase64Native, decode_cases),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, (input, disposition, expected)) in cases.into_iter().enumerate() {
+            let compare_value = operation == EvaluatedBytesOp::FromBase64Native
+                && matches!(&disposition, OutputDisposition::Allow);
+            let args = EvaluatedArgs::PacketBytes {
+                value: input.map(|bytes| bytes.to_vec()),
+                disposition,
+            };
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("Base64 native returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            if compare_value {
+                let ComputedValue::Bytes(value) = value_decoder
+                    .eval_one(input.map(|bytes| bytes.to_vec()))
+                    .unwrap()
+                else {
+                    panic!("value-only Base64 returned a non-Bytes value");
+                };
+                assert_eq!(value.value(), expected);
+                assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+                assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+                value_invocations += 1;
+                assert_eq!(value_decoder.kernel_invocations(), value_invocations);
+                assert!(value_decoder.is_healthy());
+                assert_eq!(value_decoder.retained_storage().unwrap(), value_storage);
+            }
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_packet_roles_reject_plain_carriers() {
+    use OutputDisposition::Allow;
+
+    let cases = [
+        (
+            EvaluatedBytesOp::SpaceNative,
+            EvaluatedArgs::Int2(Some(1), Some(1)),
+            EvaluatedArgs::PacketInt {
+                value: None,
+                disposition: Allow,
+            },
+        ),
+        (
+            EvaluatedBytesOp::RepeatNative,
+            EvaluatedArgs::BytesInt(Some(b"ab".to_vec()), Some(1)),
+            EvaluatedArgs::PacketBytesInt {
+                bytes: Some(b"ab".to_vec()),
+                count: ReadyPacketCount::Value(None),
+                disposition: Allow,
+            },
+        ),
+        (
+            EvaluatedBytesOp::BitAnd,
+            EvaluatedArgs::PacketInt {
+                value: Some(1),
+                disposition: Allow,
+            },
+            EvaluatedArgs::Int2(None, Some(1)),
+        ),
+        (
+            EvaluatedBytesOp::Left,
+            EvaluatedArgs::PacketBytes {
+                value: Some(b"abc".to_vec()),
+                disposition: Allow,
+            },
+            EvaluatedArgs::BytesInt(None, Some(1)),
+        ),
+    ];
+    for (operation, invalid, valid) in cases {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        match worker.eval_args(valid).unwrap() {
+            ComputedValue::Int(value) => {
+                assert_eq!(operation, EvaluatedBytesOp::BitAnd);
+                assert_eq!(value.value(), None);
+                assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+                assert_eq!(value.into_option(), None);
+            }
+            ComputedValue::Bytes(value) => {
+                assert_ne!(operation, EvaluatedBytesOp::BitAnd);
+                assert_eq!(value.value(), None);
+                assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+                assert_eq!(value.into_option(), None);
+            }
+            _ => panic!("packet role check returned an unexpected output type"),
+        }
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}

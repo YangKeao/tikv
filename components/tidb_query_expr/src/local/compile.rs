@@ -1547,6 +1547,11 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::IsIpv6Nullable,
             EvaluatedBytesOp::IsIpv4CompatNullable,
             EvaluatedBytesOp::IsIpv4MappedNullable,
+            EvaluatedBytesOp::SpaceNative,
+            EvaluatedBytesOp::RepeatNative,
+            EvaluatedBytesOp::ToBase64Native,
+            EvaluatedBytesOp::FromBase64Native,
+            EvaluatedBytesOp::FromBase64ValueNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
