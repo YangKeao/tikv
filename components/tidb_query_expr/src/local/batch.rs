@@ -20,7 +20,7 @@ use super::{
     LocalControlProgram, LocalError, LocalProgram, LocalResult, LocalRuntimeServices,
     ReportedLocalFailure, ResultMetaId,
     compile::{
-        LocalNumericBatchProgram, ProgramEntry, compile_evaluated_ascii,
+        LocalNumericBatchProgram, ProgramEntry, compile_evaluated_bytes,
         evaluated_ascii_bytes_type, evaluated_ascii_int_type,
     },
     runtime::{EvalBudget, bytes_min_storage_bytes, int_min_storage_bytes, vector_storage_bytes},
@@ -734,6 +734,69 @@ impl LocalNumericBatchProgram {
     }
 }
 
+/// Closed unary operations over already-evaluated nullable Bytes. LENGTH and
+/// OCTET_LENGTH share Length; no arbitrary signature or SQL descriptor is
+/// accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EvaluatedBytesOp {
+    Ascii,
+    Length,
+    BitLength,
+    LTrim,
+    RTrim,
+    UnHex,
+}
+
+impl EvaluatedBytesOp {
+    pub(crate) fn signature(self) -> tipb::ScalarFuncSig {
+        use tipb::ScalarFuncSig;
+        match self {
+            Self::Ascii => ScalarFuncSig::Ascii,
+            Self::Length => ScalarFuncSig::Length,
+            Self::BitLength => ScalarFuncSig::BitLength,
+            Self::LTrim => ScalarFuncSig::LTrim,
+            Self::RTrim => ScalarFuncSig::RTrim,
+            Self::UnHex => ScalarFuncSig::UnHex,
+        }
+    }
+
+    pub(crate) fn fn_meta(self) -> crate::RpnFnMeta {
+        // Defensive identity witnesses for calls selected by prepare_call, not
+        // alternative algorithms or another public signature registry.
+        match self {
+            Self::Ascii => crate::impl_string::ascii_fn_meta(),
+            Self::Length => crate::impl_string::length_fn_meta(),
+            Self::BitLength => crate::impl_string::bit_length_fn_meta(),
+            Self::LTrim => crate::impl_string::ltrim_fn_meta(),
+            Self::RTrim => crate::impl_string::rtrim_fn_meta(),
+            Self::UnHex => crate::impl_string::unhex_fn_meta(),
+        }
+    }
+
+    fn eval_type(self) -> EvalType {
+        match self {
+            Self::Ascii | Self::Length | Self::BitLength => EvalType::Int,
+            Self::LTrim | Self::RTrim | Self::UnHex => EvalType::Bytes,
+        }
+    }
+
+    pub(crate) fn return_type(self) -> tipb::FieldType {
+        match self.eval_type() {
+            EvalType::Int => evaluated_ascii_int_type(),
+            EvalType::Bytes => evaluated_ascii_bytes_type(),
+            _ => unreachable!("the operation has a closed Int/Bytes result"),
+        }
+    }
+
+    fn entry(self) -> ProgramEntry {
+        if self == Self::Ascii {
+            ProgramEntry::EvaluatedAscii
+        } else {
+            ProgramEntry::EvaluatedBytes
+        }
+    }
+}
+
 /// The fixed computed result identity, including for a NULL result. It is not
 /// the operand's metadata, a SQL return descriptor, or a control-lineage ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -758,6 +821,40 @@ impl ComputedInt {
     pub fn metadata(&self) -> ComputedIntMetadata {
         ComputedIntMetadata::OwnSignedInt
     }
+}
+
+/// Own computed Bytes, not the operand's lineage or a SQL charset/collation.
+/// The caller still owns native text/binary packing and return-type metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputedBytesMetadata {
+    OwnBytes,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ComputedBytes {
+    value: Option<Vec<u8>>,
+}
+
+impl ComputedBytes {
+    pub fn value(&self) -> Option<&[u8]> {
+        self.value.as_deref()
+    }
+
+    pub fn into_option(self) -> Option<Vec<u8>> {
+        self.value
+    }
+
+    pub fn metadata(&self) -> ComputedBytesMetadata {
+        ComputedBytesMetadata::OwnBytes
+    }
+}
+
+/// The complete result domain of the closed ready-Bytes worker. Both carriers
+/// own their computed result, including NULL; neither borrows the input/worker.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ComputedValue {
+    Int(ComputedInt),
+    Bytes(ComputedBytes),
 }
 
 /// Checked retained storage for one worker. Inline bytes are separate so a
@@ -855,15 +952,18 @@ fn evaluated_ascii_context_is_sealed(ctx: &EvalContext) -> bool {
         && ctx.warnings.warnings.is_empty()
 }
 
-/// An exclusively owned, reusable ready-Bytes ASCII runtime. It is Send, not
-/// Sync, and exposes no program, context, services, native graph or mutable
-/// configuration. A caller may move idle workers through a synchronized owner;
-/// it must drop an unhealthy or unwinding worker rather than recycle it.
+/// An exclusively owned, reusable runtime for one closed ready-Bytes operation.
+/// It is Send, not Sync, and exposes no program, context, services, native
+/// graph or mutable configuration. A caller may cache workers by operation in
+/// one synchronized owner; unhealthy or unwinding workers must not be recycled.
 ///
-/// Per-call execution limits cover ready input and driver temporaries, NOT this
-/// persistent program/context/state. The caller separately reserves and charges
-/// worker/pool ownership. No operand, result or invocation borrow is cached.
-pub struct EvaluatedAsciiWorker {
+/// Per-call limits cover ready input and driver/result owners, NOT this
+/// retained program/context/state. They are boundary accounting, not a bound on
+/// temporary kernel allocations (including UNHEX's decoder/padding).
+/// Worker/pool ownership remains separately charged. No operand, result or
+/// invocation borrow is cached.
+pub struct EvaluatedBytesWorker {
+    operation: EvaluatedBytesOp,
     program: LocalProgram,
     state: LocalEvalState,
     ctx: EvalContext,
@@ -873,28 +973,30 @@ pub struct EvaluatedAsciiWorker {
     poisoned: bool,
 }
 
-impl std::fmt::Debug for EvaluatedAsciiWorker {
+impl std::fmt::Debug for EvaluatedBytesWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EvaluatedAsciiWorker")
+        f.debug_struct("EvaluatedBytesWorker")
+            .field("operation", &self.operation)
             .field("kernel_invocations", &self.kernel_invocations())
             .field("healthy", &self.is_healthy())
             .finish_non_exhaustive()
     }
 }
 
-/// Prepare only after the original frontend has produced a demanded ready
-/// value, under the caller's creating-worker reservation. This does not
-/// evaluate a kernel (not even a fake NULL), retain native descriptors, or make
-/// a SQL context. The private default/UTC configuration is justified only by
-/// ASCII's sealed context-free ABI; warning storage is disabled but its count
-/// is checked.
-pub fn prepare_evaluated_ascii(
+/// Prepare one fixed operation after the frontend has produced a demanded ready
+/// value, under the caller's creating-worker reservation. No kernel is
+/// evaluated (not even a fake NULL), and no native descriptor or SQL context is
+/// retained. All six official kernels are context-free on ready Bytes; the
+/// private UTC context disables warning storage and still checks that no
+/// warning was raised.
+pub fn prepare_evaluated_bytes(
+    operation: EvaluatedBytesOp,
     cx: LocalCompileContext,
     execution: ExecutionLimits,
     max_worker_retained_bytes: usize,
-) -> LocalResult<EvaluatedAsciiWorker> {
-    let program = compile_evaluated_ascii(cx)?;
-    program.check_entry(ProgramEntry::EvaluatedAscii)?;
+) -> LocalResult<EvaluatedBytesWorker> {
+    let program = compile_evaluated_bytes(operation, cx)?;
+    program.check_entry(operation.entry())?;
     // Fully warm the fixed program's owned metadata BEFORE publication. These
     // getters only inspect source structure; none dispatches an RPN function.
     if program.expression.node_count() != 2
@@ -908,7 +1010,8 @@ pub fn prepare_evaluated_ascii(
     }
     let mut cfg = EvalConfig::new();
     cfg.set_max_warning_cnt(0);
-    let mut worker = EvaluatedAsciiWorker {
+    let mut runtime = EvaluatedBytesWorker {
+        operation,
         program,
         state: LocalEvalState::with_limits(execution),
         ctx: EvalContext::new(Arc::new(cfg)),
@@ -917,17 +1020,78 @@ pub fn prepare_evaluated_ascii(
         accepted_storage: WorkerStorage::new(0, 0)?,
         poisoned: false,
     };
-    let storage = worker.retained_storage()?;
+    let storage = runtime.retained_storage()?;
     if storage.total_bytes() > max_worker_retained_bytes {
         return Err(LocalError::ResourceLimit(
             "evaluated ASCII worker retained storage exceeded".into(),
         ));
     }
-    worker.accepted_storage = storage;
-    Ok(worker)
+    runtime.accepted_storage = storage;
+    Ok(runtime)
+}
+
+/// Compatible ASCII-only facade over the shared closed ready-Bytes worker.
+/// Transparent representation keeps inline storage accounting identical to its
+/// sole owned runtime; it exposes neither operation mutation nor a raw program.
+#[repr(transparent)]
+pub struct EvaluatedAsciiWorker {
+    inner: EvaluatedBytesWorker,
+}
+
+impl std::fmt::Debug for EvaluatedAsciiWorker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EvaluatedAsciiWorker")
+            .field("kernel_invocations", &self.kernel_invocations())
+            .field("healthy", &self.is_healthy())
+            .finish_non_exhaustive()
+    }
+}
+
+pub fn prepare_evaluated_ascii(
+    cx: LocalCompileContext,
+    execution: ExecutionLimits,
+    max_worker_retained_bytes: usize,
+) -> LocalResult<EvaluatedAsciiWorker> {
+    prepare_evaluated_bytes(
+        EvaluatedBytesOp::Ascii,
+        cx,
+        execution,
+        max_worker_retained_bytes,
+    )
+    .map(|inner| EvaluatedAsciiWorker { inner })
 }
 
 impl EvaluatedAsciiWorker {
+    pub fn kernel_invocations(&self) -> u64 {
+        self.inner.kernel_invocations()
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.inner.is_healthy()
+    }
+
+    pub fn retained_storage(&self) -> LocalResult<WorkerStorage> {
+        self.inner.retained_storage()
+    }
+
+    pub fn eval_one(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedInt> {
+        match self.inner.eval_one(bytes)? {
+            ComputedValue::Int(value) => Ok(value),
+            ComputedValue::Bytes(_) => {
+                self.inner.poisoned = true;
+                Err(LocalError::InvalidBatch(
+                    "evaluated ASCII requires an owned canonical Int result".into(),
+                ))
+            }
+        }
+    }
+}
+
+impl EvaluatedBytesWorker {
+    pub fn operation(&self) -> EvaluatedBytesOp {
+        self.operation
+    }
+
     pub fn kernel_invocations(&self) -> u64 {
         self.witness.invocations()
     }
@@ -955,14 +1119,15 @@ impl EvaluatedAsciiWorker {
     }
 
     fn observe_storage(&self) -> LocalResult<WorkerStorage> {
-        self.program.check_entry(ProgramEntry::EvaluatedAscii)?;
+        self.program.check_entry(self.operation.entry())?;
         if !evaluated_ascii_context_is_sealed(&self.ctx) {
             return Err(LocalError::InvalidSpec(
                 "evaluated ASCII private context is not clean and sealed".into(),
             ));
         }
         let bytes_type = evaluated_ascii_bytes_type();
-        let int_type = evaluated_ascii_int_type();
+        let result_type = self.operation.return_type();
+        let official = self.operation.fn_meta();
         let [
             RpnExpressionNode::ColumnRef { offset: 0 },
             RpnExpressionNode::FnCall {
@@ -980,9 +1145,10 @@ impl EvaluatedAsciiWorker {
         if self.program.host_catalog.is_some()
             || self.program.expression.checked_result_flow().is_some()
             || self.program.schema.as_slice() != std::slice::from_ref(&bytes_type)
-            || self.program.return_type() != &int_type
-            || field_type != &int_type
-            || func_meta.name != "ascii"
+            || self.program.return_type() != &result_type
+            || field_type != &result_type
+            || func_meta.name != official.name
+            || !std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
             || !metadata.is::<()>()
         {
             return Err(LocalError::InvalidSpec(
@@ -1038,17 +1204,17 @@ impl EvaluatedAsciiWorker {
         self.check_owner_footprint(self.observe_storage()?)
     }
 
-    /// Consume one already-coerced nullable byte buffer. Even NULL must enter
-    /// the official generated nullable wrapper. The computed result contains
-    /// only a nullable signed Int; original frontend return coercion stays out
-    /// of this worker and runs after its exclusive borrow has ended.
-    pub fn eval_one(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedInt> {
+    /// Consume one already-coerced nullable byte buffer. Even NULL enters the
+    /// official generated nullable wrapper. Return coercion/charset policy
+    /// stays in the frontend, after this exclusive borrow and owned-result
+    /// extraction.
+    pub fn eval_one(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedValue> {
         self.begin_invocation()?;
         let result = self.eval_ready(bytes);
         self.finish_invocation(result)
     }
 
-    fn finish_invocation(&mut self, result: LocalResult<ComputedInt>) -> LocalResult<ComputedInt> {
+    fn finish_invocation<T>(&mut self, result: LocalResult<T>) -> LocalResult<T> {
         // eval_ready has dropped both input and physical output on every normal
         // Result exit. No warning reset, context rebuild or native replay occurs.
         let postflight = self
@@ -1079,12 +1245,13 @@ impl EvaluatedAsciiWorker {
         }
     }
 
-    fn eval_ready(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedInt> {
+    fn eval_ready(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedValue> {
         let input_bytes = bytes.as_ref().map_or(0, Vec::capacity);
         let ready = ScalarValue::Bytes(bytes);
         self.state.row = [0];
         let mut budget = EvalBudget::exact(self.state.limits)?;
-        let result = self.program.expression.eval_with_ready_ascii(
+        let result = self.program.expression.eval_with_ready_bytes(
+            self.operation,
             &mut self.ctx,
             &self.program.schema,
             &ready,
@@ -1096,29 +1263,67 @@ impl EvaluatedAsciiWorker {
             RpnStackNode::Vector {
                 value: RpnStackNodeVectorValue::Generated { physical_value },
                 field_type,
-            } if field_type == &evaluated_ascii_int_type() => physical_value,
+            } if field_type == &self.operation.return_type() => physical_value,
             _ => {
-                return Err(LocalError::InvalidBatch(
-                    "evaluated ASCII requires an owned canonical Int result".into(),
-                ));
+                let message = if self.operation == EvaluatedBytesOp::Ascii {
+                    "evaluated ASCII requires an owned canonical Int result"
+                } else {
+                    "evaluated Bytes requires an owned canonical result"
+                };
+                return Err(LocalError::InvalidBatch(message.into()));
             }
         };
-        if output.eval_type() != EvalType::Int || output.len() != 1 {
-            return Err(LocalError::InvalidBatch(
-                "evaluated ASCII returned an invalid singleton Int result".into(),
-            ));
+        if output.eval_type() != self.operation.eval_type() || output.len() != 1 {
+            let message = if self.operation == EvaluatedBytesOp::Ascii {
+                "evaluated ASCII returned an invalid singleton Int result"
+            } else {
+                "evaluated Bytes returned an invalid singleton result"
+            };
+            return Err(LocalError::InvalidBatch(message.into()));
         }
-        // TaskGuard is gone, but the call-local ready owner is STILL live.
-        // Check it alongside the actual output once before copying the i64.
-        budget.check_output(vector_storage_bytes(&output, budget.mode()), input_bytes)?;
-        let ScalarValueRef::Int(value) = output.get_scalar_ref(0) else {
-            unreachable!("the owned singleton carrier was checked")
+        // TaskGuard is gone, but the ready owner remains live. Bytes extraction
+        // additionally holds the generated data/offset/bitmap buffers AND the
+        // new owned Vec; precheck requested length, then check actual capacity.
+        let output_bytes = vector_storage_bytes(&output, budget.mode());
+        budget.check_output(output_bytes, input_bytes)?;
+        let (value, retained_bytes) = match output.get_scalar_ref(0) {
+            ScalarValueRef::Int(value) => (
+                ComputedValue::Int(ComputedInt {
+                    value: value.copied(),
+                }),
+                0,
+            ),
+            ScalarValueRef::Bytes(value) => {
+                let value = match value {
+                    None => None,
+                    Some(source) => {
+                        let overlap = output_bytes
+                            .checked_add(source.len())
+                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        budget.check_output(overlap, input_bytes)?;
+                        let mut owned = Vec::new();
+                        owned.try_reserve_exact(source.len()).map_err(|_| {
+                            LocalError::ResourceLimit(
+                                "evaluated Bytes result allocation failed".into(),
+                            )
+                        })?;
+                        let overlap = output_bytes
+                            .checked_add(owned.capacity())
+                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        budget.check_output(overlap, input_bytes)?;
+                        owned.extend_from_slice(source);
+                        Some(owned)
+                    }
+                };
+                let retained = value.as_ref().map_or(0, Vec::capacity);
+                (ComputedValue::Bytes(ComputedBytes { value }), retained)
+            }
+            _ => unreachable!("the closed result carrier was checked"),
         };
-        let value = value.copied();
         drop(output);
         drop(ready);
-        budget.set_output_bytes(0)?;
-        Ok(ComputedInt { value })
+        budget.set_output_bytes(retained_bytes)?;
+        Ok(value)
     }
 }
 
@@ -1162,23 +1367,27 @@ mod evaluated_ascii_tests {
         assert_eq!(worker.kernel_invocations(), 0);
         assert!(
             worker
+                .inner
                 .program
                 .expression
                 .retained_metadata_heap_bytes()
                 .unwrap()
                 > 0
         );
-        assert_eq!(worker.program.expression.node_count(), 2);
-        assert_eq!(worker.program.expression.work_count(), 2);
-        assert_eq!(worker.program.expression.column_ref_count(), 1);
-        assert_eq!(worker.program.expression.referenced_column_offsets(), &[0]);
+        assert_eq!(worker.inner.program.expression.node_count(), 2);
+        assert_eq!(worker.inner.program.expression.work_count(), 2);
+        assert_eq!(worker.inner.program.expression.column_ref_count(), 1);
+        assert_eq!(
+            worker.inner.program.expression.referenced_column_offsets(),
+            &[0]
+        );
         assert_eq!(worker.retained_storage().unwrap(), storage);
-        assert_eq!(worker.accepted_storage, storage);
+        assert_eq!(worker.inner.accepted_storage, storage);
         assert_eq!(worker.kernel_invocations(), 0);
-        assert!(evaluated_ascii_context_is_sealed(&worker.ctx));
-        assert_eq!(worker.ctx.cfg.max_warning_cnt, 0);
-        assert_eq!(worker.ctx.warnings.warning_cnt, 0);
-        assert!(worker.ctx.warnings.warnings.is_empty());
+        assert!(evaluated_ascii_context_is_sealed(&worker.inner.ctx));
+        assert_eq!(worker.inner.ctx.cfg.max_warning_cnt, 0);
+        assert_eq!(worker.inner.ctx.warnings.warning_cnt, 0);
+        assert!(worker.inner.ctx.warnings.warnings.is_empty());
         assert_eq!(
             storage.inline_bytes(),
             mem::size_of::<EvaluatedAsciiWorker>()
@@ -1194,9 +1403,13 @@ mod evaluated_ascii_tests {
         let mut worker = new_worker();
         // Private fault injection invalidates metadata without changing nodes.
         // An observation must refuse this cold published worker, not allocate.
-        let _: &mut [RpnExpressionNode] = worker.program.expression.as_mut();
+        let _: &mut [RpnExpressionNode] = worker.inner.program.expression.as_mut();
         assert_eq!(
-            worker.program.expression.retained_metadata_heap_bytes(),
+            worker
+                .inner
+                .program
+                .expression
+                .retained_metadata_heap_bytes(),
             Some(0)
         );
         assert!(matches!(
@@ -1204,7 +1417,11 @@ mod evaluated_ascii_tests {
             Err(LocalError::InvalidSpec(_))
         ));
         assert_eq!(
-            worker.program.expression.retained_metadata_heap_bytes(),
+            worker
+                .inner
+                .program
+                .expression
+                .retained_metadata_heap_bytes(),
             Some(0)
         );
         assert_eq!(worker.kernel_invocations(), 0);
@@ -1215,31 +1432,36 @@ mod evaluated_ascii_tests {
     fn test_evaluated_ascii_observer_measures_actual_spare_capacities() {
         let mut worker = new_worker();
         let before = worker.retained_storage().unwrap();
-        worker.program.expression.reserve(17);
-        worker.program.schema.reserve(11);
-        worker.ctx.warnings.warnings.reserve(13);
+        worker.inner.program.expression.reserve(17);
+        worker.inner.program.schema.reserve(11);
+        worker.inner.ctx.warnings.warnings.reserve(13);
         // Mutation above intentionally invalidated the cache. Rewarm explicitly
         // in this private test, never inside the observation API.
-        assert_eq!(worker.program.expression.node_count(), 2);
-        assert_eq!(worker.program.expression.work_count(), 2);
-        assert_eq!(worker.program.expression.referenced_column_offsets(), &[0]);
+        assert_eq!(worker.inner.program.expression.node_count(), 2);
+        assert_eq!(worker.inner.program.expression.work_count(), 2);
+        assert_eq!(
+            worker.inner.program.expression.referenced_column_offsets(),
+            &[0]
+        );
         let storage = worker.retained_storage().unwrap();
-        let expected = worker.program.expression.capacity() * mem::size_of::<RpnExpressionNode>()
-            + worker.program.schema.capacity() * mem::size_of::<tipb::FieldType>()
+        let expected = worker.inner.program.expression.capacity()
+            * mem::size_of::<RpnExpressionNode>()
+            + worker.inner.program.schema.capacity() * mem::size_of::<tipb::FieldType>()
             + worker
+                .inner
                 .program
                 .expression
                 .retained_metadata_heap_bytes()
                 .unwrap()
             + mem::size_of::<EvaluatedAsciiConfigAllocation>()
-            + worker.ctx.warnings.warnings.capacity() * mem::size_of::<tipb::Error>();
+            + worker.inner.ctx.warnings.warnings.capacity() * mem::size_of::<tipb::Error>();
         assert_eq!(storage.owned_heap_bytes(), expected);
         assert!(storage.owned_heap_bytes() > before.owned_heap_bytes());
-        assert_eq!(worker.program.expression.len(), 2);
-        assert_eq!(worker.program.schema.len(), 1);
-        assert!(worker.ctx.warnings.warnings.is_empty());
-        assert_eq!(worker.ctx.warnings.warning_cnt, 0);
-        assert_eq!(worker.accepted_storage, before);
+        assert_eq!(worker.inner.program.expression.len(), 2);
+        assert_eq!(worker.inner.program.schema.len(), 1);
+        assert!(worker.inner.ctx.warnings.warnings.is_empty());
+        assert_eq!(worker.inner.ctx.warnings.warning_cnt, 0);
+        assert_eq!(worker.inner.accepted_storage, before);
         assert!(!worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
@@ -1306,9 +1528,10 @@ mod evaluated_ascii_tests {
     fn test_evaluated_ascii_reuses_program_context_and_computed_identity() {
         let mut worker = new_worker();
         let storage = worker.retained_storage().unwrap();
-        let cfg = Arc::as_ptr(&worker.ctx.cfg);
-        let nodes = worker.program.expression.as_ptr();
+        let cfg = Arc::as_ptr(&worker.inner.ctx.cfg);
+        let nodes = worker.inner.program.expression.as_ptr();
         let refs = worker
+            .inner
             .program
             .expression
             .referenced_column_offsets()
@@ -1322,19 +1545,20 @@ mod evaluated_ascii_tests {
             (Some(b"2".to_vec()), Some(50)),
         ];
         for (index, (input, expected)) in cases.into_iter().enumerate() {
-            worker.state.row = [99];
+            worker.inner.state.row = [99];
             let value = worker.eval_one(input).unwrap();
             assert_eq!(value.value(), expected);
             assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
             assert_eq!(value.into_option(), expected);
             assert_eq!(worker.kernel_invocations(), index as u64 + 1);
-            assert_eq!(worker.state.row, [0]);
+            assert_eq!(worker.inner.state.row, [0]);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
-            assert_eq!(Arc::as_ptr(&worker.ctx.cfg), cfg);
-            assert_eq!(worker.program.expression.as_ptr(), nodes);
+            assert_eq!(Arc::as_ptr(&worker.inner.ctx.cfg), cfg);
+            assert_eq!(worker.inner.program.expression.as_ptr(), nodes);
             assert_eq!(
                 worker
+                    .inner
                     .program
                     .expression
                     .referenced_column_offsets()
@@ -1347,8 +1571,8 @@ mod evaluated_ascii_tests {
     #[test]
     fn test_evaluated_ascii_count_only_warning_poison_is_not_reset() {
         let mut worker = new_worker();
-        worker.ctx.warnings.warning_cnt = 1;
-        assert!(worker.ctx.warnings.warnings.is_empty());
+        worker.inner.ctx.warnings.warning_cnt = 1;
+        assert!(worker.inner.ctx.warnings.warnings.is_empty());
         assert!(!worker.is_healthy());
         assert!(worker.retained_storage().is_err());
         assert!(matches!(
@@ -1356,9 +1580,9 @@ mod evaluated_ascii_tests {
             Err(LocalError::InvalidSpec(_))
         ));
         assert_eq!(worker.kernel_invocations(), 0);
-        assert_eq!(worker.ctx.warnings.warning_cnt, 1);
-        assert!(worker.ctx.warnings.warnings.is_empty());
-        assert!(worker.poisoned);
+        assert_eq!(worker.inner.ctx.warnings.warning_cnt, 1);
+        assert!(worker.inner.ctx.warnings.warnings.is_empty());
+        assert!(worker.inner.poisoned);
         // The caller must now drop this worker, never reset/recycle it.
     }
 
@@ -1367,8 +1591,8 @@ mod evaluated_ascii_tests {
         let mut worker = new_worker();
         let mut detail = tipb::Error::default();
         detail.set_msg("unexpected private warning".into());
-        worker.ctx.warnings.warnings.push(detail);
-        assert_eq!(worker.ctx.warnings.warning_cnt, 0);
+        worker.inner.ctx.warnings.warnings.push(detail);
+        assert_eq!(worker.inner.ctx.warnings.warning_cnt, 0);
         assert!(!worker.is_healthy());
         assert!(worker.retained_storage().is_err());
         assert!(matches!(
@@ -1376,13 +1600,13 @@ mod evaluated_ascii_tests {
             Err(LocalError::InvalidSpec(_))
         ));
         assert_eq!(worker.kernel_invocations(), 0);
-        assert_eq!(worker.ctx.warnings.warning_cnt, 0);
-        assert_eq!(worker.ctx.warnings.warnings.len(), 1);
+        assert_eq!(worker.inner.ctx.warnings.warning_cnt, 0);
+        assert_eq!(worker.inner.ctx.warnings.warnings.len(), 1);
         assert_eq!(
-            worker.ctx.warnings.warnings[0].get_msg(),
+            worker.inner.ctx.warnings.warnings[0].get_msg(),
             "unexpected private warning"
         );
-        assert!(worker.poisoned);
+        assert!(worker.inner.poisoned);
     }
 
     #[test]
@@ -1399,7 +1623,7 @@ mod evaluated_ascii_tests {
         ];
         for mutate in mutations {
             let mut worker = new_worker();
-            mutate(Arc::get_mut(&mut worker.ctx.cfg).unwrap());
+            mutate(Arc::get_mut(&mut worker.inner.ctx.cfg).unwrap());
             assert!(!worker.is_healthy());
             assert!(worker.retained_storage().is_err());
             assert!(matches!(
@@ -1407,10 +1631,10 @@ mod evaluated_ascii_tests {
                 Err(LocalError::InvalidSpec(_))
             ));
             assert_eq!(worker.kernel_invocations(), 0);
-            assert!(worker.poisoned);
+            assert!(worker.inner.poisoned);
         }
         let mut worker = new_worker();
-        let alias = Arc::clone(&worker.ctx.cfg);
+        let alias = Arc::clone(&worker.inner.ctx.cfg);
         assert!(!worker.is_healthy());
         assert!(worker.retained_storage().is_err());
         assert!(matches!(
@@ -1418,7 +1642,7 @@ mod evaluated_ascii_tests {
             Err(LocalError::InvalidSpec(_))
         ));
         drop(alias);
-        assert!(worker.poisoned);
+        assert!(worker.inner.poisoned);
         assert!(!worker.is_healthy());
         assert_eq!(worker.kernel_invocations(), 0);
     }
@@ -1446,7 +1670,7 @@ mod evaluated_ascii_tests {
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         // No large input buffer stayed in the worker after refusal.
-        worker.state.limits = ExecutionLimits::default();
+        worker.inner.state.limits = ExecutionLimits::default();
         assert_eq!(worker.eval_one(Some(vec![])).unwrap().value(), Some(0));
         assert_eq!(worker.kernel_invocations(), 1);
         assert_eq!(worker.retained_storage().unwrap(), storage);
@@ -1458,12 +1682,12 @@ mod evaluated_ascii_tests {
         // Exercise the exact admission/poison boundary used by eval_one, without
         // replacing a kernel or installing a production failure callback.
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            worker.begin_invocation().unwrap();
+            worker.inner.begin_invocation().unwrap();
             panic!("unwind after evaluated ASCII invocation admission");
         }));
         assert!(panic.is_err());
-        assert!(worker.poisoned);
-        assert!(evaluated_ascii_context_is_sealed(&worker.ctx));
+        assert!(worker.inner.poisoned);
+        assert!(evaluated_ascii_context_is_sealed(&worker.inner.ctx));
         assert!(!worker.is_healthy());
         assert!(worker.retained_storage().is_err());
         assert!(matches!(
@@ -1476,36 +1700,39 @@ mod evaluated_ascii_tests {
     #[test]
     fn test_evaluated_ascii_postflight_preserves_owned_primary_error() {
         let faults: [fn(&mut EvaluatedAsciiWorker); 2] = [
-            |worker| worker.ctx.warnings.warning_cnt = 1,
-            |worker| worker.ctx.warnings.warnings.reserve(1),
+            |worker| worker.inner.ctx.warnings.warning_cnt = 1,
+            |worker| worker.inner.ctx.warnings.warnings.reserve(1),
         ];
         for fault in faults {
             let mut worker = new_worker();
-            worker.begin_invocation().unwrap();
+            worker.inner.begin_invocation().unwrap();
             let primary: tidb_query_common::Error =
                 other_err!("original evaluated ASCII primary error");
             let identity = primary.0.as_ref() as *const _;
             fault(&mut worker);
             let error = worker
-                .finish_invocation(Err(LocalError::Evaluation(primary)))
+                .inner
+                .finish_invocation::<ComputedInt>(Err(LocalError::Evaluation(primary)))
                 .unwrap_err();
             let LocalError::Evaluation(primary) = error else {
                 panic!("postflight replaced the original evaluation error");
             };
             assert!(std::ptr::eq(primary.0.as_ref(), identity));
-            assert!(worker.poisoned);
+            assert!(worker.inner.poisoned);
             assert!(!worker.is_healthy());
             assert!(worker.retained_storage().is_err());
             assert_eq!(worker.kernel_invocations(), 0);
 
             let mut success = new_worker();
-            success.begin_invocation().unwrap();
+            success.inner.begin_invocation().unwrap();
             fault(&mut success);
             assert!(matches!(
-                success.finish_invocation(Ok(ComputedInt { value: Some(7) })),
+                success
+                    .inner
+                    .finish_invocation(Ok(ComputedInt { value: Some(7) })),
                 Err(LocalError::InvalidSpec(_))
             ));
-            assert!(success.poisoned);
+            assert!(success.inner.poisoned);
             assert!(!success.is_healthy());
             assert_eq!(success.kernel_invocations(), 0);
         }
@@ -1515,27 +1742,27 @@ mod evaluated_ascii_tests {
     fn test_evaluated_ascii_owner_growth_refused_even_below_maximum() {
         let mut worker = new_worker();
         let accepted = worker.retained_storage().unwrap();
-        worker.ctx.warnings.warnings.reserve(1);
+        worker.inner.ctx.warnings.warnings.reserve(1);
         let actual = worker.retained_storage().unwrap();
         assert!(actual.owned_heap_bytes() > accepted.owned_heap_bytes());
-        assert!(actual.total_bytes() < worker.max_worker_retained_bytes);
-        assert_eq!(worker.accepted_storage, accepted);
+        assert!(actual.total_bytes() < worker.inner.max_worker_retained_bytes);
+        assert_eq!(worker.inner.accepted_storage, accepted);
         assert!(!worker.is_healthy());
         assert!(matches!(
             worker.eval_one(None),
             Err(LocalError::InvalidSpec(_))
         ));
-        assert!(worker.poisoned);
+        assert!(worker.inner.poisoned);
         assert_eq!(worker.kernel_invocations(), 0);
-        assert!(worker.ctx.warnings.warnings.is_empty());
-        assert_eq!(worker.ctx.warnings.warning_cnt, 0);
-        assert!(worker.ctx.warnings.warnings.capacity() > 0);
+        assert!(worker.inner.ctx.warnings.warnings.is_empty());
+        assert_eq!(worker.inner.ctx.warnings.warning_cnt, 0);
+        assert!(worker.inner.ctx.warnings.warnings.capacity() > 0);
     }
 
     #[test]
     fn test_evaluated_ascii_wrong_compiled_entry_refused_before_invocation() {
         let mut worker = new_worker();
-        worker.program = compile_local(
+        worker.inner.program = compile_local(
             &LocalExpr::Constant {
                 value: ScalarValue::Int(Some(7)),
                 field_type: evaluated_ascii_int_type(),
@@ -1550,7 +1777,7 @@ mod evaluated_ascii_tests {
             Err(LocalError::InvalidSpec(_))
         ));
         assert_eq!(worker.kernel_invocations(), 0);
-        assert!(worker.poisoned);
+        assert!(worker.inner.poisoned);
     }
 
     #[test]

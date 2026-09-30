@@ -381,3 +381,167 @@ fn local_worker_instances_share_only_specification() {
         .collect();
     assert_eq!(result, vec![vec![Some(11)], vec![Some(21)]]);
 }
+
+#[test]
+fn local_evaluated_bytes_integer_operations_reuse_worker() {
+    let cases: &[(Option<&[u8]>, [Option<i64>; 3])] = &[
+        (None, [None, None, None]),
+        (Some(b""), [Some(0), Some(0), Some(0)]),
+        (Some(b"\0x"), [Some(0), Some(2), Some(16)]),
+        (Some(b"\xff\0a"), [Some(255), Some(3), Some(24)]),
+        (Some("é".as_bytes()), [Some(195), Some(2), Some(16)]),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::Ascii,
+        EvaluatedBytesOp::Length,
+        EvaluatedBytesOp::BitLength,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Int(value) =
+                worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+            else {
+                panic!("integer operation returned Bytes");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected[column]);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_trim_only_spaces() {
+    let cases: &[(Option<&[u8]>, [Option<&[u8]>; 2])] = &[
+        (None, [None, None]),
+        (Some(b""), [Some(b""), Some(b"")]),
+        (Some(b"   "), [Some(b""), Some(b"")]),
+        (
+            Some(b"  \t\r\n\0\xff\n\r\t  "),
+            [Some(b"\t\r\n\0\xff\n\r\t  "), Some(b"  \t\r\n\0\xff\n\r\t")],
+        ),
+        (Some(b"  a b  "), [Some(b"a b  "), Some(b"  a b")]),
+    ];
+    for (column, operation) in [EvaluatedBytesOp::LTrim, EvaluatedBytesOp::RTrim]
+        .into_iter()
+        .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Bytes(value) =
+                worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+            else {
+                panic!("trim operation returned Int");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_unhex_cases() {
+    let cases: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(b""), Some(b"")),
+        (Some(b"f"), Some(b"\x0f")),
+        (Some(b"aBc"), Some(b"\x0a\xbc")),
+        (Some(b"aBcD"), Some(b"\xab\xcd")),
+        (Some(b"FF00"), Some(b"\xff\0")),
+        (Some(b"g1"), None),
+        (Some(b"\xff"), None),
+        (Some(b"0\0"), None),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::UnHex,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::UnHex);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(input, expected)) in cases.iter().enumerate() {
+        let ComputedValue::Bytes(value) =
+            worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+        else {
+            panic!("UNHEX returned Int");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_output_outlives_worker() {
+    let cases: &[(EvaluatedBytesOp, &[u8], &[u8])] = &[
+        (EvaluatedBytesOp::LTrim, b" \xff\0 x ", b"\xff\0 x "),
+        (EvaluatedBytesOp::RTrim, b" \xff\0 x ", b" \xff\0 x"),
+        (EvaluatedBytesOp::UnHex, b"fF00", b"\xff\0"),
+    ];
+    for &(operation, input, expected) in cases {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        let storage = worker.retained_storage().unwrap();
+        let ComputedValue::Bytes(first) = worker.eval_one(Some(input.to_vec())).unwrap() else {
+            panic!("byte operation returned Int");
+        };
+        let ComputedValue::Bytes(second) = worker.eval_one(Some(b"00".to_vec())).unwrap() else {
+            panic!("byte operation returned Int");
+        };
+        assert_eq!(first.value(), Some(expected));
+        assert_eq!(worker.kernel_invocations(), 2);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        drop(worker);
+        assert_eq!(first.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(first.into_option(), Some(expected.to_vec()));
+        let second_expected: &[u8] = match operation {
+            EvaluatedBytesOp::UnHex => b"\0",
+            _ => b"00",
+        };
+        assert_eq!(second.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(second.into_option(), Some(second_expected.to_vec()));
+    }
+}

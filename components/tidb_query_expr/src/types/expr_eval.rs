@@ -18,10 +18,10 @@ use super::{
 use crate::{
     impl_op::LogicalAccumulator,
     local::{
-        ArgMode, CheckedResultFlow, FailureRecorder, HostArgReply, HostArgRequest, HostCatalogKey,
-        HostInvocation, HostStart, HostStep, HostTaskId, InputRow, LineageCarrier, LocalError,
-        LocalHostServices, LocalResult, LocalRuntimeServices, OrdinaryProfile, PreparedHostCall,
-        PreparedOrdinaryCall, ResultMetaId,
+        ArgMode, CheckedResultFlow, EvaluatedBytesOp, FailureRecorder, HostArgReply,
+        HostArgRequest, HostCatalogKey, HostInvocation, HostStart, HostStep, HostTaskId, InputRow,
+        LineageCarrier, LocalError, LocalHostServices, LocalResult, LocalRuntimeServices,
+        OrdinaryProfile, PreparedHostCall, PreparedOrdinaryCall, ResultMetaId,
         runtime::{
             EvalBudget, StorageMode, bytes_min_storage_bytes, int_min_storage_bytes,
             int_storage_bytes, int_vector_storage_bytes, vector_storage_bytes,
@@ -322,13 +322,25 @@ enum EvalExecution {
     SqlControlLineage,
     SqlNumericBatch,
     EvaluatedAscii,
+    EvaluatedBytes(EvaluatedBytesOp),
 }
 
 impl EvalExecution {
+    fn evaluated_bytes_operation(self) -> Option<EvaluatedBytesOp> {
+        match self {
+            Self::EvaluatedAscii => Some(EvaluatedBytesOp::Ascii),
+            Self::EvaluatedBytes(operation) => Some(operation),
+            _ => None,
+        }
+    }
+
     fn check_budget(self, budget: &EvalBudget) -> LocalResult<()> {
         let valid = match self {
             Self::Unannotated => budget.mode() == StorageMode::ConservativeInt,
-            Self::SqlControlLineage | Self::SqlNumericBatch | Self::EvaluatedAscii => {
+            Self::SqlControlLineage
+            | Self::SqlNumericBatch
+            | Self::EvaluatedAscii
+            | Self::EvaluatedBytes(_) => {
                 budget.is_checked() && budget.mode() == StorageMode::ExactRetained
             }
         };
@@ -342,7 +354,7 @@ impl EvalExecution {
 
     fn check_input(self, input: &EvalInput<'_, '_>) -> LocalResult<()> {
         let ready = matches!(input, EvalInput::ReadyBytes { .. });
-        if ready != (self == Self::EvaluatedAscii)
+        if ready != self.evaluated_bytes_operation().is_some()
             || (ready
                 && !matches!(
                     input,
@@ -392,7 +404,11 @@ fn numeric_batch_int_type(field_type: &FieldType) -> bool {
 
 // Fresh scalar-only canonical protobuf values have no heap owners. Comparing
 // these fixed ABI records does not clone a descriptor or select/prepare a call.
-fn evaluated_ascii_shape(nodes: &[RpnExpressionNode], schema: &[FieldType]) -> bool {
+fn evaluated_bytes_shape(
+    operation: EvaluatedBytesOp,
+    nodes: &[RpnExpressionNode],
+    schema: &[FieldType],
+) -> bool {
     if schema.len() != 1 || schema[0] != FieldType::from(tidb_query_datatype::FieldTypeTp::Blob) {
         return false;
     }
@@ -406,10 +422,10 @@ fn evaluated_ascii_shape(nodes: &[RpnExpressionNode], schema: &[FieldType]) -> b
                 metadata,
             },
         ] => {
-            let official = crate::impl_string::ascii_fn_meta();
+            let official = operation.fn_meta();
             func_meta.name == official.name
                 && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
-                && *field_type == FieldType::from(tidb_query_datatype::FieldTypeTp::LongLong)
+                && *field_type == operation.return_type()
                 && metadata.is::<()>()
         }
         _ => false,
@@ -515,11 +531,12 @@ impl<'a> ProgramFrame<'a> {
         let valid = match execution {
             EvalExecution::Unannotated => self.flow.is_none(),
             EvalExecution::SqlControlLineage => self.flow.is_some() && self.rows.len() == 1,
-            EvalExecution::EvaluatedAscii => {
+            EvalExecution::EvaluatedAscii | EvalExecution::EvaluatedBytes(_) => {
+                let operation = execution.evaluated_bytes_operation().unwrap();
                 self.flow.is_none()
                     && self.rows.len() == 1
                     && self.rows.physical() == [0]
-                    && evaluated_ascii_shape(self.nodes, schema)
+                    && evaluated_bytes_shape(operation, self.nodes, schema)
             }
             EvalExecution::SqlNumericBatch => {
                 if self.flow.is_some()
@@ -584,10 +601,17 @@ impl<'a> ProgramFrame<'a> {
             0 // borrowed compiled scalar; do not materialize an unneeded value.
         } else if execution == EvalExecution::SqlNumericBatch {
             int_min_storage_bytes(self.rows.len()).unwrap_or(usize::MAX)
-        } else if execution == EvalExecution::EvaluatedAscii {
+        } else if let Some(operation) = execution.evaluated_bytes_operation() {
             match node {
                 RpnExpressionNode::ColumnRef { offset: 0 } => 0,
-                RpnExpressionNode::FnCall { .. } => int_min_storage_bytes(1).unwrap_or(usize::MAX),
+                RpnExpressionNode::FnCall { .. } => match operation {
+                    EvaluatedBytesOp::Ascii
+                    | EvaluatedBytesOp::Length
+                    | EvaluatedBytesOp::BitLength => int_min_storage_bytes(1).unwrap_or(usize::MAX),
+                    EvaluatedBytesOp::LTrim | EvaluatedBytesOp::RTrim | EvaluatedBytesOp::UnHex => {
+                        bytes_min_storage_bytes(1, 0).unwrap_or(usize::MAX)
+                    }
+                },
                 _ => usize::MAX, // the complete fixed shape was checked first.
             }
         } else {
@@ -1586,9 +1610,14 @@ fn eval_frames<'a, 'data: 'a>(
 ) -> LocalResult<FrameResult<'a>> {
     execution.check_budget(budget)?;
     execution.check_input(input)?;
-    if execution == EvalExecution::EvaluatedAscii && host_catalog.is_some() {
+    if execution.evaluated_bytes_operation().is_some() && host_catalog.is_some() {
         return Err(LocalError::InvalidSpec(
-            "evaluated ASCII has no host catalog".into(),
+            if execution == EvalExecution::EvaluatedAscii {
+                "evaluated ASCII has no host catalog"
+            } else {
+                "evaluated Bytes has no host catalog"
+            }
+            .into(),
         ));
     }
     // Preserve the allocation-free legacy leaf path, using the exact same
@@ -2287,9 +2316,7 @@ impl RpnExpression {
         .and_then(FrameResult::into_unannotated)
     }
 
-    /// Closed value-boundary entry: the facade owns the ready nullable Bytes
-    /// and has checked its private compiled tag. This always executes the fixed
-    /// two-node program, including the official nullable wrapper for NULL.
+    /// Compatibility entry for the original ASCII-only ready-value worker.
     pub(crate) fn eval_with_ready_ascii<'a, 'data: 'a>(
         &'a self,
         ctx: &mut EvalContext,
@@ -2299,17 +2326,51 @@ impl RpnExpression {
         witness: &mut EvaluatedAsciiWitness,
         budget: &mut EvalBudget,
     ) -> LocalResult<RpnStackNode<'a>> {
+        self.eval_with_ready_bytes(
+            EvaluatedBytesOp::Ascii,
+            ctx,
+            schema,
+            ready,
+            input_logical_rows,
+            witness,
+            budget,
+        )
+    }
+
+    /// Closed value-boundary entry: the facade owns the ready nullable Bytes
+    /// and has checked its private compiled tag. This always executes the fixed
+    /// two-node program, including the selected official nullable wrapper for
+    /// NULL.
+    pub(crate) fn eval_with_ready_bytes<'a, 'data: 'a>(
+        &'a self,
+        operation: EvaluatedBytesOp,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        ready: &'data ScalarValue,
+        input_logical_rows: &'a [usize],
+        witness: &mut EvaluatedAsciiWitness,
+        budget: &mut EvalBudget,
+    ) -> LocalResult<RpnStackNode<'a>> {
         if self.checked_result_flow().is_some()
             || input_logical_rows != [0]
-            || !evaluated_ascii_shape(self.as_ref(), schema)
+            || !evaluated_bytes_shape(operation, self.as_ref(), schema)
         {
             return Err(LocalError::InvalidSpec(
-                "evaluated ASCII requires its exact untagged two-node singleton recipe".into(),
+                if operation == EvaluatedBytesOp::Ascii {
+                    "evaluated ASCII requires its exact untagged two-node singleton recipe"
+                } else {
+                    "evaluated Bytes requires its exact selected untagged two-node singleton recipe"
+                }
+                .into(),
             ));
         }
         let mut input = EvalInput::ReadyBytes {
             value: ready,
             witness,
+        };
+        let execution = match operation {
+            EvaluatedBytesOp::Ascii => EvalExecution::EvaluatedAscii,
+            _ => EvalExecution::EvaluatedBytes(operation),
         };
         eval_frames(
             EvalFrame::Program(ProgramFrame::new(
@@ -2323,7 +2384,7 @@ impl RpnExpression {
             None,
             budget,
             None,
-            EvalExecution::EvaluatedAscii,
+            execution,
         )
         .and_then(FrameResult::into_unannotated)
     }
@@ -2353,7 +2414,7 @@ impl RpnExpression {
                 assert_eq!(rows.physical().len(), output_rows);
                 let value = match input {
                     EvalInput::ReadyBytes { value, .. } => {
-                        if execution != EvalExecution::EvaluatedAscii
+                        if execution.evaluated_bytes_operation().is_none()
                             || *offset != 0
                             || output_rows != 1
                             || !matches!(value, ScalarValue::Bytes(_))
@@ -2713,6 +2774,57 @@ mod tests {
             ),
             Err(LocalError::InvalidSpec(_))
         ));
+        assert_eq!(witness.invocations(), 0);
+    }
+
+    #[test]
+    fn test_evaluated_bytes_rejects_same_carrier_operation_and_kernel_drift() {
+        use crate::local::ExecutionLimits;
+        let ready = ScalarValue::Bytes(None);
+        let schema = [FieldType::from(FieldTypeTp::Blob)];
+        let mut witness = EvaluatedAsciiWitness::default();
+        for (operation, other) in [
+            (EvaluatedBytesOp::Length, EvaluatedBytesOp::BitLength),
+            (EvaluatedBytesOp::LTrim, EvaluatedBytesOp::RTrim),
+        ] {
+            // Isolate each guard: neither a matching carrier nor a matching
+            // display name grants admission for a different kernel or metadata.
+            for mismatch in 0..5 {
+                let mut selected = operation;
+                let mut func_meta = operation.fn_meta();
+                let mut field_type = operation.return_type();
+                let mut metadata: Box<dyn std::any::Any + Send> = Box::new(());
+                match mismatch {
+                    0 => selected = other,
+                    1 => func_meta.name = other.fn_meta().name,
+                    2 => func_meta.fn_ptr = other.fn_meta().fn_ptr,
+                    3 => metadata = Box::new(false),
+                    _ => field_type.set_flen(1),
+                }
+                let program = RpnExpression::from(vec![
+                    RpnExpressionNode::ColumnRef { offset: 0 },
+                    RpnExpressionNode::FnCall {
+                        func_meta,
+                        args_len: 1,
+                        field_type,
+                        metadata,
+                    },
+                ]);
+                let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+                assert!(matches!(
+                    program.eval_with_ready_bytes(
+                        selected,
+                        &mut EvalContext::default(),
+                        &schema,
+                        &ready,
+                        &[0],
+                        &mut witness,
+                        &mut budget,
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+            }
+        }
         assert_eq!(witness.invocations(), 0);
     }
 

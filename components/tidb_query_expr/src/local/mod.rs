@@ -24,15 +24,17 @@
 //! complete right demand before per-lane parent kernels. Its opaque binding
 //! facade does not compose controls, hosts or lineage, expose a row fallback,
 //! or authenticate native source/consumer origin.
-//! `prepare_evaluated_ascii` separately prepares one opaque reusable worker for
-//! already-normalized nullable Bytes. Its fixed two-node ASCII7003 program uses
-//! the official nullable wrapper even for ready NULL, then owns a computed
-//! signed-Int result identity. No native child, binding-service or Host
-//! callback, arbitrary signature, original SQL/PB schema, or raw-program escape
-//! is exposed. The sealed pure context and actual wrapper-dispatch witness
-//! persist per worker, not per row; caller coercion, diagnostics and
-//! execution-owner lifetime remain outside this boundary. Wrapper counts are
-//! not non-null body counts.
+//! `prepare_evaluated_bytes` separately prepares an opaque reusable worker for
+//! one closed unary operation on already-normalized nullable Bytes: ASCII,
+//! LENGTH/OCTET_LENGTH, BIT_LENGTH, LTRIM, RTRIM or UNHEX. The fixed two-node
+//! recipe uses its official nullable wrapper even for ready NULL and returns an
+//! owned computed Int/Bytes carrier. `prepare_evaluated_ascii` retains the old
+//! ASCII-only API as a thin facade over this same compiler/worker/driver.
+//! No native child, binding-service or Host callback, arbitrary signature,
+//! original SQL/PB schema, or raw-program escape is exposed. The sealed pure
+//! context and actual wrapper-dispatch witness persist per worker, not per row;
+//! caller coercion, charset/return metadata, diagnostics and execution-owner
+//! lifetime remain outside this boundary. Wrapper counts are not body counts.
 
 mod batch;
 mod compile;
@@ -58,8 +60,9 @@ mod tests;
 
 pub use self::{
     batch::{
-        ComputedInt, ComputedIntMetadata, EvaluatedAsciiWorker, LocalBatch, LocalEvalState,
-        WorkerStorage, prepare_evaluated_ascii,
+        ComputedBytes, ComputedBytesMetadata, ComputedInt, ComputedIntMetadata, ComputedValue,
+        EvaluatedAsciiWorker, EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState,
+        WorkerStorage, prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,

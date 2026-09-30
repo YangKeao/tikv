@@ -4,9 +4,9 @@ use tidb_query_datatype::codec::data_type::ScalarValue;
 use tipb::{FieldType, ScalarFuncSig};
 
 use super::{
-    CheckedResultFlow, ControlLineageFacts, HostCatalog, HostCatalogKey, LocalCompileContext,
-    LocalControlProgram, LocalError, LocalExpr, LocalResult, NumericBatchFacts,
-    OrdinaryProfileSpec, PreparedHostCall, PreparedOrdinaryCall, registry,
+    CheckedResultFlow, ControlLineageFacts, EvaluatedBytesOp, HostCatalog, HostCatalogKey,
+    LocalCompileContext, LocalControlProgram, LocalError, LocalExpr, LocalResult,
+    NumericBatchFacts, OrdinaryProfileSpec, PreparedHostCall, PreparedOrdinaryCall, registry,
 };
 use crate::{
     FunctionRef, RpnExpression, RpnExpressionNode,
@@ -22,6 +22,7 @@ pub(super) enum ProgramEntry {
     ControlLineage,
     SqlNumericBatch,
     EvaluatedAscii,
+    EvaluatedBytes,
 }
 
 /// Worker-owned compiled RPN. Any+Send metadata intentionally prevents an
@@ -86,7 +87,27 @@ fn invalid(error: tidb_query_common::Error) -> LocalError {
     LocalError::InvalidSpec(error.to_string())
 }
 
-fn check_evaluated_ascii_source(spec: &LocalExpr, schema: &[FieldType]) -> LocalResult<()> {
+fn evaluated_bytes_error(
+    operation: EvaluatedBytesOp,
+    ascii: &'static str,
+    bytes: &'static str,
+) -> LocalError {
+    // The existing ASCII entry retains its diagnostics as well as its guards.
+    LocalError::InvalidSpec(
+        if operation == EvaluatedBytesOp::Ascii {
+            ascii
+        } else {
+            bytes
+        }
+        .into(),
+    )
+}
+
+fn check_evaluated_bytes_source(
+    operation: EvaluatedBytesOp,
+    spec: &LocalExpr,
+    schema: &[FieldType],
+) -> LocalResult<()> {
     let bytes_type = evaluated_ascii_bytes_type();
     let LocalExpr::Call {
         function,
@@ -95,35 +116,48 @@ fn check_evaluated_ascii_source(spec: &LocalExpr, schema: &[FieldType]) -> Local
         metadata,
     } = spec
     else {
-        return Err(LocalError::InvalidSpec(
-            "evaluated ASCII requires its fixed value-call source".into(),
+        return Err(evaluated_bytes_error(
+            operation,
+            "evaluated ASCII requires its fixed value-call source",
+            "evaluated Bytes requires its fixed value-call source",
         ));
     };
     if schema.len() != 1
         || schema[0] != bytes_type
-        || *function != FunctionRef::TiPb(ScalarFuncSig::Ascii)
-        || return_type != &evaluated_ascii_int_type()
+        || *function != FunctionRef::TiPb(operation.signature())
+        || return_type != &operation.return_type()
         || !matches!(metadata, crate::CallMetadata::None)
         || !matches!(
             args.as_ref(),
             [LocalExpr::InputSlot { slot: 0, field_type }] if field_type == &bytes_type
         )
     {
-        return Err(LocalError::InvalidSpec(
-            "evaluated ASCII requires only canonical slot0 Bytes to Int with no metadata".into(),
+        return Err(evaluated_bytes_error(
+            operation,
+            "evaluated ASCII requires only canonical slot0 Bytes to Int with no metadata",
+            "evaluated Bytes requires only its selected operation on canonical slot0 Bytes with its canonical result and no metadata",
         ));
     }
     Ok(())
 }
 
-fn check_evaluated_ascii_kernel(node: &RpnExpressionNode) -> LocalResult<()> {
+fn check_evaluated_bytes_kernel(
+    operation: EvaluatedBytesOp,
+    node: &RpnExpressionNode,
+) -> LocalResult<()> {
+    let official = operation.fn_meta();
     if !matches!(
         node,
-        RpnExpressionNode::FnCall { args_len: 1, field_type, metadata, .. }
-            if field_type == &evaluated_ascii_int_type() && metadata.is::<()>()
+        RpnExpressionNode::FnCall { func_meta, args_len: 1, field_type, metadata }
+            if func_meta.name == official.name
+                && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
+                && field_type == &operation.return_type()
+                && metadata.is::<()>()
     ) {
-        return Err(LocalError::InvalidSpec(
-            "evaluated ASCII preparation changed its unary Int/unit-metadata kernel".into(),
+        return Err(evaluated_bytes_error(
+            operation,
+            "evaluated ASCII preparation changed its unary Int/unit-metadata kernel",
+            "evaluated Bytes preparation changed its selected unary canonical/unit-metadata kernel",
         ));
     }
     Ok(())
@@ -136,6 +170,7 @@ enum CompileMode<'a> {
     Lineaged(&'a ControlLineageFacts),
     NumericBatch(&'a NumericBatchFacts),
     EvaluatedAscii,
+    EvaluatedBytes(EvaluatedBytesOp),
 }
 
 impl CompileMode<'_> {
@@ -145,6 +180,15 @@ impl CompileMode<'_> {
             Self::Lineaged(_) => ProgramEntry::ControlLineage,
             Self::NumericBatch(_) => ProgramEntry::SqlNumericBatch,
             Self::EvaluatedAscii => ProgramEntry::EvaluatedAscii,
+            Self::EvaluatedBytes(_) => ProgramEntry::EvaluatedBytes,
+        }
+    }
+
+    fn evaluated_bytes_operation(self) -> Option<EvaluatedBytesOp> {
+        match self {
+            Self::EvaluatedAscii => Some(EvaluatedBytesOp::Ascii),
+            Self::EvaluatedBytes(operation) => Some(operation),
+            _ => None,
         }
     }
 
@@ -153,14 +197,15 @@ impl CompileMode<'_> {
     }
 
     fn check_type(self, field_type: &FieldType) -> LocalResult<()> {
-        if matches!(self, Self::EvaluatedAscii) {
-            // The exact source guard separately fixes Bytes at slot0 and Int at
-            // the only call. This is not admission for a general mixed tree.
-            if field_type != &evaluated_ascii_bytes_type()
-                && field_type != &evaluated_ascii_int_type()
+        if let Some(operation) = self.evaluated_bytes_operation() {
+            // The exact source guard separately fixes Bytes at slot0 and the
+            // selected result at the only call, never a general mixed tree.
+            if field_type != &evaluated_ascii_bytes_type() && field_type != &operation.return_type()
             {
-                return Err(LocalError::InvalidSpec(
-                    "evaluated ASCII field type differs from its canonical ABI".into(),
+                return Err(evaluated_bytes_error(
+                    operation,
+                    "evaluated ASCII field type differs from its canonical ABI",
+                    "evaluated Bytes field type differs from its canonical ABI",
                 ));
             }
         } else if !self.is_lineaged() {
@@ -227,13 +272,15 @@ fn take_expression(
             "numeric-batch compilation requires one node per structured subprogram".into(),
         ));
     }
-    if matches!(mode, CompileMode::EvaluatedAscii) {
+    if let Some(operation) = mode.evaluated_bytes_operation() {
         let [RpnExpressionNode::ColumnRef { offset: 0 }, kernel] = expression.as_ref() else {
-            return Err(LocalError::InvalidSpec(
-                "evaluated ASCII compilation requires exactly slot0 then its unary kernel".into(),
+            return Err(evaluated_bytes_error(
+                operation,
+                "evaluated ASCII compilation requires exactly slot0 then its unary kernel",
+                "evaluated Bytes compilation requires exactly slot0 then its selected unary kernel",
             ));
         };
-        check_evaluated_ascii_kernel(kernel)?;
+        check_evaluated_bytes_kernel(operation, kernel)?;
     }
     match (mode.is_lineaged(), result_flows[index].take()) {
         (true, Some(flow)) => expression.with_result_flow(flow),
@@ -407,18 +454,29 @@ pub fn compile_numeric_batch(
 /// The worker owner must prewarm metadata before publishing the prepared
 /// worker.
 pub(super) fn compile_evaluated_ascii(cx: LocalCompileContext) -> LocalResult<LocalProgram> {
+    compile_evaluated_bytes(EvaluatedBytesOp::Ascii, cx)
+}
+
+pub(super) fn compile_evaluated_bytes(
+    operation: EvaluatedBytesOp,
+    cx: LocalCompileContext,
+) -> LocalResult<LocalProgram> {
     let schema = [evaluated_ascii_bytes_type()];
     let spec = LocalExpr::Call {
-        function: FunctionRef::TiPb(ScalarFuncSig::Ascii),
+        function: FunctionRef::TiPb(operation.signature()),
         args: vec![LocalExpr::InputSlot {
             slot: 0,
             field_type: evaluated_ascii_bytes_type(),
         }]
         .into_boxed_slice(),
-        return_type: evaluated_ascii_int_type(),
+        return_type: operation.return_type(),
         metadata: crate::CallMetadata::None,
     };
-    compile(&spec, &schema, cx, CompileMode::EvaluatedAscii)
+    let mode = match operation {
+        EvaluatedBytesOp::Ascii => CompileMode::EvaluatedAscii,
+        _ => CompileMode::EvaluatedBytes(operation),
+    };
+    compile(&spec, &schema, cx, mode)
 }
 
 fn compile(
@@ -427,10 +485,10 @@ fn compile(
     cx: LocalCompileContext,
     mode: CompileMode<'_>,
 ) -> LocalResult<LocalProgram> {
-    if matches!(mode, CompileMode::EvaluatedAscii) {
+    if let Some(operation) = mode.evaluated_bytes_operation() {
         // Check the whole closed source before preparing any descriptor. There
-        // is exactly one call and one slot, including on the private entry.
-        check_evaluated_ascii_source(spec, schema)?;
+        // is exactly one selected call and one slot, including on private entries.
+        check_evaluated_bytes_source(operation, spec, schema)?;
     }
     for field_type in schema {
         mode.check_type(field_type)?;
@@ -451,8 +509,8 @@ fn compile(
         match step {
             BuildStep::Emit { call, output } => {
                 let node = call.into_node();
-                if matches!(mode, CompileMode::EvaluatedAscii) {
-                    check_evaluated_ascii_kernel(&node)?;
+                if let Some(operation) = mode.evaluated_bytes_operation() {
+                    check_evaluated_bytes_kernel(operation, &node)?;
                 }
                 buffers[output].push(node);
             }
@@ -635,18 +693,22 @@ fn compile(
                                     .map_err(invalid)?;
                                 None
                             }
-                            CompileMode::Lineaged(_) | CompileMode::EvaluatedAscii => None,
+                            CompileMode::Lineaged(_)
+                            | CompileMode::EvaluatedAscii
+                            | CompileMode::EvaluatedBytes(_) => None,
                         };
                         let mut call = CallBuild::local(shape, metadata.clone());
                         let prepared = prepare_call(&mut call).map_err(invalid)?;
-                        if matches!(mode, CompileMode::EvaluatedAscii)
-                            && (prepared.retained_args() != [0]
-                                || prepared.short_circuit_meta().is_some())
-                        {
-                            return Err(LocalError::InvalidSpec(
-                                "evaluated ASCII preparation changed its operand or control shape"
-                                    .into(),
-                            ));
+                        if let Some(operation) = mode.evaluated_bytes_operation() {
+                            if prepared.retained_args() != [0]
+                                || prepared.short_circuit_meta().is_some()
+                            {
+                                return Err(evaluated_bytes_error(
+                                    operation,
+                                    "evaluated ASCII preparation changed its operand or control shape",
+                                    "evaluated Bytes preparation changed its operand or control shape",
+                                ));
+                            }
                         }
                         if mode.is_lineaged() {
                             check_lineaged_control(
@@ -732,10 +794,14 @@ fn compile(
             ));
         }
     }
-    if matches!(mode, CompileMode::EvaluatedAscii) && (visited != 2 || host_catalog.is_some()) {
-        return Err(LocalError::InvalidSpec(
-            "evaluated ASCII compilation changed its fixed source or attached hosts".into(),
-        ));
+    if let Some(operation) = mode.evaluated_bytes_operation() {
+        if visited != 2 || host_catalog.is_some() {
+            return Err(evaluated_bytes_error(
+                operation,
+                "evaluated ASCII compilation changed its fixed source or attached hosts",
+                "evaluated Bytes compilation changed its fixed source or attached hosts",
+            ));
+        }
     }
     Ok(LocalProgram {
         expression: take_expression(&mut buffers, &mut result_flows, 0, mode)?,
@@ -1293,6 +1359,67 @@ mod evaluated_ascii_compile_tests {
         let mut changed_schema = bytes_type;
         changed_schema.set_flen(3);
         assert_closed_source_rejected(&spec, &[changed_schema]);
+    }
+
+    #[test]
+    fn evaluated_bytes_factory_keeps_selected_operation_and_entry_closed() {
+        for operation in [
+            EvaluatedBytesOp::Ascii,
+            EvaluatedBytesOp::Length,
+            EvaluatedBytesOp::BitLength,
+            EvaluatedBytesOp::LTrim,
+            EvaluatedBytesOp::RTrim,
+            EvaluatedBytesOp::UnHex,
+        ] {
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            let expected = if operation == EvaluatedBytesOp::Ascii {
+                ProgramEntry::EvaluatedAscii
+            } else {
+                ProgramEntry::EvaluatedBytes
+            };
+            for entry in [
+                ProgramEntry::Row,
+                ProgramEntry::ControlLineage,
+                ProgramEntry::SqlNumericBatch,
+                ProgramEntry::EvaluatedAscii,
+                ProgramEntry::EvaluatedBytes,
+            ] {
+                assert_eq!(program.check_entry(entry).is_ok(), entry == expected);
+            }
+            assert_eq!(program.schema, [evaluated_ascii_bytes_type()]);
+            assert_eq!(program.return_type(), &operation.return_type());
+            assert_eq!(program.expression.len(), 2);
+            check_evaluated_bytes_kernel(operation, &program.expression[1]).unwrap();
+
+            let mut spec = source();
+            if let LocalExpr::Call {
+                function,
+                return_type,
+                ..
+            } = &mut spec
+            {
+                *function = FunctionRef::TiPb(operation.signature());
+                *return_type = operation.return_type();
+            }
+            if operation != EvaluatedBytesOp::Ascii {
+                assert_closed_source_rejected(&spec, &program.schema);
+            }
+            let other = if operation == EvaluatedBytesOp::Length {
+                EvaluatedBytesOp::BitLength
+            } else {
+                EvaluatedBytesOp::Length
+            };
+            assert!(matches!(
+                compile(
+                    &spec,
+                    &program.schema,
+                    LocalCompileContext::default(),
+                    CompileMode::EvaluatedBytes(other),
+                ),
+                Err(LocalError::InvalidSpec(_))
+            ));
+        }
     }
 
     #[test]
