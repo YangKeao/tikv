@@ -734,12 +734,12 @@ impl LocalNumericBatchProgram {
     }
 }
 
-/// Closed unary operations over already-evaluated nullable Bytes. LENGTH and
-/// OCTET_LENGTH share Length; no arbitrary signature or SQL descriptor is
-/// accepted. UTF8 variants require the caller's already-normalized UTF8 bytes;
+/// Closed operations over already-evaluated nullable Int/Bytes arguments.
+/// LENGTH and OCTET_LENGTH share Length; no arbitrary signature or SQL
+/// descriptor is accepted. UTF8 variants require the caller's normalized UTF8;
 /// this boundary never chooses a SQL charset or performs lossy conversion.
 /// Quote uses its official nullable kernel: a NULL input yields non-NULL
-/// "NULL".
+/// "NULL". The operation fixes the complete argument shape, not only its arity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EvaluatedBytesOp {
     Ascii,
@@ -754,6 +754,14 @@ pub enum EvaluatedBytesOp {
     CharLength,
     CharLengthUtf8,
     Quote,
+    HexInt,
+    HexStr,
+    Bin,
+    Left,
+    LeftUtf8,
+    Right,
+    RightUtf8,
+    Replace,
 }
 
 impl EvaluatedBytesOp {
@@ -772,6 +780,14 @@ impl EvaluatedBytesOp {
             Self::CharLength => ScalarFuncSig::CharLength,
             Self::CharLengthUtf8 => ScalarFuncSig::CharLengthUtf8,
             Self::Quote => ScalarFuncSig::Quote,
+            Self::HexInt => ScalarFuncSig::HexIntArg,
+            Self::HexStr => ScalarFuncSig::HexStrArg,
+            Self::Bin => ScalarFuncSig::Bin,
+            Self::Left => ScalarFuncSig::Left,
+            Self::LeftUtf8 => ScalarFuncSig::LeftUtf8,
+            Self::Right => ScalarFuncSig::Right,
+            Self::RightUtf8 => ScalarFuncSig::RightUtf8,
+            Self::Replace => ScalarFuncSig::Replace,
         }
     }
 
@@ -791,6 +807,14 @@ impl EvaluatedBytesOp {
             Self::CharLength => crate::impl_string::char_length_fn_meta(),
             Self::CharLengthUtf8 => crate::impl_string::char_length_utf8_fn_meta(),
             Self::Quote => crate::impl_string::quote_fn_meta(),
+            Self::HexInt => crate::impl_string::hex_int_arg_fn_meta(),
+            Self::HexStr => crate::impl_string::hex_str_arg_fn_meta(),
+            Self::Bin => crate::impl_string::bin_fn_meta(),
+            Self::Left => crate::impl_string::left_fn_meta(),
+            Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
+            Self::Right => crate::impl_string::right_fn_meta(),
+            Self::RightUtf8 => crate::impl_string::right_utf8_fn_meta(),
+            Self::Replace => crate::impl_string::replace_fn_meta(),
         }
     }
 
@@ -807,7 +831,15 @@ impl EvaluatedBytesOp {
             | Self::UnHex
             | Self::Reverse
             | Self::ReverseUtf8
-            | Self::Quote => EvalType::Bytes,
+            | Self::Quote
+            | Self::HexInt
+            | Self::HexStr
+            | Self::Bin
+            | Self::Left
+            | Self::LeftUtf8
+            | Self::Right
+            | Self::RightUtf8
+            | Self::Replace => EvalType::Bytes,
         }
     }
 
@@ -819,11 +851,68 @@ impl EvaluatedBytesOp {
         }
     }
 
+    pub(crate) fn input_types(self) -> &'static [EvalType] {
+        match self {
+            Self::HexInt | Self::Bin => &[EvalType::Int],
+            Self::Left | Self::LeftUtf8 | Self::Right | Self::RightUtf8 => {
+                &[EvalType::Bytes, EvalType::Int]
+            }
+            Self::Replace => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
+            Self::Ascii
+            | Self::Length
+            | Self::BitLength
+            | Self::LTrim
+            | Self::RTrim
+            | Self::UnHex
+            | Self::Crc32
+            | Self::Reverse
+            | Self::ReverseUtf8
+            | Self::CharLength
+            | Self::CharLengthUtf8
+            | Self::Quote
+            | Self::HexStr => &[EvalType::Bytes],
+        }
+    }
+
+    pub(crate) fn input_field_type(self, slot: usize) -> Option<tipb::FieldType> {
+        self.input_types().get(slot).map(|kind| match kind {
+            EvalType::Int => evaluated_ascii_int_type(),
+            EvalType::Bytes => evaluated_ascii_bytes_type(),
+            _ => unreachable!("the operation has only Int/Bytes inputs"),
+        })
+    }
+
     fn entry(self) -> ProgramEntry {
         if self == Self::Ascii {
             ProgramEntry::EvaluatedAscii
         } else {
             ProgramEntry::EvaluatedBytes
+        }
+    }
+}
+
+/// Owned, already-evaluated arguments for the closed operation recipes. Int
+/// carries the original 64-bit pattern: callers may pass a u64 as i64 without
+/// numeric narrowing. Coercion, diagnostics, argument demand and text
+/// normalization have already happened in the original frontend.
+#[derive(Debug)]
+pub enum EvaluatedArgs {
+    Bytes(Option<Vec<u8>>),
+    Int(Option<i64>),
+    BytesInt(Option<Vec<u8>>, Option<i64>),
+    Bytes3([Option<Vec<u8>>; 3]),
+}
+
+impl EvaluatedArgs {
+    fn into_values(self) -> ([ScalarValue; 3], usize) {
+        // A fixed inline owner, not an extra per-invocation Vec allocation.
+        // Unused slots are inline NULL Ints and never enter the driver slice.
+        use ScalarValue::{Bytes, Int};
+        match self {
+            Self::Bytes(value) => ([Bytes(value), Int(None), Int(None)], 1),
+            Self::Int(value) => ([Int(value), Int(None), Int(None)], 1),
+            Self::BytesInt(bytes, int) => ([Bytes(bytes), Int(int), Int(None)], 2),
+            Self::Bytes3([a, b, c]) => ([Bytes(a), Bytes(b), Bytes(c)], 3),
         }
     }
 }
@@ -880,7 +969,7 @@ impl ComputedBytes {
     }
 }
 
-/// The complete result domain of the closed ready-Bytes worker. Both carriers
+/// The complete result domain of the closed ready-value worker. Both carriers
 /// own their computed result, including NULL; neither borrows the input/worker.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ComputedValue {
@@ -983,7 +1072,7 @@ fn evaluated_ascii_context_is_sealed(ctx: &EvalContext) -> bool {
         && ctx.warnings.warnings.is_empty()
 }
 
-/// An exclusively owned, reusable runtime for one closed ready-Bytes operation.
+/// An exclusively owned, reusable runtime for one closed ready-value operation.
 /// It is Send, not Sync, and exposes no program, context, services, native
 /// graph or mutable configuration. A caller may cache workers by operation in
 /// one synchronized owner; unhealthy or unwinding workers must not be recycled.
@@ -1014,10 +1103,10 @@ impl std::fmt::Debug for EvaluatedBytesWorker {
     }
 }
 
-/// Prepare one fixed operation after the frontend has produced a demanded ready
-/// value, under the caller's creating-worker reservation. No kernel is
+/// Prepare one fixed operation after the frontend has produced demanded ready
+/// arguments, under the caller's creating-worker reservation. No kernel is
 /// evaluated (not even a fake NULL), and no native descriptor or SQL context is
-/// retained. The admitted official kernels are context-free on ready Bytes;
+/// retained. The admitted official kernels are context-free on ready Int/Bytes;
 /// the private UTC context disables warning storage and still checks that no
 /// warning was raised. Prewarming inspects structure, never a fabricated input
 /// or an assumption that NULL input must produce NULL output.
@@ -1031,10 +1120,16 @@ pub fn prepare_evaluated_bytes(
     program.check_entry(operation.entry())?;
     // Fully warm the fixed program's owned metadata BEFORE publication. These
     // getters only inspect source structure; none dispatches an RPN function.
-    if program.expression.node_count() != 2
-        || program.expression.work_count() != 2
-        || program.expression.column_ref_count() != 1
-        || program.expression.referenced_column_offsets() != [0]
+    let arity = operation.input_types().len();
+    if program.expression.node_count() != arity + 1
+        || program.expression.work_count() != arity + 1
+        || program.expression.column_ref_count() != arity
+        || !program
+            .expression
+            .referenced_column_offsets()
+            .iter()
+            .copied()
+            .eq(0..arity)
     {
         return Err(LocalError::InvalidSpec(
             "evaluated ASCII compiled metadata differs from its fixed recipe".into(),
@@ -1062,7 +1157,7 @@ pub fn prepare_evaluated_bytes(
     Ok(runtime)
 }
 
-/// Compatible ASCII-only facade over the shared closed ready-Bytes worker.
+/// Compatible ASCII-only facade over the shared closed ready-value worker.
 /// Transparent representation keeps inline storage accounting identical to its
 /// sole owned runtime; it exposes neither operation mutation nor a raw program.
 #[repr(transparent)]
@@ -1157,18 +1252,19 @@ impl EvaluatedBytesWorker {
                 "evaluated ASCII private context is not clean and sealed".into(),
             ));
         }
-        let bytes_type = evaluated_ascii_bytes_type();
+        let arity = self.operation.input_types().len();
         let result_type = self.operation.return_type();
         let official = self.operation.fn_meta();
-        let [
-            RpnExpressionNode::ColumnRef { offset: 0 },
+        let nodes: &[RpnExpressionNode] = self.program.expression.as_ref();
+        let Some((
             RpnExpressionNode::FnCall {
                 func_meta,
-                args_len: 1,
+                args_len,
                 field_type,
                 metadata,
             },
-        ] = self.program.expression.as_ref()
+            inputs,
+        )) = nodes.split_last()
         else {
             return Err(LocalError::InvalidSpec(
                 "evaluated ASCII worker no longer owns its fixed recipe".into(),
@@ -1176,7 +1272,15 @@ impl EvaluatedBytesWorker {
         };
         if self.program.host_catalog.is_some()
             || self.program.expression.checked_result_flow().is_some()
-            || self.program.schema.as_slice() != std::slice::from_ref(&bytes_type)
+            || *args_len != arity
+            || inputs.len() != arity
+            || inputs.iter().enumerate().any(|(slot, node)| {
+                !matches!(node, RpnExpressionNode::ColumnRef { offset } if *offset == slot)
+            })
+            || self.program.schema.len() != arity
+            || self.program.schema.iter().enumerate().any(|(slot, input_type)| {
+                self.operation.input_field_type(slot).as_ref() != Some(input_type)
+            })
             || self.program.return_type() != &result_type
             || field_type != &result_type
             || func_meta.name != official.name
@@ -1236,13 +1340,32 @@ impl EvaluatedBytesWorker {
         self.check_owner_footprint(self.observe_storage()?)
     }
 
-    /// Consume one already-coerced nullable byte buffer. Even NULL enters the
-    /// official generated nullable wrapper. Return coercion/charset policy
-    /// stays in the frontend, after this exclusive borrow and owned-result
-    /// extraction.
+    /// Compatible entry for a single nullable Bytes argument. It rejects an
+    /// operation with another input shape rather than coercing or inventing
+    /// args.
     pub fn eval_one(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedValue> {
+        self.eval_args(EvaluatedArgs::Bytes(bytes))
+    }
+
+    /// Consume the complete ready argument shape selected by this worker's
+    /// operation. Shape refusal is pure preflight; valid NULL arguments still
+    /// reach the official nullable wrapper. Frontend demand/coercion order and
+    /// return charset/type policy remain outside this owned-value boundary.
+    pub fn eval_args(&mut self, args: EvaluatedArgs) -> LocalResult<ComputedValue> {
+        let (ready, arity) = args.into_values();
+        let expected = self.operation.input_types();
+        if arity != expected.len()
+            || ready[..arity]
+                .iter()
+                .zip(expected)
+                .any(|(value, kind)| value.eval_type() != *kind)
+        {
+            return Err(LocalError::InvalidBatch(
+                "evaluated arguments differ from the operation's closed input shape".into(),
+            ));
+        }
         self.begin_invocation()?;
-        let result = self.eval_ready(bytes);
+        let result = self.eval_ready(ready, arity);
         self.finish_invocation(result)
     }
 
@@ -1277,16 +1400,23 @@ impl EvaluatedBytesWorker {
         }
     }
 
-    fn eval_ready(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedValue> {
-        let input_bytes = bytes.as_ref().map_or(0, Vec::capacity);
-        let ready = ScalarValue::Bytes(bytes);
+    fn eval_ready(&mut self, ready: [ScalarValue; 3], arity: usize) -> LocalResult<ComputedValue> {
+        let input_bytes = ready[..arity].iter().try_fold(0usize, |total, value| {
+            let bytes = match value {
+                ScalarValue::Bytes(Some(bytes)) => bytes.capacity(),
+                _ => 0,
+            };
+            total
+                .checked_add(bytes)
+                .ok_or_else(evaluated_ascii_storage_overflow)
+        })?;
         self.state.row = [0];
         let mut budget = EvalBudget::exact(self.state.limits)?;
-        let result = self.program.expression.eval_with_ready_bytes(
+        let result = self.program.expression.eval_with_ready_args(
             self.operation,
             &mut self.ctx,
             &self.program.schema,
-            &ready,
+            &ready[..arity],
             &self.state.row,
             &mut self.witness,
             &mut budget,

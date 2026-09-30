@@ -278,18 +278,41 @@ pub(crate) enum EvalInput<'data, 'services> {
         value: &'data ScalarValue,
         witness: &'services mut EvaluatedAsciiWitness,
     },
+    ReadyArgs {
+        values: &'data [ScalarValue],
+        witness: &'services mut EvaluatedAsciiWitness,
+    },
 }
 
 impl EvalInput<'_, '_> {
-    fn retained_input_bytes(&self) -> usize {
+    fn retained_input_bytes(&self) -> Option<usize> {
         match self {
             Self::ReadyBytes {
                 value: ScalarValue::Bytes(Some(value)),
                 ..
-            } => value.capacity(),
-            _ => 0,
+            } => Some(value.capacity()),
+            Self::ReadyArgs { values, .. } => values.iter().try_fold(0usize, |total, value| {
+                total.checked_add(match value {
+                    ScalarValue::Bytes(Some(bytes)) => bytes.capacity(),
+                    _ => 0,
+                })
+            }),
+            _ => Some(0),
         }
     }
+}
+
+fn evaluated_ready_args_match(operation: EvaluatedBytesOp, values: &[ScalarValue]) -> bool {
+    let types = operation.input_types();
+    (1..=3).contains(&types.len())
+        && values.len() == types.len()
+        && values.iter().zip(types).all(|(value, eval_type)| {
+            matches!(
+                (value, *eval_type),
+                (ScalarValue::Int(_), tidb_query_datatype::EvalType::Int)
+                    | (ScalarValue::Bytes(_), tidb_query_datatype::EvalType::Bytes)
+            )
+        })
 }
 
 /// Per-worker evidence at the actual generated-wrapper dispatch, including
@@ -353,19 +376,25 @@ impl EvalExecution {
     }
 
     fn check_input(self, input: &EvalInput<'_, '_>) -> LocalResult<()> {
-        let ready = matches!(input, EvalInput::ReadyBytes { .. });
-        if ready != self.evaluated_bytes_operation().is_some()
-            || (ready
-                && !matches!(
-                    input,
-                    EvalInput::ReadyBytes {
-                        value: ScalarValue::Bytes(_),
-                        ..
-                    }
-                ))
-        {
+        let valid = match (self.evaluated_bytes_operation(), input) {
+            (None, EvalInput::Decoded(_) | EvalInput::Bindings(_)) => true,
+            (Some(operation), EvalInput::ReadyBytes { value, .. }) => {
+                operation.input_types() == [tidb_query_datatype::EvalType::Bytes]
+                    && matches!(value, ScalarValue::Bytes(_))
+            }
+            (Some(operation), EvalInput::ReadyArgs { values, .. }) => {
+                evaluated_ready_args_match(operation, values)
+            }
+            _ => false,
+        };
+        if !valid {
             return Err(LocalError::InvalidSpec(
                 "ready Bytes and evaluated ASCII must share their closed execution domain".into(),
+            ));
+        }
+        if input.retained_input_bytes().is_none() {
+            return Err(LocalError::ResourceLimit(
+                "evaluated ready-argument storage overflow".into(),
             ));
         }
         Ok(())
@@ -409,21 +438,29 @@ fn evaluated_bytes_shape(
     nodes: &[RpnExpressionNode],
     schema: &[FieldType],
 ) -> bool {
-    if schema.len() != 1 || schema[0] != FieldType::from(tidb_query_datatype::FieldTypeTp::Blob) {
+    let arity = operation.input_types().len();
+    if !(1..=3).contains(&arity)
+        || schema.len() != arity
+        || nodes.len() != arity + 1
+        || schema.iter().enumerate().any(|(slot, field_type)| {
+            operation.input_field_type(slot).as_ref() != Some(field_type)
+        })
+        || nodes[..arity].iter().enumerate().any(|(slot, node)| {
+            !matches!(node, RpnExpressionNode::ColumnRef { offset } if *offset == slot)
+        })
+    {
         return false;
     }
-    match nodes {
-        [
-            RpnExpressionNode::ColumnRef { offset: 0 },
-            RpnExpressionNode::FnCall {
-                func_meta,
-                args_len: 1,
-                field_type,
-                metadata,
-            },
-        ] => {
+    match &nodes[arity] {
+        RpnExpressionNode::FnCall {
+            func_meta,
+            args_len,
+            field_type,
+            metadata,
+        } => {
             let official = operation.fn_meta();
-            func_meta.name == official.name
+            *args_len == arity
+                && func_meta.name == official.name
                 && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
                 && *field_type == operation.return_type()
                 && metadata.is::<()>()
@@ -603,7 +640,11 @@ impl<'a> ProgramFrame<'a> {
             int_min_storage_bytes(self.rows.len()).unwrap_or(usize::MAX)
         } else if let Some(operation) = execution.evaluated_bytes_operation() {
             match node {
-                RpnExpressionNode::ColumnRef { offset: 0 } => 0,
+                RpnExpressionNode::ColumnRef { offset }
+                    if *offset < operation.input_types().len() =>
+                {
+                    0
+                }
                 RpnExpressionNode::FnCall { .. } => match operation.eval_type() {
                     tidb_query_datatype::EvalType::Int => {
                         int_min_storage_bytes(1).unwrap_or(usize::MAX)
@@ -959,7 +1000,8 @@ impl TaskGuard<'_, '_, '_> {
         self.live
             .capacity()
             .saturating_mul(std::mem::size_of::<HostTaskId>())
-            .saturating_add((&*self.input).retained_input_bytes())
+            // check_input rejects overflow before any frame or kernel runs.
+            .saturating_add((&*self.input).retained_input_bytes().unwrap_or(usize::MAX))
     }
 
     fn host(&mut self) -> LocalResult<&mut dyn LocalHostServices> {
@@ -968,7 +1010,9 @@ impl TaskGuard<'_, '_, '_> {
         })?;
         let provider = match self.input {
             EvalInput::Bindings(services) => services.host_services(),
-            EvalInput::Decoded(_) | EvalInput::ReadyBytes { .. } => None,
+            EvalInput::Decoded(_) | EvalInput::ReadyBytes { .. } | EvalInput::ReadyArgs { .. } => {
+                None
+            }
         }
         .ok_or_else(|| LocalError::HostContract("host provider is unavailable".into()))?;
         if provider.catalog_key() != &expected {
@@ -982,7 +1026,10 @@ impl TaskGuard<'_, '_, '_> {
     fn reserve_start(&mut self, budget: &EvalBudget, retained: &mut usize) -> LocalResult<()> {
         // Its storage includes a standing ready-value owner, not a host ledger.
         // Do not let that base enter the task-buffer-only reservation delta.
-        if matches!(&*self.input, EvalInput::ReadyBytes { .. }) {
+        if matches!(
+            &*self.input,
+            EvalInput::ReadyBytes { .. } | EvalInput::ReadyArgs { .. }
+        ) {
             return Err(LocalError::InvalidSpec(
                 "ready Bytes cannot start a host task".into(),
             ));
@@ -1037,7 +1084,9 @@ impl Drop for TaskGuard<'_, '_, '_> {
             // Do not allocate an error string on this cleanup-only path.
             let provider = match self.input {
                 EvalInput::Bindings(services) => services.host_services(),
-                EvalInput::Decoded(_) | EvalInput::ReadyBytes { .. } => None,
+                EvalInput::Decoded(_)
+                | EvalInput::ReadyBytes { .. }
+                | EvalInput::ReadyArgs { .. } => None,
             };
             if let (Some(expected), Some(provider)) = (expected, provider) {
                 if provider.catalog_key() == &expected {
@@ -2352,6 +2401,35 @@ impl RpnExpression {
         witness: &mut EvaluatedAsciiWitness,
         budget: &mut EvalBudget,
     ) -> LocalResult<RpnStackNode<'a>> {
+        if operation.input_types() != [tidb_query_datatype::EvalType::Bytes] {
+            return Err(LocalError::InvalidSpec(
+                "evaluated Bytes compatibility entry requires one Bytes operand".into(),
+            ));
+        }
+        self.eval_with_ready_args(
+            operation,
+            ctx,
+            schema,
+            std::slice::from_ref(ready),
+            input_logical_rows,
+            witness,
+            budget,
+        )
+    }
+
+    /// Fixed one-to-three ready operands, borrowed from the facade until its
+    /// result extraction completes. Only the selected closed recipe is
+    /// admitted.
+    pub(crate) fn eval_with_ready_args<'a, 'data: 'a>(
+        &'a self,
+        operation: EvaluatedBytesOp,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        ready: &'data [ScalarValue],
+        input_logical_rows: &'a [usize],
+        witness: &mut EvaluatedAsciiWitness,
+        budget: &mut EvalBudget,
+    ) -> LocalResult<RpnStackNode<'a>> {
         if self.checked_result_flow().is_some()
             || input_logical_rows != [0]
             || !evaluated_bytes_shape(operation, self.as_ref(), schema)
@@ -2359,14 +2437,16 @@ impl RpnExpression {
             return Err(LocalError::InvalidSpec(
                 if operation == EvaluatedBytesOp::Ascii {
                     "evaluated ASCII requires its exact untagged two-node singleton recipe"
-                } else {
+                } else if operation.input_types() == [tidb_query_datatype::EvalType::Bytes] {
                     "evaluated Bytes requires its exact selected untagged two-node singleton recipe"
+                } else {
+                    "evaluated arguments require their exact selected untagged singleton recipe"
                 }
                 .into(),
             ));
         }
-        let mut input = EvalInput::ReadyBytes {
-            value: ready,
+        let mut input = EvalInput::ReadyArgs {
+            values: ready,
             witness,
         };
         let execution = match operation {
@@ -2411,6 +2491,28 @@ impl RpnExpression {
                 Ok((0, RpnStackNode::Scalar { value, field_type }))
             }
             RpnExpressionNode::ColumnRef { offset } => {
+                if matches!(
+                    input,
+                    EvalInput::ReadyBytes { .. } | EvalInput::ReadyArgs { .. }
+                ) {
+                    execution.check_input(input)?;
+                    let operation = execution.evaluated_bytes_operation().ok_or_else(|| {
+                        LocalError::InvalidSpec(
+                            "ready Bytes cannot enter another input domain".into(),
+                        )
+                    })?;
+                    let canonical = operation.input_field_type(*offset);
+                    if output_rows != 1
+                        || rows.physical() != [0]
+                        || schema.len() != operation.input_types().len()
+                        || canonical.is_none()
+                        || schema.get(*offset) != canonical.as_ref()
+                    {
+                        return Err(LocalError::InvalidSpec(
+                            "ready Bytes cannot enter another input domain".into(),
+                        ));
+                    }
+                }
                 let field_type = &schema[*offset];
                 assert_eq!(rows.physical().len(), output_rows);
                 let value = match input {
@@ -2425,6 +2527,11 @@ impl RpnExpression {
                             ));
                         }
                         let value: &'data ScalarValue = *value;
+                        return Ok((0, RpnStackNode::Scalar { value, field_type }));
+                    }
+                    EvalInput::ReadyArgs { values, .. } => {
+                        let values: &'data [ScalarValue] = *values;
+                        let value = &values[*offset];
                         return Ok((0, RpnStackNode::Scalar { value, field_type }));
                     }
                     EvalInput::Decoded(columns) => {
@@ -2531,7 +2638,8 @@ impl RpnExpression {
                     ret_field_type,
                     &**metadata,
                     match input {
-                        EvalInput::ReadyBytes { witness, .. } => Some(&mut **witness),
+                        EvalInput::ReadyBytes { witness, .. }
+                        | EvalInput::ReadyArgs { witness, .. } => Some(&mut **witness),
                         _ => None,
                     },
                 )?;

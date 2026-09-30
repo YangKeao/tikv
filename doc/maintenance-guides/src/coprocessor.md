@@ -147,7 +147,7 @@ short-circuit admission policy described above.
   metadata is not `Sync`; share immutable input specifications, not one mutable
   compiled program between workers. General local routes borrow the caller's
   persistent `EvalContext` and must not reset statement diagnostics. The closed
-  evaluated-ASCII worker below has a separately sealed context capability.
+  closed evaluated-arguments worker below has a separately sealed context capability.
 - `compile_local` admission remains exact signed LongLong: constants/slots, the initial
   arithmetic/NULLIF kernels, and explicit AND/OR/IF/IFNULL/searched CASE/COALESCE
   controls. A private selected-call descriptor attaches control identity in the
@@ -195,24 +195,30 @@ short-circuit admission policy described above.
   The caller must prove the genuine suite/global-vectorization entry on every
   invocation. Library facts do not prove native eligibility or activate SQL.
 - Execution semantics (`Unannotated`, SQL control lineage, SQL numeric batch,
-  evaluated ASCII) and
+  closed evaluated arguments, including the legacy ASCII entry) and
   retained-storage policy (`ConservativeInt`, `ExactRetained`) are independent.
   Numeric batches use actual retained owners, including both suspended operands
   and output capacity, checked before the next effect/publication. They do not
   gain control/result lineage, byte kernels, hosts or a hard allocator-peak bound.
   Reported numeric calls use the same fresh failure-only recorder and preserve
   genuine input versus kernel sites without replay or guessed SQL diagnostics.
-- `prepare_evaluated_ascii` constructs only the canonical Bytes-slot/ASCII7003
-  program and returns an opaque owned worker, not a raw program/context/graph.
-  Its distinct compiled and execution domains require ready-Bytes input even
-  for internal empty/no-read misuse. Existing legitimate wire ASCII stays valid.
-  The frontend already evaluated/coerced its operand; this is no original SQL/PB
-  provenance or full FieldType proof. The same compiler and frame/kernel driver
-  consume one borrowed Bytes scalar without copying it to a Bytes vector. NULL
-  still dispatches the official nullable wrapper; there is no NULL shortcut or
-  native retry. Only a checked singleton computed Int with its own signed metadata
-  may leave the worker; native result coercion remains a separate caller operation.
-- This exact context-free ASCII body permits one private UTC/default/zero-detail
+- `prepare_evaluated_bytes` constructs one closed operation over canonical ready
+  slots and returns an opaque worker, not a raw program/context/graph. Its legacy
+  name also covers fixed Int and multi-input string operations. `EvaluatedArgs`
+  admits only nullable Bytes, Int (including an explicitly normalized bit pattern),
+  Bytes+Int or three Bytes operands. The operation fixes signature, ordered slot
+  types/arity and the single FnCall; callers cannot supply arbitrary FieldTypes.
+  `eval_args` checks shape before invocation, then uses the existing compiler and
+  frame/kernel driver with a fixed stack array and borrowed ready scalar slots.
+  `eval_one` and `prepare_evaluated_ascii` are thin compatibility paths, not second
+  implementations. Existing legitimate wire execution remains unchanged.
+- The frontend has already applied its own child demand, coercion and byte/text
+  normalization; ready values prove neither original SQL/PB origin nor complete
+  SQL FieldTypes. NULL still invokes the official wrapper, including QUOTE(NULL)'s
+  non-NULL string result. No native retry is available. Checked singleton Int or
+  owned Bytes results carry their own computed metadata; original SQL charset,
+  unsigned result packing and return casts remain the caller's responsibility.
+- These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake
   NULL call. Owner observation never initializes the cache and includes its Box
@@ -222,8 +228,10 @@ short-circuit admission policy described above.
   reuse after a panic caught elsewhere; dirty/unmeasurable workers are disposed
   before native continuation. Cleanup/health failure cannot overwrite an original
   kernel error. No per-row context recreation, warning drain or silent repair.
-- Evaluated input Vec capacity remains charged through its actual lifetime and
-  overlaps the generated Int output check. Worker inline and owned-heap accounting
+- All ready Bytes Vec capacities are summed with checked arithmetic, including
+  arguments following NULL, and remain charged through their actual lifetime.
+  Result accounting includes Int/Bytes physical output and owned Bytes extraction
+  overlap. Worker inline and owned-heap accounting
   are separate from per-call storage and caller pool/container/creation ledgers.
   The private Arc-config accounting proxy is pinned, uses no Arc memory access,
   and requires independent actual allocation-request validation on each compiler
@@ -555,6 +563,11 @@ wide Decimal arithmetic, complete raw physical compatibility or performance.
 - DAG execution changes:
   inspect `dag/*`, expression evaluation, snapshot/store setup, and query-side
   statistics paths
+- Closed in-process ready-argument changes:
+  inspect `components/tidb_query_expr/src/local/{batch,compile,mod,tests}.rs`
+  and `components/tidb_query_expr/src/types/expr_eval.rs`; check exact operation,
+  canonical slot order/types, actual nullable dispatch, all live input capacities
+  and extraction overlap. This is a library route, not a read-pool/RPC change.
 - Analyze or checksum changes:
   inspect `statistics/*` or `checksum.rs` plus exec-detail accounting
 

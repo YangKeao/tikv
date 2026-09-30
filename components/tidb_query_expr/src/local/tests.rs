@@ -699,3 +699,300 @@ fn local_evaluated_bytes_quote_preserves_raw_bytes_and_null_text() {
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
 }
+
+#[test]
+fn local_evaluated_args_integer_formatters_preserve_bits() {
+    let cases: &[(Option<i64>, [Option<&[u8]>; 2])] = &[
+        (None, [None, None]),
+        (Some(0), [Some(b"0"), Some(b"0")]),
+        (
+            Some(u64::MAX as i64),
+            [
+                Some(b"FFFFFFFFFFFFFFFF"),
+                Some(b"1111111111111111111111111111111111111111111111111111111111111111"),
+            ],
+        ),
+        (
+            Some(i64::MIN),
+            [
+                Some(b"8000000000000000"),
+                Some(b"1000000000000000000000000000000000000000000000000000000000000000"),
+            ],
+        ),
+    ];
+    for (column, operation) in [EvaluatedBytesOp::HexInt, EvaluatedBytesOp::Bin]
+        .into_iter()
+        .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Bytes(value) = worker.eval_args(EvaluatedArgs::Int(input)).unwrap()
+            else {
+                panic!("integer formatter returned Int");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_hex_str_preserves_bytes() {
+    let cases: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(b""), Some(b"")),
+        (Some(b"\xff\0"), Some(b"FF00")),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::HexStr,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::HexStr);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(input, expected)) in cases.iter().enumerate() {
+        let args = EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec()));
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("HEX string operation returned Int");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_left_right_respect_units() {
+    let cases: &[(Option<&[u8]>, Option<i64>, [Option<&[u8]>; 4])] = &[
+        (None, Some(1), [None; 4]),
+        (Some("aé🦀".as_bytes()), None, [None; 4]),
+        (Some(b""), Some(2), [Some(b""); 4]),
+        (Some("aé🦀".as_bytes()), Some(-1), [Some(b""); 4]),
+        (Some("aé🦀".as_bytes()), Some(0), [Some(b""); 4]),
+        (
+            Some("aé🦀".as_bytes()),
+            Some(2),
+            [
+                Some(b"a\xc3"),
+                Some("aé".as_bytes()),
+                Some(b"\xa6\x80"),
+                Some("é🦀".as_bytes()),
+            ],
+        ),
+        (
+            Some("aé🦀".as_bytes()),
+            Some(i64::MAX),
+            [Some("aé🦀".as_bytes()); 4],
+        ),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::Left,
+        EvaluatedBytesOp::LeftUtf8,
+        EvaluatedBytesOp::Right,
+        EvaluatedBytesOp::RightUtf8,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, length, expected)) in cases.iter().enumerate() {
+            let args = EvaluatedArgs::BytesInt(input.map(|bytes| bytes.to_vec()), length);
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("LEFT or RIGHT returned Int");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_replace_is_owned_and_nullable() {
+    let cases: &[([Option<&[u8]>; 3], Option<&[u8]>)] = &[
+        ([Some(b"aaaaa"), Some(b"aa"), Some(b"b")], Some(b"bba")),
+        ([Some(b"abc"), Some(b""), Some(b"x")], Some(b"abc")),
+        ([Some(b"aaaaa"), Some(b"aa"), Some(b"")], Some(b"a")),
+        (
+            [Some(b"\xff\0\xff"), Some(b"\xff"), Some(b"x")],
+            Some(b"x\0x"),
+        ),
+        ([None, Some(b"x"), Some(b"y")], None),
+        ([Some(b"x"), None, Some(b"y")], None),
+        ([Some(b"x"), Some(b"x"), None], None),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::Replace,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::Replace);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    let mut outputs = Vec::new();
+    for (index, &(inputs, expected)) in cases.iter().enumerate() {
+        let args = EvaluatedArgs::Bytes3(inputs.map(|input| input.map(|bytes| bytes.to_vec())));
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("REPLACE returned Int");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        outputs.push(value);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    drop(worker);
+    for (value, &(_, expected)) in outputs.into_iter().zip(cases) {
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+    }
+}
+
+#[test]
+fn local_evaluated_args_shape_errors_are_preflight() {
+    let cases: [(EvaluatedBytesOp, EvaluatedArgs, EvaluatedArgs, &[u8]); 3] = [
+        (
+            EvaluatedBytesOp::HexInt,
+            EvaluatedArgs::Bytes(Some(b"1".to_vec())),
+            EvaluatedArgs::Int(Some(1)),
+            b"1",
+        ),
+        (
+            EvaluatedBytesOp::Left,
+            EvaluatedArgs::Bytes(Some(b"xy".to_vec())),
+            EvaluatedArgs::BytesInt(Some(b"xy".to_vec()), Some(1)),
+            b"x",
+        ),
+        (
+            EvaluatedBytesOp::Replace,
+            EvaluatedArgs::BytesInt(Some(b"x".to_vec()), Some(1)),
+            EvaluatedArgs::Bytes3([
+                Some(b"x".to_vec()),
+                Some(b"x".to_vec()),
+                Some(b"y".to_vec()),
+            ]),
+            b"y",
+        ),
+    ];
+    for (operation, invalid, valid, expected) in cases {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        assert!(matches!(
+            worker.eval_one(None),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let ComputedValue::Bytes(value) = worker.eval_args(valid).unwrap() else {
+            panic!("valid operation returned Int");
+        };
+        assert_eq!(value.value(), Some(expected));
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), Some(expected.to_vec()));
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_charge_all_ready_capacities_before_null() {
+    let needle = Vec::<u8>::with_capacity(16 * 1024);
+    let replacement = Vec::<u8>::with_capacity(16 * 1024);
+    let limit = needle.capacity() + replacement.capacity() - 1;
+    assert!(needle.capacity() < limit && replacement.capacity() < limit);
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::Replace,
+        LocalCompileContext::default(),
+        ExecutionLimits {
+            max_retained_bytes: limit,
+            ..ExecutionLimits::default()
+        },
+        usize::MAX,
+    )
+    .unwrap();
+    let storage = worker.retained_storage().unwrap();
+    // Empty buffers still own their full capacity even though a NULL subject
+    // will make the official wrapper skip the non-null replacement body.
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::Bytes3([
+            None,
+            Some(needle),
+            Some(replacement)
+        ])),
+        Err(LocalError::ResourceLimit(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let ComputedValue::Bytes(value) = worker
+        .eval_args(EvaluatedArgs::Bytes3([
+            None,
+            Some(Vec::new()),
+            Some(Vec::new()),
+        ]))
+        .unwrap()
+    else {
+        panic!("REPLACE returned Int");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+}

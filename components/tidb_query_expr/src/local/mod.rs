@@ -25,20 +25,21 @@
 //! facade does not compose controls, hosts or lineage, expose a row fallback,
 //! or authenticate native source/consumer origin.
 //! `prepare_evaluated_bytes` separately prepares an opaque reusable worker for
-//! one closed unary operation on already-normalized nullable Bytes: ASCII,
-//! LENGTH/OCTET_LENGTH, BIT_LENGTH, LTRIM, RTRIM, UNHEX, CRC32, REVERSE,
-//! CHAR_LENGTH or QUOTE, with separate byte/UTF8 variants where required. The
-//! fixed two-node recipe dispatches its official wrapper even for ready NULL;
-//! QUOTE(NULL) returns owned non-NULL bytes "NULL". Result carriers remain
-//! owned Int/Bytes, not native SQL descriptors. Frontends retain text
-//! normalization, signature selection and CRC32's unsigned packing.
-//! `prepare_evaluated_ascii` keeps the old ASCII-only API over the same
-//! compiler/worker/driver. No native child, binding-service or Host callback,
-//! arbitrary signature, original SQL/PB schema, or raw-program escape is
-//! exposed. The sealed pure context and actual wrapper-dispatch witness persist
-//! per worker, not per row; caller coercion, charset/return metadata,
-//! diagnostics and execution-owner lifetime remain outside this boundary.
-//! Wrapper counts are not body counts.
+//! a closed operation on ready nullable Int/Bytes: ASCII, LENGTH/OCTET_LENGTH,
+//! BIT_LENGTH, LTRIM, RTRIM, UNHEX, CRC32, REVERSE, CHAR_LENGTH, QUOTE, HEX,
+//! BIN, LEFT, RIGHT or REPLACE, with separate numeric/byte/UTF8 variants as
+//! needed. `EvaluatedArgs` owns the fixed argument shapes; Int preserves all 64
+//! bits. An operation admits only its canonical one-to-three ordered ColumnRefs
+//! and one official FnCall. Its wrapper runs even for ready NULL; QUOTE(NULL)
+//! returns owned non-NULL bytes "NULL". All ready owners remain charged through
+//! result extraction. Results are owned Int/Bytes, not native SQL descriptors.
+//! Frontends retain demand/coercion order, normalization, signature selection
+//! and result packing (including CRC32's UInt). The old single-Bytes eval_one
+//! and ASCII-only facade use the same compiler/worker/driver. No native child,
+//! binding-service or Host callback, arbitrary signature, original SQL/PB
+//! schema, or raw-program escape is exposed. The sealed context and actual
+//! wrapper-dispatch witness persist per worker, not per row; diagnostics and
+//! execution-owner lifetime stay outside. Wrapper counts are not body counts.
 
 mod batch;
 mod compile;
@@ -65,8 +66,8 @@ mod tests;
 pub use self::{
     batch::{
         ComputedBytes, ComputedBytesMetadata, ComputedInt, ComputedIntMetadata, ComputedValue,
-        EvaluatedAsciiWorker, EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState,
-        WorkerStorage, prepare_evaluated_ascii, prepare_evaluated_bytes,
+        EvaluatedArgs, EvaluatedAsciiWorker, EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch,
+        LocalEvalState, WorkerStorage, prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,

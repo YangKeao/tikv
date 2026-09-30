@@ -108,7 +108,7 @@ fn check_evaluated_bytes_source(
     spec: &LocalExpr,
     schema: &[FieldType],
 ) -> LocalResult<()> {
-    let bytes_type = evaluated_ascii_bytes_type();
+    let arity = operation.input_types().len();
     let LocalExpr::Call {
         function,
         args,
@@ -122,20 +122,25 @@ fn check_evaluated_bytes_source(
             "evaluated Bytes requires its fixed value-call source",
         ));
     };
-    if schema.len() != 1
-        || schema[0] != bytes_type
+    if !(1..=3).contains(&arity)
+        || schema.len() != arity
+        || schema
+            .iter()
+            .enumerate()
+            .any(|(slot, field_type)| operation.input_field_type(slot).as_ref() != Some(field_type))
         || *function != FunctionRef::TiPb(operation.signature())
         || return_type != &operation.return_type()
         || !matches!(metadata, crate::CallMetadata::None)
-        || !matches!(
-            args.as_ref(),
-            [LocalExpr::InputSlot { slot: 0, field_type }] if field_type == &bytes_type
-        )
+        || args.len() != arity
+        || args.iter().enumerate().any(|(expected, arg)| {
+            !matches!(arg, LocalExpr::InputSlot { slot, field_type }
+                if *slot == expected && Some(field_type) == schema.get(expected))
+        })
     {
         return Err(evaluated_bytes_error(
             operation,
             "evaluated ASCII requires only canonical slot0 Bytes to Int with no metadata",
-            "evaluated Bytes requires only its selected operation on canonical slot0 Bytes with its canonical result and no metadata",
+            "evaluated Bytes requires its selected operation on ordered canonical slots with its canonical result and no metadata",
         ));
     }
     Ok(())
@@ -148,8 +153,9 @@ fn check_evaluated_bytes_kernel(
     let official = operation.fn_meta();
     if !matches!(
         node,
-        RpnExpressionNode::FnCall { func_meta, args_len: 1, field_type, metadata }
-            if func_meta.name == official.name
+        RpnExpressionNode::FnCall { func_meta, args_len, field_type, metadata }
+            if *args_len == operation.input_types().len()
+                && func_meta.name == official.name
                 && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
                 && field_type == &operation.return_type()
                 && metadata.is::<()>()
@@ -157,7 +163,7 @@ fn check_evaluated_bytes_kernel(
         return Err(evaluated_bytes_error(
             operation,
             "evaluated ASCII preparation changed its unary Int/unit-metadata kernel",
-            "evaluated Bytes preparation changed its selected unary canonical/unit-metadata kernel",
+            "evaluated Bytes preparation changed its selected arity/canonical/unit-metadata kernel",
         ));
     }
     Ok(())
@@ -198,9 +204,11 @@ impl CompileMode<'_> {
 
     fn check_type(self, field_type: &FieldType) -> LocalResult<()> {
         if let Some(operation) = self.evaluated_bytes_operation() {
-            // The exact source guard separately fixes Bytes at slot0 and the
-            // selected result at the only call, never a general mixed tree.
-            if field_type != &evaluated_ascii_bytes_type() && field_type != &operation.return_type()
+            // The exact source guard fixes every input slot and the selected
+            // result at the only call, never a general mixed tree.
+            if field_type != &operation.return_type()
+                && !(0..operation.input_types().len())
+                    .any(|slot| operation.input_field_type(slot).as_ref() == Some(field_type))
             {
                 return Err(evaluated_bytes_error(
                     operation,
@@ -273,14 +281,19 @@ fn take_expression(
         ));
     }
     if let Some(operation) = mode.evaluated_bytes_operation() {
-        let [RpnExpressionNode::ColumnRef { offset: 0 }, kernel] = expression.as_ref() else {
+        let arity = operation.input_types().len();
+        if expression.len() != arity + 1
+            || expression.as_ref()[..arity].iter().enumerate().any(|(slot, node)| {
+                !matches!(node, RpnExpressionNode::ColumnRef { offset } if *offset == slot)
+            })
+        {
             return Err(evaluated_bytes_error(
                 operation,
                 "evaluated ASCII compilation requires exactly slot0 then its unary kernel",
-                "evaluated Bytes compilation requires exactly slot0 then its selected unary kernel",
+                "evaluated Bytes compilation requires ordered slots then its selected kernel",
             ));
-        };
-        check_evaluated_bytes_kernel(operation, kernel)?;
+        }
+        check_evaluated_bytes_kernel(operation, &expression[arity])?;
     }
     match (mode.is_lineaged(), result_flows[index].take()) {
         (true, Some(flow)) => expression.with_result_flow(flow),
@@ -461,14 +474,24 @@ pub(super) fn compile_evaluated_bytes(
     operation: EvaluatedBytesOp,
     cx: LocalCompileContext,
 ) -> LocalResult<LocalProgram> {
-    let schema = [evaluated_ascii_bytes_type()];
+    let schema = (0..operation.input_types().len())
+        .map(|slot| {
+            operation.input_field_type(slot).ok_or_else(|| {
+                LocalError::InvalidSpec("evaluated operation has no canonical input type".into())
+            })
+        })
+        .collect::<LocalResult<Vec<_>>>()?;
     let spec = LocalExpr::Call {
         function: FunctionRef::TiPb(operation.signature()),
-        args: vec![LocalExpr::InputSlot {
-            slot: 0,
-            field_type: evaluated_ascii_bytes_type(),
-        }]
-        .into_boxed_slice(),
+        args: schema
+            .iter()
+            .enumerate()
+            .map(|(slot, field_type)| LocalExpr::InputSlot {
+                slot,
+                field_type: field_type.clone(),
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
         return_type: operation.return_type(),
         metadata: crate::CallMetadata::None,
     };
@@ -487,7 +510,7 @@ fn compile(
 ) -> LocalResult<LocalProgram> {
     if let Some(operation) = mode.evaluated_bytes_operation() {
         // Check the whole closed source before preparing any descriptor. There
-        // is exactly one selected call and one slot, including on private entries.
+        // is exactly one selected call over ordered slots, even on private entries.
         check_evaluated_bytes_source(operation, spec, schema)?;
     }
     for field_type in schema {
@@ -700,7 +723,11 @@ fn compile(
                         let mut call = CallBuild::local(shape, metadata.clone());
                         let prepared = prepare_call(&mut call).map_err(invalid)?;
                         if let Some(operation) = mode.evaluated_bytes_operation() {
-                            if prepared.retained_args() != [0]
+                            if !prepared
+                                .retained_args()
+                                .iter()
+                                .copied()
+                                .eq(0..operation.input_types().len())
                                 || prepared.short_circuit_meta().is_some()
                             {
                                 return Err(evaluated_bytes_error(
@@ -795,7 +822,7 @@ fn compile(
         }
     }
     if let Some(operation) = mode.evaluated_bytes_operation() {
-        if visited != 2 || host_catalog.is_some() {
+        if visited != operation.input_types().len() + 1 || host_catalog.is_some() {
             return Err(evaluated_bytes_error(
                 operation,
                 "evaluated ASCII compilation changed its fixed source or attached hosts",
@@ -1376,6 +1403,14 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::CharLength,
             EvaluatedBytesOp::CharLengthUtf8,
             EvaluatedBytesOp::Quote,
+            EvaluatedBytesOp::HexInt,
+            EvaluatedBytesOp::HexStr,
+            EvaluatedBytesOp::Bin,
+            EvaluatedBytesOp::Left,
+            EvaluatedBytesOp::LeftUtf8,
+            EvaluatedBytesOp::Right,
+            EvaluatedBytesOp::RightUtf8,
+            EvaluatedBytesOp::Replace,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
@@ -1393,21 +1428,32 @@ mod evaluated_ascii_compile_tests {
             ] {
                 assert_eq!(program.check_entry(entry).is_ok(), entry == expected);
             }
-            assert_eq!(program.schema, [evaluated_ascii_bytes_type()]);
-            assert_eq!(program.return_type(), &operation.return_type());
-            assert_eq!(program.expression.len(), 2);
-            check_evaluated_bytes_kernel(operation, &program.expression[1]).unwrap();
-
-            let mut spec = source();
-            if let LocalExpr::Call {
-                function,
-                return_type,
-                ..
-            } = &mut spec
-            {
-                *function = FunctionRef::TiPb(operation.signature());
-                *return_type = operation.return_type();
+            let arity = operation.input_types().len();
+            assert_eq!(program.schema.len(), arity);
+            for (slot, field_type) in program.schema.iter().enumerate() {
+                assert_eq!(Some(field_type), operation.input_field_type(slot).as_ref());
+                assert!(matches!(program.expression[slot],
+                    RpnExpressionNode::ColumnRef { offset } if offset == slot));
             }
+            assert_eq!(program.return_type(), &operation.return_type());
+            assert_eq!(program.expression.len(), arity + 1);
+            check_evaluated_bytes_kernel(operation, &program.expression[arity]).unwrap();
+
+            let mut spec = LocalExpr::Call {
+                function: FunctionRef::TiPb(operation.signature()),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
             if operation != EvaluatedBytesOp::Ascii {
                 assert_closed_source_rejected(&spec, &program.schema);
             }
@@ -1425,6 +1471,20 @@ mod evaluated_ascii_compile_tests {
                 ),
                 Err(LocalError::InvalidSpec(_))
             ));
+            if arity > 1 {
+                if let LocalExpr::Call { args, .. } = &mut spec {
+                    args.swap(0, 1);
+                }
+                assert!(matches!(
+                    compile(
+                        &spec,
+                        &program.schema,
+                        LocalCompileContext::default(),
+                        CompileMode::EvaluatedBytes(operation)
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+            }
         }
     }
 
