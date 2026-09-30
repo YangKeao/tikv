@@ -171,7 +171,7 @@ pub use self::{
         ComputedInt128Metadata, ComputedIntMetadata, ComputedValue, EvaluatedArgs,
         EvaluatedAsciiWorker, EvaluatedBytesOp, EvaluatedBytesWorker, EvaluatedSqlFailureKind,
         LocalBatch, LocalEvalState, NativeSearchPolicy, OutputDisposition, ReadyBytesArg,
-        ReadyDecimalArg, ReadyIeee754Arg, ReadyIntArg, ReadySubstringI128,
+        ReadyConvBaseArg, ReadyDecimalArg, ReadyIeee754Arg, ReadyIntArg, ReadySubstringI128,
         ReportedEvaluatedFailure, WorkerStorage, native_decimal_bridge_error,
         prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
@@ -202,14 +202,15 @@ pub(crate) use self::{
 };
 pub use crate::{
     CallMetadata, FunctionRef, LiteralKind, LocalFunctionId,
-    impl_math::native_decimal_target_scale,
+    impl_math::{conv_valid_prefix_native, native_decimal_target_scale},
     impl_string::{
-        ConcatKind, ConcatTerminal, FieldIntValue, FieldTerminal, PreparedConcatArgs,
-        PreparedExportSetArgs, PreparedFieldArgs, PreparedFindInSetKeys, PreparedMakeSetArgs,
-        ReadyFieldIntArg, elt_selected_arg, field_bytes_equal, field_int_equal, field_real_equal,
-        legacy_substring_needs_len, make_set_selected, prepare_concat_args,
-        prepare_export_set_args, prepare_field_bytes_args, prepare_field_int_args,
-        prepare_field_real_args, prepare_find_in_set_keys, prepare_make_set_args,
+        ConcatKind, ConcatTerminal, FieldIntValue, FieldTerminal, PreparedCharArgs,
+        PreparedConcatArgs, PreparedExportSetArgs, PreparedFieldArgs, PreparedFindInSetKeys,
+        PreparedMakeSetArgs, ReadyFieldIntArg, elt_selected_arg, field_bytes_equal,
+        field_int_equal, field_real_equal, legacy_substring_needs_len, make_set_selected,
+        prepare_char_args, prepare_concat_args, prepare_export_set_args, prepare_field_bytes_args,
+        prepare_field_int_args, prepare_field_real_args, prepare_find_in_set_keys,
+        prepare_make_set_args,
     },
     types::function::PreparedOrdinaryCall,
 };

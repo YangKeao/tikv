@@ -293,6 +293,24 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  CHAR adds a distinct packed nullable-i64 list, including zero items, and a
+  new single-owner compatibility byte generator (not a pre-existing wire kernel).
+  Each integer follows the original signed shift loop for at most four bytes;
+  truncating to u32 before trimming would change values above 32 bits. NULL items
+  are skipped; an empty/all-NULL list computes non-NULL empty bytes. Charset lookup
+  remains in guarded frontend preparation, while decoding, warning1300 and strict
+  mode handling consume the computed result in guarded packing.
+  CONV adds native text and full-binary-literal BII recipes plus a legacy BBB
+  recipe with canonical LE16 i128 bases. Native and legacy reuse the existing
+  prefix/parse/radix primitives with explicit sign, base and overflow policies;
+  wire wrapping/sign/error behavior stays distinct. Binary literals execute both
+  original conversion stages in the kernel without pre-narrowing the payload.
+  Legacy ready validation preserves text/from/to demand, retaining actual
+  out-of-i64 values rather than fabricating NULL. ConvUnsignedOverflow receipts
+  require one of the two sealed native operations, an actual invocation and the
+  typed parse-overflow cause. The full sign-stripped digit payload is retained;
+  generic resource failures and legacy NULL results are not reclassified by code
+  or text. All four new operations use at most three columns and the same driver.
   SPACE/REPEAT/TO_BASE64/FROM_BASE64 add an independent Packet argument role,
   carrying real nullable values plus typed Allow/SuppressByPacket (physical
   non-NULL 0/1). The private wrapper is actually invoked for suppressed NULL;

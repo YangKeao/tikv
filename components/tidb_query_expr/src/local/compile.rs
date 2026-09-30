@@ -1638,6 +1638,10 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::RoundRealLegacy,
             EvaluatedBytesOp::RoundDecimalLegacy,
             EvaluatedBytesOp::MathNullWitnessNative,
+            EvaluatedBytesOp::CharNative,
+            EvaluatedBytesOp::ConvNative,
+            EvaluatedBytesOp::ConvBinaryLiteralNative,
+            EvaluatedBytesOp::ConvLegacy,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

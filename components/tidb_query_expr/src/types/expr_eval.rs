@@ -355,6 +355,26 @@ fn evaluated_ready_args_match(
         && match role {
             EvaluatedArgsRole::NoArgs => values.is_empty(),
             EvaluatedArgsRole::Values => true,
+            EvaluatedArgsRole::CharReady => {
+                operation == EvaluatedBytesOp::CharNative
+                    && matches!(values, [ScalarValue::Bytes(encoded)]
+                        if encoded.is_some()
+                            && crate::impl_string::prepared_char_args_match(encoded.as_deref()))
+            }
+            EvaluatedArgsRole::ConvNative => {
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::ConvNative | EvaluatedBytesOp::ConvBinaryLiteralNative
+                ) && matches!(values, [ScalarValue::Bytes(number), ScalarValue::Int(_), ScalarValue::Int(_)]
+                        if operation == EvaluatedBytesOp::ConvBinaryLiteralNative
+                            || number.as_ref().is_none_or(|bytes| std::str::from_utf8(bytes).is_ok()))
+            }
+            EvaluatedArgsRole::ConvLegacy => {
+                operation == EvaluatedBytesOp::ConvLegacy
+                    && matches!(values, [ScalarValue::Bytes(_), ScalarValue::Bytes(from), ScalarValue::Bytes(to)]
+                        if from.as_ref().is_none_or(|bytes| bytes.len() == 16)
+                            && to.as_ref().is_none_or(|bytes| bytes.len() == 16))
+            }
             EvaluatedArgsRole::DecimalUnary => {
                 matches!(
                     operation,
@@ -3292,7 +3312,7 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..73 {
+        for mismatch in 0..83 {
             let operation = match mismatch {
                 3 | 5 | 45 | 53 | 56 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
@@ -3328,6 +3348,12 @@ mod tests {
                 64 | 70 => EvaluatedBytesOp::RoundRealNative,
                 65 | 71 => EvaluatedBytesOp::RoundInt128Legacy,
                 66 | 72 => EvaluatedBytesOp::MathNullWitnessNative,
+                73 | 75 | 76 => EvaluatedBytesOp::CharNative,
+                74 => EvaluatedBytesOp::Md5,
+                77 | 79 => EvaluatedBytesOp::ConvNative,
+                78 => EvaluatedBytesOp::Substring3BytesNative,
+                80 | 82 => EvaluatedBytesOp::ConvLegacy,
+                81 => EvaluatedBytesOp::Replace,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
@@ -3347,7 +3373,10 @@ mod tests {
                 | 52
                 | 55
                 | 58
-                | 62..=66 => EvaluatedArgsRole::Values,
+                | 62..=66
+                | 73
+                | 77
+                | 80 => EvaluatedArgsRole::Values,
                 4 | 5 => EvaluatedArgsRole::NoArgs,
                 9..=12 | 17 => EvaluatedArgsRole::Packet,
                 14 => EvaluatedArgsRole::ReadyBytesInt,
@@ -3369,6 +3398,9 @@ mod tests {
                 70 => EvaluatedArgsRole::Ieee754Int,
                 71 => EvaluatedArgsRole::Int128,
                 72 => EvaluatedArgsRole::NullWitness,
+                74..=76 => EvaluatedArgsRole::CharReady,
+                78 | 79 => EvaluatedArgsRole::ConvNative,
+                81 | 82 => EvaluatedArgsRole::ConvLegacy,
                 _ => EvaluatedArgsRole::Ieee754Bits,
             };
             let schema: Vec<_> = (0..operation.input_types().len())
@@ -3475,7 +3507,20 @@ mod tests {
             if operation == EvaluatedBytesOp::RoundDecimalNative {
                 ready[1] = ScalarValue::Int(None);
             }
-            if matches!(mismatch, 13 | 14 | 16..=72) {
+            if matches!(mismatch, 73..=76) {
+                let crate::local::EvaluatedArgs::CharReady(prepared) =
+                    crate::local::prepare_char_args(&[]).unwrap()
+                else {
+                    unreachable!("CHAR builder must return its closed ready arguments");
+                };
+                ready[0] = ScalarValue::Bytes(Some(prepared.into_encoded()));
+            }
+            if operation == EvaluatedBytesOp::ConvLegacy || role == EvaluatedArgsRole::ConvLegacy {
+                ready[0] = ScalarValue::Bytes(Some(vec![0xff]));
+                ready[1] = ScalarValue::Bytes(Some(i128::MAX.to_le_bytes().to_vec()));
+                ready[2] = ScalarValue::Bytes(Some(0i128.to_le_bytes().to_vec()));
+            }
+            if matches!(mismatch, 13 | 14 | 16..=82) {
                 assert!(evaluated_ready_args_match(
                     operation,
                     &ready,
@@ -3536,6 +3581,19 @@ mod tests {
                 ready[0] = ScalarValue::Bytes(Some(vec![0; 15]));
             } else if mismatch == 72 {
                 ready[0] = ScalarValue::Int(Some(0));
+            } else if mismatch == 75 {
+                ready[0] = ScalarValue::Bytes(None);
+            } else if mismatch == 76 {
+                ready[0] = ScalarValue::Bytes(Some(Vec::new()));
+            } else if mismatch == 79 {
+                ready[0] = ScalarValue::Bytes(Some(vec![0xff]));
+                assert!(evaluated_ready_args_match(
+                    EvaluatedBytesOp::ConvBinaryLiteralNative,
+                    &ready,
+                    EvaluatedArgsRole::ConvNative,
+                ));
+            } else if mismatch == 82 {
+                ready[2] = ScalarValue::Bytes(Some(vec![0; 15]));
             }
             if mismatch == 15 {
                 let input = EvalInput::ReadyBytes {

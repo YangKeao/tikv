@@ -17,7 +17,8 @@ use tidb_query_datatype::{
 use crate::{
     impl_math::i64_to_usize,
     local::{
-        LocalError, LocalResult, NativeSearchPolicy, ReadyBytesArg, ReadyIeee754Arg, ReadyIntArg,
+        EvaluatedArgs, LocalError, LocalResult, NativeSearchPolicy, ReadyBytesArg, ReadyIeee754Arg,
+        ReadyIntArg,
     },
 };
 
@@ -1563,6 +1564,91 @@ fn read_set_bytes<'a>(reader: &mut SetArgsReader<'a>) -> LocalResult<SetArg<&'a 
         2 => Ok(SetArg::Undemanded),
         _ => Err(invalid_set_args("Invalid prepared bytes demand tag")),
     }
+}
+
+/// All coerced CHAR operands, including NULLs, in an opaque versioned tuple.
+#[derive(Clone, Debug)]
+pub struct PreparedCharArgs {
+    encoded: Vec<u8>,
+}
+
+impl PreparedCharArgs {
+    pub(crate) fn into_encoded(self) -> Vec<u8> {
+        self.encoded
+    }
+}
+
+/// Prepares values only; charset decoding and SQL warning policy stay outside.
+pub fn prepare_char_args(values: &[Option<i64>]) -> LocalResult<EvaluatedArgs> {
+    let mut encoder = SetArgsEncoder::new(b'C', usize::MAX)?;
+    encoder.byte(1)?;
+    encoder.size(values.len())?;
+    for value in values {
+        match value {
+            None => encoder.byte(0)?,
+            Some(value) => {
+                encoder.byte(1)?;
+                encoder.word(*value as u64)?;
+            }
+        }
+    }
+    decode_char_args(&encoder.bytes)?;
+    Ok(EvaluatedArgs::CharReady(PreparedCharArgs {
+        encoded: encoder.bytes,
+    }))
+}
+
+fn read_char_value(reader: &mut SetArgsReader<'_>) -> LocalResult<Option<Int>> {
+    match reader.byte()? {
+        0 => Ok(None),
+        1 => Ok(Some(reader.word()? as Int)),
+        _ => Err(invalid_set_args("Invalid CHAR operand tag")),
+    }
+}
+
+fn decode_char_args(encoded: &[u8]) -> LocalResult<(usize, SetArgsReader<'_>)> {
+    let mut reader = SetArgsReader::new(encoded, b'C')?;
+    if reader.byte()? != 1 {
+        return Err(invalid_set_args("Invalid CHAR tuple version"));
+    }
+    let count = reader.size()?;
+    let entries = reader.clone();
+    for _ in 0..count {
+        read_char_value(&mut reader)?;
+    }
+    reader.finish()?;
+    Ok((count, entries))
+}
+
+pub(crate) fn prepared_char_args_match(encoded: Option<&[u8]>) -> bool {
+    encoded.is_some_and(|encoded| decode_char_args(encoded).is_ok())
+}
+
+// This is the new-owned native CHAR byte core, not a pre-existing wire kernel.
+#[rpn_fn(writer)]
+fn char_native(encoded: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    let (count, mut reader) = decode_char_args(encoded).map_err(set_args_eval_error)?;
+    let mut writer = writer.begin();
+    for _ in 0..count {
+        let Some(mut value) = read_char_value(&mut reader).map_err(set_args_eval_error)? else {
+            continue;
+        };
+        let mut current = [0_u8; 4];
+        let mut length = 0;
+        for byte in &mut current {
+            *byte = (value & 0xff) as u8;
+            length += 1;
+            value >>= 8;
+            if value == 0 {
+                break;
+            }
+        }
+        // Inspect the full signed value before stopping: narrowing first would
+        // shorten positive values above u32 whose low bytes happen to be zero.
+        current[..length].reverse();
+        writer.partial_write(&current[..length]);
+    }
+    Ok(writer.finish())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

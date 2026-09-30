@@ -1,6 +1,10 @@
 // Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cell::RefCell, convert::TryFrom};
+use std::{
+    cell::RefCell,
+    convert::TryFrom,
+    num::{IntErrorKind, ParseIntError},
+};
 
 use num::traits::Pow;
 use tidb_query_codegen::rpn_fn;
@@ -536,27 +540,183 @@ pub fn atan_2_args(arg0: &Real, arg1: &Real) -> Result<Option<Real>> {
     Ok(Real::new(arg0.atan2(arg1.into_inner())).ok())
 }
 
+#[derive(Clone, Copy)]
+enum ConvMode {
+    Wire,
+    Native,
+    Legacy,
+}
+
+#[derive(Clone, Copy)]
+enum ConvSignPolicy {
+    WireOriginalSign,
+    NativeWrappedSign,
+}
+
+fn conv_bases(from: Int, to: Int, mode: ConvMode) -> Option<(IntWithSign, IntWithSign)> {
+    let (from, to) = match mode {
+        ConvMode::Wire => (IntWithSign::from_int(from), IntWithSign::from_int(to)),
+        ConvMode::Native | ConvMode::Legacy => {
+            let (mut from, mut to) = (from, to);
+            let (signed, ignore_sign) = (from < 0, to < 0);
+            // Preserve the source unchecked operations and their order. Even an
+            // invalid from radix does not skip negating to before range checks.
+            // Actual overflow-check settings decide MIN's panic/wrap behavior.
+            if signed {
+                from = -from;
+            }
+            if ignore_sign {
+                to = -to;
+            }
+            (
+                IntWithSign::from_signed_uint(from as u64, signed),
+                IntWithSign::from_signed_uint(to as u64, ignore_sign),
+            )
+        }
+    };
+    (is_valid_base(from) && is_valid_base(to)).then_some((from, to))
+}
+
+fn conv_text_with_bases(
+    text: &str,
+    from: IntWithSign,
+    to: IntWithSign,
+    mode: ConvMode,
+) -> Result<Option<String>> {
+    let Some((digits, negative)) = extract_num_str(text.trim(), from) else {
+        return Ok(Some("0".to_owned()));
+    };
+    let value = match extract_num(&digits, negative, from) {
+        Ok(value) => value,
+        Err(source) => {
+            return match mode {
+                // Keep the existing wire error and its conv(...) expression.
+                ConvMode::Wire => {
+                    Err(Error::overflow("BIGINT UNSIGNED", format!("conv({})", digits)).into())
+                }
+                ConvMode::Legacy => Ok(None),
+                ConvMode::Native => {
+                    let overflow = matches!(source.kind(), IntErrorKind::PosOverflow);
+                    let source = EvaluateError::Caused(Box::new(source));
+                    if overflow {
+                        Err(EvaluateError::ConvUnsignedOverflow {
+                            digits,
+                            source: Box::new(source),
+                        }
+                        .into())
+                    } else {
+                        Err(source.into())
+                    }
+                }
+            };
+        }
+    };
+    let policy = match mode {
+        ConvMode::Wire => ConvSignPolicy::WireOriginalSign,
+        ConvMode::Native | ConvMode::Legacy => ConvSignPolicy::NativeWrappedSign,
+    };
+    Ok(Some(value.format_to_base(to, policy)))
+}
+
+fn conv_text(text: &str, from: Int, to: Int, mode: ConvMode) -> Result<Option<String>> {
+    let Some((from, to)) = conv_bases(from, to, mode) else {
+        return Ok(None);
+    };
+    conv_text_with_bases(text, from, to, mode)
+}
+
 #[inline]
 #[rpn_fn]
 pub fn conv(n: BytesRef, from_base: &Int, to_base: &Int) -> Result<Option<Bytes>> {
-    let s = String::from_utf8_lossy(n);
-    let s = s.trim();
-    let from_base = IntWithSign::from_int(*from_base);
-    let to_base = IntWithSign::from_int(*to_base);
-    if is_valid_base(from_base) && is_valid_base(to_base) {
-        if let Some((num_str, is_neg)) = extract_num_str(s, from_base) {
-            match extract_num(num_str.as_ref(), is_neg, from_base) {
-                Some(num) => Ok(Some(num.format_to_base(to_base).into_bytes())),
-                None => {
-                    Err(Error::overflow("BIGINT UNSIGNED", format!("conv({})", num_str)).into())
-                }
-            }
-        } else {
-            Ok(Some(b"0".to_vec()))
-        }
-    } else {
-        Ok(None)
+    let text = String::from_utf8_lossy(n);
+    Ok(conv_text(&text, *from_base, *to_base, ConvMode::Wire)?.map(String::into_bytes))
+}
+
+#[rpn_fn(nullable)]
+fn conv_native(
+    n: Option<BytesRef>,
+    from_base: Option<&Int>,
+    to_base: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    let (Some(from), Some(to)) = (from_base, to_base) else {
+        return Ok(None);
+    };
+    let Some(n) = n else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(n).map_err(|source| EvaluateError::Caused(Box::new(source)))?;
+    Ok(conv_text(text, *from, *to, ConvMode::Native)?.map(String::into_bytes))
+}
+
+#[rpn_fn(nullable)]
+fn conv_binary_literal_native(
+    n: Option<BytesRef>,
+    from_base: Option<&Int>,
+    to_base: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    use std::fmt::Write;
+
+    let (Some(from), Some(to)) = (from_base, to_base) else {
+        return Ok(None);
+    };
+    let Some(n) = n else {
+        return Ok(None);
+    };
+    // Materialize the full payload's bits, never its truncated u64 reading.
+    // The source b'...' wrapper contributes no valid digits after the closing
+    // quote, so only its trim-leading-zero digit substring is needed here.
+    let capacity = n
+        .len()
+        .checked_mul(8)
+        .ok_or_else(|| other_err!("CONV binary literal bit length overflow"))?;
+    let mut bits = String::new();
+    bits.try_reserve_exact(capacity)
+        .map_err(|source| EvaluateError::Caused(Box::new(source)))?;
+    for byte in n {
+        write!(bits, "{byte:08b}").expect("writing to String cannot fail");
     }
+    let digits = bits.trim_start_matches('0');
+    let digits = if !bits.is_empty() && digits.is_empty() {
+        "0"
+    } else {
+        digits
+    };
+    // Do not validate the final target before this first conversion: NULL or
+    // overflow from 2 -> from terminates before from -> to can run.
+    let Some(first) = conv_text(digits, 2, *from, ConvMode::Native)? else {
+        return Ok(None);
+    };
+    Ok(conv_text(&first, *from, *to, ConvMode::Native)?.map(String::into_bytes))
+}
+
+#[rpn_fn(nullable)]
+fn conv_legacy(
+    n: Option<BytesRef>,
+    from_base: Option<BytesRef>,
+    to_base: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    let Some(n) = n else {
+        return Ok(None);
+    };
+    let Some(from) = from_base else {
+        return Ok(None);
+    };
+    let Ok(from) = i64::try_from(decode_raw_i128(from)?) else {
+        return Ok(None);
+    };
+    let Some(to) = to_base else {
+        return Ok(None);
+    };
+    let Ok(to) = i64::try_from(decode_raw_i128(to)?) else {
+        return Ok(None);
+    };
+    // A merely invalid from radix did not skip reading/converting to. Legacy
+    // normalizes both bases before its lossy text conversion, unlike wire.
+    let Some((from, to)) = conv_bases(from, to, ConvMode::Legacy) else {
+        return Ok(None);
+    };
+    let text = String::from_utf8_lossy(n);
+    Ok(conv_text_with_bases(&text, from, to, ConvMode::Legacy)?.map(String::into_bytes))
 }
 
 /// Resolves the native decimal scale policy before ready-argument construction.
@@ -815,15 +975,19 @@ fn truncate_decimal_native(arg: &Decimal, scale: &Int, budget: &Int) -> Result<O
     .map(Some)
 }
 
-#[rpn_fn]
-fn round_int128_legacy(arg: BytesRef) -> Result<Option<Bytes>> {
+fn decode_raw_i128(arg: BytesRef) -> Result<i128> {
     let bytes = <[u8; 16]>::try_from(arg).map_err(|_| {
         other_err!(
             "Internal raw i128 transport requires exactly 16 bytes, received {}",
             arg.len()
         )
     })?;
-    Ok(Some(i128::from_le_bytes(bytes).to_le_bytes().to_vec()))
+    Ok(i128::from_le_bytes(bytes))
+}
+
+#[rpn_fn]
+fn round_int128_legacy(arg: BytesRef) -> Result<Option<Bytes>> {
+    Ok(Some(decode_raw_i128(arg)?.to_le_bytes().to_vec()))
 }
 
 #[rpn_fn(nullable)]
@@ -1038,16 +1202,30 @@ impl IntWithSign {
         r.iter().rev().collect::<String>()
     }
 
-    fn format_to_base(self, to_base: IntWithSign) -> String {
+    fn format_to_base(self, to_base: IntWithSign, policy: ConvSignPolicy) -> String {
         let IntWithSign(value, is_neg) = self;
         let IntWithSign(to_base, should_ignore_sign) = to_base;
-        let mut real_val = value as i64;
-        // real_val > 0 is to avoid overflow issue when value is -int64_min.
-        if is_neg && !should_ignore_sign && real_val > 0 {
-            real_val = -real_val;
-        }
-        let mut ret = IntWithSign::format_radix(real_val as u64, to_base as u32);
-        if is_neg && should_ignore_sign {
+        let (magnitude, negative) = match policy {
+            ConvSignPolicy::WireOriginalSign => {
+                let mut real_val = value as i64;
+                // Preserve the wire guard and original sign, including -0 and
+                // magnitudes above i64::MAX. This is not native wrapped sign.
+                if is_neg && !should_ignore_sign && real_val > 0 {
+                    real_val = -real_val;
+                }
+                (real_val as u64, is_neg && should_ignore_sign)
+            }
+            ConvSignPolicy::NativeWrappedSign => {
+                let mut bits = if is_neg { value.wrapping_neg() } else { value };
+                let negative = (bits as i64) < 0;
+                if should_ignore_sign && negative {
+                    bits = bits.wrapping_neg();
+                }
+                (bits, negative && should_ignore_sign)
+            }
+        };
+        let mut ret = IntWithSign::format_radix(magnitude, to_base as u32);
+        if negative {
             ret.insert(0, '-');
         }
         ret
@@ -1078,13 +1256,29 @@ fn extract_num_str(s: &str, from_base: IntWithSign) -> Option<(String, bool)> {
     }
 }
 
-fn extract_num(num_s: &str, is_neg: bool, from_base: IntWithSign) -> Option<IntWithSign> {
+/// The native prefix-only compatibility surface. Deliberately does not trim;
+/// top-level CONV owns whitespace normalization. All callers share this
+/// scanner.
+pub fn conv_valid_prefix_native(s: &str, base: u32) -> String {
+    match extract_num_str(s, IntWithSign::from_signed_uint(u64::from(base), false)) {
+        Some((mut digits, negative)) => {
+            if negative {
+                digits.insert(0, '-');
+            }
+            digits
+        }
+        None => String::new(),
+    }
+}
+
+fn extract_num(
+    num_s: &str,
+    is_neg: bool,
+    from_base: IntWithSign,
+) -> std::result::Result<IntWithSign, ParseIntError> {
     let IntWithSign(from_base, signed) = from_base;
-    let value = match u64::from_str_radix(num_s, from_base as u32) {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-    Some(if signed {
+    let value = u64::from_str_radix(num_s, from_base as u32)?;
+    Ok(if signed {
         IntWithSign::shrink_from_signed_uint(value, is_neg)
     } else {
         IntWithSign::from_signed_uint(value, is_neg)
@@ -2123,6 +2317,119 @@ mod tests {
                 .evaluate(ScalarFuncSig::Atan2Args)
                 .unwrap();
             assert!((output.unwrap() - expect.unwrap()).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn test_conv_native_sign_binary_stages_and_overflow_cause() {
+        let maximum = b"18446744073709551615";
+        assert_eq!(
+            conv_native(Some(maximum), Some(&10), Some(&-10)).unwrap(),
+            Some(b"-1".to_vec())
+        );
+        assert_eq!(conv(maximum, &10, &-10).unwrap(), Some(maximum.to_vec()));
+        assert_eq!(
+            conv_native(Some(b"-0"), Some(&10), Some(&-10)).unwrap(),
+            Some(b"0".to_vec())
+        );
+        assert_eq!(conv(b"-0", &10, &-10).unwrap(), Some(b"-0".to_vec()));
+        assert_eq!(conv_valid_prefix_native(" +12azD", 16), "");
+        assert_eq!(conv_valid_prefix_native("+12azD", 16), "12a");
+        // A negative intermediate base is observable: a single signed-input
+        // clamp of u64::MAX would incorrectly return i64::MAX here.
+        assert_eq!(
+            conv_binary_literal_native(Some(&[0xff; 8]), Some(&-10), Some(&10)).unwrap(),
+            Some(maximum.to_vec())
+        );
+        assert_eq!(
+            conv_binary_literal_native(Some(b""), Some(&2), Some(&10)).unwrap(),
+            Some(b"0".to_vec())
+        );
+        let wide = [1, 0, 0, 0, 0, 0, 0, 0, 0];
+        // First-stage NULL skips the final MIN negation, but first-stage
+        // overflow precedes even an invalid final target.
+        assert_eq!(
+            conv_binary_literal_native(Some(&wide), Some(&37), Some(&i64::MIN)).unwrap(),
+            None
+        );
+        let binary_error =
+            conv_binary_literal_native(Some(&wide), Some(&2), Some(&37)).unwrap_err();
+        let digits = format!("00{}f", "fF".repeat(9));
+        let input = format!(" -{digits}z");
+        let text_error = conv_native(Some(input.as_bytes()), Some(&16), Some(&10)).unwrap_err();
+        for (failure, expected_digits) in [
+            (text_error, digits),
+            (binary_error, format!("1{}", "0".repeat(64))),
+        ] {
+            let tidb_query_common::error::ErrorInner::Evaluate(error) = failure.0.as_ref() else {
+                panic!("CONV overflow must be an evaluation failure");
+            };
+            assert_eq!(error.code(), 1690);
+            let EvaluateError::ConvUnsignedOverflow { digits, source } = error else {
+                panic!("only actual native parse overflow gets the semantic marker");
+            };
+            assert_eq!(digits, &expected_digits);
+            let EvaluateError::Caused(original) = source.as_ref() else {
+                panic!("CONV must retain the actual parser error");
+            };
+            assert_eq!(
+                original.downcast_ref::<ParseIntError>().unwrap().kind(),
+                &IntErrorKind::PosOverflow
+            );
+        }
+    }
+
+    #[test]
+    fn test_conv_legacy_full_i128_demand_and_base_overflow_profile() {
+        use std::{hint::black_box, panic::catch_unwind};
+
+        let ten = 10_i128.to_le_bytes();
+        let negative_ten = (-10_i128).to_le_bytes();
+        let outside_i64 = ((1_i128 << 64) + 10).to_le_bytes();
+        assert_eq!(
+            conv_legacy(
+                Some(b"18446744073709551615"),
+                Some(&ten),
+                Some(&negative_ten)
+            )
+            .unwrap(),
+            Some(b"-1".to_vec())
+        );
+        assert_eq!(
+            conv_legacy(Some(b"18446744073709551616"), Some(&ten), Some(&ten)).unwrap(),
+            None
+        );
+        assert_eq!(
+            conv_legacy(Some(b"10"), Some(&outside_i64), Some(&ten)).unwrap(),
+            None
+        );
+        assert_eq!(
+            conv_legacy(Some(b"10"), Some(&ten), Some(&outside_i64)).unwrap(),
+            None
+        );
+        // Direct-kernel malformed-width probes pin decoding order; these are
+        // not assertions that the closed factory admits malformed columns.
+        assert_eq!(conv_legacy(None, Some(b"bad"), Some(b"bad")).unwrap(), None);
+        assert_eq!(
+            conv_legacy(Some(b"1"), Some(&outside_i64), Some(b"bad")).unwrap(),
+            None
+        );
+        let invalid_radix = 37_i128.to_le_bytes();
+        assert!(conv_legacy(Some(b"1"), Some(&invalid_radix), Some(b"bad")).is_err());
+        let base = black_box(i64::MIN);
+        assert_eq!(conv(b"1", &base, &10).unwrap(), None);
+        assert_eq!(conv_native(None, Some(&base), Some(&10)).unwrap(), None);
+        let source = catch_unwind(|| {
+            let mut from = base;
+            if from < 0 {
+                from = -from;
+            }
+            (2..=36).contains(&from)
+        });
+        let native = catch_unwind(|| conv_native(Some(b"1"), Some(&base), Some(&10)));
+        match (source, native) {
+            (Ok(false), Ok(Ok(None))) | (Err(_), Err(_)) => {}
+            _ => panic!("native base negation must follow the actual source overflow profile"),
         }
     }
 

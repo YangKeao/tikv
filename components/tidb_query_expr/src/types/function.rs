@@ -201,6 +201,10 @@ pub enum LocalFunctionId {
     RoundRealLegacy,
     RoundDecimalLegacy,
     MathNullWitnessNative,
+    CharNative,
+    ConvNative,
+    ConvBinaryLiteralNative,
+    ConvLegacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

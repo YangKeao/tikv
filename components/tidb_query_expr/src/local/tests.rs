@@ -5239,3 +5239,426 @@ fn local_evaluated_args_abs_failure_receipt_preserves_primary_and_call_scope() {
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
 }
+
+#[test]
+fn local_evaluated_args_char_packs_full_values_and_nullable_entries() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::CharNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::CharNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::Bytes(None)),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases: &[(&[Option<i64>], &[u8])] = &[
+        (&[], b""),
+        (&[None, None], b""),
+        (
+            &[Some(0), None, Some(0x4142), Some(-1), Some(1_i64 << 32)],
+            b"\0AB\xff\xff\xff\xff\0\0\0\0",
+        ),
+    ];
+    for (index, &(input, expected)) in cases.iter().enumerate() {
+        let args = prepare_char_args(input).unwrap();
+        assert_eq!(worker.kernel_invocations(), index as u64);
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("native CHAR returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), Some(expected));
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), Some(expected.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_conv_legacy_preserves_i128_and_demanded_prefix() {
+    use tidb_query_common::error::{ErrorInner, EvaluateError};
+    use tidb_query_datatype::codec::data_type::Bytes;
+
+    let wire = crate::test_util::RpnFnScalarEvaluator::new()
+        .push_param(Some(b"18446744073709551616".to_vec()))
+        .push_param(Some(10_i64))
+        .push_param(Some(10_i64))
+        .evaluate::<Bytes>(ScalarFuncSig::Conv)
+        .unwrap_err();
+    assert!(matches!(
+        wire.0.as_ref(),
+        ErrorInner::Evaluate(EvaluateError::Custom { code: 1690, .. })
+    ));
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::ConvLegacy,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::ConvLegacy);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::ConvLegacyReady {
+            number: ReadyBytesArg::Undemanded,
+            from_base: ReadyConvBaseArg::Value(None),
+            to_base: ReadyConvBaseArg::Undemanded,
+        },
+        EvaluatedArgs::ConvLegacyReady {
+            number: ReadyBytesArg::Value(None),
+            from_base: ReadyConvBaseArg::Value(Some(10)),
+            to_base: ReadyConvBaseArg::Undemanded,
+        },
+        EvaluatedArgs::ConvLegacyReady {
+            number: ReadyBytesArg::Value(Some(b"1".to_vec())),
+            from_base: ReadyConvBaseArg::Value(Some(1)),
+            to_base: ReadyConvBaseArg::Undemanded,
+        },
+    ] {
+        let failure = worker.eval_args_reported(invalid).unwrap_err();
+        assert!(matches!(failure.error(), LocalError::InvalidBatch(_)));
+        assert!(failure.sql_failure().is_none());
+        assert!(failure.conv_overflow_digits().is_none());
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let cases: [(
+        Option<&[u8]>,
+        ReadyConvBaseArg,
+        ReadyConvBaseArg,
+        Option<&[u8]>,
+    ); 7] = [
+        (
+            Some(b"FF"),
+            ReadyConvBaseArg::Value(Some(16)),
+            ReadyConvBaseArg::Value(Some(10)),
+            Some(b"255"),
+        ),
+        (
+            None,
+            ReadyConvBaseArg::Undemanded,
+            ReadyConvBaseArg::Undemanded,
+            None,
+        ),
+        (
+            Some(b"1"),
+            ReadyConvBaseArg::Value(None),
+            ReadyConvBaseArg::Undemanded,
+            None,
+        ),
+        (
+            Some(b"1"),
+            ReadyConvBaseArg::Value(Some(i128::from(i64::MAX) + 1)),
+            ReadyConvBaseArg::Undemanded,
+            None,
+        ),
+        (
+            Some(b"1"),
+            ReadyConvBaseArg::Value(Some(10)),
+            ReadyConvBaseArg::Value(Some(i128::from(i64::MIN) - 1)),
+            None,
+        ),
+        (
+            Some(b"1"),
+            ReadyConvBaseArg::Value(Some(1)),
+            ReadyConvBaseArg::Value(Some(10)),
+            None,
+        ),
+        (
+            Some(b"18446744073709551616"),
+            ReadyConvBaseArg::Value(Some(10)),
+            ReadyConvBaseArg::Value(Some(10)),
+            None,
+        ),
+    ];
+    for (index, (number, from_base, to_base, expected)) in cases.into_iter().enumerate() {
+        let args = EvaluatedArgs::ConvLegacyReady {
+            number: ReadyBytesArg::Value(number.map(|bytes| bytes.to_vec())),
+            from_base,
+            to_base,
+        };
+        let ComputedValue::Bytes(value) = worker.eval_args_reported(args).unwrap() else {
+            panic!("legacy CONV returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_conv_native_preserves_markers_and_overflow_receipts() {
+    use std::num::ParseIntError;
+
+    use tidb_query_common::error::{ErrorInner, EvaluateError};
+
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::ConvNative,
+        LocalCompileContext::default(),
+        ExecutionLimits {
+            max_retained_bytes: 8 * 1024,
+            ..ExecutionLimits::default()
+        },
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::ConvNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::ConvReady {
+            number: ReadyBytesArg::Value(None),
+            from_base: ReadyIntArg::Undemanded,
+            to_base: ReadyIntArg::Value(Some(10)),
+        },
+        EvaluatedArgs::ConvReady {
+            number: ReadyBytesArg::Undemanded,
+            from_base: ReadyIntArg::Value(Some(10)),
+            to_base: ReadyIntArg::Value(Some(16)),
+        },
+        EvaluatedArgs::ConvReady {
+            number: ReadyBytesArg::Value(Some(b"1".to_vec())),
+            from_base: ReadyIntArg::Value(Some(1)),
+            to_base: ReadyIntArg::Undemanded,
+        },
+    ] {
+        let failure = worker.eval_args_reported(invalid).unwrap_err();
+        assert!(matches!(failure.error(), LocalError::InvalidBatch(_)));
+        assert!(failure.sql_failure().is_none());
+        assert!(failure.conv_overflow_digits().is_none());
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let mut oversized = Vec::with_capacity(16 * 1024);
+    oversized.push(b'1');
+    let failure = worker
+        .eval_args_reported(EvaluatedArgs::ConvReady {
+            number: ReadyBytesArg::Value(Some(oversized)),
+            from_base: ReadyIntArg::Value(Some(10)),
+            to_base: ReadyIntArg::Value(Some(16)),
+        })
+        .unwrap_err();
+    assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+    assert!(failure.sql_failure().is_none());
+    assert!(failure.conv_overflow_digits().is_none());
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases: [(ReadyBytesArg, ReadyIntArg, ReadyIntArg, Option<&[u8]>); 6] = [
+        (
+            ReadyBytesArg::Value(Some(b"-1".to_vec())),
+            ReadyIntArg::Value(Some(10)),
+            ReadyIntArg::Value(Some(16)),
+            Some(b"FFFFFFFFFFFFFFFF"),
+        ),
+        (
+            ReadyBytesArg::Value(Some(b"18446744073709551615".to_vec())),
+            ReadyIntArg::Value(Some(10)),
+            ReadyIntArg::Value(Some(-10)),
+            Some(b"-1"),
+        ),
+        (
+            ReadyBytesArg::Value(None),
+            ReadyIntArg::Value(Some(10)),
+            ReadyIntArg::Value(Some(16)),
+            None,
+        ),
+        (
+            ReadyBytesArg::Undemanded,
+            ReadyIntArg::Value(None),
+            ReadyIntArg::Undemanded,
+            None,
+        ),
+        (
+            ReadyBytesArg::Undemanded,
+            ReadyIntArg::Undemanded,
+            ReadyIntArg::Value(None),
+            None,
+        ),
+        (
+            ReadyBytesArg::Value(Some(b"10".to_vec())),
+            ReadyIntArg::Value(Some(1)),
+            ReadyIntArg::Value(Some(10)),
+            None,
+        ),
+    ];
+    for (index, (number, from_base, to_base, expected)) in cases.into_iter().enumerate() {
+        let args = EvaluatedArgs::ConvReady {
+            number,
+            from_base,
+            to_base,
+        };
+        let ComputedValue::Bytes(value) = worker.eval_args_reported(args).unwrap() else {
+            panic!("native CONV returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let failure = worker
+        .eval_args_reported(EvaluatedArgs::ConvReady {
+            number: ReadyBytesArg::Value(Some(b"  -18446744073709551616tail ".to_vec())),
+            from_base: ReadyIntArg::Value(Some(10)),
+            to_base: ReadyIntArg::Value(Some(16)),
+        })
+        .unwrap_err();
+    assert_eq!(failure.operation(), Some(EvaluatedBytesOp::ConvNative));
+    assert!(matches!(
+        failure.sql_failure(),
+        Some(EvaluatedSqlFailureKind::ConvUnsignedOverflow)
+    ));
+    assert_eq!(failure.conv_overflow_digits(), Some("18446744073709551616"));
+    let LocalError::Evaluation(error) = failure.error() else {
+        panic!("native CONV overflow lost its primary evaluation error");
+    };
+    let ErrorInner::Evaluate(cause) = error.0.as_ref() else {
+        panic!("native CONV overflow lost its typed evaluation cause");
+    };
+    assert_eq!(cause.code(), 1690);
+    let EvaluateError::ConvUnsignedOverflow { digits, source } = cause else {
+        panic!("native CONV overflow lost its typed digits");
+    };
+    assert_eq!(digits, "18446744073709551616");
+    assert_eq!(source.code(), 10000);
+    let EvaluateError::Caused(source) = source.as_ref() else {
+        panic!("native CONV overflow lost its parse cause");
+    };
+    assert!(source.downcast_ref::<ParseIntError>().is_some());
+    let primary = failure.error().to_string();
+    assert_eq!(failure.into_error().to_string(), primary);
+    assert_eq!(worker.kernel_invocations(), 7);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let ComputedValue::Bytes(value) = worker
+        .eval_args_reported(EvaluatedArgs::ConvReady {
+            number: ReadyBytesArg::Value(Some(b"0".to_vec())),
+            from_base: ReadyIntArg::Value(Some(10)),
+            to_base: ReadyIntArg::Value(Some(16)),
+        })
+        .unwrap()
+    else {
+        panic!("reused native CONV returned a non-Bytes value");
+    };
+    assert_eq!(value.value(), Some(b"0".as_slice()));
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(value.into_option(), Some(b"0".to_vec()));
+    assert_eq!(worker.kernel_invocations(), 8);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+}
+
+#[test]
+fn local_evaluated_args_conv_binary_literal_keeps_full_payload_and_first_stage() {
+    use std::num::ParseIntError;
+
+    use tidb_query_common::error::{ErrorInner, EvaluateError};
+
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::ConvBinaryLiteralNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(
+        worker.operation(),
+        EvaluatedBytesOp::ConvBinaryLiteralNative
+    );
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    let cases: &[(&[u8], i64, i64, &[u8])] = &[
+        (b"\0\0\xff", 16, 10, b"255"),
+        (b"", 10, 16, b"0"),
+        (b"\0\0\0\0\0\0\0\0\x01", 2, 16, b"1"),
+    ];
+    for (index, &(number, from_base, to_base, expected)) in cases.iter().enumerate() {
+        let args = EvaluatedArgs::ConvReady {
+            number: ReadyBytesArg::Value(Some(number.to_vec())),
+            from_base: ReadyIntArg::Value(Some(from_base)),
+            to_base: ReadyIntArg::Value(Some(to_base)),
+        };
+        let ComputedValue::Bytes(value) = worker.eval_args_reported(args).unwrap() else {
+            panic!("binary-literal CONV returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), Some(expected));
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), Some(expected.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    // Stage one strips leading zero bits, but never narrows the nine-byte input.
+    let stage_one_digits = concat!(
+        "1", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000", "00000000",
+        "00000000",
+    );
+    let failure = worker
+        .eval_args_reported(EvaluatedArgs::ConvReady {
+            number: ReadyBytesArg::Value(Some(b"\x01\0\0\0\0\0\0\0\0".to_vec())),
+            from_base: ReadyIntArg::Value(Some(10)),
+            // Invalid final radix must not bypass the first-stage overflow.
+            to_base: ReadyIntArg::Value(Some(1)),
+        })
+        .unwrap_err();
+    assert_eq!(
+        failure.operation(),
+        Some(EvaluatedBytesOp::ConvBinaryLiteralNative)
+    );
+    assert!(matches!(
+        failure.sql_failure(),
+        Some(EvaluatedSqlFailureKind::ConvUnsignedOverflow)
+    ));
+    assert_eq!(failure.conv_overflow_digits(), Some(stage_one_digits));
+    let LocalError::Evaluation(error) = failure.error() else {
+        panic!("binary-literal CONV overflow lost its evaluation error");
+    };
+    let ErrorInner::Evaluate(cause) = error.0.as_ref() else {
+        panic!("binary-literal CONV overflow lost its typed cause");
+    };
+    assert_eq!(cause.code(), 1690);
+    let EvaluateError::ConvUnsignedOverflow { digits, source } = cause else {
+        panic!("binary-literal CONV overflow lost its first-stage digits");
+    };
+    assert_eq!(digits, stage_one_digits);
+    assert_eq!(source.code(), 10000);
+    let EvaluateError::Caused(source) = source.as_ref() else {
+        panic!("binary-literal CONV overflow lost its parse cause");
+    };
+    assert!(source.downcast_ref::<ParseIntError>().is_some());
+    assert_eq!(worker.kernel_invocations(), 4);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let ComputedValue::Bytes(value) = worker
+        .eval_args_reported(EvaluatedArgs::ConvReady {
+            number: ReadyBytesArg::Value(None),
+            from_base: ReadyIntArg::Value(Some(10)),
+            to_base: ReadyIntArg::Value(Some(16)),
+        })
+        .unwrap()
+    else {
+        panic!("nullable binary-literal CONV returned a non-Bytes value");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(worker.kernel_invocations(), 5);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+}

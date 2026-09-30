@@ -28,6 +28,15 @@ pub enum EvaluateError {
         source: Box<EvaluateError>,
     },
 
+    /// Explicit private-CONV positive integer parse overflow, retaining its
+    /// cause.
+    #[error("BIGINT UNSIGNED value is out of range in '{digits}'")]
+    ConvUnsignedOverflow {
+        digits: String,
+        #[source]
+        source: Box<EvaluateError>,
+    },
+
     /// An explicitly retained cause; legacy boxed-error conversion stays lossy.
     #[error("{0}")]
     Caused(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -41,6 +50,7 @@ impl EvaluateError {
             EvaluateError::DeadlineExceeded => 9007,
             EvaluateError::Custom { code, .. } => *code,
             EvaluateError::AbsSignedOverflow { source } => source.code(),
+            EvaluateError::ConvUnsignedOverflow { .. } => 1690,
             EvaluateError::Other(_) | EvaluateError::Caused(_) => 10000,
         }
     }
@@ -92,7 +102,9 @@ impl ErrorCodeExt for EvaluateError {
             EvaluateError::InvalidCharacterString { .. } => {
                 error_code::coprocessor::INVALID_CHARACTER_STRING
             }
-            EvaluateError::Custom { .. } => error_code::coprocessor::EVAL,
+            EvaluateError::Custom { .. } | EvaluateError::ConvUnsignedOverflow { .. } => {
+                error_code::coprocessor::EVAL
+            }
             EvaluateError::AbsSignedOverflow { source } => source.error_code(),
             EvaluateError::Other(_) | EvaluateError::Caused(_) => error_code::UNKNOWN,
         }

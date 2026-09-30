@@ -30,8 +30,8 @@ use super::{
 use crate::{
     RpnExpressionNode, RpnStackNode, RpnStackNodeVectorValue,
     impl_string::{
-        ConcatKind, FieldKind, PreparedConcatArgs, PreparedExportSetArgs, PreparedFieldArgs,
-        PreparedFindInSetKeys, PreparedMakeSetArgs,
+        ConcatKind, FieldKind, PreparedCharArgs, PreparedConcatArgs, PreparedExportSetArgs,
+        PreparedFieldArgs, PreparedFindInSetKeys, PreparedMakeSetArgs,
     },
     types::expr_eval::{EvalInput, EvaluatedAsciiWitness, FrameResult, evaluated_bytes_shape},
 };
@@ -887,6 +887,10 @@ pub enum EvaluatedBytesOp {
     RoundRealLegacy,
     RoundDecimalLegacy,
     MathNullWitnessNative,
+    CharNative,
+    ConvNative,
+    ConvBinaryLiteralNative,
+    ConvLegacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -923,6 +927,9 @@ pub(crate) enum EvaluatedArgsRole {
     Ieee754Int,
     Int128,
     NullWitness,
+    CharReady,
+    ConvNative,
+    ConvLegacy,
 }
 
 impl EvaluatedBytesOp {
@@ -1217,7 +1224,9 @@ impl EvaluatedBytesOp {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AbsRealNative);
             }
             Self::AbsDecimalNative => {
-                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AbsDecimalNative);
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AbsDecimalNative,
+                );
             }
             Self::CeilIntNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::CeilIntNative);
@@ -1300,6 +1309,20 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::MathNullWitnessNative,
                 );
             }
+            Self::CharNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::CharNative);
+            }
+            Self::ConvNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ConvNative);
+            }
+            Self::ConvBinaryLiteralNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ConvBinaryLiteralNative,
+                );
+            }
+            Self::ConvLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ConvLegacy);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1330,6 +1353,9 @@ impl EvaluatedBytesOp {
             Self::RoundRealNative | Self::TruncateRealNative => EvaluatedArgsRole::Ieee754Int,
             Self::RoundInt128Legacy => EvaluatedArgsRole::Int128,
             Self::MathNullWitnessNative => EvaluatedArgsRole::NullWitness,
+            Self::CharNative => EvaluatedArgsRole::CharReady,
+            Self::ConvNative | Self::ConvBinaryLiteralNative => EvaluatedArgsRole::ConvNative,
+            Self::ConvLegacy => EvaluatedArgsRole::ConvLegacy,
             Self::AbsRealNative
             | Self::CeilRealNative
             | Self::FloorRealNative
@@ -1522,6 +1548,10 @@ impl EvaluatedBytesOp {
             Self::RoundRealLegacy => crate::impl_math::round_real_legacy_fn_meta(),
             Self::RoundDecimalLegacy => crate::impl_math::round_decimal_legacy_fn_meta(),
             Self::MathNullWitnessNative => crate::impl_math::math_null_witness_native_fn_meta(),
+            Self::CharNative => crate::impl_string::char_native_fn_meta(),
+            Self::ConvNative => crate::impl_math::conv_native_fn_meta(),
+            Self::ConvBinaryLiteralNative => crate::impl_math::conv_binary_literal_native_fn_meta(),
+            Self::ConvLegacy => crate::impl_math::conv_legacy_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1761,7 +1791,11 @@ impl EvaluatedBytesOp {
             | Self::TruncateRealNative
             | Self::RoundRealLegacy
             | Self::RoundDecimalLegacy
-            | Self::RoundInt128Legacy => EvalType::Bytes,
+            | Self::RoundInt128Legacy
+            | Self::CharNative
+            | Self::ConvNative
+            | Self::ConvBinaryLiteralNative
+            | Self::ConvLegacy => EvalType::Bytes,
         }
     }
 
@@ -1785,6 +1819,11 @@ impl EvaluatedBytesOp {
             | Self::FieldRealNative
             | Self::MakeSetNative => &[EvalType::Bytes],
             Self::ExportSetNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
+            Self::CharNative => &[EvalType::Bytes],
+            Self::ConvNative | Self::ConvBinaryLiteralNative => {
+                &[EvalType::Bytes, EvalType::Int, EvalType::Int]
+            }
+            Self::ConvLegacy => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative
             | Self::CeilIntNative
@@ -1996,6 +2035,15 @@ pub enum ReadyIntArg {
     Undemanded,
 }
 
+/// Legacy CONV retains the complete folded integer domain. A base outside
+/// i64 is a non-NULL value; only that validated from-base exit, or an earlier
+/// actual NULL, authorizes skipping a later base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadyConvBaseArg {
+    Value(Option<i128>),
+    Undemanded,
+}
+
 /// A Decimal demand marker. Undemanded requires an actual NULL scale;
 /// it never substitutes for an evaluated SQL NULL numeric operand.
 #[derive(Debug)]
@@ -2086,6 +2134,17 @@ pub enum EvaluatedArgs {
     Int128(Option<i128>),
     /// Witness of some actually observed SQL NULL, not a claimed numeric value.
     NullWitness(Option<i64>),
+    CharReady(PreparedCharArgs),
+    ConvReady {
+        number: ReadyBytesArg,
+        from_base: ReadyIntArg,
+        to_base: ReadyIntArg,
+    },
+    ConvLegacyReady {
+        number: ReadyBytesArg,
+        from_base: ReadyConvBaseArg,
+        to_base: ReadyConvBaseArg,
+    },
     Bytes(Option<Vec<u8>>),
     Bytes2(Option<Vec<u8>>, Option<Vec<u8>>),
     Int(Option<i64>),
@@ -2191,6 +2250,9 @@ impl EvaluatedArgs {
             Self::Ieee754BitsInt { .. } => EvaluatedArgsRole::Ieee754Int,
             Self::Int128(_) => EvaluatedArgsRole::Int128,
             Self::NullWitness(_) => EvaluatedArgsRole::NullWitness,
+            Self::CharReady(_) => EvaluatedArgsRole::CharReady,
+            Self::ConvReady { .. } => EvaluatedArgsRole::ConvNative,
+            Self::ConvLegacyReady { .. } => EvaluatedArgsRole::ConvLegacy,
             Self::ConcatReady(_) => EvaluatedArgsRole::ConcatPacked,
             Self::FieldReady(_) => EvaluatedArgsRole::FieldPacked,
             Self::MakeSetReady(_) => EvaluatedArgsRole::MakeSetPacked,
@@ -2228,6 +2290,9 @@ impl EvaluatedArgs {
             Self::Ieee754BitsInt { .. } => &[EvalType::Bytes, EvalType::Int],
             Self::Int128(_) => &[EvalType::Bytes],
             Self::NullWitness(_) => &[EvalType::Int],
+            Self::CharReady(_) => &[EvalType::Bytes],
+            Self::ConvReady { .. } => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
+            Self::ConvLegacyReady { .. } => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::ConcatReady(_) | Self::FieldReady(_) | Self::MakeSetReady(_) => {
                 &[EvalType::Bytes]
             }
@@ -2278,6 +2343,54 @@ impl EvaluatedArgs {
         match self {
             Self::NullWitness(value) => {
                 operation == EvaluatedBytesOp::MathNullWitnessNative && value.is_none()
+            }
+            Self::ConvReady {
+                number,
+                from_base,
+                to_base,
+            } => {
+                // Native CONV checks base NULLs before coercing its number.
+                // A NULL number does not authorize skipping either base.
+                let base_null = matches!(from_base, ReadyIntArg::Value(None))
+                    || matches!(to_base, ReadyIntArg::Value(None));
+                let demanded = base_null
+                    || (matches!(number, ReadyBytesArg::Value(_))
+                        && matches!(from_base, ReadyIntArg::Value(_))
+                        && matches!(to_base, ReadyIntArg::Value(_)));
+                let text_valid = operation != EvaluatedBytesOp::ConvNative
+                    || match number {
+                        ReadyBytesArg::Value(Some(bytes)) => std::str::from_utf8(bytes).is_ok(),
+                        _ => true,
+                    };
+                demanded && text_valid
+            }
+            Self::ConvLegacyReady {
+                number,
+                from_base,
+                to_base,
+            } => {
+                // Retain the actual demand prefix, not a fabricated NULL base.
+                // Only representability is examined here, never the radix or
+                // unchecked source arithmetic (including i64::MIN negation).
+                match number {
+                    ReadyBytesArg::Undemanded => false,
+                    ReadyBytesArg::Value(None) => {
+                        matches!(from_base, ReadyConvBaseArg::Undemanded)
+                            && matches!(to_base, ReadyConvBaseArg::Undemanded)
+                    }
+                    ReadyBytesArg::Value(Some(_)) => match from_base {
+                        ReadyConvBaseArg::Undemanded => false,
+                        ReadyConvBaseArg::Value(None) => {
+                            matches!(to_base, ReadyConvBaseArg::Undemanded)
+                        }
+                        ReadyConvBaseArg::Value(Some(from)) if i64::try_from(*from).is_err() => {
+                            matches!(to_base, ReadyConvBaseArg::Undemanded)
+                        }
+                        ReadyConvBaseArg::Value(Some(_)) => {
+                            matches!(to_base, ReadyConvBaseArg::Value(_))
+                        }
+                    },
+                }
             }
             Self::DecimalIntReady { value, scale } => {
                 (!matches!(value, ReadyDecimalArg::Undemanded)
@@ -2490,6 +2603,41 @@ impl EvaluatedArgs {
                 1,
             ),
             Self::NullWitness(value) => ([Int(value), Int(None), Int(None), Int(None)], 1),
+            Self::CharReady(args) => (
+                [
+                    Bytes(Some(args.into_encoded())),
+                    Int(None),
+                    Int(None),
+                    Int(None),
+                ],
+                1,
+            ),
+            Self::ConvReady {
+                number,
+                from_base,
+                to_base,
+            } => (
+                [
+                    Self::ready_bytes_value(number),
+                    Self::ready_int_value(from_base),
+                    Self::ready_int_value(to_base),
+                    Int(None),
+                ],
+                3,
+            ),
+            Self::ConvLegacyReady {
+                number,
+                from_base,
+                to_base,
+            } => (
+                [
+                    Self::ready_bytes_value(number),
+                    Self::conv_base_value(from_base)?,
+                    Self::conv_base_value(to_base)?,
+                    Int(None),
+                ],
+                3,
+            ),
             Self::FieldReady(args) => (
                 [
                     Bytes(Some(args.into_encoded())),
@@ -2761,6 +2909,14 @@ impl EvaluatedArgs {
         })
     }
 
+    fn conv_base_value(arg: ReadyConvBaseArg) -> LocalResult<ScalarValue> {
+        // Share only the canonical LE16 transport, never SUBSTRING semantics.
+        Self::substring_i128_value(match arg {
+            ReadyConvBaseArg::Value(value) => ReadySubstringI128::Value(value),
+            ReadyConvBaseArg::Undemanded => ReadySubstringI128::Undemanded,
+        })
+    }
+
     fn substring_i128_value(arg: ReadySubstringI128) -> LocalResult<ScalarValue> {
         let value = match arg {
             ReadySubstringI128::Value(value) => value,
@@ -2928,11 +3084,12 @@ impl ComputedInt128 {
     }
 }
 
-/// Only a semantic cause returned by the exact sealed ABS invocation can
+/// Only a semantic cause returned by the matching sealed invocation can
 /// authorize this view. Neither numeric error codes nor messages classify it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EvaluatedSqlFailureKind {
     AbsSignedOverflow,
+    ConvUnsignedOverflow,
 }
 
 /// Fresh owned failure-only observation for one ready-value invocation.
@@ -2963,6 +3120,23 @@ impl ReportedEvaluatedFailure {
     }
     pub fn sql_failure(&self) -> Option<EvaluatedSqlFailureKind> {
         self.sql_failure
+    }
+    /// Borrow the actual failing conversion stage's sign-stripped digits.
+    /// They live in the original typed cause; no input reparse or prediction
+    /// is performed, and unreported or unrelated failures expose no payload.
+    pub fn conv_overflow_digits(&self) -> Option<&str> {
+        if self.sql_failure != Some(EvaluatedSqlFailureKind::ConvUnsignedOverflow) {
+            return None;
+        }
+        match &self.error {
+            LocalError::Evaluation(error) => match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::ConvUnsignedOverflow { digits, .. }) => {
+                    Some(digits.as_str())
+                }
+                _ => None,
+            },
+            _ => None,
+        }
     }
 }
 
@@ -3349,9 +3523,9 @@ impl EvaluatedBytesWorker {
             .map_err(ReportedEvaluatedFailure::into_error)
     }
 
-    /// The same single evaluation with a narrow, owned ABS failure receipt.
-    /// Preparation, resource and output failures remain the original
-    /// LocalError.
+    /// The same single evaluation with a narrow, owned ABS/CONV failure
+    /// receipt. Preparation, resource and output failures remain the
+    /// original LocalError.
     pub fn eval_args_reported(
         &mut self,
         args: EvaluatedArgs,
@@ -3448,28 +3622,43 @@ impl EvaluatedBytesWorker {
         self.state.row = [0];
         let mut budget = EvalBudget::exact(self.state.limits)?;
         let calls_before = self.witness.invocations();
-        let result = self.program.expression.eval_with_ready_args(
-            self.operation,
-            &mut self.ctx,
-            &self.program.schema,
-            &ready[..arity],
-            self.operation.input_role(),
-            &self.state.row,
-            &mut self.witness,
-            &mut budget,
-        ).map_err(|error| {
-            // This exact closed recipe has one canonical generated wrapper.
-            // Capture only its just-returned typed failure, not a later output
-            // or cleanup failure, an input error, or an overflow-looking code.
-            if self.operation == EvaluatedBytesOp::AbsIntNative
-                && calls_before.checked_add(1) == Some(self.witness.invocations())
-                && matches!(&error, LocalError::Evaluation(error)
-                    if matches!(error.0.as_ref(), ErrorInner::Evaluate(EvaluateError::AbsSignedOverflow { .. })))
-            {
-                *sql_failure = Some(EvaluatedSqlFailureKind::AbsSignedOverflow);
-            }
-            error
-        })?;
+        let result = self
+            .program
+            .expression
+            .eval_with_ready_args(
+                self.operation,
+                &mut self.ctx,
+                &self.program.schema,
+                &ready[..arity],
+                self.operation.input_role(),
+                &self.state.row,
+                &mut self.witness,
+                &mut budget,
+            )
+            .map_err(|error| {
+                // This exact closed recipe has one canonical generated wrapper.
+                // Capture only its just-returned typed failure, not a later output
+                // or cleanup failure, an input error, or an overflow-looking code.
+                if calls_before.checked_add(1) == Some(self.witness.invocations()) {
+                    if let LocalError::Evaluation(cause) = &error {
+                        *sql_failure = match (self.operation, cause.0.as_ref()) {
+                            (
+                                EvaluatedBytesOp::AbsIntNative,
+                                ErrorInner::Evaluate(EvaluateError::AbsSignedOverflow { .. }),
+                            ) => Some(EvaluatedSqlFailureKind::AbsSignedOverflow),
+                            (
+                                EvaluatedBytesOp::ConvNative
+                                | EvaluatedBytesOp::ConvBinaryLiteralNative,
+                                ErrorInner::Evaluate(EvaluateError::ConvUnsignedOverflow {
+                                    ..
+                                }),
+                            ) => Some(EvaluatedSqlFailureKind::ConvUnsignedOverflow),
+                            _ => None,
+                        };
+                    }
+                }
+                error
+            })?;
         let output = match result {
             RpnStackNode::Vector {
                 value: RpnStackNodeVectorValue::Generated { physical_value },
