@@ -28,7 +28,10 @@ use super::{
 };
 use crate::{
     RpnExpressionNode, RpnStackNode, RpnStackNodeVectorValue,
-    impl_string::{ConcatKind, PreparedConcatArgs, PreparedFindInSetKeys},
+    impl_string::{
+        ConcatKind, FieldKind, PreparedConcatArgs, PreparedExportSetArgs, PreparedFieldArgs,
+        PreparedFindInSetKeys, PreparedMakeSetArgs,
+    },
     types::expr_eval::{EvalInput, EvaluatedAsciiWitness, FrameResult, evaluated_bytes_shape},
 };
 
@@ -855,6 +858,11 @@ pub enum EvaluatedBytesOp {
     ConcatNative,
     ConcatWsNative,
     EltNative,
+    FieldBytesNative,
+    FieldIntNative,
+    FieldRealNative,
+    MakeSetNative,
+    ExportSetNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -883,6 +891,9 @@ pub(crate) enum EvaluatedArgsRole {
     FindInSetPrepared,
     ConcatPacked,
     EltReady,
+    FieldPacked,
+    MakeSetPacked,
+    ExportSetPacked,
 }
 
 impl EvaluatedBytesOp {
@@ -1150,6 +1161,23 @@ impl EvaluatedBytesOp {
             Self::EltNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::EltNative);
             }
+            Self::FieldBytesNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FieldBytesNative,
+                );
+            }
+            Self::FieldIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::FieldIntNative);
+            }
+            Self::FieldRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::FieldRealNative);
+            }
+            Self::MakeSetNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::MakeSetNative);
+            }
+            Self::ExportSetNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ExportSetNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1167,6 +1195,11 @@ impl EvaluatedBytesOp {
         match self {
             Self::ConcatNative | Self::ConcatWsNative => EvaluatedArgsRole::ConcatPacked,
             Self::EltNative => EvaluatedArgsRole::EltReady,
+            Self::FieldBytesNative | Self::FieldIntNative | Self::FieldRealNative => {
+                EvaluatedArgsRole::FieldPacked
+            }
+            Self::MakeSetNative => EvaluatedArgsRole::MakeSetPacked,
+            Self::ExportSetNative => EvaluatedArgsRole::ExportSetPacked,
             Self::StrcmpNative | Self::FindInSetNative => EvaluatedArgsRole::CollatedBytes2,
             Self::Locate2Native | Self::Locate3Native => EvaluatedArgsRole::NativeSearch,
             Self::FindInSetPreparedNative => EvaluatedArgsRole::FindInSetPrepared,
@@ -1216,6 +1249,15 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn is_insert(self) -> bool {
         matches!(self, Self::Insert | Self::InsertUtf8Native)
+    }
+
+    pub(crate) fn field_kind(self) -> Option<FieldKind> {
+        match self {
+            Self::FieldBytesNative => Some(FieldKind::Bytes),
+            Self::FieldIntNative => Some(FieldKind::Int),
+            Self::FieldRealNative => Some(FieldKind::Real),
+            _ => None,
+        }
     }
 
     pub(crate) fn concat_kind(self) -> Option<ConcatKind> {
@@ -1307,6 +1349,11 @@ impl EvaluatedBytesOp {
             Self::ConcatNative => crate::impl_string::concat_native_fn_meta(),
             Self::ConcatWsNative => crate::impl_string::concat_ws_native_fn_meta(),
             Self::EltNative => crate::impl_string::elt_native_fn_meta(),
+            Self::FieldBytesNative => crate::impl_string::field_bytes_native_fn_meta(),
+            Self::FieldIntNative => crate::impl_string::field_int_native_fn_meta(),
+            Self::FieldRealNative => crate::impl_string::field_real_native_fn_meta(),
+            Self::MakeSetNative => crate::impl_string::make_set_native_fn_meta(),
+            Self::ExportSetNative => crate::impl_string::export_set_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1453,7 +1500,10 @@ impl EvaluatedBytesOp {
             | Self::Locate3BytesExtNative
             | Self::Locate3Utf8ExtNative
             | Self::FindInSetNative
-            | Self::FindInSetPreparedNative => EvalType::Int,
+            | Self::FindInSetPreparedNative
+            | Self::FieldBytesNative
+            | Self::FieldIntNative
+            | Self::FieldRealNative => EvalType::Int,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -1518,7 +1568,9 @@ impl EvaluatedBytesOp {
             | Self::OctStringNative
             | Self::ConcatNative
             | Self::ConcatWsNative
-            | Self::EltNative => EvalType::Bytes,
+            | Self::EltNative
+            | Self::MakeSetNative
+            | Self::ExportSetNative => EvalType::Bytes,
         }
     }
 
@@ -1536,6 +1588,11 @@ impl EvaluatedBytesOp {
             Self::OctInt => &[EvalType::Int],
             Self::OctStringNative | Self::ConcatNative | Self::ConcatWsNative => &[EvalType::Bytes],
             Self::EltNative => &[EvalType::Int, EvalType::Int, EvalType::Bytes],
+            Self::FieldBytesNative
+            | Self::FieldIntNative
+            | Self::FieldRealNative
+            | Self::MakeSetNative => &[EvalType::Bytes],
+            Self::ExportSetNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
             Self::StrcmpNative
             | Self::Locate2Native
             | Self::Locate3BytesExtNative
@@ -1874,6 +1931,9 @@ pub enum EvaluatedArgs {
         collation: NativeCollation,
     },
     ConcatReady(PreparedConcatArgs),
+    FieldReady(PreparedFieldArgs),
+    MakeSetReady(PreparedMakeSetArgs),
+    ExportSetReady(PreparedExportSetArgs),
     EltReady {
         index: Option<i64>,
         total_sql_arity: usize,
@@ -1885,6 +1945,9 @@ impl EvaluatedArgs {
     fn role(&self) -> EvaluatedArgsRole {
         match self {
             Self::ConcatReady(_) => EvaluatedArgsRole::ConcatPacked,
+            Self::FieldReady(_) => EvaluatedArgsRole::FieldPacked,
+            Self::MakeSetReady(_) => EvaluatedArgsRole::MakeSetPacked,
+            Self::ExportSetReady(_) => EvaluatedArgsRole::ExportSetPacked,
             Self::EltReady { .. } => EvaluatedArgsRole::EltReady,
             Self::CollatedBytes2 { .. } => EvaluatedArgsRole::CollatedBytes2,
             Self::SearchBytes2 { .. } | Self::SearchBytes2IntReady { .. } => {
@@ -1913,7 +1976,10 @@ impl EvaluatedArgs {
     fn input_types(&self) -> &'static [EvalType] {
         match self {
             Self::NoArgs => &[],
-            Self::ConcatReady(_) => &[EvalType::Bytes],
+            Self::ConcatReady(_) | Self::FieldReady(_) | Self::MakeSetReady(_) => {
+                &[EvalType::Bytes]
+            }
+            Self::ExportSetReady(_) => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
             Self::EltReady { .. } => &[EvalType::Int, EvalType::Int, EvalType::Bytes],
             Self::CollatedBytes2 { .. }
             | Self::SearchBytes2 { .. }
@@ -1960,6 +2026,9 @@ impl EvaluatedArgs {
         match self {
             Self::Bytes(bytes) => operation.ready_bytes_match(bytes.as_deref()),
             Self::ConcatReady(args) => operation.concat_kind() == Some(args.kind()),
+            Self::FieldReady(args) => operation.field_kind() == Some(args.kind()),
+            Self::MakeSetReady(_) => operation == EvaluatedBytesOp::MakeSetNative,
+            Self::ExportSetReady(_) => operation == EvaluatedBytesOp::ExportSetNative,
             Self::EltReady {
                 index,
                 total_sql_arity,
@@ -2093,6 +2162,28 @@ impl EvaluatedArgs {
         use ScalarValue::{Bytes, Int};
         Ok(match self {
             Self::NoArgs => ([Int(None), Int(None), Int(None), Int(None)], 0),
+            Self::FieldReady(args) => (
+                [
+                    Bytes(Some(args.into_encoded())),
+                    Int(None),
+                    Int(None),
+                    Int(None),
+                ],
+                1,
+            ),
+            Self::MakeSetReady(args) => (
+                [
+                    Bytes(Some(args.into_encoded())),
+                    Int(None),
+                    Int(None),
+                    Int(None),
+                ],
+                1,
+            ),
+            Self::ExportSetReady(args) => {
+                let (encoded, bits, count) = args.into_parts();
+                ([Bytes(Some(encoded)), Int(bits), Int(count), Int(None)], 3)
+            }
             Self::ConcatReady(args) => (
                 [
                     Bytes(Some(args.into_encoded())),

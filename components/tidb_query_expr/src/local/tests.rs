@@ -4352,3 +4352,526 @@ fn local_evaluated_args_elt_uses_sql_offsets_and_full_arity() {
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
 }
+
+#[test]
+fn local_evaluated_args_field_bytes_preserves_collation_and_prefix_ordinals() {
+    use tidb_query_datatype::{
+        Collation,
+        builder::FieldTypeBuilder,
+        codec::data_type::{Bytes, Int},
+    };
+
+    let wire = crate::test_util::RpnFnScalarEvaluator::new()
+        .return_field_type(
+            FieldTypeBuilder::new()
+                .tp(FieldTypeTp::LongLong)
+                .collation(Collation::Utf8Mb4GeneralCi)
+                .build(),
+        )
+        .push_param(Some(b"A".to_vec()))
+        .push_param(None::<Bytes>)
+        .push_param(Some(b"a ".to_vec()))
+        .evaluate::<Int>(ScalarFuncSig::FieldString)
+        .unwrap();
+    assert_eq!(wire, Some(2));
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::FieldBytesNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::FieldBytesNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(field_bytes_equal(b"A", b"a ", NativeCollation::Utf8Mb4GeneralCi).unwrap());
+    assert!(!field_bytes_equal(b"a", b"a ", NativeCollation::Binary).unwrap());
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    for (total, prefix, terminal) in [
+        (
+            3,
+            vec![Some(b"a".to_vec()), Some(b"a".to_vec())],
+            FieldTerminal::Matched,
+        ),
+        (2, vec![Some(b"a".to_vec())], FieldTerminal::Exhausted),
+    ] {
+        assert!(matches!(
+            prepare_field_bytes_args(
+                total,
+                ReadyBytesArg::Value(Some(b"a".to_vec())),
+                prefix,
+                terminal,
+                NativeCollation::Binary,
+                usize::MAX,
+            ),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    assert!(matches!(
+        prepare_field_bytes_args(
+            2,
+            ReadyBytesArg::Value(Some(b"a".to_vec())),
+            vec![Some(b"a".to_vec())],
+            FieldTerminal::Matched,
+            NativeCollation::Binary,
+            0,
+        ),
+        Err(LocalError::ResourceLimit(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases = [
+        (
+            5,
+            ReadyBytesArg::Value(Some(b"A".to_vec())),
+            vec![None, Some(b"a ".to_vec())],
+            FieldTerminal::Matched,
+            Some(2),
+        ),
+        (
+            3,
+            ReadyBytesArg::Value(None),
+            vec![],
+            FieldTerminal::NeedleNull,
+            Some(0),
+        ),
+        (
+            3,
+            ReadyBytesArg::Undemanded,
+            vec![None, None],
+            FieldTerminal::Exhausted,
+            Some(0),
+        ),
+        (
+            1,
+            ReadyBytesArg::Undemanded,
+            vec![],
+            FieldTerminal::Exhausted,
+            Some(0),
+        ),
+    ];
+    for (index, (total, needle, prefix, terminal, expected)) in cases.into_iter().enumerate() {
+        let prepared = prepare_field_bytes_args(
+            total,
+            needle,
+            prefix,
+            terminal,
+            NativeCollation::Utf8Mb4GeneralCi,
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.kernel_invocations(), index as u64);
+        let ComputedValue::Int(value) = worker
+            .eval_args(EvaluatedArgs::FieldReady(prepared))
+            .unwrap()
+        else {
+            panic!("FIELD bytes returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_field_numeric_preserves_signedness_and_ieee_equality() {
+    let high = 1_u64 << 63;
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::FieldIntNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::FieldIntNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (left, right, expected) in [
+        (
+            FieldIntValue {
+                bits: high,
+                unsigned: false,
+            },
+            FieldIntValue {
+                bits: high,
+                unsigned: true,
+            },
+            false,
+        ),
+        (
+            FieldIntValue {
+                bits: 7,
+                unsigned: false,
+            },
+            FieldIntValue {
+                bits: 7,
+                unsigned: true,
+            },
+            true,
+        ),
+    ] {
+        assert_eq!(field_int_equal(left, right), expected);
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    assert!(matches!(
+        prepare_field_int_args(
+            2,
+            ReadyFieldIntArg::Undemanded,
+            vec![Some(FieldIntValue {
+                bits: 7,
+                unsigned: false
+            })],
+            FieldTerminal::Exhausted,
+            usize::MAX,
+        ),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases = [
+        (
+            5,
+            ReadyFieldIntArg::Value(Some(FieldIntValue {
+                bits: high,
+                unsigned: true,
+            })),
+            vec![
+                Some(FieldIntValue {
+                    bits: high,
+                    unsigned: false,
+                }),
+                None,
+                Some(FieldIntValue {
+                    bits: high,
+                    unsigned: true,
+                }),
+            ],
+            FieldTerminal::Matched,
+            Some(3),
+        ),
+        (
+            3,
+            ReadyFieldIntArg::Undemanded,
+            vec![None, None],
+            FieldTerminal::Exhausted,
+            Some(0),
+        ),
+    ];
+    for (index, (total, needle, prefix, terminal, expected)) in cases.into_iter().enumerate() {
+        let prepared = prepare_field_int_args(total, needle, prefix, terminal, usize::MAX).unwrap();
+        assert_eq!(worker.kernel_invocations(), index as u64);
+        let ComputedValue::Int(value) = worker
+            .eval_args(EvaluatedArgs::FieldReady(prepared))
+            .unwrap()
+        else {
+            panic!("FIELD int returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let nan = f64::NAN.to_bits();
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::FieldRealNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::FieldRealNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(!field_real_equal(nan, nan));
+    assert!(field_real_equal((-0.0_f64).to_bits(), 0.0_f64.to_bits()));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    assert!(matches!(
+        prepare_field_real_args(
+            2,
+            ReadyIeee754Arg::Undemanded,
+            vec![None],
+            FieldTerminal::Exhausted,
+            usize::MAX,
+        ),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases = [
+        (
+            2,
+            ReadyIeee754Arg::Value(Some(nan)),
+            vec![Some(nan)],
+            FieldTerminal::Exhausted,
+            Some(0),
+        ),
+        (
+            4,
+            ReadyIeee754Arg::Value(Some((-0.0_f64).to_bits())),
+            vec![None, Some(0.0_f64.to_bits())],
+            FieldTerminal::Matched,
+            Some(2),
+        ),
+        (
+            2,
+            ReadyIeee754Arg::Value(Some(1.0_f64.to_bits())),
+            vec![None],
+            FieldTerminal::Exhausted,
+            Some(0),
+        ),
+        (
+            2,
+            ReadyIeee754Arg::Value(None),
+            vec![],
+            FieldTerminal::NeedleNull,
+            Some(0),
+        ),
+    ];
+    for (index, (total, needle, prefix, terminal, expected)) in cases.into_iter().enumerate() {
+        let prepared =
+            prepare_field_real_args(total, needle, prefix, terminal, usize::MAX).unwrap();
+        assert_eq!(worker.kernel_invocations(), index as u64);
+        let ComputedValue::Int(value) = worker
+            .eval_args(EvaluatedArgs::FieldReady(prepared))
+            .unwrap()
+        else {
+            panic!("FIELD real returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_make_set_preserves_selection_and_shift_profile() {
+    use tidb_query_datatype::codec::data_type::Bytes;
+
+    let mut wire = crate::test_util::RpnFnScalarEvaluator::new()
+        .push_param(Some(1_i64))
+        .push_param(Some(b"first".to_vec()));
+    for _ in 1..64 {
+        wire = wire.push_param(None::<Bytes>);
+    }
+    let wire = wire
+        .push_param(Some(b"tail".to_vec()))
+        .evaluate::<Bytes>(ScalarFuncSig::MakeSet)
+        .unwrap();
+    assert_eq!(wire, Some(b"first".to_vec()));
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::MakeSetNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::MakeSetNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(!make_set_selected(0, 63));
+    assert!(make_set_selected(1_u64 << 63, 63));
+    // Compare only the active profile; neither panic nor wrapping is assumed.
+    for mask in [0_u64, 1_u64] {
+        let index = std::hint::black_box(64_usize);
+        let original = std::panic::catch_unwind(|| mask & (1_u64 << index) != 0);
+        let shared = std::panic::catch_unwind(|| make_set_selected(mask, index));
+        match (original, shared) {
+            (Ok(expected), Ok(actual)) => assert_eq!(actual, expected),
+            (Err(_), Err(_)) => {}
+            _ => panic!("MAKE_SET selector changed the active shift profile"),
+        }
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    for (mask, entries) in [
+        (1, vec![ReadyBytesArg::Undemanded]),
+        (0, vec![ReadyBytesArg::Value(None)]),
+    ] {
+        assert!(matches!(
+            prepare_make_set_args(Some(mask), 2, entries, usize::MAX),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let mut high_entries: Vec<_> = (0..63).map(|_| ReadyBytesArg::Undemanded).collect();
+    high_entries.push(ReadyBytesArg::Value(Some(b"high".to_vec())));
+    let cases: [(Option<u64>, usize, Vec<ReadyBytesArg>, Option<&[u8]>); 4] = [
+        (Some(0), 1, vec![], Some(b"")),
+        (None, 4, vec![], None),
+        (
+            Some(13),
+            5,
+            vec![
+                ReadyBytesArg::Value(Some(Vec::new())),
+                ReadyBytesArg::Undemanded,
+                ReadyBytesArg::Value(None),
+                ReadyBytesArg::Value(Some(b"b".to_vec())),
+            ],
+            Some(b",b"),
+        ),
+        (Some(1_u64 << 63), 65, high_entries, Some(b"high")),
+    ];
+    for (index, (mask, total, entries, expected)) in cases.into_iter().enumerate() {
+        let prepared = prepare_make_set_args(mask, total, entries, usize::MAX).unwrap();
+        assert_eq!(worker.kernel_invocations(), index as u64);
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::MakeSetReady(prepared))
+            .unwrap()
+        else {
+            panic!("MAKE_SET ready entries returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_export_set_preserves_defaults_clamps_and_null_witnesses() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::ExportSetNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::ExportSetNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(matches!(
+        prepare_export_set_args(
+            ReadyIntArg::Undemanded,
+            ReadyBytesArg::Value(Some(b"Y".to_vec())),
+            ReadyBytesArg::Value(Some(b"N".to_vec())),
+            None,
+            None,
+            usize::MAX,
+        ),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    assert!(matches!(
+        prepare_export_set_args(
+            ReadyIntArg::Value(Some(1)),
+            ReadyBytesArg::Value(Some(b"Y".to_vec())),
+            ReadyBytesArg::Value(Some(b"N".to_vec())),
+            None,
+            Some(ReadyIntArg::Value(Some(1))),
+            usize::MAX,
+        ),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases: [(
+        ReadyIntArg,
+        ReadyBytesArg,
+        ReadyBytesArg,
+        Option<ReadyBytesArg>,
+        Option<ReadyIntArg>,
+        Option<&[u8]>,
+    ); 7] = [
+        (
+            ReadyIntArg::Value(Some(0)),
+            ReadyBytesArg::Value(Some(Vec::new())),
+            ReadyBytesArg::Value(Some(Vec::new())),
+            None,
+            None,
+            Some(&[b','; 63]),
+        ),
+        (
+            ReadyIntArg::Value(Some(-1)),
+            ReadyBytesArg::Value(Some(Vec::new())),
+            ReadyBytesArg::Value(Some(b"x".to_vec())),
+            Some(ReadyBytesArg::Value(Some(Vec::new()))),
+            None,
+            Some(b"x"),
+        ),
+        (
+            ReadyIntArg::Value(Some(-1)),
+            ReadyBytesArg::Value(Some(Vec::new())),
+            ReadyBytesArg::Value(Some(b"x".to_vec())),
+            Some(ReadyBytesArg::Value(Some(Vec::new()))),
+            Some(ReadyIntArg::Value(Some(0))),
+            Some(b""),
+        ),
+        (
+            ReadyIntArg::Value(Some(-1)),
+            ReadyBytesArg::Value(Some(Vec::new())),
+            ReadyBytesArg::Value(Some(b"x".to_vec())),
+            Some(ReadyBytesArg::Value(Some(Vec::new()))),
+            Some(ReadyIntArg::Value(Some(65))),
+            Some(b"x"),
+        ),
+        (
+            ReadyIntArg::Value(Some(-1)),
+            ReadyBytesArg::Value(Some(Vec::new())),
+            ReadyBytesArg::Value(Some(b"x".to_vec())),
+            Some(ReadyBytesArg::Value(Some(Vec::new()))),
+            Some(ReadyIntArg::Value(Some(-1))),
+            Some(b"x"),
+        ),
+        (
+            ReadyIntArg::Undemanded,
+            ReadyBytesArg::Value(Some(b"Y".to_vec())),
+            ReadyBytesArg::Value(None),
+            None,
+            None,
+            None,
+        ),
+        (
+            ReadyIntArg::Undemanded,
+            ReadyBytesArg::Value(Some(b"Y".to_vec())),
+            ReadyBytesArg::Value(Some(b"N".to_vec())),
+            Some(ReadyBytesArg::Value(Some(b",".to_vec()))),
+            Some(ReadyIntArg::Value(None)),
+            None,
+        ),
+    ];
+    for (index, (bits, on, off, separator, count, expected)) in cases.into_iter().enumerate() {
+        let prepared =
+            prepare_export_set_args(bits, on, off, separator, count, usize::MAX).unwrap();
+        assert_eq!(worker.kernel_invocations(), index as u64);
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::ExportSetReady(prepared))
+            .unwrap()
+        else {
+            panic!("EXPORT_SET ready arguments returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}

@@ -335,6 +335,17 @@ short-circuit admission policy described above.
   never decodes replacement bytes. Original wire UTF8 strict decoding and its
   character-offset-as-byte-offset behavior remain. Packet refusal follows the
   actual result in the frontend, not a suppression flag or fake NULL input.
+- FIELD uses separate prepared Bytes/collation, signedness-preserving integer
+  and raw-IEEE domains. A single-candidate matcher can guide frontend coercion
+  demand, but the final one-column recipe validates the complete observed prefix
+  and computes the first-match index. MAKE_SET has its own ready selection payload;
+  its native unchecked-shift selector follows the actual compilation profile,
+  while wire retains the original rolling-mask behavior. Total SQL arity includes
+  the needle/mask, including existing value-only arity-one calls. EXPORT_SET adds
+  a new compatibility core rather than claiming an existing wire implementation:
+  three physical columns preserve real NULL witnesses versus undemanded operands,
+  omitted defaults, count clamping and the native signed bit63 comparison rule.
+  Frontend whole-list NULL prechecks versus strict tuple coercion remain distinct.
 - Full-arity CONCAT/CONCAT_WS use a dedicated opaque prepared prefix, not a
   general variadic graph or prejoined SQL result. One physical Bytes input holds
   true SQL arity, each demanded nullable operand and a checked terminal state.

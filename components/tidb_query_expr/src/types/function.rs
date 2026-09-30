@@ -173,6 +173,11 @@ pub enum LocalFunctionId {
     ConcatNative,
     ConcatWsNative,
     EltNative,
+    FieldBytesNative,
+    FieldIntNative,
+    FieldRealNative,
+    MakeSetNative,
+    ExportSetNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

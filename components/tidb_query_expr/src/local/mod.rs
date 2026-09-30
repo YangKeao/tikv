@@ -200,8 +200,12 @@ pub(crate) use self::{
 pub use crate::{
     CallMetadata, FunctionRef, LiteralKind, LocalFunctionId,
     impl_string::{
-        ConcatKind, ConcatTerminal, PreparedConcatArgs, PreparedFindInSetKeys, elt_selected_arg,
-        legacy_substring_needs_len, prepare_concat_args, prepare_find_in_set_keys,
+        ConcatKind, ConcatTerminal, FieldIntValue, FieldTerminal, PreparedConcatArgs,
+        PreparedExportSetArgs, PreparedFieldArgs, PreparedFindInSetKeys, PreparedMakeSetArgs,
+        ReadyFieldIntArg, elt_selected_arg, field_bytes_equal, field_int_equal, field_real_equal,
+        legacy_substring_needs_len, make_set_selected, prepare_concat_args,
+        prepare_export_set_args, prepare_field_bytes_args, prepare_field_int_args,
+        prepare_field_real_args, prepare_find_in_set_keys, prepare_make_set_args,
     },
     types::function::PreparedOrdinaryCall,
 };

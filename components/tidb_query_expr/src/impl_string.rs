@@ -16,7 +16,9 @@ use tidb_query_datatype::{
 
 use crate::{
     impl_math::i64_to_usize,
-    local::{LocalError, LocalResult, NativeSearchPolicy},
+    local::{
+        LocalError, LocalResult, NativeSearchPolicy, ReadyBytesArg, ReadyIeee754Arg, ReadyIntArg,
+    },
 };
 
 const SPACE: u8 = 0o40u8;
@@ -1364,74 +1366,867 @@ pub fn locate_3_args(substr: BytesRef, s: BytesRef, pos: &Int) -> Result<Option<
         .or(Some(0)))
 }
 
+#[inline]
+fn field_value_equal<T: PartialEq>(left: &T, right: &T) -> bool {
+    left == right
+}
+
+fn first_field_match<E>(
+    matches: impl Iterator<Item = std::result::Result<bool, E>>,
+    scan_all: bool,
+) -> std::result::Result<Option<usize>, E> {
+    let mut first = None;
+    for (index, matches) in matches.enumerate() {
+        if matches? && first.is_none() {
+            first = Some(index);
+            if !scan_all {
+                break;
+            }
+        }
+    }
+    Ok(first)
+}
+
 #[rpn_fn(nullable, varg, min_args = 1)]
 #[inline]
 fn field<T: Evaluable + EvaluableRet + PartialEq>(args: &[Option<&T>]) -> Result<Option<Int>> {
-    Ok(Some(match args[0] {
-        // As per the MySQL doc, if the first argument is NULL, this function always returns 0.
-        None => 0,
-        Some(val) => args
-            .iter()
+    let Some(needle) = args[0] else {
+        return Ok(Some(0));
+    };
+    let found = first_field_match::<tidb_query_common::Error>(
+        args.iter()
             .skip(1)
-            .position(|&i| i == Some(val))
-            .map_or(0, |pos| (pos + 1) as i64),
-    }))
+            .map(|arg| Ok(arg.is_some_and(|value| field_value_equal(value, needle)))),
+        false,
+    )?;
+    Ok(Some(found.map_or(0, |index| (index + 1) as Int)))
 }
 
 #[rpn_fn(nullable, varg, min_args = 1)]
 #[inline]
 fn field_bytes<C: Collator>(args: &[Option<BytesRef>]) -> Result<Option<Int>> {
-    Ok(Some(match args[0] {
-        // As per the MySQL doc, if the first argument is NULL, this function always returns 0.
-        None => 0,
-        Some(val) => {
-            for (pos, arg) in args.iter().enumerate().skip(1) {
-                if arg.is_none() {
-                    continue;
-                }
-                match C::sort_compare(val, arg.unwrap(), false) {
-                    Ok(Ordering::Equal) => return Ok(Some(pos as i64)),
-                    _ => continue,
-                }
-            }
-            0
+    let Some(needle) = args[0] else {
+        return Ok(Some(0));
+    };
+    let found = first_field_match::<tidb_query_common::Error>(
+        args.iter().skip(1).map(|arg| {
+            Ok(arg.is_some_and(|value| {
+                C::sort_compare(needle, value, false).ok() == Some(Ordering::Equal)
+            }))
+        }),
+        false,
+    )?;
+    Ok(Some(found.map_or(0, |index| (index + 1) as Int)))
+}
+
+// These families have independent layouts. Only checked byte/word I/O is
+// shared.
+fn invalid_set_args(message: &str) -> LocalError {
+    LocalError::InvalidBatch(message.into())
+}
+
+fn set_args_eval_error(error: LocalError) -> tidb_query_common::Error {
+    other_err!("Invalid prepared string/set arguments: {}", error)
+}
+
+struct SetArgsEncoder {
+    bytes: Vec<u8>,
+    cap: usize,
+}
+
+impl SetArgsEncoder {
+    fn new(family: u8, cap: usize) -> LocalResult<Self> {
+        let mut encoder = Self {
+            bytes: Vec::new(),
+            cap,
+        };
+        encoder.byte(family)?;
+        Ok(encoder)
+    }
+    fn append(&mut self, bytes: &[u8]) -> LocalResult<()> {
+        let length = self.bytes.len().checked_add(bytes.len()).ok_or_else(|| {
+            LocalError::ResourceLimit("Prepared set argument size overflow".into())
+        })?;
+        if length > self.cap {
+            return Err(LocalError::ResourceLimit(
+                "Prepared set argument byte cap exceeded".into(),
+            ));
         }
-    }))
+        self.bytes.try_reserve(bytes.len()).map_err(|error| {
+            LocalError::ResourceLimit(format!("Prepared set argument allocation: {}", error))
+        })?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn byte(&mut self, value: u8) -> LocalResult<()> {
+        self.append(&[value])
+    }
+    fn word(&mut self, value: u64) -> LocalResult<()> {
+        self.append(&value.to_le_bytes())
+    }
+    fn size(&mut self, value: usize) -> LocalResult<()> {
+        self.word(u64::try_from(value).map_err(|_| {
+            LocalError::ResourceLimit("Prepared set argument size exceeds u64".into())
+        })?)
+    }
+    fn value(&mut self, value: &[u8]) -> LocalResult<()> {
+        self.size(value.len())?;
+        self.append(value)
+    }
+}
+
+#[derive(Clone)]
+struct SetArgsReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> SetArgsReader<'a> {
+    fn new(bytes: &'a [u8], family: u8) -> LocalResult<Self> {
+        let mut reader = Self { bytes, offset: 0 };
+        if reader.byte()? != family {
+            return Err(invalid_set_args("Wrong prepared set argument family"));
+        }
+        Ok(reader)
+    }
+    fn take(&mut self, length: usize) -> LocalResult<&'a [u8]> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or_else(|| invalid_set_args("Prepared set argument offset overflow"))?;
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or_else(|| invalid_set_args("Truncated prepared set arguments"))?;
+        self.offset = end;
+        Ok(bytes)
+    }
+    fn byte(&mut self) -> LocalResult<u8> {
+        Ok(self.take(1)?[0])
+    }
+    fn word(&mut self) -> LocalResult<u64> {
+        let bytes = <[u8; 8]>::try_from(self.take(8)?)
+            .map_err(|_| invalid_set_args("Invalid prepared set word width"))?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+    fn size(&mut self) -> LocalResult<usize> {
+        usize::try_from(self.word()?)
+            .map_err(|_| invalid_set_args("Prepared set size exceeds usize"))
+    }
+    fn value(&mut self) -> LocalResult<&'a [u8]> {
+        let length = self.size()?;
+        self.take(length)
+    }
+    fn finish(&self) -> LocalResult<()> {
+        if self.offset != self.bytes.len() {
+            return Err(invalid_set_args("Trailing prepared set bytes"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SetArg<T> {
+    Null,
+    Value(T),
+    Undemanded,
+}
+
+fn set_arg_tag<T>(value: &SetArg<T>) -> u8 {
+    match value {
+        SetArg::Null => 0,
+        SetArg::Value(_) => 1,
+        SetArg::Undemanded => 2,
+    }
+}
+
+fn ready_set_bytes(value: &ReadyBytesArg) -> SetArg<&[u8]> {
+    match value {
+        ReadyBytesArg::Value(None) => SetArg::Null,
+        ReadyBytesArg::Value(Some(value)) => SetArg::Value(value),
+        ReadyBytesArg::Undemanded => SetArg::Undemanded,
+    }
+}
+
+fn encode_set_bytes(encoder: &mut SetArgsEncoder, value: SetArg<&[u8]>) -> LocalResult<()> {
+    encoder.byte(set_arg_tag(&value))?;
+    if let SetArg::Value(bytes) = value {
+        encoder.value(bytes)?;
+    }
+    Ok(())
+}
+
+fn read_set_bytes<'a>(reader: &mut SetArgsReader<'a>) -> LocalResult<SetArg<&'a [u8]>> {
+    match reader.byte()? {
+        0 => Ok(SetArg::Null),
+        1 => Ok(SetArg::Value(reader.value()?)),
+        2 => Ok(SetArg::Undemanded),
+        _ => Err(invalid_set_args("Invalid prepared bytes demand tag")),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldTerminal {
+    NeedleNull,
+    Exhausted,
+    Matched,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldIntValue {
+    pub bits: u64,
+    pub unsigned: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadyFieldIntArg {
+    Value(Option<FieldIntValue>),
+    Undemanded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FieldKind {
+    Bytes,
+    Int,
+    Real,
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedFieldArgs {
+    kind: FieldKind,
+    encoded: Vec<u8>,
+}
+
+impl PreparedFieldArgs {
+    pub(crate) fn kind(&self) -> FieldKind {
+        self.kind
+    }
+    pub(crate) fn into_encoded(self) -> Vec<u8> {
+        self.encoded
+    }
+}
+
+pub fn field_bytes_equal(
+    left: &[u8],
+    right: &[u8],
+    collation: NativeCollation,
+) -> LocalResult<bool> {
+    collation
+        .compare(left, right)
+        .map(|ordering| ordering == Ordering::Equal)
+        .map_err(|error| LocalError::Evaluation(error.into()))
+}
+
+pub fn field_int_equal(left: FieldIntValue, right: FieldIntValue) -> bool {
+    field_value_equal(&left.bits, &right.bits)
+        && (left.unsigned == right.unsigned || left.bits <= i64::MAX as u64)
+}
+
+pub fn field_real_equal(left: u64, right: u64) -> bool {
+    field_value_equal(&f64::from_bits(left), &f64::from_bits(right))
+}
+
+#[derive(Clone, Copy)]
+enum FieldValue<'a> {
+    Bytes(&'a [u8]),
+    Int(FieldIntValue),
+    Real(u64),
+}
+
+fn encode_field_value(
+    encoder: &mut SetArgsEncoder,
+    value: SetArg<FieldValue<'_>>,
+) -> LocalResult<()> {
+    encoder.byte(set_arg_tag(&value))?;
+    match value {
+        SetArg::Value(FieldValue::Bytes(value)) => encoder.value(value)?,
+        SetArg::Value(FieldValue::Int(value)) => {
+            encoder.byte(u8::from(value.unsigned))?;
+            encoder.word(value.bits)?;
+        }
+        SetArg::Value(FieldValue::Real(value)) => encoder.word(value)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn read_field_value<'a>(
+    reader: &mut SetArgsReader<'a>,
+    kind: FieldKind,
+) -> LocalResult<SetArg<FieldValue<'a>>> {
+    match reader.byte()? {
+        0 => Ok(SetArg::Null),
+        2 => Ok(SetArg::Undemanded),
+        1 => Ok(SetArg::Value(match kind {
+            FieldKind::Bytes => FieldValue::Bytes(reader.value()?),
+            FieldKind::Int => {
+                let unsigned = match reader.byte()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(invalid_set_args("Invalid FIELD signedness flag")),
+                };
+                FieldValue::Int(FieldIntValue {
+                    bits: reader.word()?,
+                    unsigned,
+                })
+            }
+            FieldKind::Real => FieldValue::Real(reader.word()?),
+        })),
+        _ => Err(invalid_set_args("Invalid FIELD demand tag")),
+    }
+}
+
+fn field_values_match(
+    left: FieldValue<'_>,
+    right: FieldValue<'_>,
+    collation: Option<NativeCollation>,
+) -> LocalResult<bool> {
+    match (left, right) {
+        (FieldValue::Bytes(left), FieldValue::Bytes(right)) => field_bytes_equal(
+            left,
+            right,
+            collation.ok_or_else(|| invalid_set_args("Missing FIELD collation"))?,
+        ),
+        (FieldValue::Int(left), FieldValue::Int(right)) => Ok(field_int_equal(left, right)),
+        (FieldValue::Real(left), FieldValue::Real(right)) => Ok(field_real_equal(left, right)),
+        _ => Err(invalid_set_args("Mismatched FIELD value domains")),
+    }
+}
+
+// Returns only a transient scan position, never stored in a prepared
+// owner/blob.
+fn scan_prepared_field(encoded: &[u8], expected: FieldKind) -> LocalResult<Option<usize>> {
+    let mut reader = SetArgsReader::new(encoded, b'F')?;
+    let kind = match reader.byte()? {
+        0 => FieldKind::Bytes,
+        1 => FieldKind::Int,
+        2 => FieldKind::Real,
+        _ => return Err(invalid_set_args("Invalid FIELD kind")),
+    };
+    if kind != expected {
+        return Err(invalid_set_args("FIELD operation/domain mismatch"));
+    }
+    let terminal = match reader.byte()? {
+        0 => FieldTerminal::NeedleNull,
+        1 => FieldTerminal::Exhausted,
+        2 => FieldTerminal::Matched,
+        _ => return Err(invalid_set_args("Invalid FIELD terminal")),
+    };
+    let total = reader.size()?;
+    let count = reader.size()?;
+    if total == 0 || count > total - 1 {
+        return Err(invalid_set_args("Invalid FIELD arity/prefix"));
+    }
+    let collation = if kind == FieldKind::Bytes {
+        Some(
+            NativeCollation::from_tag(reader.word()? as i64)
+                .ok_or_else(|| invalid_set_args("Invalid FIELD collation tag"))?,
+        )
+    } else {
+        None
+    };
+    let needle = read_field_value(&mut reader, kind)?;
+    match (terminal, needle) {
+        (FieldTerminal::NeedleNull, SetArg::Null) if count == 0 => {}
+        (FieldTerminal::NeedleNull, _) | (_, SetArg::Null) => {
+            return Err(invalid_set_args("Invalid FIELD NULL needle terminal"));
+        }
+        (_, SetArg::Undemanded)
+            if kind == FieldKind::Real || terminal != FieldTerminal::Exhausted =>
+        {
+            return Err(invalid_set_args("Invalid FIELD undemanded needle"));
+        }
+        _ => {}
+    }
+    if terminal == FieldTerminal::Exhausted && count != total - 1 {
+        return Err(invalid_set_args("Exhausted FIELD requires every candidate"));
+    }
+    if terminal == FieldTerminal::Matched && count == 0 {
+        return Err(invalid_set_args("Matched FIELD requires a candidate"));
+    }
+    let found = first_field_match::<LocalError>(
+        (0..count).map(|_| match read_field_value(&mut reader, kind)? {
+            SetArg::Null => Ok(false),
+            SetArg::Undemanded => Err(invalid_set_args(
+                "FIELD prefix candidates cannot be undemanded",
+            )),
+            SetArg::Value(candidate) => match needle {
+                SetArg::Value(needle) => field_values_match(needle, candidate, collation),
+                _ => Err(invalid_set_args(
+                    "FIELD value candidate requires a demanded needle",
+                )),
+            },
+        }),
+        true,
+    )?;
+    reader.finish()?;
+    match terminal {
+        FieldTerminal::Matched if found != count.checked_sub(1) => {
+            return Err(invalid_set_args(
+                "FIELD first match must be the final prefix candidate",
+            ));
+        }
+        FieldTerminal::Exhausted if found.is_some() => {
+            return Err(invalid_set_args("Exhausted FIELD contains a match"));
+        }
+        _ => {}
+    }
+    Ok(found)
+}
+
+fn prepare_field<'a>(
+    total: usize,
+    kind: FieldKind,
+    needle: SetArg<FieldValue<'a>>,
+    prefix: impl ExactSizeIterator<Item = Option<FieldValue<'a>>>,
+    terminal: FieldTerminal,
+    collation: Option<NativeCollation>,
+    cap: usize,
+) -> LocalResult<PreparedFieldArgs> {
+    let mut encoder = SetArgsEncoder::new(b'F', cap)?;
+    encoder.byte(match kind {
+        FieldKind::Bytes => 0,
+        FieldKind::Int => 1,
+        FieldKind::Real => 2,
+    })?;
+    encoder.byte(match terminal {
+        FieldTerminal::NeedleNull => 0,
+        FieldTerminal::Exhausted => 1,
+        FieldTerminal::Matched => 2,
+    })?;
+    encoder.size(total)?;
+    encoder.size(prefix.len())?;
+    if let Some(collation) = collation {
+        encoder.word(collation.tag() as u64)?;
+    }
+    encode_field_value(&mut encoder, needle)?;
+    for value in prefix {
+        encode_field_value(&mut encoder, value.map_or(SetArg::Null, SetArg::Value))?;
+    }
+    scan_prepared_field(&encoder.bytes, kind)?;
+    Ok(PreparedFieldArgs {
+        kind,
+        encoded: encoder.bytes,
+    })
+}
+
+pub fn prepare_field_bytes_args(
+    total_sql_arity: usize,
+    needle: ReadyBytesArg,
+    prefix: Vec<Option<Vec<u8>>>,
+    terminal: FieldTerminal,
+    collation: NativeCollation,
+    cap: usize,
+) -> LocalResult<PreparedFieldArgs> {
+    let needle = match ready_set_bytes(&needle) {
+        SetArg::Null => SetArg::Null,
+        SetArg::Undemanded => SetArg::Undemanded,
+        SetArg::Value(value) => SetArg::Value(FieldValue::Bytes(value)),
+    };
+    prepare_field(
+        total_sql_arity,
+        FieldKind::Bytes,
+        needle,
+        prefix
+            .iter()
+            .map(|value| value.as_deref().map(FieldValue::Bytes)),
+        terminal,
+        Some(collation),
+        cap,
+    )
+}
+
+pub fn prepare_field_int_args(
+    total_sql_arity: usize,
+    needle: ReadyFieldIntArg,
+    prefix: Vec<Option<FieldIntValue>>,
+    terminal: FieldTerminal,
+    cap: usize,
+) -> LocalResult<PreparedFieldArgs> {
+    let needle = match needle {
+        ReadyFieldIntArg::Value(None) => SetArg::Null,
+        ReadyFieldIntArg::Value(Some(value)) => SetArg::Value(FieldValue::Int(value)),
+        ReadyFieldIntArg::Undemanded => SetArg::Undemanded,
+    };
+    prepare_field(
+        total_sql_arity,
+        FieldKind::Int,
+        needle,
+        prefix.into_iter().map(|value| value.map(FieldValue::Int)),
+        terminal,
+        None,
+        cap,
+    )
+}
+
+pub fn prepare_field_real_args(
+    total_sql_arity: usize,
+    needle: ReadyIeee754Arg,
+    prefix: Vec<Option<u64>>,
+    terminal: FieldTerminal,
+    cap: usize,
+) -> LocalResult<PreparedFieldArgs> {
+    let needle = match needle {
+        ReadyIeee754Arg::Value(None) => SetArg::Null,
+        ReadyIeee754Arg::Value(Some(value)) => SetArg::Value(FieldValue::Real(value)),
+        ReadyIeee754Arg::Undemanded => SetArg::Undemanded,
+    };
+    prepare_field(
+        total_sql_arity,
+        FieldKind::Real,
+        needle,
+        prefix.into_iter().map(|value| value.map(FieldValue::Real)),
+        terminal,
+        None,
+        cap,
+    )
+}
+
+pub(crate) fn prepared_field_args_match(encoded: Option<&[u8]>, kind: FieldKind) -> bool {
+    encoded.is_some_and(|encoded| scan_prepared_field(encoded, kind).is_ok())
+}
+
+fn field_native_impl(encoded: BytesRef, kind: FieldKind) -> Result<Option<Int>> {
+    let found = scan_prepared_field(encoded, kind).map_err(set_args_eval_error)?;
+    let ordinal = match found {
+        None => 0,
+        Some(index) => index
+            .checked_add(1)
+            .and_then(|index| Int::try_from(index).ok())
+            .ok_or_else(|| other_err!("FIELD ordinal exceeds signed Int"))?,
+    };
+    Ok(Some(ordinal))
+}
+
+#[rpn_fn]
+fn field_bytes_native(encoded: BytesRef) -> Result<Option<Int>> {
+    field_native_impl(encoded, FieldKind::Bytes)
+}
+#[rpn_fn]
+fn field_int_native(encoded: BytesRef) -> Result<Option<Int>> {
+    field_native_impl(encoded, FieldKind::Int)
+}
+#[rpn_fn]
+fn field_real_native(encoded: BytesRef) -> Result<Option<Int>> {
+    field_native_impl(encoded, FieldKind::Real)
 }
 
 #[rpn_fn(nullable, raw_varg, min_args = 2, extra_validator = elt_validator)]
 #[inline]
 pub fn make_set(raw_args: &[ScalarValueRef]) -> Result<Option<Bytes>> {
     assert!(raw_args.len() >= 2);
-    let mask = raw_args[0].as_int();
+    let Some(mask) = raw_args[0].as_int() else {
+        return Ok(None);
+    };
     let mut output = Vec::new();
-    let mut pow2 = 1;
-    let s = b",";
-    let mut q = false;
-    match mask {
-        None => {
-            return Ok(None);
+    let mut pow2: Int = 1;
+    let parts = raw_args.iter().skip(1).filter_map(|arg| {
+        let selected = pow2 & mask != 0;
+        // Wire retains its rolling bit, including zero after bit 63.
+        pow2 <<= 1;
+        if selected {
+            arg.as_bytes().map(Ok)
+        } else {
+            None
         }
-        Some(mask2) => {
-            for raw_arg in raw_args.iter().skip(1) {
-                if pow2 & mask2 != 0 {
-                    let input = raw_arg.as_bytes();
-                    match input {
-                        None => {}
-                        Some(s2) => {
-                            if q {
-                                output.extend_from_slice(s);
-                            }
-                            output.extend_from_slice(s2);
-                            q = true;
-                        }
-                    };
-                }
-                pow2 <<= 1;
+    });
+    concat_join(parts, Some(b","), |part| output.extend_from_slice(part))?;
+    Ok(Some(output))
+}
+
+/// Native source selection, including its unchecked shift in the actual
+/// profile.
+pub fn make_set_selected(mask: u64, idx: usize) -> bool {
+    mask & (1_u64 << idx) != 0
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedMakeSetArgs {
+    encoded: Vec<u8>,
+}
+
+impl PreparedMakeSetArgs {
+    pub(crate) fn into_encoded(self) -> Vec<u8> {
+        self.encoded
+    }
+}
+
+struct DecodedMakeSet<'a> {
+    mask: Option<u64>,
+    count: usize,
+    entries: SetArgsReader<'a>,
+}
+
+fn decode_make_set(encoded: &[u8]) -> LocalResult<DecodedMakeSet<'_>> {
+    let mut reader = SetArgsReader::new(encoded, b'M')?;
+    let total = reader.size()?;
+    if total == 0 {
+        return Err(invalid_set_args("MAKE_SET requires its mask argument"));
+    }
+    let mask = match reader.byte()? {
+        0 => None,
+        1 => Some(reader.word()?),
+        _ => return Err(invalid_set_args("Invalid MAKE_SET mask state")),
+    };
+    let count = reader.size()?;
+    if (mask.is_none() && count != 0) || (mask.is_some() && count != total - 1) {
+        return Err(invalid_set_args(
+            "MAKE_SET entry count does not match mask demand",
+        ));
+    }
+    let entries = reader.clone();
+    if let Some(mask) = mask {
+        for index in 0..count {
+            let value = read_set_bytes(&mut reader)?;
+            let selected = make_set_selected(mask, index);
+            if selected == matches!(value, SetArg::Undemanded) {
+                return Err(invalid_set_args(
+                    "MAKE_SET entry demand disagrees with mask",
+                ));
             }
         }
-    };
+    }
+    reader.finish()?;
+    Ok(DecodedMakeSet {
+        mask,
+        count,
+        entries,
+    })
+}
+
+pub fn prepare_make_set_args(
+    mask: Option<u64>,
+    total_sql_arity: usize,
+    entries: Vec<ReadyBytesArg>,
+    cap: usize,
+) -> LocalResult<PreparedMakeSetArgs> {
+    let mut encoder = SetArgsEncoder::new(b'M', cap)?;
+    encoder.size(total_sql_arity)?;
+    match mask {
+        None => encoder.byte(0)?,
+        Some(mask) => {
+            encoder.byte(1)?;
+            encoder.word(mask)?;
+        }
+    }
+    encoder.size(entries.len())?;
+    for entry in &entries {
+        encode_set_bytes(&mut encoder, ready_set_bytes(entry))?;
+    }
+    decode_make_set(&encoder.bytes)?;
+    Ok(PreparedMakeSetArgs {
+        encoded: encoder.bytes,
+    })
+}
+
+pub(crate) fn prepared_make_set_args_match(encoded: Option<&[u8]>) -> bool {
+    encoded.is_some_and(|encoded| decode_make_set(encoded).is_ok())
+}
+
+#[rpn_fn]
+fn make_set_native(encoded: BytesRef) -> Result<Option<Bytes>> {
+    let mut decoded = decode_make_set(encoded).map_err(set_args_eval_error)?;
+    if decoded.mask.is_none() {
+        return Ok(None);
+    }
+    let mut output = Vec::new();
+    let parts = (0..decoded.count).filter_map(|_| match read_set_bytes(&mut decoded.entries) {
+        Ok(SetArg::Value(bytes)) => Some(Ok(bytes)),
+        Ok(SetArg::Null | SetArg::Undemanded) => None,
+        Err(error) => Some(Err(set_args_eval_error(error))),
+    });
+    concat_join(parts, Some(b","), |part| output.extend_from_slice(part))?;
     Ok(Some(output))
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedExportSetArgs {
+    encoded: Vec<u8>,
+    bits: Option<i64>,
+    count: Option<i64>,
+}
+
+impl PreparedExportSetArgs {
+    pub(crate) fn into_parts(self) -> (Vec<u8>, Option<i64>, Option<i64>) {
+        (self.encoded, self.bits, self.count)
+    }
+}
+
+fn export_int_parts(value: ReadyIntArg) -> (u8, Option<i64>) {
+    match value {
+        ReadyIntArg::Value(None) => (0, None),
+        ReadyIntArg::Value(Some(value)) => (1, Some(value)),
+        ReadyIntArg::Undemanded => (2, Some(0)),
+    }
+}
+
+struct DecodedExportSet<'a> {
+    flags: [u8; 5],
+    on: Option<&'a [u8]>,
+    off: Option<&'a [u8]>,
+    separator: Option<&'a [u8]>,
+    has_null: bool,
+}
+
+fn export_int_state_matches(tag: u8, value: Option<i64>) -> bool {
+    match tag {
+        0 => value.is_none(),
+        1 => value.is_some(),
+        2 | 3 => value == Some(0),
+        _ => false,
+    }
+}
+
+fn decode_export_set(
+    encoded: &[u8],
+    bits: Option<i64>,
+    count: Option<i64>,
+) -> LocalResult<DecodedExportSet<'_>> {
+    let mut reader = SetArgsReader::new(encoded, b'E')?;
+    let flags = [
+        reader.byte()?,
+        reader.byte()?,
+        reader.byte()?,
+        reader.byte()?,
+        reader.byte()?,
+    ];
+    if flags[..3].iter().any(|tag| *tag > 2)
+        || flags[3..].iter().any(|tag| *tag > 3)
+        || (flags[3] == 3 && flags[4] != 3)
+    {
+        return Err(invalid_set_args(
+            "Invalid EXPORT_SET supplied/omitted shape",
+        ));
+    }
+    if !export_int_state_matches(flags[0], bits) || !export_int_state_matches(flags[4], count) {
+        return Err(invalid_set_args(
+            "EXPORT_SET physical Int states disagree with flags",
+        ));
+    }
+    let has_null = flags.contains(&0);
+    if !has_null && flags.contains(&2) {
+        return Err(invalid_set_args(
+            "EXPORT_SET undemanded input lacks a true NULL witness",
+        ));
+    }
+    let mut read_bytes = |tag| -> LocalResult<Option<&[u8]>> {
+        if tag == 1 {
+            Ok(Some(reader.value()?))
+        } else {
+            Ok(None)
+        }
+    };
+    let on = read_bytes(flags[1])?;
+    let off = read_bytes(flags[2])?;
+    let separator = read_bytes(flags[3])?;
+    reader.finish()?;
+    Ok(DecodedExportSet {
+        flags,
+        on,
+        off,
+        separator,
+        has_null,
+    })
+}
+
+pub fn prepare_export_set_args(
+    bits: ReadyIntArg,
+    on: ReadyBytesArg,
+    off: ReadyBytesArg,
+    separator: Option<ReadyBytesArg>,
+    count: Option<ReadyIntArg>,
+    cap: usize,
+) -> LocalResult<PreparedExportSetArgs> {
+    let (bits_tag, bits) = export_int_parts(bits);
+    let (count_tag, count) = count.map_or((3, Some(0)), export_int_parts);
+    let on = ready_set_bytes(&on);
+    let off = ready_set_bytes(&off);
+    let separator = separator.as_ref().map(ready_set_bytes);
+    let flags = [
+        bits_tag,
+        set_arg_tag(&on),
+        set_arg_tag(&off),
+        separator.as_ref().map_or(3, set_arg_tag),
+        count_tag,
+    ];
+    let mut encoder = SetArgsEncoder::new(b'E', cap)?;
+    encoder.append(&flags)?;
+    for value in [Some(on), Some(off), separator].iter().copied().flatten() {
+        if let SetArg::Value(bytes) = value {
+            encoder.value(bytes)?;
+        }
+    }
+    decode_export_set(&encoder.bytes, bits, count)?;
+    Ok(PreparedExportSetArgs {
+        encoded: encoder.bytes,
+        bits,
+        count,
+    })
+}
+
+pub(crate) fn prepared_export_set_args_match(
+    encoded: Option<&[u8]>,
+    bits: Option<i64>,
+    count: Option<i64>,
+) -> bool {
+    encoded.is_some_and(|encoded| decode_export_set(encoded, bits, count).is_ok())
+}
+
+#[rpn_fn(nullable)]
+fn export_set_native(
+    encoded: Option<BytesRef>,
+    bits: Option<&Int>,
+    count: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    let encoded = encoded.ok_or_else(|| other_err!("EXPORT_SET requires its encoded tuple"))?;
+    let decoded =
+        decode_export_set(encoded, bits.copied(), count.copied()).map_err(set_args_eval_error)?;
+    if decoded.has_null {
+        return Ok(None);
+    }
+    let bits = *bits.ok_or_else(|| other_err!("Missing EXPORT_SET bits"))?;
+    let on = decoded
+        .on
+        .ok_or_else(|| other_err!("Missing EXPORT_SET on value"))?;
+    let off = decoded
+        .off
+        .ok_or_else(|| other_err!("Missing EXPORT_SET off value"))?;
+    let separator = if decoded.flags[3] == 3 {
+        b",".as_slice()
+    } else {
+        decoded
+            .separator
+            .ok_or_else(|| other_err!("Missing EXPORT_SET separator"))?
+    };
+    let count = if decoded.flags[4] == 3 {
+        64
+    } else {
+        *count.ok_or_else(|| other_err!("Missing EXPORT_SET count"))?
+    };
+    Ok(Some(export_set_impl(bits, on, off, separator, count)?))
+}
+
+fn export_set_impl(
+    bits: Int,
+    on: &[u8],
+    off: &[u8],
+    separator: &[u8],
+    count: Int,
+) -> Result<Bytes> {
+    let count = if (0..=64).contains(&count) { count } else { 64 };
+    let mut output = Vec::new();
+    // Retain the original signed > 0 test: a set bit 63 still selects off.
+    let parts = (0..count).map(|index| {
+        Ok(if (bits & (1_i64 << index)) > 0 {
+            on
+        } else {
+            off
+        })
+    });
+    concat_join(parts, Some(separator), |part| {
+        output.extend_from_slice(part)
+    })?;
+    Ok(output)
 }
 
 /// Returns a demanded SQL operand offset; total arity includes the index.

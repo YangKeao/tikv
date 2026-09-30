@@ -1606,6 +1606,11 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::ConcatNative,
             EvaluatedBytesOp::ConcatWsNative,
             EvaluatedBytesOp::EltNative,
+            EvaluatedBytesOp::FieldBytesNative,
+            EvaluatedBytesOp::FieldIntNative,
+            EvaluatedBytesOp::FieldRealNative,
+            EvaluatedBytesOp::MakeSetNative,
+            EvaluatedBytesOp::ExportSetNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

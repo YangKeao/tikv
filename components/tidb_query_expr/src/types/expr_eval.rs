@@ -350,6 +350,24 @@ fn evaluated_ready_args_match(
             EvaluatedArgsRole::NoArgs => values.is_empty(),
             EvaluatedArgsRole::Values => true,
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
+            EvaluatedArgsRole::FieldPacked => match (operation.field_kind(), values) {
+                (Some(kind), [ScalarValue::Bytes(encoded)]) if encoded.is_some() => {
+                    crate::impl_string::prepared_field_args_match(encoded.as_deref(), kind)
+                }
+                _ => false,
+            },
+            EvaluatedArgsRole::MakeSetPacked => {
+                operation == EvaluatedBytesOp::MakeSetNative
+                    && matches!(values, [ScalarValue::Bytes(encoded)]
+                        if encoded.is_some()
+                            && crate::impl_string::prepared_make_set_args_match(encoded.as_deref()))
+            }
+            EvaluatedArgsRole::ExportSetPacked => {
+                operation == EvaluatedBytesOp::ExportSetNative
+                    && matches!(values, [ScalarValue::Bytes(blob), ScalarValue::Int(bits), ScalarValue::Int(count)]
+                        if blob.is_some()
+                            && crate::impl_string::prepared_export_set_args_match(blob.as_deref(), *bits, *count))
+            }
             EvaluatedArgsRole::ConcatPacked => match (operation.concat_kind(), values) {
                 (Some(kind), [ScalarValue::Bytes(bytes)]) if bytes.is_some() => {
                     crate::impl_string::prepared_concat_args_match(bytes.as_deref(), kind)
@@ -3231,9 +3249,9 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..52 {
+        for mismatch in 0..62 {
             let operation = match mismatch {
-                3 | 5 | 45 => EvaluatedBytesOp::Md5,
+                3 | 5 | 45 | 53 | 56 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
                 8..=10 => EvaluatedBytesOp::SpaceNative,
                 11 => EvaluatedBytesOp::BitAnd,
@@ -3258,10 +3276,14 @@ mod tests {
                 39 => EvaluatedBytesOp::Locate2Native,
                 44 | 46 | 47 => EvaluatedBytesOp::ConcatNative,
                 48..=51 => EvaluatedBytesOp::EltNative,
+                52 | 54 => EvaluatedBytesOp::FieldBytesNative,
+                55 | 57 => EvaluatedBytesOp::MakeSetNative,
+                58 | 60 | 61 => EvaluatedBytesOp::ExportSetNative,
+                59 => EvaluatedBytesOp::Substring3BytesNative,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
-                0 | 6 | 8 | 13 | 15 | 16 | 22 | 26 | 28 | 32 | 34 | 44 | 48 => {
+                0 | 6 | 8 | 13 | 15 | 16 | 22 | 26 | 28 | 32 | 34 | 44 | 48 | 52 | 55 | 58 => {
                     EvaluatedArgsRole::Values
                 }
                 4 | 5 => EvaluatedArgsRole::NoArgs,
@@ -3277,6 +3299,9 @@ mod tests {
                 37 | 40..=43 => EvaluatedArgsRole::FindInSetPrepared,
                 45..=47 => EvaluatedArgsRole::ConcatPacked,
                 49..=51 => EvaluatedArgsRole::EltReady,
+                53 | 54 => EvaluatedArgsRole::FieldPacked,
+                56 | 57 => EvaluatedArgsRole::MakeSetPacked,
+                59..=61 => EvaluatedArgsRole::ExportSetPacked,
                 _ => EvaluatedArgsRole::Ieee754Bits,
             };
             let schema: Vec<_> = (0..operation.input_types().len())
@@ -3332,7 +3357,46 @@ mod tests {
                 ready[0] = ScalarValue::Int(Some(1));
                 ready[1] = ScalarValue::Int(Some(2));
             }
-            if matches!(mismatch, 13 | 14 | 16..=51) {
+            if matches!(mismatch, 52..=54) {
+                let packed = crate::local::prepare_field_bytes_args(
+                    2,
+                    crate::local::ReadyBytesArg::Value(Some(b"a".to_vec())),
+                    vec![Some(b"a".to_vec())],
+                    crate::local::FieldTerminal::Matched,
+                    tidb_query_datatype::codec::collation::native::NativeCollation::Binary,
+                    usize::MAX,
+                )
+                .unwrap()
+                .into_encoded();
+                ready[0] = ScalarValue::Bytes(Some(packed));
+            }
+            if matches!(mismatch, 55..=57) {
+                let packed = crate::local::prepare_make_set_args(
+                    Some(1),
+                    2,
+                    vec![crate::local::ReadyBytesArg::Value(Some(Vec::new()))],
+                    usize::MAX,
+                )
+                .unwrap()
+                .into_encoded();
+                ready[0] = ScalarValue::Bytes(Some(packed));
+            }
+            if matches!(mismatch, 58..=61) {
+                let (packed, bits, count) = crate::local::prepare_export_set_args(
+                    crate::local::ReadyIntArg::Value(Some(1)),
+                    crate::local::ReadyBytesArg::Value(Some(b"a".to_vec())),
+                    crate::local::ReadyBytesArg::Value(Some(b"b".to_vec())),
+                    None,
+                    None,
+                    usize::MAX,
+                )
+                .unwrap()
+                .into_parts();
+                ready[0] = ScalarValue::Bytes(Some(packed));
+                ready[1] = ScalarValue::Int(bits);
+                ready[2] = ScalarValue::Int(count);
+            }
+            if matches!(mismatch, 13 | 14 | 16..=61) {
                 assert!(evaluated_ready_args_match(
                     operation,
                     &ready,
@@ -3375,6 +3439,12 @@ mod tests {
                 ready[1] = ScalarValue::Int(Some(1));
             } else if mismatch == 51 {
                 ready[0] = ScalarValue::Int(Some(2));
+            } else if mismatch == 54 || mismatch == 60 {
+                ready[0] = ScalarValue::Bytes(None);
+            } else if mismatch == 57 {
+                ready[0] = ScalarValue::Bytes(Some(Vec::new()));
+            } else if mismatch == 61 {
+                ready[2] = ScalarValue::Int(None);
             }
             if mismatch == 15 {
                 let input = EvalInput::ReadyBytes {
