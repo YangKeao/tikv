@@ -109,55 +109,86 @@ fn check_evaluated_bytes_source(
     schema: &[FieldType],
 ) -> LocalResult<()> {
     let arity = operation.input_types().len();
-    let LocalExpr::Call {
-        function,
-        args,
-        return_type,
-        metadata,
-    } = spec
-    else {
+    let calls = operation.call_count();
+    if !matches!(spec, LocalExpr::Call { .. }) {
         return Err(evaluated_bytes_error(
             operation,
             "evaluated ASCII requires its fixed value-call source",
             "evaluated Bytes requires its fixed value-call source",
         ));
+    }
+    let invalid_shape = || {
+        evaluated_bytes_error(
+            operation,
+            "evaluated ASCII requires only canonical slot0 Bytes to Int with no metadata",
+            "evaluated Bytes requires its selected nested calls on ordered canonical slots with no metadata",
+        )
     };
     if !(1..=3).contains(&arity)
+        || !(1..=2).contains(&calls)
         || schema.len() != arity
         || schema
             .iter()
             .enumerate()
             .any(|(slot, field_type)| operation.input_field_type(slot).as_ref() != Some(field_type))
-        || *function != FunctionRef::TiPb(operation.signature())
-        || return_type != &operation.return_type()
-        || !matches!(metadata, crate::CallMetadata::None)
-        || args.len() != arity
-        || args.iter().enumerate().any(|(expected, arg)| {
-            !matches!(arg, LocalExpr::InputSlot { slot, field_type }
-                if *slot == expected && Some(field_type) == schema.get(expected))
-        })
+        || spec.field_type() != &operation.return_type()
     {
-        return Err(evaluated_bytes_error(
-            operation,
-            "evaluated ASCII requires only canonical slot0 Bytes to Int with no metadata",
-            "evaluated Bytes requires its selected operation on ordered canonical slots with its canonical result and no metadata",
-        ));
+        return Err(invalid_shape());
+    }
+    let mut current = spec;
+    for index in (0..calls).rev() {
+        let primitive = operation.call_operation(index).ok_or_else(&invalid_shape)?;
+        let LocalExpr::Call {
+            function,
+            args,
+            return_type,
+            metadata,
+        } = current
+        else {
+            return Err(invalid_shape());
+        };
+        if *function != FunctionRef::TiPb(primitive.signature())
+            || return_type != &primitive.return_type()
+            || !matches!(metadata, crate::CallMetadata::None)
+            || args.len() != (if index == 0 { arity } else { 1 })
+            || args.len() != primitive.input_types().len()
+            || args.iter().enumerate().any(|(slot, arg)| {
+                primitive.input_field_type(slot).as_ref() != Some(arg.field_type())
+            })
+        {
+            return Err(invalid_shape());
+        }
+        if index == 0 {
+            if args.iter().enumerate().any(|(expected, arg)| {
+                !matches!(arg, LocalExpr::InputSlot { slot, field_type }
+                    if *slot == expected && Some(field_type) == schema.get(expected))
+            }) {
+                return Err(invalid_shape());
+            }
+        } else {
+            current = &args[0];
+        }
     }
     Ok(())
 }
 
 fn check_evaluated_bytes_kernel(
     operation: EvaluatedBytesOp,
+    call_index: usize,
     node: &RpnExpressionNode,
 ) -> LocalResult<()> {
-    let official = operation.fn_meta();
+    let primitive = operation.call_operation(call_index).ok_or_else(|| {
+        LocalError::InvalidSpec("evaluated operation has no call at this position".into())
+    })?;
+    let official = primitive.fn_meta();
     if !matches!(
         node,
         RpnExpressionNode::FnCall { func_meta, args_len, field_type, metadata }
-            if *args_len == operation.input_types().len()
+            if *args_len == primitive.input_types().len()
+                && *args_len == (if call_index == 0 { operation.input_types().len() } else { 1 })
                 && func_meta.name == official.name
                 && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
-                && field_type == &operation.return_type()
+                && field_type == &primitive.return_type()
                 && metadata.is::<()>()
     ) {
         return Err(evaluated_bytes_error(
@@ -205,7 +236,7 @@ impl CompileMode<'_> {
     fn check_type(self, field_type: &FieldType) -> LocalResult<()> {
         if let Some(operation) = self.evaluated_bytes_operation() {
             // The exact source guard fixes every input slot and the selected
-            // result at the only call, never a general mixed tree.
+            // final result of the fixed call chain, never a general mixed tree.
             if field_type != &operation.return_type()
                 && !(0..operation.input_types().len())
                     .any(|slot| operation.input_field_type(slot).as_ref() == Some(field_type))
@@ -282,7 +313,7 @@ fn take_expression(
     }
     if let Some(operation) = mode.evaluated_bytes_operation() {
         let arity = operation.input_types().len();
-        if expression.len() != arity + 1
+        if expression.len() != arity + operation.call_count()
             || expression.as_ref()[..arity].iter().enumerate().any(|(slot, node)| {
                 !matches!(node, RpnExpressionNode::ColumnRef { offset } if *offset == slot)
             })
@@ -293,7 +324,9 @@ fn take_expression(
                 "evaluated Bytes compilation requires ordered slots then its selected kernel",
             ));
         }
-        check_evaluated_bytes_kernel(operation, &expression[arity])?;
+        for (call_index, node) in expression.as_ref()[arity..].iter().enumerate() {
+            check_evaluated_bytes_kernel(operation, call_index, node)?;
+        }
     }
     match (mode.is_lineaged(), result_flows[index].take()) {
         (true, Some(flow)) => expression.with_result_flow(flow),
@@ -481,8 +514,11 @@ pub(super) fn compile_evaluated_bytes(
             })
         })
         .collect::<LocalResult<Vec<_>>>()?;
-    let spec = LocalExpr::Call {
-        function: FunctionRef::TiPb(operation.signature()),
+    let first = operation
+        .call_operation(0)
+        .ok_or_else(|| LocalError::InvalidSpec("evaluated operation has no first call".into()))?;
+    let mut spec = LocalExpr::Call {
+        function: FunctionRef::TiPb(first.signature()),
         args: schema
             .iter()
             .enumerate()
@@ -492,9 +528,20 @@ pub(super) fn compile_evaluated_bytes(
             })
             .collect::<Vec<_>>()
             .into_boxed_slice(),
-        return_type: operation.return_type(),
+        return_type: first.return_type(),
         metadata: crate::CallMetadata::None,
     };
+    for index in 1..operation.call_count() {
+        let primitive = operation.call_operation(index).ok_or_else(|| {
+            LocalError::InvalidSpec("evaluated operation has no call at this position".into())
+        })?;
+        spec = LocalExpr::Call {
+            function: FunctionRef::TiPb(primitive.signature()),
+            args: vec![spec].into_boxed_slice(),
+            return_type: primitive.return_type(),
+            metadata: crate::CallMetadata::None,
+        };
+    }
     let mode = match operation {
         EvaluatedBytesOp::Ascii => CompileMode::EvaluatedAscii,
         _ => CompileMode::EvaluatedBytes(operation),
@@ -510,7 +557,8 @@ fn compile(
 ) -> LocalResult<LocalProgram> {
     if let Some(operation) = mode.evaluated_bytes_operation() {
         // Check the whole closed source before preparing any descriptor. There
-        // is exactly one selected call over ordered slots, even on private entries.
+        // are only the selected nested calls over ordered slots, even on private
+        // entries.
         check_evaluated_bytes_source(operation, spec, schema)?;
     }
     for field_type in schema {
@@ -533,7 +581,15 @@ fn compile(
             BuildStep::Emit { call, output } => {
                 let node = call.into_node();
                 if let Some(operation) = mode.evaluated_bytes_operation() {
-                    check_evaluated_bytes_kernel(operation, &node)?;
+                    let call_index = buffers[output]
+                        .len()
+                        .checked_sub(operation.input_types().len())
+                        .ok_or_else(|| {
+                            LocalError::InvalidSpec(
+                                "evaluated call precedes its input slots".into(),
+                            )
+                        })?;
+                    check_evaluated_bytes_kernel(operation, call_index, &node)?;
                 }
                 buffers[output].push(node);
             }
@@ -723,11 +779,7 @@ fn compile(
                         let mut call = CallBuild::local(shape, metadata.clone());
                         let prepared = prepare_call(&mut call).map_err(invalid)?;
                         if let Some(operation) = mode.evaluated_bytes_operation() {
-                            if !prepared
-                                .retained_args()
-                                .iter()
-                                .copied()
-                                .eq(0..operation.input_types().len())
+                            if !prepared.retained_args().iter().copied().eq(0..args.len())
                                 || prepared.short_circuit_meta().is_some()
                             {
                                 return Err(evaluated_bytes_error(
@@ -822,7 +874,9 @@ fn compile(
         }
     }
     if let Some(operation) = mode.evaluated_bytes_operation() {
-        if visited != operation.input_types().len() + 1 || host_catalog.is_some() {
+        if visited != operation.input_types().len() + operation.call_count()
+            || host_catalog.is_some()
+        {
             return Err(evaluated_bytes_error(
                 operation,
                 "evaluated ASCII compilation changed its fixed source or attached hosts",
@@ -1418,6 +1472,14 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::BitXor,
             EvaluatedBytesOp::LeftShift,
             EvaluatedBytesOp::RightShift,
+            EvaluatedBytesOp::UnaryNot,
+            EvaluatedBytesOp::IsNull,
+            EvaluatedBytesOp::IsTrue,
+            EvaluatedBytesOp::IsFalse,
+            EvaluatedBytesOp::IsTrueWithNull,
+            EvaluatedBytesOp::IsNotNull,
+            EvaluatedBytesOp::IsNotTrue,
+            EvaluatedBytesOp::IsNotFalse,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
@@ -1443,11 +1505,17 @@ mod evaluated_ascii_compile_tests {
                     RpnExpressionNode::ColumnRef { offset } if offset == slot));
             }
             assert_eq!(program.return_type(), &operation.return_type());
-            assert_eq!(program.expression.len(), arity + 1);
-            check_evaluated_bytes_kernel(operation, &program.expression[arity]).unwrap();
+            let calls = operation.call_count();
+            assert_eq!(program.expression.len(), arity + calls);
+            for index in 0..calls {
+                check_evaluated_bytes_kernel(operation, index, &program.expression[arity + index])
+                    .unwrap();
+            }
+            assert!(operation.call_operation(calls).is_none());
 
+            let first = operation.call_operation(0).unwrap();
             let mut spec = LocalExpr::Call {
-                function: FunctionRef::TiPb(operation.signature()),
+                function: FunctionRef::TiPb(first.signature()),
                 args: program
                     .schema
                     .iter()
@@ -1458,9 +1526,18 @@ mod evaluated_ascii_compile_tests {
                     })
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
-                return_type: operation.return_type(),
+                return_type: first.return_type(),
                 metadata: crate::CallMetadata::None,
             };
+            for index in 1..calls {
+                let primitive = operation.call_operation(index).unwrap();
+                spec = LocalExpr::Call {
+                    function: FunctionRef::TiPb(primitive.signature()),
+                    args: vec![spec].into_boxed_slice(),
+                    return_type: primitive.return_type(),
+                    metadata: crate::CallMetadata::None,
+                };
+            }
             if operation != EvaluatedBytesOp::Ascii {
                 assert_closed_source_rejected(&spec, &program.schema);
             }

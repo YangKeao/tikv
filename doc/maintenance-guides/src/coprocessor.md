@@ -206,8 +206,11 @@ short-circuit admission policy described above.
   slots and returns an opaque worker, not a raw program/context/graph. Its legacy
   name also covers fixed Int and multi-input string operations. `EvaluatedArgs`
   admits only nullable Bytes, Int (including an explicitly normalized bit pattern),
-  two Ints, Bytes+Int or three Bytes operands. The operation fixes signature, ordered slot
-  types/arity and the single FnCall; callers cannot supply arbitrary FieldTypes.
+  two Ints, Bytes+Int or three Bytes operands. The operation fixes ordered slot
+  types/arity and an exact call recipe; callers cannot supply arbitrary FieldTypes.
+  Existing operations use one FnCall. Closed negated boolean tests use only
+  base+UnaryNot, checking each stage's signature, name, function pointer, arity and
+  metadata in order. Their source tree needs compile depth3, not a new evaluator.
   `eval_args` checks shape before invocation, then uses the existing compiler and
   frame/kernel driver with a fixed stack array and borrowed ready scalar slots.
   `eval_one` and `prepare_evaluated_ascii` are thin compatibility paths, not second
@@ -223,6 +226,11 @@ short-circuit admission policy described above.
   and counts>=64 come from the official kernels. Native string/Decimal/Real
   normalization and SQL diagnostics happen before this ready-value boundary;
   OwnSignedInt describes computed transport, not the caller's UInt SQL result.
+  Boolean operations consume frontend-normalized truth/presence as nullable Int0/1;
+  this does not restrict original SQL operands to Int or silently coerce NaN to NULL.
+  NULL IS NOT TRUE/FALSE requires base+UnaryNot, not substituting the opposite IS
+  test. Both official wrappers really execute, so the dispatch counter is two.
+  Structural factory prewarming still executes no kernel.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake

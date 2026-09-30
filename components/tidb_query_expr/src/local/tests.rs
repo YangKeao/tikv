@@ -1183,3 +1183,90 @@ fn local_evaluated_args_int2_shape_errors_are_preflight() {
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
 }
+
+#[test]
+fn local_evaluated_args_truth_predicates_preserve_null_semantics() {
+    let cases: &[(EvaluatedBytesOp, [Option<i64>; 3], u64)] = &[
+        (EvaluatedBytesOp::UnaryNot, [None, Some(1), Some(0)], 1),
+        (EvaluatedBytesOp::IsNull, [Some(1), Some(0), Some(0)], 1),
+        (EvaluatedBytesOp::IsTrue, [Some(0), Some(0), Some(1)], 1),
+        (EvaluatedBytesOp::IsFalse, [Some(0), Some(1), Some(0)], 1),
+        (
+            EvaluatedBytesOp::IsTrueWithNull,
+            [None, Some(0), Some(1)],
+            1,
+        ),
+        (EvaluatedBytesOp::IsNotNull, [Some(0), Some(1), Some(1)], 2),
+        (EvaluatedBytesOp::IsNotTrue, [Some(1), Some(1), Some(0)], 2),
+        (EvaluatedBytesOp::IsNotFalse, [Some(1), Some(0), Some(1)], 2),
+    ];
+    for &(operation, expected, invocations_per_call) in cases {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, input) in [None, Some(0), Some(1)].into_iter().enumerate() {
+            let ComputedValue::Int(value) = worker.eval_args(EvaluatedArgs::Int(input)).unwrap()
+            else {
+                panic!("truth predicate returned Bytes");
+            };
+            assert_eq!(value.value(), expected[index]);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected[index]);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) * invocations_per_call
+            );
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_composite_truth_predicates_require_depth_three() {
+    for operation in [
+        EvaluatedBytesOp::IsNotNull,
+        EvaluatedBytesOp::IsNotTrue,
+        EvaluatedBytesOp::IsNotFalse,
+    ] {
+        assert!(matches!(
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext {
+                    limits: CompileLimits {
+                        max_nodes: 4,
+                        max_depth: 2,
+                    },
+                },
+                ExecutionLimits::default(),
+                usize::MAX,
+            ),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        let worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext {
+                limits: CompileLimits {
+                    max_nodes: 4,
+                    max_depth: 3,
+                },
+            },
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        assert_eq!(worker.kernel_invocations(), 0);
+    }
+}

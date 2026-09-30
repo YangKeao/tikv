@@ -433,15 +433,17 @@ fn numeric_batch_int_type(field_type: &FieldType) -> bool {
 
 // Fresh scalar-only canonical protobuf values have no heap owners. Comparing
 // these fixed ABI records does not clone a descriptor or select/prepare a call.
-fn evaluated_bytes_shape(
+pub(crate) fn evaluated_bytes_shape(
     operation: EvaluatedBytesOp,
     nodes: &[RpnExpressionNode],
     schema: &[FieldType],
 ) -> bool {
     let arity = operation.input_types().len();
+    let calls = operation.call_count();
     if !(1..=3).contains(&arity)
+        || !(1..=2).contains(&calls)
         || schema.len() != arity
-        || nodes.len() != arity + 1
+        || nodes.len() != arity + calls
         || schema.iter().enumerate().any(|(slot, field_type)| {
             operation.input_field_type(slot).as_ref() != Some(field_type)
         })
@@ -451,22 +453,39 @@ fn evaluated_bytes_shape(
     {
         return false;
     }
-    match &nodes[arity] {
-        RpnExpressionNode::FnCall {
-            func_meta,
-            args_len,
-            field_type,
-            metadata,
-        } => {
-            let official = operation.fn_meta();
-            *args_len == arity
-                && func_meta.name == official.name
-                && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
-                && *field_type == operation.return_type()
-                && metadata.is::<()>()
+    nodes[arity..].iter().enumerate().all(|(index, node)| {
+        let Some(primitive) = operation.call_operation(index) else {
+            return false;
+        };
+        let expected_arity = if index == 0 { arity } else { 1 };
+        if primitive.input_types().len() != expected_arity {
+            return false;
         }
-        _ => false,
-    }
+        let input_types_match = if index == 0 {
+            primitive.input_types() == operation.input_types()
+        } else {
+            matches!(&nodes[arity + index - 1], RpnExpressionNode::FnCall { field_type, .. }
+                if primitive.input_field_type(0).as_ref() == Some(field_type))
+        };
+        match node {
+            RpnExpressionNode::FnCall {
+                func_meta,
+                args_len,
+                field_type,
+                metadata,
+            } => {
+                let official = primitive.fn_meta();
+                input_types_match
+                    && *args_len == expected_arity
+                    && func_meta.name == official.name
+                    && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
+                    && *field_type == primitive.return_type()
+                    && (index + 1 != calls || *field_type == operation.return_type())
+                    && metadata.is::<()>()
+            }
+            _ => false,
+        }
+    })
 }
 
 #[derive(Clone)]
@@ -2942,6 +2961,48 @@ mod tests {
             }
         }
         assert_eq!(witness.invocations(), 0);
+    }
+
+    #[test]
+    fn test_evaluated_composite_requires_exact_call_chain() {
+        let call = |primitive: EvaluatedBytesOp| RpnExpressionNode::FnCall {
+            func_meta: primitive.fn_meta(),
+            args_len: 1,
+            field_type: primitive.return_type(),
+            metadata: Box::new(()),
+        };
+        let schema = [FieldType::from(FieldTypeTp::LongLong)];
+        let operation = EvaluatedBytesOp::IsNotNull;
+        let mut nodes = vec![
+            RpnExpressionNode::ColumnRef { offset: 0 },
+            call(EvaluatedBytesOp::IsNull),
+            call(EvaluatedBytesOp::UnaryNot),
+        ];
+        assert!(evaluated_bytes_shape(operation, &nodes, &schema));
+        assert!(!evaluated_bytes_shape(
+            EvaluatedBytesOp::IsNull,
+            &nodes,
+            &schema
+        ));
+        assert!(!evaluated_bytes_shape(operation, &nodes[..2], &schema));
+        nodes.push(call(EvaluatedBytesOp::UnaryNot));
+        assert!(!evaluated_bytes_shape(operation, &nodes, &schema));
+        let _ = nodes.pop();
+        nodes.swap(1, 2);
+        assert!(!evaluated_bytes_shape(operation, &nodes, &schema));
+        nodes.swap(1, 2);
+        nodes[1] = call(EvaluatedBytesOp::IsTrue);
+        assert!(!evaluated_bytes_shape(operation, &nodes, &schema));
+        nodes[1] = call(EvaluatedBytesOp::IsNull);
+        if let RpnExpressionNode::FnCall { func_meta, .. } = &mut nodes[2] {
+            func_meta.name = EvaluatedBytesOp::IsNull.fn_meta().name;
+        }
+        assert!(!evaluated_bytes_shape(operation, &nodes, &schema));
+        if let RpnExpressionNode::FnCall { func_meta, .. } = &mut nodes[2] {
+            *func_meta = EvaluatedBytesOp::UnaryNot.fn_meta();
+            func_meta.fn_ptr = EvaluatedBytesOp::IsNull.fn_meta().fn_ptr;
+        }
+        assert!(!evaluated_bytes_shape(operation, &nodes, &schema));
     }
 
     #[test]

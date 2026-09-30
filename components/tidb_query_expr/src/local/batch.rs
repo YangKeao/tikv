@@ -27,7 +27,7 @@ use super::{
 };
 use crate::{
     RpnExpressionNode, RpnStackNode, RpnStackNodeVectorValue,
-    types::expr_eval::{EvalInput, EvaluatedAsciiWitness, FrameResult},
+    types::expr_eval::{EvalInput, EvaluatedAsciiWitness, FrameResult, evaluated_bytes_shape},
 };
 
 pub struct LocalBatch<'a> {
@@ -739,7 +739,10 @@ impl LocalNumericBatchProgram {
 /// descriptor is accepted. UTF8 variants require the caller's normalized UTF8;
 /// this boundary never chooses a SQL charset or performs lossy conversion.
 /// Quote uses its official nullable kernel: a NULL input yields non-NULL
-/// "NULL". The operation fixes the complete argument shape, not only its arity.
+/// "NULL". Boolean operations take frontend-normalized Int truth/presence
+/// (None/Some(0)/Some(1)), never raw SQL values. Each operation fixes its
+/// entire input shape and either one kernel or one of three exact base-then-NOT
+/// pairs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EvaluatedBytesOp {
     Ascii,
@@ -769,6 +772,14 @@ pub enum EvaluatedBytesOp {
     BitXor,
     LeftShift,
     RightShift,
+    UnaryNot,
+    IsNull,
+    IsTrue,
+    IsFalse,
+    IsTrueWithNull,
+    IsNotNull,
+    IsNotTrue,
+    IsNotFalse,
 }
 
 impl EvaluatedBytesOp {
@@ -802,6 +813,13 @@ impl EvaluatedBytesOp {
             Self::BitXor => ScalarFuncSig::BitXorSig,
             Self::LeftShift => ScalarFuncSig::LeftShift,
             Self::RightShift => ScalarFuncSig::RightShift,
+            Self::UnaryNot | Self::IsNotNull | Self::IsNotTrue | Self::IsNotFalse => {
+                ScalarFuncSig::UnaryNotInt
+            }
+            Self::IsNull => ScalarFuncSig::IntIsNull,
+            Self::IsTrue => ScalarFuncSig::IntIsTrue,
+            Self::IsFalse => ScalarFuncSig::IntIsFalse,
+            Self::IsTrueWithNull => ScalarFuncSig::IntIsTrueWithNull,
         }
     }
 
@@ -836,6 +854,17 @@ impl EvaluatedBytesOp {
             Self::BitXor => crate::impl_op::bit_xor_fn_meta(),
             Self::LeftShift => crate::impl_op::left_shift_fn_meta(),
             Self::RightShift => crate::impl_op::right_shift_fn_meta(),
+            Self::UnaryNot | Self::IsNotNull | Self::IsNotTrue | Self::IsNotFalse => {
+                crate::impl_op::unary_not_int_fn_meta()
+            }
+            Self::IsNull => {
+                crate::impl_op::is_null_fn_meta::<tidb_query_datatype::codec::data_type::Int>()
+            }
+            Self::IsTrue => crate::impl_op::int_is_true_fn_meta::<crate::impl_op::KeepNullOff>(),
+            Self::IsFalse => crate::impl_op::int_is_false_fn_meta::<crate::impl_op::KeepNullOff>(),
+            Self::IsTrueWithNull => {
+                crate::impl_op::int_is_true_fn_meta::<crate::impl_op::KeepNullOn>()
+            }
         }
     }
 
@@ -853,7 +882,15 @@ impl EvaluatedBytesOp {
             | Self::BitOr
             | Self::BitXor
             | Self::LeftShift
-            | Self::RightShift => EvalType::Int,
+            | Self::RightShift
+            | Self::UnaryNot
+            | Self::IsNull
+            | Self::IsTrue
+            | Self::IsFalse
+            | Self::IsTrueWithNull
+            | Self::IsNotNull
+            | Self::IsNotTrue
+            | Self::IsNotFalse => EvalType::Int,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -881,7 +918,18 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
-            Self::HexInt | Self::Bin | Self::BitCount | Self::BitNeg => &[EvalType::Int],
+            Self::HexInt
+            | Self::Bin
+            | Self::BitCount
+            | Self::BitNeg
+            | Self::UnaryNot
+            | Self::IsNull
+            | Self::IsTrue
+            | Self::IsFalse
+            | Self::IsTrueWithNull
+            | Self::IsNotNull
+            | Self::IsNotTrue
+            | Self::IsNotFalse => &[EvalType::Int],
             Self::BitAnd | Self::BitOr | Self::BitXor | Self::LeftShift | Self::RightShift => {
                 &[EvalType::Int, EvalType::Int]
             }
@@ -902,6 +950,28 @@ impl EvaluatedBytesOp {
             | Self::CharLengthUtf8
             | Self::Quote
             | Self::HexStr => &[EvalType::Bytes],
+        }
+    }
+
+    /// The only composite recipes are NOT(IS NULL/TRUE/FALSE(input)). These
+    /// stages are fixed identities, not a caller-supplied list or expression.
+    pub(crate) fn call_count(self) -> usize {
+        match self {
+            Self::IsNotNull | Self::IsNotTrue | Self::IsNotFalse => 2,
+            _ => 1,
+        }
+    }
+
+    /// Primitive kernel identities in postfix order. signature()/fn_meta() on
+    /// a composite denote its root; each stage must instead use this selector.
+    pub(crate) fn call_operation(self, index: usize) -> Option<Self> {
+        match (self, index) {
+            (Self::IsNotNull, 0) => Some(Self::IsNull),
+            (Self::IsNotTrue, 0) => Some(Self::IsTrue),
+            (Self::IsNotFalse, 0) => Some(Self::IsFalse),
+            (Self::IsNotNull | Self::IsNotTrue | Self::IsNotFalse, 1) => Some(Self::UnaryNot),
+            (operation, 0) => Some(operation),
+            _ => None,
         }
     }
 
@@ -1154,8 +1224,9 @@ pub fn prepare_evaluated_bytes(
     // Fully warm the fixed program's owned metadata BEFORE publication. These
     // getters only inspect source structure; none dispatches an RPN function.
     let arity = operation.input_types().len();
-    if program.expression.node_count() != arity + 1
-        || program.expression.work_count() != arity + 1
+    let nodes = arity + operation.call_count();
+    if program.expression.node_count() != nodes
+        || program.expression.work_count() != nodes
         || program.expression.column_ref_count() != arity
         || !program
             .expression
@@ -1285,40 +1356,17 @@ impl EvaluatedBytesWorker {
                 "evaluated ASCII private context is not clean and sealed".into(),
             ));
         }
-        let arity = self.operation.input_types().len();
         let result_type = self.operation.return_type();
-        let official = self.operation.fn_meta();
         let nodes: &[RpnExpressionNode] = self.program.expression.as_ref();
-        let Some((
-            RpnExpressionNode::FnCall {
-                func_meta,
-                args_len,
-                field_type,
-                metadata,
-            },
-            inputs,
-        )) = nodes.split_last()
-        else {
+        if !matches!(nodes.last(), Some(RpnExpressionNode::FnCall { .. })) {
             return Err(LocalError::InvalidSpec(
                 "evaluated ASCII worker no longer owns its fixed recipe".into(),
             ));
-        };
+        }
         if self.program.host_catalog.is_some()
             || self.program.expression.checked_result_flow().is_some()
-            || *args_len != arity
-            || inputs.len() != arity
-            || inputs.iter().enumerate().any(|(slot, node)| {
-                !matches!(node, RpnExpressionNode::ColumnRef { offset } if *offset == slot)
-            })
-            || self.program.schema.len() != arity
-            || self.program.schema.iter().enumerate().any(|(slot, input_type)| {
-                self.operation.input_field_type(slot).as_ref() != Some(input_type)
-            })
             || self.program.return_type() != &result_type
-            || field_type != &result_type
-            || func_meta.name != official.name
-            || !std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
-            || !metadata.is::<()>()
+            || !evaluated_bytes_shape(self.operation, nodes, &self.program.schema)
         {
             return Err(LocalError::InvalidSpec(
                 "evaluated ASCII worker ownership invariants changed".into(),

@@ -27,13 +27,17 @@
 //! `prepare_evaluated_bytes` separately prepares an opaque reusable worker for
 //! a closed operation on ready nullable Int/Bytes: ASCII, LENGTH/OCTET_LENGTH,
 //! BIT_LENGTH, LTRIM, RTRIM, UNHEX, CRC32, REVERSE, CHAR_LENGTH, QUOTE, HEX,
-//! BIN, LEFT, RIGHT, REPLACE, BIT_COUNT, bitwise NOT/AND/OR/XOR and shifts,
-//! with separate numeric/byte/UTF8 variants as needed. `EvaluatedArgs` owns the
-//! fixed argument shapes, including Int2; Int preserves all 64 bits. An
-//! operation admits only its canonical one-to-three ordered ColumnRefs
-//! and one official FnCall. Its wrapper runs even for ready NULL; QUOTE(NULL)
-//! returns owned non-NULL bytes "NULL". All ready owners remain charged through
-//! result extraction. Results are owned Int/Bytes, not native SQL descriptors.
+//! BIN, LEFT, RIGHT, REPLACE, BIT_COUNT, bitwise NOT/AND/OR/XOR, shifts and
+//! normalized truth/presence predicates. Numeric/byte/UTF8 variants are
+//! explicit. `EvaluatedArgs` owns fixed shapes, including Int2; Int preserves
+//! all 64 bits. Boolean operations instead consume frontend-normalized Int
+//! None/0/1, not Real/Decimal/string values. Recipes admit only ordered
+//! canonical ColumnRefs and their exact official calls: one call, or the fixed
+//! NOT(IS NULL/TRUE/FALSE) pair for IsNotNull/IsNotTrue/IsNotFalse. These pairs
+//! require compile depth 3 and perform two real wrapper dispatches, including
+//! for NULL; they are not arbitrary programs. QUOTE(NULL) returns owned
+//! non-NULL bytes "NULL". All ready owners remain charged through result
+//! extraction. Results are owned Int/Bytes, not native SQL descriptors.
 //! Frontends retain demand/coercion order, normalization, signature selection
 //! and result packing (including CRC32/bitwise UInt). The old single-Bytes
 //! eval_one and ASCII-only facade use the same compiler/worker/driver. No
