@@ -206,7 +206,7 @@ short-circuit admission policy described above.
   slots and returns an opaque worker, not a raw program/context/graph. Its legacy
   name also covers fixed Int and multi-input string operations. `EvaluatedArgs`
   admits only nullable Bytes, Int (including an explicitly normalized bit pattern),
-  Bytes+Int or three Bytes operands. The operation fixes signature, ordered slot
+  two Ints, Bytes+Int or three Bytes operands. The operation fixes signature, ordered slot
   types/arity and the single FnCall; callers cannot supply arbitrary FieldTypes.
   `eval_args` checks shape before invocation, then uses the existing compiler and
   frame/kernel driver with a fixed stack array and borrowed ready scalar slots.
@@ -218,6 +218,11 @@ short-circuit admission policy described above.
   non-NULL string result. No native retry is available. Checked singleton Int or
   owned Bytes results carry their own computed metadata; original SQL charset,
   unsigned result packing and return casts remain the caller's responsibility.
+  BitCount and the six bitwise operations use the same Int carrier: it preserves
+  all64 bits, not a checked unsigned-to-signed numeric narrowing. Logical shifts
+  and counts>=64 come from the official kernels. Native string/Decimal/Real
+  normalization and SQL diagnostics happen before this ready-value boundary;
+  OwnSignedInt describes computed transport, not the caller's UInt SQL result.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake

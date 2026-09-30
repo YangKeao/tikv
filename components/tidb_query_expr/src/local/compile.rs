@@ -1411,6 +1411,13 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::Right,
             EvaluatedBytesOp::RightUtf8,
             EvaluatedBytesOp::Replace,
+            EvaluatedBytesOp::BitCount,
+            EvaluatedBytesOp::BitNeg,
+            EvaluatedBytesOp::BitAnd,
+            EvaluatedBytesOp::BitOr,
+            EvaluatedBytesOp::BitXor,
+            EvaluatedBytesOp::LeftShift,
+            EvaluatedBytesOp::RightShift,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

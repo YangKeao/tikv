@@ -27,19 +27,21 @@
 //! `prepare_evaluated_bytes` separately prepares an opaque reusable worker for
 //! a closed operation on ready nullable Int/Bytes: ASCII, LENGTH/OCTET_LENGTH,
 //! BIT_LENGTH, LTRIM, RTRIM, UNHEX, CRC32, REVERSE, CHAR_LENGTH, QUOTE, HEX,
-//! BIN, LEFT, RIGHT or REPLACE, with separate numeric/byte/UTF8 variants as
-//! needed. `EvaluatedArgs` owns the fixed argument shapes; Int preserves all 64
-//! bits. An operation admits only its canonical one-to-three ordered ColumnRefs
+//! BIN, LEFT, RIGHT, REPLACE, BIT_COUNT, bitwise NOT/AND/OR/XOR and shifts,
+//! with separate numeric/byte/UTF8 variants as needed. `EvaluatedArgs` owns the
+//! fixed argument shapes, including Int2; Int preserves all 64 bits. An
+//! operation admits only its canonical one-to-three ordered ColumnRefs
 //! and one official FnCall. Its wrapper runs even for ready NULL; QUOTE(NULL)
 //! returns owned non-NULL bytes "NULL". All ready owners remain charged through
 //! result extraction. Results are owned Int/Bytes, not native SQL descriptors.
 //! Frontends retain demand/coercion order, normalization, signature selection
-//! and result packing (including CRC32's UInt). The old single-Bytes eval_one
-//! and ASCII-only facade use the same compiler/worker/driver. No native child,
-//! binding-service or Host callback, arbitrary signature, original SQL/PB
-//! schema, or raw-program escape is exposed. The sealed context and actual
-//! wrapper-dispatch witness persist per worker, not per row; diagnostics and
-//! execution-owner lifetime stay outside. Wrapper counts are not body counts.
+//! and result packing (including CRC32/bitwise UInt). The old single-Bytes
+//! eval_one and ASCII-only facade use the same compiler/worker/driver. No
+//! native child, binding-service or Host callback, arbitrary signature,
+//! original SQL/PB schema, or raw-program escape is exposed. The sealed context
+//! and actual wrapper-dispatch witness persist per worker, not per row;
+//! diagnostics and execution-owner lifetime stay outside. Wrapper counts are
+//! not body counts.
 
 mod batch;
 mod compile;

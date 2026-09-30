@@ -996,3 +996,190 @@ fn local_evaluated_args_charge_all_ready_capacities_before_null() {
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
 }
+
+#[test]
+fn local_evaluated_args_unary_bits_preserve_signed_carrier() {
+    let cases: &[(Option<i64>, [Option<i64>; 2])] = &[
+        (None, [None, None]),
+        (Some(0), [Some(0), Some(-1)]),
+        (Some(-1), [Some(64), Some(0)]),
+        (Some(-2), [Some(63), Some(1)]),
+        (Some(i64::MIN), [Some(1), Some(i64::MAX)]),
+    ];
+    for (column, operation) in [EvaluatedBytesOp::BitCount, EvaluatedBytesOp::BitNeg]
+        .into_iter()
+        .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Int(value) = worker.eval_args(EvaluatedArgs::Int(input)).unwrap()
+            else {
+                panic!("unary bit operation returned Bytes");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected[column]);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_binary_bits_preserve_high_bit_and_nulls() {
+    let cases: &[(Option<i64>, Option<i64>, [Option<i64>; 3])] = &[
+        (None, Some(-1), [None; 3]),
+        (Some(i64::MIN), None, [None; 3]),
+        (
+            Some(i64::MIN),
+            Some(-1),
+            [Some(i64::MIN), Some(-1), Some(i64::MAX)],
+        ),
+        (
+            Some(i64::MIN),
+            Some(1),
+            [
+                Some(0),
+                Some(-9_223_372_036_854_775_807),
+                Some(-9_223_372_036_854_775_807),
+            ],
+        ),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::BitAnd,
+        EvaluatedBytesOp::BitOr,
+        EvaluatedBytesOp::BitXor,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(lhs, rhs, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Int(value) =
+                worker.eval_args(EvaluatedArgs::Int2(lhs, rhs)).unwrap()
+            else {
+                panic!("binary bit operation returned Bytes");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected[column]);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_shifts_are_logical_and_not_modulo() {
+    let cases: &[(Option<i64>, Option<i64>, [Option<i64>; 2])] = &[
+        (None, Some(1), [None, None]),
+        (Some(-1), None, [None, None]),
+        (Some(i64::MIN), Some(0), [Some(i64::MIN), Some(i64::MIN)]),
+        (Some(-1), Some(1), [Some(-2), Some(i64::MAX)]),
+        (Some(-1), Some(63), [Some(i64::MIN), Some(1)]),
+        (Some(-1), Some(64), [Some(0), Some(0)]),
+        (Some(-1), Some(65), [Some(0), Some(0)]),
+        (Some(-1), Some(4_294_967_296), [Some(0), Some(0)]),
+        (Some(-1), Some(-1), [Some(0), Some(0)]),
+    ];
+    for (column, operation) in [EvaluatedBytesOp::LeftShift, EvaluatedBytesOp::RightShift]
+        .into_iter()
+        .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(lhs, rhs, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Int(value) =
+                worker.eval_args(EvaluatedArgs::Int2(lhs, rhs)).unwrap()
+            else {
+                panic!("shift returned Bytes");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected[column]);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_int2_shape_errors_are_preflight() {
+    let cases = [
+        (
+            EvaluatedBytesOp::BitNeg,
+            EvaluatedArgs::Int2(None, None),
+            EvaluatedArgs::Int(Some(0)),
+            Some(-1),
+        ),
+        (
+            EvaluatedBytesOp::BitAnd,
+            EvaluatedArgs::Int(None),
+            EvaluatedArgs::Int2(Some(i64::MIN), Some(-1)),
+            Some(i64::MIN),
+        ),
+        (
+            EvaluatedBytesOp::RightShift,
+            EvaluatedArgs::BytesInt(None, Some(1)),
+            EvaluatedArgs::Int2(Some(-1), Some(1)),
+            Some(i64::MAX),
+        ),
+    ];
+    for (operation, invalid, valid, expected) in cases {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let ComputedValue::Int(value) = worker.eval_args(valid).unwrap() else {
+            panic!("valid bit operation returned Bytes");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}

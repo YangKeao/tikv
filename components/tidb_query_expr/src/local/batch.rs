@@ -762,6 +762,13 @@ pub enum EvaluatedBytesOp {
     Right,
     RightUtf8,
     Replace,
+    BitCount,
+    BitNeg,
+    BitAnd,
+    BitOr,
+    BitXor,
+    LeftShift,
+    RightShift,
 }
 
 impl EvaluatedBytesOp {
@@ -788,6 +795,13 @@ impl EvaluatedBytesOp {
             Self::Right => ScalarFuncSig::Right,
             Self::RightUtf8 => ScalarFuncSig::RightUtf8,
             Self::Replace => ScalarFuncSig::Replace,
+            Self::BitCount => ScalarFuncSig::BitCount,
+            Self::BitNeg => ScalarFuncSig::BitNegSig,
+            Self::BitAnd => ScalarFuncSig::BitAndSig,
+            Self::BitOr => ScalarFuncSig::BitOrSig,
+            Self::BitXor => ScalarFuncSig::BitXorSig,
+            Self::LeftShift => ScalarFuncSig::LeftShift,
+            Self::RightShift => ScalarFuncSig::RightShift,
         }
     }
 
@@ -815,6 +829,13 @@ impl EvaluatedBytesOp {
             Self::Right => crate::impl_string::right_fn_meta(),
             Self::RightUtf8 => crate::impl_string::right_utf8_fn_meta(),
             Self::Replace => crate::impl_string::replace_fn_meta(),
+            Self::BitCount => crate::impl_other::bit_count_fn_meta(),
+            Self::BitNeg => crate::impl_op::bit_neg_fn_meta(),
+            Self::BitAnd => crate::impl_op::bit_and_fn_meta(),
+            Self::BitOr => crate::impl_op::bit_or_fn_meta(),
+            Self::BitXor => crate::impl_op::bit_xor_fn_meta(),
+            Self::LeftShift => crate::impl_op::left_shift_fn_meta(),
+            Self::RightShift => crate::impl_op::right_shift_fn_meta(),
         }
     }
 
@@ -825,7 +846,14 @@ impl EvaluatedBytesOp {
             | Self::BitLength
             | Self::Crc32
             | Self::CharLength
-            | Self::CharLengthUtf8 => EvalType::Int,
+            | Self::CharLengthUtf8
+            | Self::BitCount
+            | Self::BitNeg
+            | Self::BitAnd
+            | Self::BitOr
+            | Self::BitXor
+            | Self::LeftShift
+            | Self::RightShift => EvalType::Int,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -853,7 +881,10 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
-            Self::HexInt | Self::Bin => &[EvalType::Int],
+            Self::HexInt | Self::Bin | Self::BitCount | Self::BitNeg => &[EvalType::Int],
+            Self::BitAnd | Self::BitOr | Self::BitXor | Self::LeftShift | Self::RightShift => {
+                &[EvalType::Int, EvalType::Int]
+            }
             Self::Left | Self::LeftUtf8 | Self::Right | Self::RightUtf8 => {
                 &[EvalType::Bytes, EvalType::Int]
             }
@@ -901,6 +932,7 @@ pub enum EvaluatedArgs {
     Int(Option<i64>),
     BytesInt(Option<Vec<u8>>, Option<i64>),
     Bytes3([Option<Vec<u8>>; 3]),
+    Int2(Option<i64>, Option<i64>),
 }
 
 impl EvaluatedArgs {
@@ -913,6 +945,7 @@ impl EvaluatedArgs {
             Self::Int(value) => ([Int(value), Int(None), Int(None)], 1),
             Self::BytesInt(bytes, int) => ([Bytes(bytes), Int(int), Int(None)], 2),
             Self::Bytes3([a, b, c]) => ([Bytes(a), Bytes(b), Bytes(c)], 3),
+            Self::Int2(lhs, rhs) => ([Int(lhs), Int(rhs), Int(None)], 2),
         }
     }
 }
