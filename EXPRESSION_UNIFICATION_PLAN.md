@@ -76,11 +76,18 @@
 - [x] (round9，native错误承载与terminal映射编译验收) D两文件新EvalError variant/固定1105 arm及2原生origin tests回交；parent三文件native-only reexports/真实EvalError身份trait test。实际carrier8、fullExpr1348/4原完整块仅threadID归一相同/94ignored；session/old-exec/unistore check0。新variant前后renderer均7/1，旧Sequence origin Eq failure完整块仅threadID+临时cfg行366→365归一相同，旧expected不改。首executor编译因旧prepared.rs7处缺clause_message而零测试；parent只补7行generic expression，7fixture前后均过。3临时cfg全部恢复且SHA核对，最终6源码pinnedfmt/diffcheck/A独立复核无域内新增finding。当前ELFb5d49459…872cf4重跑8次actual malloc192/free+负控86，非旧receipt转移。无Columns/ASCII/fold/default/public producer；terminal新arm尚非端到端证明。E/C只读产出下一activation切片和5族选型，所有agent写权均回收；完整族仍0。
 - [x] (round10，显式native capability/value API验收) E两文件公开原opaque policy/owner/execution/scope/Sized wrapper、63普通forward+2有效capabilities；discovery失败隔离requested，成功handoff后guard/scope/execution一致。D新adapter carrier与terminal原Pool/Scope/Bridge cause、9native固定消息；parent4边界注册。实际tikv107/1ignored（37caller含7public新项、8adapter、8runtime）、真实publicvalue→terminal2通过；renderer9/1旧完整块仅threadID+3行365→368归一相同；全Expr1363/4原完整块仅threadID相同/94ignored、3下游check0。A最终8源前后hash一致、无新增finding；pool/layout/ledger不改、旧assert不放宽。5site捕获Prepare1/Observe3/Invoke1，真实Prepare/Invoke资源失败已测，Observe只结构覆盖；primary同Arc/phase保留。最终ELFdec586c4…4df4b4实际8×192/free+负控86重验。无默认policy/session/SQLdispatcher/native删除，value→terminal不是SQLquery/network；族仍0。
 - [ ] (M5/C4 public activation阶段) closed ASCII7003 ready-Bytes→own Int worker/native gate及private caller/race/固定pin请求基准已过；worker config Arc双pin各88B与caller Aug Arc192B是不同测量域。尚需真实业务wrapper递归能力传播及SQL producer全链路（显式ScopedColumns/value与Prepare/Pool两条terminal链已验）、既有panic catcher内放guard、完整AST/SQL/PB/vector/fold/default/DML/join/sort/agg/window/helper/unistore入口接管、旧ASCII native删除、150行baseline差分/来源与explicit-scope release性能门；factory F reservation不等于transient high-water。不得把63方法静态forwarding测试当动态capability传播，不得把opaque carrier当已接入SQL诊断；完整入口/删除/性能通过才可能计1/245。
-- [ ] 下一直接执行按C清单evidence/session-runtime-lifecycle-next-cut.md的7文件显式policy dormant生命周期：session稳定root、ctx/COW仅传同epoch、捕获token的唯一close-owner；处理嵌套EXECUTE/IMPORT、PointGet fallback、sandbox早退及旧detached recordset晚close，不能关Session.current epoch。独立executor/subquery/operator不能误关共享epoch，晚worker债务直到销毁；Scope非Sync不入共享ctx。现有concurrency/query内存配置不等价pool policy且SET_VAR晚于begin，不猜默认、不重建root抹债务。随后实际操作scope/catcher内部guard/业务forwarders，最后一起切ASCII并删native；round10已完成显式cap/value/错误边界但不是上述接线。不按capability选择native fallback。
+- [x] (round11，session-runtime-lifetime-05核心验收) D executor2文件optional carrier/defaultNone/COW，4新测试和整个context23通过；E session6文件一次性显式policy/独有稳定root、outer marker+captured closer、nested borrow与Rows转交、Next unwind、finish/retain/Drop，旧生命周期14→28全部通过。父named OwnerError::into_eval_error新增1通过；初始From导致旧vector推断E0282/ZEROtests已撤，不改旧builtin。完整Expr1364/4旧完整块/94ignored，renderer9/1旧块，两者只threadID归一仍一致。TLS仅native epilogue结构性unwind；真实begin失败未自然触发。依用户加速决定不追加穷尽审计/allocator重验，最后192-byte观测仍属04，未冒认当前artifact。精确命令/后补项见session-runtime-lifetime-checkpoint.md。无SQL激活/默认policy/native删除；正在并行下一实际激活与后端函数批次。
+- [ ] 下一直接执行SQL ASCII接管（D已获expr6文件权）：func传ctx，string_fn删native首字节算法；active scope→borrowed execution.scope→无cap时TiKV one-shot，绝非native fallback。保留前置coercion/arity/charset/return cast；仅one-shot拥有close。批准明确实验policy1worker/1creating、pool8MiB/W1MiB/F2MiB、steps64/frame16、call allowance usize::MAX（固定2node recipe，不人为缩小有效字节域）；不是Go默认、不是物理heap保证。先实现/核心SQL语义测试，批次复用与性能后补。C并行TiKV local/{batch,mod,tests,compile}+types/expr_eval.rs共用closed unary evaluator扩展5族并保留ASCII ABI；不复制driver、不另建五pool。两个并行WIP明确不入05提交。
 - [ ] ASCII后优先C只读选型evidence/next-five-expression-families.md的5完整族：LENGTH/OCTET_LENGTH、BIT_LENGTH、LTRIM、RTRIM、UNHEX；共用一个closed recipe/driver/pool，后三者增加一次ownBytes结果边界。LENGTH公共builder/helper单独覆盖；非法ENUM/SET coercion、返回metadata、binary/rawbytes行为不能统一抹平。ORD/CHAR_LENGTH/QUOTE/HEX/TRIM/base64差异逐项defer，不靠合法UTF8或binary半族凑覆盖。
 - [ ] 接入 TiDB 全部求值入口，包含 PB typed builtin 和 unistore `SimpleSig` 旁路。
 - [ ] 按函数族迁移、补齐 TiKV 缺失纯 kernel、删除 native；收紧并记录例外。
 - [ ] 达到覆盖目标，完成 SQL/诊断/缓存/并行验证、性能记录、去重审计及仓库验证门槛。
+
+## Execution priority update — user-approved fast Demo
+
+The user explicitly approved the synchronous evaluator/pool design and requested substantially faster progress. Prioritize working SQL delegation and deleting duplicate native kernels, then batch additional families. Keep compilation, existing relevant semantic tests and a few core lifecycle tests as immediate checks. Exhaustive panic/race matrices, repeated allocator/cohort measurements when layout is unchanged, comprehensive per-cut independent audits and release performance work are follow-ups, not prerequisites for each functional cut. Preserve existing tests; fix observed material failures, but do not grow speculative test infrastructure before activating functions. Record deferred checks honestly; do not weaken expected SQL results or introduce native fallback. The ≥90% final migration objective and paired commit/push policy remain. Earlier stricter per-step gates in this document are superseded by this sequencing decision; final completion/PR requirements remain separately stated.
+
+Immediate sequence: finish the already-written session lifetime slice with focused checks, push it, then activate SQL ASCII and remove its native byte algorithm; reuse that route for the next function batch. No more foundation-only rounds merely to perfect accounting evidence.
 
 ## Context and Orientation
 
@@ -351,7 +358,9 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
-当前活动台账（M0 已过，M1/M2/M3 源码检查点推进中）：主 agent 是主计划、Cargo manifests/lock、共享 exports/registry 和集成的默认唯一 owner。goal `goal-013a1489-bf6a-43d4-b9fd-3b27cdb269be`覆盖M0–M6；用户明确“请继续”后已通过工具resume，最新get_goal为revision6、roundsStarted10、phase active、activation armed（max256，已包含每步双仓commit/push政策）。不得因基础切片通过就标记complete。没有两个 agent 同时写同一文件。当前完整函数族迁移计数仍为 0/245，所有基础共享/seed 进度另外记录。
+当前round11后半段具体写权覆盖下表历史记录：E六session文件已回交；D仅TiDB expr/{func,string_fn,tests/mod,tikv/mod,tikv/evaluated_ascii,tikv/evaluated_ascii_tests}.rs做实际ASCII接管；C仅TiKV local/{batch,mod,tests,compile}.rs及types/expr_eval.rs做共用六op后端；父集成/发布05并保留其他文件默认写权。禁止将这两份并行WIP误stage进05。
+
+当前活动台账（M0 已过，M1/M2/M3 源码检查点推进中）：主 agent 是主计划、Cargo manifests/lock、共享 exports/registry 和集成的默认唯一 owner。goal `goal-013a1489-bf6a-43d4-b9fd-3b27cdb269be`覆盖M0–M6；用户明确“请继续”后已通过工具resume，最新get_goal为revision9、roundsStarted11、phase active、activation armed（用户已批准加速执行策略）（max256，已包含每步双仓commit/push政策）。不得因基础切片通过就标记complete。没有两个 agent 同时写同一文件。当前完整函数族迁移计数仍为 0/245，所有基础共享/seed 进度另外记录。
 
 | Agent / 责任域 | 当前唯一可写路径（相对 expression-unification/） | 状态、接口与依赖 |
 | --- | --- | --- |
@@ -512,9 +521,13 @@ fetch 会更新仓库元信息，但不得改旧 worktree 文件。若 fetch 结
 - [TiKV 固定基线 RPN builder](https://github.com/tikv/tikv/blob/548812e1ef57aef077a2062a9cc356640a6347f5/components/tidb_query_expr/src/types/expr_builder.rs)
 - [TiKV 固定基线 RPN evaluator](https://github.com/tikv/tikv/blob/548812e1ef57aef077a2062a9cc356640a6347f5/components/tidb_query_expr/src/types/expr_eval.rs)
 
-第四检查点 `native-capability-value-04`：显式public capability/value+typed adapter cause，107/1ignored focused、2 actual publicvalue→terminal、renderer9/1旧failure、全Expr1363/4同原/94ignored及3下游check0；A最终8源码审无域内finding；当前ELF8×192/free与negative86重验。源码/精确命令/未验证范围见evidence/native-capability-value-checkpoint.md；EV-r3只放开此窄面，不含SQL/session/defaultpolicy/native删除。TiKV仍只更新Plan，按先TiKV再配对TiDB的正常推送与远端验证流程。
+第四检查点 `native-capability-value-04`：已推送TiDB258541a32b6c0e2b0394d47b54d0d7d84be5034a、TiKVada4d28ff32c6cace174b1880b47ed2ad3ef2982；显式public capability/value+typed adapter cause，107/1ignored focused、2 actual publicvalue→terminal、renderer9/1旧failure、全Expr1363/4同原/94ignored及3下游check0；A最终8源码审无域内finding；当前ELF8×192/free与negative86重验。源码/精确命令/未验证范围见evidence/native-capability-value-checkpoint.md；EV-r3只放开此窄面，不含SQL/session/defaultpolicy/native删除。TiKV仍只更新Plan，按先TiKV再配对TiDB的正常推送与远端验证流程。
+
+第五检查点 `session-runtime-lifetime-05`：9个Rust文件，显式session root/执行token/closer及Ctx COW，生命周期14旧+14新=28通过、context23通过、named错误桥1通过；Expr1364/4旧/94ignored及renderer9/1旧。依用户加速决定，未重复allocator观测/广域审计/性能；资料精简见session-runtime-lifetime-checkpoint.md。提交仅此9源、Plan和相应资料，排除D的ASCII激活6文件及C的后端扩展5文件WIP；TiKV本次仍仅Plan。
 
 ## Outcomes & Retrospective
+
+- 用户明确当前同步evaluator（不是线程）的设计合理，但要求加快：本轮完成后停止把完善计账/测试矩阵当每族前置。以编译+核心语义检查推动真实SQL接管与native删除，边界/性能后补；不隐瞒失败、不引入native fallback。下一ASCII激活与5族共享后端已并行实施，不再多轮只交基础接口。
 
 - round10完成显式nativecap/value窄面，不冒充SQL迁移：7public caller用真实C4/NULL/复用/冲突scope/两类panic/前置错误/PrepareInvoke，8新adapter保留typed原cause，2外crate公共value错到terminal确实通过；107focused通过1ignored，完整1363/4旧failure/94ignored，renderer9/1旧Sequence。A独立逐句审guard切换无gap、8源hash前后一致；原Scope/string指针断言保留并加强sameArc/phase。当前TEST ELF独立8×192/free与负控86，不能升级为heap/peak/OOM证明。Observe只有site结构证据；body必须从boundcap取effective scope，不自动代理另一个captured handle。C发现下一生命周期不能照搬每begin新epoch：nested EXECUTE/IMPORT、PointGet fallback、旧detached Close、subquery内部Close、SET_VAR时序都要测；现有配置不是poolpolicy，下一显式配置接线不猜defaults、不抹旧债务。公开Execution.close目前是调用方discipline，若要类型级借用权限须另定API。整体目标仍active，完成族0/245。
 
