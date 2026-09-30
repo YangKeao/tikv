@@ -327,9 +327,14 @@ fn evaluated_ready_args_match(
                     | (ScalarValue::Bytes(_), tidb_query_datatype::EvalType::Bytes)
             )
         })
+        && match values {
+            [ScalarValue::Bytes(value)] => operation.ready_bytes_match(value.as_deref()),
+            _ => true,
+        }
         && match role {
             EvaluatedArgsRole::NoArgs => values.is_empty(),
             EvaluatedArgsRole::Values => true,
+            EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
             EvaluatedArgsRole::Packet => {
                 matches!(
                     operation,
@@ -413,7 +418,8 @@ impl EvalExecution {
             (Some(operation), EvalInput::ReadyBytes { value, .. }) => {
                 operation.input_role() == EvaluatedArgsRole::Values
                     && operation.input_types() == [tidb_query_datatype::EvalType::Bytes]
-                    && matches!(value, ScalarValue::Bytes(_))
+                    && matches!(value, ScalarValue::Bytes(bytes)
+                        if operation.ready_bytes_match(bytes.as_deref()))
             }
             (Some(operation), EvalInput::ReadyArgs { values, role, .. }) => {
                 evaluated_ready_args_match(operation, values, *role)
@@ -2966,6 +2972,10 @@ mod tests {
             (EvaluatedBytesOp::Quote, EvaluatedBytesOp::UnHex),
             (EvaluatedBytesOp::Md5, EvaluatedBytesOp::Sha1),
             (
+                EvaluatedBytesOp::UpperUtf8Ready,
+                EvaluatedBytesOp::LowerUtf8Ready,
+            ),
+            (
                 EvaluatedBytesOp::FromBase64ValueNative,
                 EvaluatedBytesOp::Md5,
             ),
@@ -3123,19 +3133,23 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..13 {
+        for mismatch in 0..16 {
             let operation = match mismatch {
                 3 | 5 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
                 8..=10 => EvaluatedBytesOp::SpaceNative,
                 11 => EvaluatedBytesOp::BitAnd,
                 12 => EvaluatedBytesOp::ToBase64Native,
+                13 => EvaluatedBytesOp::Sha2Native,
+                14 => EvaluatedBytesOp::Left,
+                15 => EvaluatedBytesOp::OrdNative,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
-                0 | 6 | 8 => EvaluatedArgsRole::Values,
+                0 | 6 | 8 | 13 | 15 => EvaluatedArgsRole::Values,
                 4 | 5 => EvaluatedArgsRole::NoArgs,
                 9..=12 => EvaluatedArgsRole::Packet,
+                14 => EvaluatedArgsRole::ReadyBytesInt,
                 _ => EvaluatedArgsRole::Ieee754Bits,
             };
             let schema: Vec<_> = (0..operation.input_types().len())
@@ -3147,7 +3161,12 @@ mod tests {
                 .map(|eval_type| match *eval_type {
                     tidb_query_datatype::EvalType::Int => ScalarValue::Int(Some(0)),
                     tidb_query_datatype::EvalType::Bytes => {
-                        ScalarValue::Bytes(Some(vec![0; if mismatch == 1 { 7 } else { 8 }]))
+                        let len = match mismatch {
+                            1 => 7,
+                            15 => 5,
+                            _ => 8,
+                        };
+                        ScalarValue::Bytes(Some(vec![0; len]))
                     }
                     _ => unreachable!("closed ready guard fixture requires Int or Bytes"),
                 })
@@ -3156,6 +3175,23 @@ mod tests {
                 ready[1] = ScalarValue::Int(None);
             } else if mismatch == 10 {
                 ready[1] = ScalarValue::Int(Some(2));
+            }
+            if matches!(mismatch, 13 | 14) {
+                assert!(evaluated_ready_args_match(
+                    operation,
+                    &ready,
+                    operation.input_role()
+                ));
+            }
+            if mismatch == 15 {
+                let input = EvalInput::ReadyBytes {
+                    value: &ready[0],
+                    witness: &mut witness,
+                };
+                assert!(matches!(
+                    EvalExecution::EvaluatedBytes(operation).check_input(&input),
+                    Err(LocalError::InvalidSpec(_))
+                ));
             }
             let mut func_meta = operation.fn_meta();
             if matches!(mismatch, 2 | 12) {

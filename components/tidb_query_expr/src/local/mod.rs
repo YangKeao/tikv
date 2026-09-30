@@ -66,12 +66,25 @@
 //! frontend keeps warning 1301 and original values; a real wrapper dispatch
 //! applies SuppressByPacket without running the potentially huge algorithm.
 //! The internal non-NULL Int flag is not an original argument or SQL NULL.
-//! ReadyPacketCount::Undemanded is allowed only for RepeatNative with NULL
-//! bytes and Allow: its validated irrelevant zero representative does not
-//! claim that RHS was coerced or NULL. FromBase64ValueNative uses ordinary
+//! ReadyIntArg::Undemanded is allowed for RepeatNative only with NULL bytes
+//! and Allow: its validated irrelevant zero representative does not claim
+//! that RHS was coerced or NULL. FromBase64ValueNative uses ordinary
 //! Bytes without packet policy or its signed raw-length guard; execution
 //! context availability never selects packet semantics. Wire policies and the
 //! shared string/base64 algorithms remain in their original kernel module.
+//! Sha2Native requires BytesIntReady with its own role. ReadyIntArg::Undemanded
+//! is accepted there only for NULL bytes, before using an irrelevant zero;
+//! Value(None) alone denotes a genuinely NULL integer argument. Its digest
+//! core is shared with wire SHA2, but invalid lengths are silently NULL here
+//! while wire retains warning 1583. Lower/Upper dispatch the binary no-op
+//! kernels; LowerUtf8Ready/UpperUtf8Ready bind the original EncodingUtf8Mb4
+//! kernels without adding charset owners to the zero-heap transport ABI.
+//! Frontends retain signature choice and one-U+FFFD-per-invalid-byte repair.
+//! OrdNative folds a frontend-prepared encoded first-character slice, not a
+//! whole string. None or at most four bytes is its checked input domain, not a
+//! resource limit; oversize inputs are refused, never truncated. Wire ORD keeps
+//! its original decoder selection and NULL-to-zero policy; OrdNative propagates
+//! NULL and shares only the base-256 fold.
 //! Results are owned values, not native SQL descriptors.
 //! Frontends retain demand/coercion order, normalization, signature selection
 //! and result packing (including CRC32/bitwise UInt). The old single-Bytes
@@ -109,7 +122,7 @@ pub use self::{
         ComputedBytes, ComputedBytesMetadata, ComputedIeee754Bits, ComputedIeee754BitsMetadata,
         ComputedInt, ComputedIntMetadata, ComputedValue, EvaluatedArgs, EvaluatedAsciiWorker,
         EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState, OutputDisposition,
-        ReadyPacketCount, WorkerStorage, prepare_evaluated_ascii, prepare_evaluated_bytes,
+        ReadyIntArg, WorkerStorage, prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,

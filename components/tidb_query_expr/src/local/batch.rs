@@ -809,6 +809,12 @@ pub enum EvaluatedBytesOp {
     ToBase64Native,
     FromBase64Native,
     FromBase64ValueNative,
+    Lower,
+    Upper,
+    LowerUtf8Ready,
+    UpperUtf8Ready,
+    Sha2Native,
+    OrdNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -826,6 +832,7 @@ pub(crate) enum EvaluatedArgsRole {
     Ieee754Bits,
     NoArgs,
     Packet,
+    ReadyBytesInt,
 }
 
 impl EvaluatedBytesOp {
@@ -875,6 +882,8 @@ impl EvaluatedBytesOp {
             Self::InetNtoa => ScalarFuncSig::InetNtoa,
             Self::Inet6Aton => ScalarFuncSig::Inet6Aton,
             Self::Inet6Ntoa => ScalarFuncSig::Inet6Ntoa,
+            Self::Lower => ScalarFuncSig::Lower,
+            Self::Upper => ScalarFuncSig::Upper,
             Self::AsinRaw => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AsinRaw);
             }
@@ -931,6 +940,18 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::FromBase64ValueNative,
                 );
             }
+            Self::LowerUtf8Ready => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::LowerUtf8Ready);
+            }
+            Self::UpperUtf8Ready => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::UpperUtf8Ready);
+            }
+            Self::Sha2Native => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Sha2Native);
+            }
+            Self::OrdNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::OrdNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -947,6 +968,7 @@ impl EvaluatedBytesOp {
         // In particular, value-only FROM_BASE64 keeps the ordinary Bytes role.
         match self {
             Self::PiRaw => EvaluatedArgsRole::NoArgs,
+            Self::Sha2Native => EvaluatedArgsRole::ReadyBytesInt,
             Self::SpaceNative
             | Self::RepeatNative
             | Self::ToBase64Native
@@ -959,6 +981,12 @@ impl EvaluatedBytesOp {
             | Self::DegreesRaw => EvaluatedArgsRole::Ieee754Bits,
             _ => EvaluatedArgsRole::Values,
         }
+    }
+
+    /// ORD receives one already-encoded native character, never an arbitrary
+    /// string. This is a prepared-value domain check, not a memory budget.
+    pub(crate) fn ready_bytes_match(self, value: Option<&[u8]>) -> bool {
+        self != Self::OrdNative || value.is_none_or(|bytes| bytes.len() <= 4)
     }
 
     fn returns_ieee754_bits(self) -> bool {
@@ -1045,6 +1073,16 @@ impl EvaluatedBytesOp {
             Self::ToBase64Native => crate::impl_string::to_base64_native_fn_meta(),
             Self::FromBase64Native => crate::impl_string::from_base64_native_fn_meta(),
             Self::FromBase64ValueNative => crate::impl_string::from_base64_value_native_fn_meta(),
+            Self::Lower => crate::impl_string::lower_fn_meta(),
+            Self::Upper => crate::impl_string::upper_fn_meta(),
+            Self::LowerUtf8Ready => crate::impl_string::lower_utf8_fn_meta::<
+                tidb_query_datatype::codec::collation::encoding::EncodingUtf8Mb4,
+            >(),
+            Self::UpperUtf8Ready => crate::impl_string::upper_utf8_fn_meta::<
+                tidb_query_datatype::codec::collation::encoding::EncodingUtf8Mb4,
+            >(),
+            Self::Sha2Native => crate::impl_encryption::sha2_native_fn_meta(),
+            Self::OrdNative => crate::impl_string::ord_native_fn_meta(),
         }
     }
 
@@ -1079,7 +1117,8 @@ impl EvaluatedBytesOp {
             | Self::IsIpv4Nullable
             | Self::IsIpv6Nullable
             | Self::IsIpv4CompatNullable
-            | Self::IsIpv4MappedNullable => EvalType::Int,
+            | Self::IsIpv4MappedNullable
+            | Self::OrdNative => EvalType::Int,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -1109,7 +1148,12 @@ impl EvaluatedBytesOp {
             | Self::RepeatNative
             | Self::ToBase64Native
             | Self::FromBase64Native
-            | Self::FromBase64ValueNative => EvalType::Bytes,
+            | Self::FromBase64ValueNative
+            | Self::Lower
+            | Self::Upper
+            | Self::LowerUtf8Ready
+            | Self::UpperUtf8Ready
+            | Self::Sha2Native => EvalType::Bytes,
         }
     }
 
@@ -1151,7 +1195,8 @@ impl EvaluatedBytesOp {
             | Self::Right
             | Self::RightUtf8
             | Self::ToBase64Native
-            | Self::FromBase64Native => &[EvalType::Bytes, EvalType::Int],
+            | Self::FromBase64Native
+            | Self::Sha2Native => &[EvalType::Bytes, EvalType::Int],
             Self::RepeatNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
             Self::Replace => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::Ascii
@@ -1182,7 +1227,12 @@ impl EvaluatedBytesOp {
             | Self::IsIpv6Nullable
             | Self::IsIpv4CompatNullable
             | Self::IsIpv4MappedNullable
-            | Self::FromBase64ValueNative => &[EvalType::Bytes],
+            | Self::FromBase64ValueNative
+            | Self::Lower
+            | Self::Upper
+            | Self::LowerUtf8Ready
+            | Self::UpperUtf8Ready
+            | Self::OrdNative => &[EvalType::Bytes],
         }
     }
 
@@ -1244,11 +1294,11 @@ impl OutputDisposition {
     }
 }
 
-/// REPEAT's count demand is independent of the count's SQL nullability.
-/// Undemanded is accepted only for RepeatNative with a NULL left operand and
-/// Allow disposition; it never claims that the count was evaluated to NULL.
+/// Integer-argument demand is independent of SQL nullability. Undemanded
+/// requires a NULL left operand and either Sha2Native or RepeatNative with
+/// Allow disposition; it never claims that the argument evaluated to NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReadyPacketCount {
+pub enum ReadyIntArg {
     Value(Option<i64>),
     Undemanded,
 }
@@ -1267,6 +1317,11 @@ pub enum EvaluatedArgs {
     Bytes(Option<Vec<u8>>),
     Int(Option<i64>),
     BytesInt(Option<Vec<u8>>, Option<i64>),
+    /// Ready values with an explicit integer-demand marker, not packet policy.
+    BytesIntReady {
+        bytes: Option<Vec<u8>>,
+        count: ReadyIntArg,
+    },
     Bytes3([Option<Vec<u8>>; 3]),
     Int2(Option<i64>, Option<i64>),
     /// Original ready value plus an explicit packet-policy decision.
@@ -1280,7 +1335,7 @@ pub enum EvaluatedArgs {
     },
     PacketBytesInt {
         bytes: Option<Vec<u8>>,
-        count: ReadyPacketCount,
+        count: ReadyIntArg,
         disposition: OutputDisposition,
     },
     /// Nullable IEEE754 binary64 bits, not a SQL integer or ordinary Bytes.
@@ -1293,6 +1348,7 @@ impl EvaluatedArgs {
         match self {
             Self::NoArgs => EvaluatedArgsRole::NoArgs,
             Self::Ieee754Bits(_) => EvaluatedArgsRole::Ieee754Bits,
+            Self::BytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesInt,
             Self::PacketInt { .. } | Self::PacketBytes { .. } | Self::PacketBytesInt { .. } => {
                 EvaluatedArgsRole::Packet
             }
@@ -1305,18 +1361,25 @@ impl EvaluatedArgs {
             Self::NoArgs => &[],
             Self::Bytes(_) | Self::Ieee754Bits(_) => &[EvalType::Bytes],
             Self::Int(_) => &[EvalType::Int],
-            Self::BytesInt(..) | Self::PacketBytes { .. } => &[EvalType::Bytes, EvalType::Int],
+            Self::BytesInt(..) | Self::BytesIntReady { .. } | Self::PacketBytes { .. } => {
+                &[EvalType::Bytes, EvalType::Int]
+            }
             Self::Bytes3(_) => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::Int2(..) | Self::PacketInt { .. } => &[EvalType::Int, EvalType::Int],
             Self::PacketBytesInt { .. } => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
         }
     }
 
-    fn demand_matches(&self, operation: EvaluatedBytesOp) -> bool {
+    fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
         match self {
+            Self::Bytes(bytes) => operation.ready_bytes_match(bytes.as_deref()),
+            Self::BytesIntReady {
+                bytes,
+                count: ReadyIntArg::Undemanded,
+            } => operation == EvaluatedBytesOp::Sha2Native && bytes.is_none(),
             Self::PacketBytesInt {
                 bytes,
-                count: ReadyPacketCount::Undemanded,
+                count: ReadyIntArg::Undemanded,
                 disposition,
             } => {
                 operation == EvaluatedBytesOp::RepeatNative
@@ -1338,6 +1401,14 @@ impl EvaluatedArgs {
             Self::Bytes(value) => ([Bytes(value), Int(None), Int(None)], 1),
             Self::Int(value) => ([Int(value), Int(None), Int(None)], 1),
             Self::BytesInt(bytes, int) => ([Bytes(bytes), Int(int), Int(None)], 2),
+            Self::BytesIntReady { bytes, count } => {
+                let count = match count {
+                    ReadyIntArg::Value(value) => value,
+                    // Validated Sha2Native + NULL left: irrelevant, not SQL NULL.
+                    ReadyIntArg::Undemanded => Some(0),
+                };
+                ([Bytes(bytes), Int(count), Int(None)], 2)
+            }
             Self::Bytes3([a, b, c]) => ([Bytes(a), Bytes(b), Bytes(c)], 3),
             Self::Int2(lhs, rhs) => ([Int(lhs), Int(rhs), Int(None)], 2),
             Self::PacketInt { value, disposition } => {
@@ -1352,10 +1423,10 @@ impl EvaluatedArgs {
                 disposition,
             } => {
                 let count = match count {
-                    ReadyPacketCount::Value(value) => value,
+                    ReadyIntArg::Value(value) => value,
                     // The facade has validated RepeatNative + NULL left + Allow.
                     // This zero is irrelevant, not an evaluated RHS or SQL NULL.
-                    ReadyPacketCount::Undemanded => Some(0),
+                    ReadyIntArg::Undemanded => Some(0),
                 };
                 ([Bytes(bytes), Int(count), Int(Some(disposition.flag()))], 3)
             }
@@ -1821,7 +1892,7 @@ impl EvaluatedBytesWorker {
         // NULL or an eight-byte ordinary Bytes value cannot enter raw math.
         if args.role() != self.operation.input_role()
             || args.input_types() != self.operation.input_types()
-            || !args.demand_matches(self.operation)
+            || !args.admission_matches(self.operation)
         {
             return Err(LocalError::InvalidBatch(
                 "evaluated arguments differ from the operation's closed input shape".into(),

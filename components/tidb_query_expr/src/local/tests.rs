@@ -1886,32 +1886,27 @@ fn local_evaluated_args_space_native_respects_packet_disposition() {
 fn local_evaluated_args_repeat_native_handles_empty_and_suppressed_output() {
     use OutputDisposition::{Allow, SuppressByPacket};
 
-    let cases: [(
-        Option<&[u8]>,
-        ReadyPacketCount,
-        OutputDisposition,
-        Option<&[u8]>,
-    ); 5] = [
+    let cases: [(Option<&[u8]>, ReadyIntArg, OutputDisposition, Option<&[u8]>); 5] = [
         (
             Some(b"ab"),
-            ReadyPacketCount::Value(Some(3)),
+            ReadyIntArg::Value(Some(3)),
             Allow,
             Some(b"ababab"),
         ),
         (
             Some(b""),
-            ReadyPacketCount::Value(Some(i64::MAX)),
+            ReadyIntArg::Value(Some(i64::MAX)),
             Allow,
             Some(b""),
         ),
-        (Some(b"ab"), ReadyPacketCount::Value(None), Allow, None),
+        (Some(b"ab"), ReadyIntArg::Value(None), Allow, None),
         (
             Some(b"ab"),
-            ReadyPacketCount::Value(Some(i64::MAX)),
+            ReadyIntArg::Value(Some(i64::MAX)),
             SuppressByPacket,
             None,
         ),
-        (None, ReadyPacketCount::Undemanded, Allow, None),
+        (None, ReadyIntArg::Undemanded, Allow, None),
     ];
     let mut worker = prepare_evaluated_bytes(
         EvaluatedBytesOp::RepeatNative,
@@ -1927,7 +1922,7 @@ fn local_evaluated_args_repeat_native_handles_empty_and_suppressed_output() {
         assert!(matches!(
             worker.eval_args(EvaluatedArgs::PacketBytesInt {
                 bytes,
-                count: ReadyPacketCount::Undemanded,
+                count: ReadyIntArg::Undemanded,
                 disposition,
             }),
             Err(LocalError::InvalidBatch(_))
@@ -2065,7 +2060,7 @@ fn local_evaluated_args_packet_roles_reject_plain_carriers() {
             EvaluatedArgs::BytesInt(Some(b"ab".to_vec()), Some(1)),
             EvaluatedArgs::PacketBytesInt {
                 bytes: Some(b"ab".to_vec()),
-                count: ReadyPacketCount::Value(None),
+                count: ReadyIntArg::Value(None),
                 disposition: Allow,
             },
         ),
@@ -2119,6 +2114,230 @@ fn local_evaluated_args_packet_roles_reject_plain_carriers() {
             }
             _ => panic!("packet role check returned an unexpected output type"),
         }
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_sha2_native_keeps_invalid_bits_warning_free() {
+    let (wire_result, wire_ctx) = crate::test_util::RpnFnScalarEvaluator::new()
+        .push_param(Some(b"pingcap".to_vec()))
+        .push_param(Some(-1_i64))
+        .evaluate_raw(FieldTypeTp::VarString, ScalarFuncSig::Sha2);
+    assert!(matches!(wire_result.unwrap(), ScalarValue::Bytes(None)));
+    assert_eq!(wire_ctx.warnings.warning_cnt, 1);
+    assert_eq!(wire_ctx.warnings.warnings.len(), 1);
+    assert_eq!(wire_ctx.warnings.warnings[0].get_code(), 1583);
+
+    // Fixed vectors from the official SHA2 tests, including 0 == 256.
+    let sha256: &[u8] = b"2871823be240f8ecd1d72f24c99eaa2e58af18b4b8ba99a4fc2823ba5c43930a";
+    let cases: [(Option<&[u8]>, ReadyIntArg, Option<&[u8]>); 9] = [
+        (None, ReadyIntArg::Value(Some(256)), None),
+        (Some(b"pingcap"), ReadyIntArg::Value(None), None),
+        (None, ReadyIntArg::Undemanded, None),
+        (Some(b"pingcap"), ReadyIntArg::Value(Some(-1)), None),
+        (Some(b"pingcap"), ReadyIntArg::Value(Some(0)), Some(sha256)),
+        (
+            Some(b"pingcap"),
+            ReadyIntArg::Value(Some(224)),
+            Some(b"cd036dc9bec69e758401379c522454ea24a6327b48724b449b40c6b7"),
+        ),
+        (Some(b"pingcap"), ReadyIntArg::Value(Some(256)), Some(sha256)),
+        (
+            Some(b"pingcap"),
+            ReadyIntArg::Value(Some(384)),
+            Some(b"c50955b6b0c7b9919740d956849eedcb0f0f90bf8a34e8c1f4e071e3773f53bd6f8f16c04425ff728bed04de1b63db51"),
+        ),
+        (
+            Some(b"pingcap"),
+            ReadyIntArg::Value(Some(512)),
+            Some(b"ea903c574370774c4844a83b7122105a106e04211673810e1baae7c2ae7aba2cf07465e02f6c413126111ef74a417232683ce7ba210052e63c15fc82204aad80"),
+        ),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::Sha2Native,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::Sha2Native);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, (input, count, expected)) in cases.into_iter().enumerate() {
+        let args = EvaluatedArgs::BytesIntReady {
+            bytes: input.map(|bytes| bytes.to_vec()),
+            count,
+        };
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("SHA2 native returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        // These observations require the private context's warning count to stay zero.
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_case_conversion_preserves_binary_and_simple_unicode() {
+    let binary_cases: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(b""), Some(b"")),
+        (Some(b"Ab\xff"), Some(b"Ab\xff")),
+    ];
+    let lower_cases: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(b""), Some(b"")),
+        (Some("İİIIÅI".as_bytes()), Some("iiiiåi".as_bytes())),
+    ];
+    let upper_cases: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(b""), Some(b"")),
+        (Some("ßßåı".as_bytes()), Some("ßßÅI".as_bytes())),
+    ];
+    for (operation, cases) in [
+        (EvaluatedBytesOp::Lower, binary_cases),
+        (EvaluatedBytesOp::Upper, binary_cases),
+        (EvaluatedBytesOp::LowerUtf8Ready, lower_cases),
+        (EvaluatedBytesOp::UpperUtf8Ready, upper_cases),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Bytes(value) =
+                worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+            else {
+                panic!("case conversion returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_ord_native_folds_prepared_bytes() {
+    // The frontend already selected and encoded the first character.
+    let cases: &[(Option<&[u8]>, Option<i64>)] = &[
+        (None, None),
+        (Some(b""), Some(0)),
+        (Some(b"\xff"), Some(255)),
+        (Some(b"\xe4\xbd\xa0"), Some(14_990_752)),
+        (Some(b"\xc4\xe3"), Some(50_403)),
+        (Some(b"\xff\xff\xff\xff"), Some(4_294_967_295)),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::OrdNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::OrdNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(matches!(
+        worker.eval_one(Some(vec![0; 5])),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    for (index, &(input, expected)) in cases.iter().enumerate() {
+        let ComputedValue::Int(value) = worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+        else {
+            panic!("ORD native returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_ready_int_roles_reject_plain_carriers() {
+    let cases: [(
+        EvaluatedBytesOp,
+        EvaluatedArgs,
+        EvaluatedArgs,
+        Option<&[u8]>,
+    ); 3] = [
+        (
+            EvaluatedBytesOp::Sha2Native,
+            EvaluatedArgs::BytesIntReady {
+                bytes: Some(b"pingcap".to_vec()),
+                count: ReadyIntArg::Undemanded,
+            },
+            EvaluatedArgs::BytesIntReady {
+                bytes: None,
+                count: ReadyIntArg::Undemanded,
+            },
+            None,
+        ),
+        (
+            EvaluatedBytesOp::Sha2Native,
+            EvaluatedArgs::BytesInt(Some(b"pingcap".to_vec()), Some(256)),
+            EvaluatedArgs::BytesIntReady {
+                bytes: Some(b"pingcap".to_vec()),
+                count: ReadyIntArg::Value(None),
+            },
+            None,
+        ),
+        (
+            EvaluatedBytesOp::Left,
+            EvaluatedArgs::BytesIntReady {
+                bytes: Some(b"ab".to_vec()),
+                count: ReadyIntArg::Value(Some(1)),
+            },
+            EvaluatedArgs::BytesInt(Some(b"ab".to_vec()), Some(1)),
+            Some(b"a"),
+        ),
+    ];
+    for (operation, invalid, valid, expected) in cases {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let ComputedValue::Bytes(value) = worker.eval_args(valid).unwrap() else {
+            panic!("ready-int role check returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
         assert_eq!(worker.kernel_invocations(), 1);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);

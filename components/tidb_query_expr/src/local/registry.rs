@@ -83,7 +83,11 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::RepeatNative
         | LocalFunctionId::ToBase64Native
         | LocalFunctionId::FromBase64Native
-        | LocalFunctionId::FromBase64ValueNative => Err(other_err!(
+        | LocalFunctionId::FromBase64ValueNative
+        | LocalFunctionId::LowerUtf8Ready
+        | LocalFunctionId::UpperUtf8Ready
+        | LocalFunctionId::Sha2Native
+        | LocalFunctionId::OrdNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

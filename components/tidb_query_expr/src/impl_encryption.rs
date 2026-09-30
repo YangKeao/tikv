@@ -51,21 +51,33 @@ pub fn sha2(
 ) -> Result<Option<Bytes>> {
     match (input, hash_length) {
         (Some(input), Some(hash_length)) => {
-            let sha2 = match *hash_length {
-                SHA0 | SHA256 => MessageDigest::sha256(),
-                SHA224 => MessageDigest::sha224(),
-                SHA384 => MessageDigest::sha384(),
-                SHA512 => MessageDigest::sha512(),
-                _ => {
-                    ctx.warnings
-                        .append_warning(Error::incorrect_parameters("sha2"));
-                    return Ok(None);
-                }
-            };
-            hex_digest(sha2, input).map(Some)
+            let result = sha2_impl(input, hash_length)?;
+            if result.is_none() {
+                ctx.warnings
+                    .append_warning(Error::incorrect_parameters("sha2"));
+            }
+            Ok(result)
         }
         _ => Ok(None),
     }
+}
+
+#[rpn_fn]
+#[inline]
+fn sha2_native(input: BytesRef, hash_length: &Int) -> Result<Option<Bytes>> {
+    sha2_impl(input, hash_length)
+}
+
+#[inline]
+fn sha2_impl(input: BytesRef, hash_length: &Int) -> Result<Option<Bytes>> {
+    let sha2 = match *hash_length {
+        SHA0 | SHA256 => MessageDigest::sha256(),
+        SHA224 => MessageDigest::sha224(),
+        SHA384 => MessageDigest::sha384(),
+        SHA512 => MessageDigest::sha512(),
+        _ => return Ok(None),
+    };
+    hex_digest(sha2, input).map(Some)
 }
 
 #[rpn_fn(writer)]

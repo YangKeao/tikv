@@ -234,7 +234,8 @@ short-circuit admission policy described above.
   MD5 and SHA1 use the existing official nullable Bytes-to-Bytes kernels, including
   their lowercase hex output and OpenSSL errors. Native text conversion/packing is
   outside the kernel; no retry or second digest implementation is provided here.
-  SHA2 and warning-producing compression operations are not admitted by this step.
+  SHA2 now uses the quiet native recipe described below; warning-producing
+  compression operations remain outside these recipes.
   Logical AND/OR/XOR consume normalized ready Int2 and execute the official eager
   FnCall. Only closed-ready AND/OR may retain the exact signature/control tag and
   complete ordered arguments while bypassing FinishControl; ordinary Row/wire
@@ -271,7 +272,7 @@ short-circuit admission policy described above.
   carrying real nullable values plus typed Allow/SuppressByPacket (physical
   non-NULL 0/1). The private wrapper is actually invoked for suppressed NULL;
   native1301 policy remains frontend-owned, never disguised as resource failure.
-  REPEAT's ReadyPacketCount distinguishes actual nullable Int from Undemanded;
+  REPEAT's ReadyIntArg distinguishes actual nullable Int from Undemanded;
   only RepeatNative + NULL bytes + Allow admits the latter, before invocation,
   then uses a documented irrelevant Some(0), not an evaluated SQL NULL.
   impl_string.rs owns unique repeat/encode/decode cores. Empty REPEAT has a fast
@@ -281,6 +282,18 @@ short-circuit admission policy described above.
   value-only private entry uses ordinary Bytes without packet/raw-length guards;
   execution capability is independent of this policy. Silent length overflow
   reaches the appropriate kernel with real arguments and Allow, not fake NULL.
+  LOWER/UPPER binary variants use their real wire no-op kernels. UTF8 variants
+  bind the existing EncodingUtf8Mb4 getters privately: the canonical descriptor
+  has empty charset and zero type heap, so invoking the charset-dependent wire
+  selector would be incorrect. No case table or case algorithm is added.
+  SHA2's selector/digest/hex core is shared: wire invalid selectors still append
+  warning1583 and return NULL; native private selection returns quiet NULL.
+  The renamed ReadyIntArg also serves the independent BytesIntReady role;
+  only Sha2Native with NULL bytes permits its undemanded integer representative.
+  ORD shares one base256 fold. Wire retains return-collation decoding and NULL0;
+  native preparation retains argument-charset behavior, including existing
+  byte-preserving latin1. The public facade and both ready matchers validate
+  prepared NULL or at most four bytes before invocation, never truncate input.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake

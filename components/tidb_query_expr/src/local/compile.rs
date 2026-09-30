@@ -1552,6 +1552,12 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::ToBase64Native,
             EvaluatedBytesOp::FromBase64Native,
             EvaluatedBytesOp::FromBase64ValueNative,
+            EvaluatedBytesOp::Lower,
+            EvaluatedBytesOp::Upper,
+            EvaluatedBytesOp::LowerUtf8Ready,
+            EvaluatedBytesOp::UpperUtf8Ready,
+            EvaluatedBytesOp::Sha2Native,
+            EvaluatedBytesOp::OrdNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

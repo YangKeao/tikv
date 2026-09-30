@@ -172,14 +172,27 @@ pub fn ord<C: Collator>(arg: Option<BytesRef>) -> Result<Option<i64>> {
             0
         };
         let bytes = &content[..size];
-        let mut factor = 1;
-
-        for b in bytes.iter().rev() {
-            result += i64::from(*b) * factor;
-            factor *= 256;
-        }
+        result = ord_impl(bytes);
     }
     Ok(Some(result))
+}
+
+#[rpn_fn]
+#[inline]
+fn ord_native(arg: BytesRef) -> Result<Option<Int>> {
+    // The closed factory validates the prepared slice has at most four bytes.
+    Ok(Some(ord_impl(arg)))
+}
+
+#[inline]
+fn ord_impl(bytes: BytesRef) -> Int {
+    let mut result = 0;
+    let mut factor = 1;
+    for b in bytes.iter().rev() {
+        result += i64::from(*b) * factor;
+        factor *= 256;
+    }
+    result
 }
 
 #[rpn_fn(varg, writer, min_args = 1)]
