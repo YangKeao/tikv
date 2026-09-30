@@ -54,6 +54,13 @@
 //! ACOS preserve operation NaNs, SQRT nulls negative inputs, SIGN maps NaN to
 //! zero, and radians/degrees apply no finite-result policy. Float results own
 //! IEEE bits; SIGN owns Int. Frontends keep their NULL/NaN/overflow policies.
+//! PiRaw instead requires NoArgs: zero columns and one real zero-argument call
+//! to the original PI body, returning owned IEEE bits without a dummy operand.
+//! The four IsIpv*Nullable private predicates consume ordinary Bytes and
+//! propagate NULL; their non-NULL calls reuse the official predicates, whose
+//! wire NULL-to-zero behavior remains unchanged. IPv4 lexical normalization
+//! and native argument coercion remain frontend responsibilities. A closed
+//! private identity therefore never implies an IEEE input role.
 //! Results are owned values, not native SQL descriptors.
 //! Frontends retain demand/coercion order, normalization, signature selection
 //! and result packing (including CRC32/bitwise UInt). The old single-Bytes

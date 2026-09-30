@@ -198,6 +198,30 @@ pub fn is_ipv6(addr: Option<BytesRef>) -> Result<Option<Int>> {
     })
 }
 
+#[rpn_fn]
+#[inline]
+fn is_ipv4_nullable(arg: BytesRef) -> Result<Option<Int>> {
+    is_ipv4(Some(arg))
+}
+
+#[rpn_fn]
+#[inline]
+fn is_ipv6_nullable(arg: BytesRef) -> Result<Option<Int>> {
+    is_ipv6(Some(arg))
+}
+
+#[rpn_fn]
+#[inline]
+fn is_ipv4_compat_nullable(arg: BytesRef) -> Result<Option<Int>> {
+    is_ipv4_compat(Some(arg))
+}
+
+#[rpn_fn]
+#[inline]
+fn is_ipv4_mapped_nullable(arg: BytesRef) -> Result<Option<Int>> {
+    is_ipv4_mapped(Some(arg))
+}
+
 #[rpn_fn(nullable)]
 #[inline]
 pub fn uuid() -> Result<Option<Bytes>> {

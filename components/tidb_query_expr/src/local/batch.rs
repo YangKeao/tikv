@@ -734,12 +734,13 @@ impl LocalNumericBatchProgram {
     }
 }
 
-/// Closed operations over already-evaluated nullable Int/Bytes or explicit
-/// IEEE754 bit arguments. The raw math variants are private local identities,
-/// not wire signatures; their Byte8 storage never admits ordinary Bytes.
-/// LENGTH/OCTET_LENGTH share Length and SHA/SHA1 share Sha1; no arbitrary
-/// signature or SQL descriptor is accepted. Hashes consume raw ready Bytes.
-/// UTF8 variants require the caller's normalized UTF8;
+/// Closed operations over already-evaluated nullable Int/Bytes, explicit
+/// IEEE754 bits or NoArgs. Private identities have independently fixed roles:
+/// raw math's Byte8 storage never admits ordinary Bytes, nullable IP predicates
+/// do consume Bytes, and PI consumes no argument. None reserves a wire
+/// signature. LENGTH/OCTET_LENGTH share Length and SHA/SHA1 share Sha1; no
+/// arbitrary signature or SQL descriptor is accepted. Hashes consume raw ready
+/// Bytes. UTF8 variants require the caller's normalized UTF8;
 /// this boundary never chooses a SQL charset or performs lossy conversion.
 /// Quote uses its official nullable kernel: a NULL input yields non-NULL
 /// "NULL". Boolean operations take frontend-normalized Int truth/presence
@@ -798,13 +799,18 @@ pub enum EvaluatedBytesOp {
     SignRaw,
     RadiansRaw,
     DegreesRaw,
+    PiRaw,
+    IsIpv4Nullable,
+    IsIpv6Nullable,
+    IsIpv4CompatNullable,
+    IsIpv4MappedNullable,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EvaluatedKernelKind {
     Wire(tipb::ScalarFuncSig),
-    PrivateRawMath(crate::LocalFunctionId),
+    ClosedPrivate(crate::LocalFunctionId),
 }
 
 /// Logical admission remains distinct even when transport uses the same Bytes
@@ -813,6 +819,7 @@ pub(crate) enum EvaluatedKernelKind {
 pub(crate) enum EvaluatedArgsRole {
     Values,
     Ieee754Bits,
+    NoArgs,
 }
 
 impl EvaluatedBytesOp {
@@ -863,22 +870,41 @@ impl EvaluatedBytesOp {
             Self::Inet6Aton => ScalarFuncSig::Inet6Aton,
             Self::Inet6Ntoa => ScalarFuncSig::Inet6Ntoa,
             Self::AsinRaw => {
-                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::AsinRaw);
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AsinRaw);
             }
             Self::AcosRaw => {
-                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::AcosRaw);
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AcosRaw);
             }
             Self::SqrtRaw => {
-                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::SqrtRaw);
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SqrtRaw);
             }
             Self::SignRaw => {
-                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::SignRaw);
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SignRaw);
             }
             Self::RadiansRaw => {
-                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::RadiansRaw);
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::RadiansRaw);
             }
             Self::DegreesRaw => {
-                return EvaluatedKernelKind::PrivateRawMath(crate::LocalFunctionId::DegreesRaw);
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::DegreesRaw);
+            }
+            Self::PiRaw => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::PiRaw);
+            }
+            Self::IsIpv4Nullable => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::IsIpv4Nullable);
+            }
+            Self::IsIpv6Nullable => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::IsIpv6Nullable);
+            }
+            Self::IsIpv4CompatNullable => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IsIpv4CompatNullable,
+                );
+            }
+            Self::IsIpv4MappedNullable => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IsIpv4MappedNullable,
+                );
             }
         };
         EvaluatedKernelKind::Wire(signature)
@@ -887,27 +913,40 @@ impl EvaluatedBytesOp {
     pub(crate) fn function_ref(self) -> crate::FunctionRef {
         match self.kernel_kind() {
             EvaluatedKernelKind::Wire(signature) => crate::FunctionRef::TiPb(signature),
-            EvaluatedKernelKind::PrivateRawMath(id) => crate::FunctionRef::Local(id),
+            EvaluatedKernelKind::ClosedPrivate(id) => crate::FunctionRef::Local(id),
         }
     }
 
     pub(crate) fn input_role(self) -> EvaluatedArgsRole {
-        match self.kernel_kind() {
-            EvaluatedKernelKind::Wire(_) => EvaluatedArgsRole::Values,
-            EvaluatedKernelKind::PrivateRawMath(_) => EvaluatedArgsRole::Ieee754Bits,
+        // Being private does not determine the carrier: PI has no operands,
+        // address predicates consume ordinary Bytes, and raw math needs bits.
+        match self {
+            Self::PiRaw => EvaluatedArgsRole::NoArgs,
+            Self::AsinRaw
+            | Self::AcosRaw
+            | Self::SqrtRaw
+            | Self::SignRaw
+            | Self::RadiansRaw
+            | Self::DegreesRaw => EvaluatedArgsRole::Ieee754Bits,
+            _ => EvaluatedArgsRole::Values,
         }
     }
 
     fn returns_ieee754_bits(self) -> bool {
         matches!(
             self,
-            Self::AsinRaw | Self::AcosRaw | Self::SqrtRaw | Self::RadiansRaw | Self::DegreesRaw
+            Self::AsinRaw
+                | Self::AcosRaw
+                | Self::SqrtRaw
+                | Self::RadiansRaw
+                | Self::DegreesRaw
+                | Self::PiRaw
         )
     }
 
     pub(crate) fn fn_meta(self) -> crate::RpnFnMeta {
         // Fixed identity witnesses for common preparation. Only the closed
-        // factory also uses the private raw getters to select a non-wire call;
+        // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
             Self::Ascii => crate::impl_string::ascii_fn_meta(),
@@ -963,6 +1002,15 @@ impl EvaluatedBytesOp {
             Self::SignRaw => crate::impl_math::sign_raw_fn_meta(),
             Self::RadiansRaw => crate::impl_math::radians_raw_fn_meta(),
             Self::DegreesRaw => crate::impl_math::degrees_raw_fn_meta(),
+            Self::PiRaw => crate::impl_math::pi_raw_fn_meta(),
+            Self::IsIpv4Nullable => crate::impl_miscellaneous::is_ipv4_nullable_fn_meta(),
+            Self::IsIpv6Nullable => crate::impl_miscellaneous::is_ipv6_nullable_fn_meta(),
+            Self::IsIpv4CompatNullable => {
+                crate::impl_miscellaneous::is_ipv4_compat_nullable_fn_meta()
+            }
+            Self::IsIpv4MappedNullable => {
+                crate::impl_miscellaneous::is_ipv4_mapped_nullable_fn_meta()
+            }
         }
     }
 
@@ -993,7 +1041,11 @@ impl EvaluatedBytesOp {
             | Self::LogicalOr
             | Self::LogicalXor
             | Self::InetAton
-            | Self::SignRaw => EvalType::Int,
+            | Self::SignRaw
+            | Self::IsIpv4Nullable
+            | Self::IsIpv6Nullable
+            | Self::IsIpv4CompatNullable
+            | Self::IsIpv4MappedNullable => EvalType::Int,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -1017,7 +1069,8 @@ impl EvaluatedBytesOp {
             | Self::AcosRaw
             | Self::SqrtRaw
             | Self::RadiansRaw
-            | Self::DegreesRaw => EvalType::Bytes,
+            | Self::DegreesRaw
+            | Self::PiRaw => EvalType::Bytes,
         }
     }
 
@@ -1031,6 +1084,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::PiRaw => &[],
             Self::HexInt
             | Self::Bin
             | Self::BitCount
@@ -1079,7 +1133,11 @@ impl EvaluatedBytesOp {
             | Self::SqrtRaw
             | Self::SignRaw
             | Self::RadiansRaw
-            | Self::DegreesRaw => &[EvalType::Bytes],
+            | Self::DegreesRaw
+            | Self::IsIpv4Nullable
+            | Self::IsIpv6Nullable
+            | Self::IsIpv4CompatNullable
+            | Self::IsIpv4MappedNullable => &[EvalType::Bytes],
         }
     }
 
@@ -1132,6 +1190,8 @@ impl EvaluatedBytesOp {
 /// NULL.
 #[derive(Debug)]
 pub enum EvaluatedArgs {
+    /// A genuine zero-operand invocation, not a nullable dummy argument.
+    NoArgs,
     Bytes(Option<Vec<u8>>),
     Int(Option<i64>),
     BytesInt(Option<Vec<u8>>, Option<i64>),
@@ -1145,6 +1205,7 @@ pub enum EvaluatedArgs {
 impl EvaluatedArgs {
     fn role(&self) -> EvaluatedArgsRole {
         match self {
+            Self::NoArgs => EvaluatedArgsRole::NoArgs,
             Self::Ieee754Bits(_) => EvaluatedArgsRole::Ieee754Bits,
             _ => EvaluatedArgsRole::Values,
         }
@@ -1152,6 +1213,7 @@ impl EvaluatedArgs {
 
     fn input_types(&self) -> &'static [EvalType] {
         match self {
+            Self::NoArgs => &[],
             Self::Bytes(_) | Self::Ieee754Bits(_) => &[EvalType::Bytes],
             Self::Int(_) => &[EvalType::Int],
             Self::BytesInt(..) => &[EvalType::Bytes, EvalType::Int],
@@ -1166,6 +1228,8 @@ impl EvaluatedArgs {
         // every other ready Bytes owner. Unused slots never enter the driver.
         use ScalarValue::{Bytes, Int};
         Ok(match self {
+            // No slot from this inline owner enters the empty ready slice.
+            Self::NoArgs => ([Int(None), Int(None), Int(None)], 0),
             Self::Bytes(value) => ([Bytes(value), Int(None), Int(None)], 1),
             Self::Int(value) => ([Int(value), Int(None), Int(None)], 1),
             Self::BytesInt(bytes, int) => ([Bytes(bytes), Int(int), Int(None)], 2),

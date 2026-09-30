@@ -4,9 +4,10 @@ use tidb_query_datatype::codec::data_type::ScalarValue;
 use tipb::{FieldType, ScalarFuncSig};
 
 use super::{
-    CheckedResultFlow, ControlLineageFacts, EvaluatedBytesOp, EvaluatedKernelKind, HostCatalog,
-    HostCatalogKey, LocalCompileContext, LocalControlProgram, LocalError, LocalExpr, LocalResult,
-    NumericBatchFacts, OrdinaryProfileSpec, PreparedHostCall, PreparedOrdinaryCall, registry,
+    CheckedResultFlow, ControlLineageFacts, EvaluatedArgsRole, EvaluatedBytesOp,
+    EvaluatedKernelKind, HostCatalog, HostCatalogKey, LocalCompileContext, LocalControlProgram,
+    LocalError, LocalExpr, LocalResult, NumericBatchFacts, OrdinaryProfileSpec, PreparedHostCall,
+    PreparedOrdinaryCall, registry,
 };
 use crate::{
     FunctionRef, RpnExpression, RpnExpressionNode,
@@ -127,7 +128,12 @@ fn check_evaluated_bytes_source(
             "evaluated Bytes requires its selected nested calls on ordered canonical slots with no metadata",
         )
     };
-    if !(1..=3).contains(&arity)
+    let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::PiRaw, EvaluatedArgsRole::NoArgs) => arity == 0 && calls == 1,
+        (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
+        _ => (1..=3).contains(&arity),
+    };
+    if !arity_matches
         || !(1..=2).contains(&calls)
         || schema.len() != arity
         || schema
@@ -784,7 +790,7 @@ fn compile(
                             Some(operation)
                                 if matches!(
                                     operation.kernel_kind(),
-                                    EvaluatedKernelKind::PrivateRawMath(_)
+                                    EvaluatedKernelKind::ClosedPrivate(_)
                                 ) =>
                             {
                                 // The closed source has fixed this private identity.
@@ -1536,6 +1542,11 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::SignRaw,
             EvaluatedBytesOp::RadiansRaw,
             EvaluatedBytesOp::DegreesRaw,
+            EvaluatedBytesOp::PiRaw,
+            EvaluatedBytesOp::IsIpv4Nullable,
+            EvaluatedBytesOp::IsIpv6Nullable,
+            EvaluatedBytesOp::IsIpv4CompatNullable,
+            EvaluatedBytesOp::IsIpv4MappedNullable,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
@@ -1568,6 +1579,15 @@ mod evaluated_ascii_compile_tests {
                     .unwrap();
             }
             assert!(operation.call_operation(calls).is_none());
+            if operation == EvaluatedBytesOp::PiRaw {
+                assert_eq!(arity, 0);
+                assert_eq!(calls, 1);
+                assert!(program.schema.is_empty());
+                assert!(matches!(
+                    program.expression.as_ref(),
+                    [RpnExpressionNode::FnCall { args_len: 0, .. }]
+                ));
+            }
 
             let first = operation.call_operation(0).unwrap();
             let mut spec = LocalExpr::Call {
@@ -1597,7 +1617,7 @@ mod evaluated_ascii_compile_tests {
             if operation != EvaluatedBytesOp::Ascii {
                 assert_closed_source_rejected(&spec, &program.schema);
             }
-            if let EvaluatedKernelKind::PrivateRawMath(id) = operation.kernel_kind() {
+            if let EvaluatedKernelKind::ClosedPrivate(id) = operation.kernel_kind() {
                 assert_eq!(operation.function_ref(), FunctionRef::Local(id));
                 let mut raw_call = CallBuild::local(
                     CallShape::new(

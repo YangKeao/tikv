@@ -112,8 +112,8 @@ pub enum FunctionRef {
 }
 
 /// Closed, TiKV-owned local signatures. Each variant has a checked support
-/// domain. The raw math variants are non-wire, factory-only identities, not
-/// ordinary local kernels.
+/// domain. Raw math and nullable IP variants are non-wire, factory-only
+/// identities, not ordinary local kernels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalFunctionId {
     NullIfIntSignedSigned,
@@ -123,6 +123,11 @@ pub enum LocalFunctionId {
     SignRaw,
     RadiansRaw,
     DegreesRaw,
+    PiRaw,
+    IsIpv4Nullable,
+    IsIpv6Nullable,
+    IsIpv4CompatNullable,
+    IsIpv4MappedNullable,
 }
 
 /// Source provenance, not a deduction from the value's collation.

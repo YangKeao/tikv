@@ -27,6 +27,12 @@ pub fn pi() -> Result<Option<Real>> {
 
 #[rpn_fn]
 #[inline]
+fn pi_raw() -> Result<Option<Bytes>> {
+    Ok(pi()?.map(|value| encode_raw_f64(value.into_inner())))
+}
+
+#[rpn_fn]
+#[inline]
 pub fn crc32(arg: BytesRef) -> Result<Option<Int>> {
     Ok(Some(i64::from(file_system::calc_crc32_bytes(arg))))
 }

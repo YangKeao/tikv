@@ -1680,3 +1680,166 @@ fn local_evaluated_args_ieee754_roles_reject_other_carriers() {
     assert!(bytes.is_healthy());
     assert_eq!(bytes.retained_storage().unwrap(), bytes_storage);
 }
+
+#[test]
+fn local_evaluated_args_pi_uses_no_args_and_rejects_other_roles() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::PiRaw,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::PiRaw);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::Bytes(None),
+        EvaluatedArgs::Ieee754Bits(None),
+        EvaluatedArgs::Int(None),
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    for invocations in 1..=3_u64 {
+        let ComputedValue::Ieee754Bits(value) = worker.eval_args(EvaluatedArgs::NoArgs).unwrap()
+        else {
+            panic!("PI returned a non-IEEE-754 value");
+        };
+        assert_eq!(value.value(), Some(std::f64::consts::PI.to_bits()));
+        assert_eq!(
+            value.metadata(),
+            ComputedIeee754BitsMetadata::OwnIeee754Bits
+        );
+        assert_eq!(value.into_option(), Some(std::f64::consts::PI.to_bits()));
+        assert_eq!(worker.kernel_invocations(), invocations);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+
+    let mut bytes = prepare_evaluated_bytes(
+        EvaluatedBytesOp::Md5,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(bytes.operation(), EvaluatedBytesOp::Md5);
+    assert_eq!(bytes.kernel_invocations(), 0);
+    let bytes_storage = bytes.retained_storage().unwrap();
+    assert!(matches!(
+        bytes.eval_args(EvaluatedArgs::NoArgs),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(bytes.kernel_invocations(), 0);
+    assert!(bytes.is_healthy());
+    assert_eq!(bytes.retained_storage().unwrap(), bytes_storage);
+    let ComputedValue::Bytes(value) = bytes.eval_one(None).unwrap() else {
+        panic!("MD5 returned a non-Bytes value");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(bytes.kernel_invocations(), 1);
+    assert!(bytes.is_healthy());
+    assert_eq!(bytes.retained_storage().unwrap(), bytes_storage);
+}
+
+#[test]
+fn local_evaluated_bytes_ip_text_predicates_keep_null_private() {
+    assert_eq!(crate::impl_miscellaneous::is_ipv4(None).unwrap(), Some(0));
+    assert_eq!(crate::impl_miscellaneous::is_ipv6(None).unwrap(), Some(0));
+    let cases: &[(Option<&[u8]>, [Option<i64>; 2])] = &[
+        (None, [None, None]),
+        (Some(b"127.0.0.1"), [Some(1), Some(0)]),
+        (Some(b"::1"), [Some(0), Some(1)]),
+        (Some(b"bad"), [Some(0), Some(0)]),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::IsIpv4Nullable,
+        EvaluatedBytesOp::IsIpv6Nullable,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Int(value) =
+                worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+            else {
+                panic!("IP text predicate returned a non-Int value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected[column]);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_ip_prefix_predicates_keep_null_private() {
+    assert_eq!(
+        crate::impl_miscellaneous::is_ipv4_compat(None).unwrap(),
+        Some(0)
+    );
+    assert_eq!(
+        crate::impl_miscellaneous::is_ipv4_mapped(None).unwrap(),
+        Some(0)
+    );
+    let mapped: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 1, 2, 3, 4];
+    let compatible: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4];
+    let cases: &[(Option<&[u8]>, [Option<i64>; 2])] = &[
+        (None, [None, None]),
+        (Some(mapped), [Some(0), Some(1)]),
+        (Some(compatible), [Some(1), Some(0)]),
+        (Some(b"\x01\x02\x03"), [Some(0), Some(0)]),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::IsIpv4CompatNullable,
+        EvaluatedBytesOp::IsIpv4MappedNullable,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Int(value) =
+                worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+            else {
+                panic!("IP prefix predicate returned a non-Int value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected[column]);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

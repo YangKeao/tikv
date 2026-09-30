@@ -246,7 +246,16 @@ short-circuit admission policy described above.
   Bytes/Int shapes and official parse/range/format kernels. The frontend retains
   text/raw-byte coercion, integer warnings, UInt bit transport and result tags.
   Malformed raw INET6 bytes reach the kernel unchanged. Four IS_IP predicates
-  are not included: native NULL behavior and IPv4 leading-zero parsing differ.
+  use private default-NULL-propagating wrappers calling the existing official
+  functions for non-NULL inputs; wire NULL-to-zero remains unchanged. Only the
+  native IPv4 input spelling removes redundant leading zeros from existing dot
+  segments, preserving empty segments, separators and other characters; the
+  kernel still decides validity. IPv6 and binary prefixes are not normalized.
+  PI has a distinct NoArgs role: empty schema/ready slice, no column references,
+  one zero-argument FnCall and one output row. Its private wrapper calls the
+  existing pi function, so there is no second constant or dummy argument.
+  ClosedPrivate selects these getters through common preparation; argument
+  roles remain independent, and ordinary registry dispatch rejects private IDs.
   ASIN/ACOS/SQRT/SIGN/RADIANS/DEGREES additionally use a sealed IEEE754Bits role,
   with nullable eight-byte little-endian physical transport and owned bit results
   (SIGN remains signed Int). Ordinary Bytes cannot impersonate this role, even

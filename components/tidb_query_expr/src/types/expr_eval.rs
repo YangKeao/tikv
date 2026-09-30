@@ -310,8 +310,15 @@ fn evaluated_ready_args_match(
     role: EvaluatedArgsRole,
 ) -> bool {
     let types = operation.input_types();
+    let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::PiRaw, EvaluatedArgsRole::NoArgs) => {
+            types.is_empty() && operation.call_count() == 1
+        }
+        (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
+        _ => (1..=3).contains(&types.len()),
+    };
     operation.input_role() == role
-        && (1..=3).contains(&types.len())
+        && arity_matches
         && values.len() == types.len()
         && values.iter().zip(types).all(|(value, eval_type)| {
             matches!(
@@ -321,6 +328,7 @@ fn evaluated_ready_args_match(
             )
         })
         && match role {
+            EvaluatedArgsRole::NoArgs => values.is_empty(),
             EvaluatedArgsRole::Values => true,
             EvaluatedArgsRole::Ieee754Bits => match values {
                 [ScalarValue::Bytes(None)] => true,
@@ -456,7 +464,12 @@ pub(crate) fn evaluated_bytes_shape(
 ) -> bool {
     let arity = operation.input_types().len();
     let calls = operation.call_count();
-    if !(1..=3).contains(&arity)
+    let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::PiRaw, EvaluatedArgsRole::NoArgs) => arity == 0 && calls == 1,
+        (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
+        _ => (1..=3).contains(&arity),
+    };
+    if !arity_matches
         || !(1..=2).contains(&calls)
         || schema.len() != arity
         || nodes.len() != arity + calls
@@ -2455,9 +2468,9 @@ impl RpnExpression {
         )
     }
 
-    /// Fixed one-to-three ready operands, borrowed from the facade until its
-    /// result extraction completes. Only the selected closed recipe is
-    /// admitted.
+    /// Fixed ready operands, borrowed from the facade until its result
+    /// extraction completes. Only the selected closed recipe is admitted;
+    /// zero operands are reserved for PiRaw with the explicit NoArgs role.
     pub(crate) fn eval_with_ready_args<'a, 'data: 'a>(
         &'a self,
         operation: EvaluatedBytesOp,
@@ -2945,6 +2958,10 @@ mod tests {
             (EvaluatedBytesOp::Md5, EvaluatedBytesOp::Sha1),
             (EvaluatedBytesOp::InetAton, EvaluatedBytesOp::Crc32),
             (EvaluatedBytesOp::Inet6Aton, EvaluatedBytesOp::Inet6Ntoa),
+            (
+                EvaluatedBytesOp::IsIpv4Nullable,
+                EvaluatedBytesOp::IsIpv6Nullable,
+            ),
         ] {
             // Isolate each guard: neither a matching carrier nor a matching
             // display name grants admission for a different kernel or metadata.
@@ -3082,46 +3099,50 @@ mod tests {
     #[test]
     fn test_evaluated_raw_rejects_role_length_and_kernel_drift() {
         use crate::local::ExecutionLimits;
-        let schema = [FieldType::from(FieldTypeTp::Blob)];
         let mut witness = EvaluatedAsciiWitness::default();
         assert!(evaluated_ready_args_match(
             EvaluatedBytesOp::AsinRaw,
             &[ScalarValue::Bytes(None)],
             EvaluatedArgsRole::Ieee754Bits,
         ));
-        for mismatch in 0..4 {
-            let operation = if mismatch == 3 {
-                EvaluatedBytesOp::Md5
-            } else {
-                EvaluatedBytesOp::AsinRaw
+        assert!(evaluated_ready_args_match(
+            EvaluatedBytesOp::PiRaw,
+            &[],
+            EvaluatedArgsRole::NoArgs,
+        ));
+        for mismatch in 0..8 {
+            let operation = match mismatch {
+                3 | 5 => EvaluatedBytesOp::Md5,
+                6 | 7 => EvaluatedBytesOp::PiRaw,
+                _ => EvaluatedBytesOp::AsinRaw,
             };
-            let role = if mismatch == 0 {
-                EvaluatedArgsRole::Values
-            } else {
-                EvaluatedArgsRole::Ieee754Bits
+            let role = match mismatch {
+                0 | 6 => EvaluatedArgsRole::Values,
+                4 | 5 => EvaluatedArgsRole::NoArgs,
+                _ => EvaluatedArgsRole::Ieee754Bits,
             };
-            let ready = [ScalarValue::Bytes(Some(vec![
-                0;
-                if mismatch == 1 {
-                    7
-                } else {
-                    8
-                }
-            ]))];
+            let schema: Vec<_> = (0..operation.input_types().len())
+                .map(|slot| operation.input_field_type(slot).unwrap())
+                .collect();
+            let ready: Vec<_> = schema
+                .iter()
+                .map(|_| ScalarValue::Bytes(Some(vec![0; if mismatch == 1 { 7 } else { 8 }])))
+                .collect();
             let mut func_meta = operation.fn_meta();
             if mismatch == 2 {
                 assert!(evaluated_ready_args_match(operation, &ready, role));
                 func_meta.fn_ptr = EvaluatedBytesOp::AcosRaw.fn_meta().fn_ptr;
             }
-            let program = RpnExpression::from(vec![
-                RpnExpressionNode::ColumnRef { offset: 0 },
-                RpnExpressionNode::FnCall {
-                    func_meta,
-                    args_len: 1,
-                    field_type: operation.return_type(),
-                    metadata: Box::new(()),
-                },
-            ]);
+            let mut nodes: Vec<_> = (0..schema.len())
+                .map(|offset| RpnExpressionNode::ColumnRef { offset })
+                .collect();
+            nodes.push(RpnExpressionNode::FnCall {
+                func_meta,
+                args_len: schema.len(),
+                field_type: operation.return_type(),
+                metadata: Box::new(()),
+            });
+            let program = RpnExpression::from(nodes);
             if mismatch != 2 {
                 assert!(evaluated_bytes_shape(operation, program.as_ref(), &schema));
             }
