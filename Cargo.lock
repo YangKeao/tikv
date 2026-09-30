@@ -2336,9 +2336,9 @@ dependencies = [
 
 [[package]]
 name = "encoding_rs"
-version = "0.8.33"
+version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7268b386296a025e474d5140678f75d6de9493ae55a5d709eeb9dd08149945e1"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 dependencies = [
  "cfg-if 1.0.0",
 ]
@@ -6491,7 +6491,7 @@ checksum = "37b1ae8d9ac08420c66222fb9096fc5de435c3c48542bc5336c51892cffafb41"
 dependencies = [
  "base64 0.21.7",
  "bytes",
- "encoding_rs 0.8.33",
+ "encoding_rs 0.8.35",
  "futures-core",
  "futures-util",
  "h2 0.3.26",
@@ -8348,6 +8348,7 @@ dependencies = [
  "crc32fast",
  "criterion 0.3.5",
  "encoding_rs 0.8.29",
+ "encoding_rs 0.8.35",
  "error_code",
  "hex 0.4.3",
  "kvproto",
@@ -9219,7 +9220,7 @@ version = "1.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
- "cfg-if 0.1.10",
+ "cfg-if 1.0.0",
  "static_assertions",
 ]
 

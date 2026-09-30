@@ -1,28 +1,12 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use collections::HashMap;
 use encoding_rs::GB18030;
-use lazy_static::*;
 
-use self::gb18030_data::GB18030_TO_UNICODE;
 use super::*;
-use crate::codec::data_type::{BytesGuard, BytesWriter};
-
-lazy_static! {
-    static ref DECODE_MAP: HashMap<u32, char> = GB18030_TO_UNICODE.iter().copied().collect();
-    static ref ENCODE_MAP: HashMap<char, Vec<u8>> = GB18030_TO_UNICODE
-        .iter()
-        .map(|(gb18030, ch)| {
-            let mut gb18030_bytes = gb18030.to_be_bytes().to_vec();
-            let mut pos = 0;
-            while pos < gb18030_bytes.len() && gb18030_bytes[pos] == 0 {
-                pos += 1;
-            }
-            gb18030_bytes = gb18030_bytes[pos..].to_vec();
-            (*ch, gb18030_bytes)
-        })
-        .collect();
-}
+use crate::codec::{
+    collation::gb::{self, GbPolicy},
+    data_type::{BytesGuard, BytesWriter},
+};
 
 #[derive(Debug)]
 pub struct EncodingGb18030 {}
@@ -91,13 +75,9 @@ impl Encoding for EncodingGb18030 {
                     ));
                 }
             };
-            if DECODE_MAP.contains_key(&v) {
+            if let Some(ch) = gb::decode_override(GbPolicy::Wire, v) {
                 let mut buffer = [0; 4];
-                let utf8_bytes = DECODE_MAP
-                    .get(&v)
-                    .unwrap()
-                    .encode_utf8(&mut buffer)
-                    .as_bytes();
+                let utf8_bytes = ch.encode_utf8(&mut buffer).as_bytes();
                 res.extend(utf8_bytes.to_vec());
             } else {
                 match GB18030
@@ -126,8 +106,10 @@ impl Encoding for EncodingGb18030 {
         let utf8_str = str::from_utf8(data)?;
         // encode each character one by one
         for ch in utf8_str.chars() {
-            if ENCODE_MAP.contains_key(&ch) {
-                res.extend(ENCODE_MAP.get(&ch).unwrap().iter().copied());
+            if let Some(encoded) = gb::encode_override(GbPolicy::Wire, ch) {
+                let bytes = encoded.to_be_bytes();
+                let first = bytes.iter().position(|&byte| byte != 0).unwrap_or(4);
+                res.extend(bytes[first..].iter().copied());
             } else {
                 res.extend(GB18030.encode(&ch.to_string()).0.iter());
             }

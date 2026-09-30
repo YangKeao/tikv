@@ -1,6 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use super::*;
+use crate::codec::collation::gb::{self, GbCollation, GbPolicy};
 
 /// Collator for `gb18030_bin`
 #[derive(Debug)]
@@ -36,55 +37,12 @@ impl Collator for CollatorGb18030Bin {
 
     #[inline]
     fn write_sort_key_unpadded<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
-        let mut bstr_rest = bstr;
-        let mut n = 0;
-        while !bstr_rest.is_empty() {
-            match next_utf8_char(bstr_rest) {
-                Some((ch, b_next)) => {
-                    let weight = Self::char_weight(ch);
-                    if weight > 0xFFFF {
-                        writer.write_u32_be(weight)?;
-                        n += 4;
-                    } else if weight > 0xFF {
-                        writer.write_u16_be(weight as u16)?;
-                        n += 2;
-                    } else {
-                        writer.write_u8(weight as u8)?;
-                        n += 1;
-                    }
-                    bstr_rest = b_next
-                }
-                None => {
-                    writer.write_u8(b'?')?;
-                    n += 1;
-                    bstr_rest = &bstr_rest[1..]
-                }
-            }
-        }
-        Ok(n * std::mem::size_of::<u8>())
+        gb::write_key_unpadded(GbCollation::Gb18030Bin, GbPolicy::Wire, writer, bstr)
     }
 
     #[inline]
     fn sort_compare(a: &[u8], b: &[u8], force_no_pad: bool) -> Result<Ordering> {
-        let sa = if force_no_pad { a } else { trim_end_padding(a) };
-        let sb = if force_no_pad { b } else { trim_end_padding(b) };
-        let mut a_rest = sa;
-        let mut b_rest = sb;
-
-        while !a_rest.is_empty() && !b_rest.is_empty() {
-            let (ch_a, a_next) = next_utf8_char(a_rest).unwrap_or(('?', &a_rest[1..]));
-            let (ch_b, b_next) = next_utf8_char(b_rest).unwrap_or(('?', &b_rest[1..]));
-
-            let ord = Self::char_weight(ch_a).cmp(&Self::char_weight(ch_b));
-            if ord != Ordering::Equal {
-                return Ok(ord);
-            }
-
-            a_rest = a_next;
-            b_rest = b_next;
-        }
-
-        Ok(a_rest.len().cmp(&b_rest.len()))
+        gb::compare(GbCollation::Gb18030Bin, GbPolicy::Wire, a, b, force_no_pad)
     }
 
     #[inline]
@@ -140,52 +98,18 @@ impl Collator for CollatorGb18030ChineseCi {
 
     #[inline]
     fn write_sort_key_unpadded<W: BufferWriter>(writer: &mut W, bstr: &[u8]) -> Result<usize> {
-        let mut bstr_rest = bstr;
-        let mut n = 0;
-        while !bstr_rest.is_empty() {
-            match next_utf8_char(bstr_rest) {
-                Some((ch, b_next)) => {
-                    let weight = Self::char_weight(ch);
-                    if weight > 0xFFFF {
-                        writer.write_u32_be(weight)?;
-                        n += 4;
-                    } else if weight > 0xFF {
-                        writer.write_u16_be(weight as u16)?;
-                        n += 2;
-                    } else {
-                        writer.write_u8(weight as u8)?;
-                        n += 1;
-                    }
-                    bstr_rest = b_next
-                }
-                _ => break,
-            }
-        }
-        Ok(n * std::mem::size_of::<u8>())
+        gb::write_key_unpadded(GbCollation::Gb18030ChineseCi, GbPolicy::Wire, writer, bstr)
     }
 
     #[inline]
     fn sort_compare(a: &[u8], b: &[u8], force_no_pad: bool) -> Result<Ordering> {
-        let sa = if force_no_pad { a } else { trim_end_padding(a) };
-        let sb = if force_no_pad { b } else { trim_end_padding(b) };
-        let mut a_rest = sa;
-        let mut b_rest = sb;
-
-        while !a_rest.is_empty() && !b_rest.is_empty() {
-            match (next_utf8_char(a_rest), next_utf8_char(b_rest)) {
-                (Some((ch_a, a_next)), Some((ch_b, b_next))) => {
-                    let ord = Self::char_weight(ch_a).cmp(&Self::char_weight(ch_b));
-                    if ord != Ordering::Equal {
-                        return Ok(ord);
-                    }
-                    a_rest = a_next;
-                    b_rest = b_next;
-                }
-                _ => return Ok(Ordering::Equal),
-            }
-        }
-
-        Ok(a_rest.len().cmp(&b_rest.len()))
+        gb::compare(
+            GbCollation::Gb18030ChineseCi,
+            GbPolicy::Wire,
+            a,
+            b,
+            force_no_pad,
+        )
     }
 
     #[inline]
@@ -206,7 +130,8 @@ impl Collator for CollatorGb18030ChineseCi {
 
 const TABLE_SIZE_FOR_GB18030: usize = 4 * (0x10FFFF + 1);
 
-// GB18030_BIN_TABLE are the encoding tables from Unicode to GB18030 code.
+// Existing wire collation weights. They are not the native GB18030 encoder:
+// the shared kernel keeps the known override/key differences policy-explicit.
 const GB18030_BIN_TABLE: &[u8; TABLE_SIZE_FOR_GB18030] = include_bytes!("gb18030_bin.data");
 
 // GB18030_CHINESE_CI_TABLE are the sort key tables for GB18030 codepoint.

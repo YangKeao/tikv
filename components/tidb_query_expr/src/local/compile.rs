@@ -1578,6 +1578,14 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::InsertUtf8Native,
             EvaluatedBytesOp::LowerAsciiNative,
             EvaluatedBytesOp::UpperAsciiNative,
+            EvaluatedBytesOp::Substring2BytesNative,
+            EvaluatedBytesOp::Substring3BytesNative,
+            EvaluatedBytesOp::Substring2Utf8Native,
+            EvaluatedBytesOp::Substring3Utf8Native,
+            EvaluatedBytesOp::Substring2BytesLegacy,
+            EvaluatedBytesOp::Substring3BytesLegacy,
+            EvaluatedBytesOp::Substring2Utf8Legacy,
+            EvaluatedBytesOp::Substring3Utf8Legacy,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

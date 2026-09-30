@@ -166,8 +166,8 @@ pub use self::{
         ComputedBytes, ComputedBytesMetadata, ComputedIeee754Bits, ComputedIeee754BitsMetadata,
         ComputedInt, ComputedIntMetadata, ComputedValue, EvaluatedArgs, EvaluatedAsciiWorker,
         EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState, OutputDisposition,
-        ReadyBytesArg, ReadyIeee754Arg, ReadyIntArg, WorkerStorage, prepare_evaluated_ascii,
-        prepare_evaluated_bytes,
+        ReadyBytesArg, ReadyIeee754Arg, ReadyIntArg, ReadySubstringI128, WorkerStorage,
+        prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,
@@ -195,5 +195,6 @@ pub(crate) use self::{
     lineage::CheckedResultFlow,
 };
 pub use crate::{
-    CallMetadata, FunctionRef, LiteralKind, LocalFunctionId, types::function::PreparedOrdinaryCall,
+    CallMetadata, FunctionRef, LiteralKind, LocalFunctionId,
+    impl_string::legacy_substring_needs_len, types::function::PreparedOrdinaryCall,
 };

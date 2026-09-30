@@ -112,8 +112,8 @@ pub enum FunctionRef {
 }
 
 /// Closed, TiKV-owned local signatures. Each variant has a checked support
-/// domain. The raw math, nullable IP, native, and ready variants are non-wire,
-/// factory-only identities, not ordinary local kernels.
+/// domain. The raw math, nullable IP, native, legacy, and ready variants are
+/// non-wire, factory-only identities, not ordinary local kernels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalFunctionId {
     NullIfIntSignedSigned,
@@ -154,6 +154,14 @@ pub enum LocalFunctionId {
     InsertUtf8Native,
     LowerAsciiNative,
     UpperAsciiNative,
+    Substring2BytesNative,
+    Substring3BytesNative,
+    Substring2Utf8Native,
+    Substring3Utf8Native,
+    Substring2BytesLegacy,
+    Substring3BytesLegacy,
+    Substring2Utf8Legacy,
+    Substring3Utf8Legacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

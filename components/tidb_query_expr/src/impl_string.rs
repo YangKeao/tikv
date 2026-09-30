@@ -1,6 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{cmp::Ordering, iter, str};
+use std::{borrow::Cow, cmp::Ordering, convert::TryFrom, iter, str};
 
 use bstr::ByteSlice;
 use memchr::memmem;
@@ -1394,7 +1394,7 @@ pub fn substring_2_args_utf8(
     pos: &Int,
     writer: BytesWriter,
 ) -> Result<BytesGuard> {
-    substring_utf8(input, *pos, Int::MAX, writer)
+    substring_wire(input, *pos, Int::MAX, true, writer)
 }
 
 #[rpn_fn(writer)]
@@ -1405,31 +1405,13 @@ pub fn substring_3_args_utf8(
     len: &Int,
     writer: BytesWriter,
 ) -> Result<BytesGuard> {
-    substring_utf8(input, *pos, *len, writer)
-}
-
-#[inline]
-fn substring_utf8(input: BytesRef, pos: Int, len: Int, writer: BytesWriter) -> Result<BytesGuard> {
-    let (pos, pos_positive) = i64_to_usize(pos, pos > 0);
-    let (len, len_positive) = i64_to_usize(len, len > 0);
-    if pos == 0 || len == 0 || !len_positive {
-        return Ok(writer.write_ref(Some(b"")));
-    }
-
-    let input = str::from_utf8(input)?;
-    let char_len = input.chars().count();
-    let start = if pos_positive {
-        (pos - 1).min(char_len)
-    } else {
-        char_len.checked_sub(pos).unwrap_or(char_len)
-    };
-    Ok(writer.write_from_char_iter(input.chars().skip(start).take(len)))
+    substring_wire(input, *pos, *len, true, writer)
 }
 
 #[rpn_fn(writer)]
 #[inline]
 pub fn substring_2_args(input: BytesRef, pos: &Int, writer: BytesWriter) -> Result<BytesGuard> {
-    substring(input, *pos, input.len() as Int, writer)
+    substring_wire(input, *pos, input.len() as Int, false, writer)
 }
 
 #[rpn_fn(writer)]
@@ -1440,24 +1422,330 @@ pub fn substring_3_args(
     len: &Int,
     writer: BytesWriter,
 ) -> Result<BytesGuard> {
-    substring(input, *pos, *len, writer)
+    substring_wire(input, *pos, *len, false, writer)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn substring_2_bytes_native(input: BytesRef, pos: &Int, writer: BytesWriter) -> Result<BytesGuard> {
+    substring_impl(
+        input,
+        i128::from(*pos),
+        SubstringLength::Tail,
+        false,
+        SubstringPolicy::Native,
+        writer,
+    )
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn substring_3_bytes_native(
+    input: BytesRef,
+    pos: &Int,
+    len: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    substring_impl(
+        input,
+        i128::from(*pos),
+        SubstringLength::Native(*len),
+        false,
+        SubstringPolicy::Native,
+        writer,
+    )
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn substring_2_utf8_native(input: BytesRef, pos: &Int, writer: BytesWriter) -> Result<BytesGuard> {
+    substring_impl(
+        input,
+        i128::from(*pos),
+        SubstringLength::Tail,
+        true,
+        SubstringPolicy::Native,
+        writer,
+    )
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn substring_3_utf8_native(
+    input: BytesRef,
+    pos: &Int,
+    len: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    substring_impl(
+        input,
+        i128::from(*pos),
+        SubstringLength::Native(*len),
+        true,
+        SubstringPolicy::Native,
+        writer,
+    )
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn substring_2_bytes_legacy(
+    input: BytesRef,
+    pos: BytesRef,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    substring_impl(
+        input,
+        decode_substring_i128(pos)?,
+        SubstringLength::Tail,
+        false,
+        SubstringPolicy::Legacy,
+        writer,
+    )
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn substring_3_bytes_legacy(
+    input: BytesRef,
+    pos: BytesRef,
+    len: BytesRef,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    substring_impl(
+        input,
+        decode_substring_i128(pos)?,
+        SubstringLength::Legacy(len),
+        false,
+        SubstringPolicy::Legacy,
+        writer,
+    )
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn substring_2_utf8_legacy(
+    input: BytesRef,
+    pos: BytesRef,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    substring_impl(
+        input,
+        decode_substring_i128(pos)?,
+        SubstringLength::Tail,
+        true,
+        SubstringPolicy::Legacy,
+        writer,
+    )
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn substring_3_utf8_legacy(
+    input: BytesRef,
+    pos: BytesRef,
+    len: BytesRef,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    substring_impl(
+        input,
+        decode_substring_i128(pos)?,
+        SubstringLength::Legacy(len),
+        true,
+        SubstringPolicy::Legacy,
+        writer,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum SubstringPolicy {
+    Wire,
+    Native,
+    Legacy,
+}
+
+enum SubstringLength<'a> {
+    Tail,
+    Wire(usize),
+    Native(Int),
+    Legacy(BytesRef<'a>),
+}
+
+enum SubstringView<'a> {
+    Bytes(BytesRef<'a>),
+    Utf8(Cow<'a, str>),
+}
+
+impl SubstringView<'_> {
+    fn unit_len(&self) -> usize {
+        match self {
+            Self::Bytes(input) => input.len(),
+            Self::Utf8(input) => input.chars().count(),
+        }
+    }
+
+    fn write_range(
+        self,
+        start: usize,
+        end: usize,
+        policy: SubstringPolicy,
+        writer: BytesWriter,
+    ) -> Result<BytesGuard> {
+        match self {
+            Self::Bytes(input) => Ok(writer.write_ref(Some(&input[start..end]))),
+            Self::Utf8(input) if matches!(policy, SubstringPolicy::Legacy) => {
+                // Only legacy needs a real unit slice to retain unchecked-end
+                // bounds behavior; do not add this allocation to wire calls.
+                let units: Vec<char> = input.chars().collect();
+                Ok(writer.write_from_char_iter(units[start..end].iter().copied()))
+            }
+            Self::Utf8(input) => {
+                Ok(writer.write_from_char_iter(input.chars().skip(start).take(end - start)))
+            }
+        }
+    }
 }
 
 #[inline]
-fn substring(input: BytesRef, pos: Int, len: Int, writer: BytesWriter) -> Result<BytesGuard> {
-    let (pos, pos_positive) = i64_to_usize(pos, pos > 0);
-    let (len, len_positive) = i64_to_usize(len, len > 0);
-    if pos == 0 || len == 0 || !len_positive {
-        return Ok(writer.write_ref(Some(b"")));
+fn legacy_substring_view(input: BytesRef, utf8: bool) -> SubstringView<'_> {
+    if utf8 {
+        SubstringView::Utf8(String::from_utf8_lossy(input))
+    } else {
+        SubstringView::Bytes(input)
+    }
+}
+
+#[inline]
+fn decode_substring_i128(input: BytesRef) -> Result<i128> {
+    let bytes = <[u8; 16]>::try_from(input).map_err(|_| {
+        other_err!(
+            "Internal substring integer transport requires exactly 16 bytes, received {}",
+            input.len()
+        )
+    })?;
+    Ok(i128::from_le_bytes(bytes))
+}
+
+#[inline]
+fn substring_position(position: i128, policy: SubstringPolicy) -> Option<Int> {
+    let position = i64::try_from(position).ok()?;
+    if matches!(policy, SubstringPolicy::Legacy) && position == 0 {
+        None
+    } else {
+        Some(position)
+    }
+}
+
+#[inline]
+fn substring_start(position: Int, unit_len: usize, policy: SubstringPolicy) -> Option<usize> {
+    if matches!(policy, SubstringPolicy::Wire) {
+        let (position, positive) = i64_to_usize(position, position > 0);
+        return Some(if positive {
+            (position - 1).min(unit_len)
+        } else {
+            unit_len.checked_sub(position).unwrap_or(unit_len)
+        });
     }
 
-    let start = if pos_positive {
-        (pos - 1).min(input.len())
+    let unit_len = unit_len as Int;
+    let start = if position < 0 {
+        position + unit_len
     } else {
-        input.len().checked_sub(pos).unwrap_or(input.len())
+        position - 1
     };
-    let end = start.saturating_add(len).min(input.len());
-    Ok(writer.write_ref(Some(&input[start..end])))
+    if matches!(policy, SubstringPolicy::Legacy) {
+        if start < 0 || start >= unit_len {
+            None
+        } else {
+            Some(start as usize)
+        }
+    } else {
+        Some(if !(0..=unit_len).contains(&start) {
+            unit_len as usize
+        } else {
+            start as usize
+        })
+    }
+}
+
+/// Asks only whether a non-NULL legacy substring source/position demands
+/// length.
+pub fn legacy_substring_needs_len(source: &[u8], position: i128, utf8: bool) -> bool {
+    let Some(position) = substring_position(position, SubstringPolicy::Legacy) else {
+        return false;
+    };
+    let view = legacy_substring_view(source, utf8);
+    substring_start(position, view.unit_len(), SubstringPolicy::Legacy).is_some()
+}
+
+#[inline]
+fn substring_wire(
+    input: BytesRef,
+    pos: Int,
+    len: Int,
+    utf8: bool,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    let (magnitude, _) = i64_to_usize(pos, pos > 0);
+    let (len, positive) = i64_to_usize(len, len > 0);
+    if magnitude == 0 || len == 0 || !positive {
+        return Ok(writer.write_ref(Some(b"")));
+    }
+    substring_impl(
+        input,
+        i128::from(pos),
+        SubstringLength::Wire(len),
+        utf8,
+        SubstringPolicy::Wire,
+        writer,
+    )
+}
+
+#[inline]
+fn substring_impl(
+    input: BytesRef,
+    position: i128,
+    length: SubstringLength<'_>,
+    utf8: bool,
+    policy: SubstringPolicy,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    let Some(position) = substring_position(position, policy) else {
+        return Ok(writer.write(None));
+    };
+    let view = if matches!(policy, SubstringPolicy::Legacy) {
+        legacy_substring_view(input, utf8)
+    } else if utf8 {
+        SubstringView::Utf8(Cow::Borrowed(str::from_utf8(input)?))
+    } else {
+        SubstringView::Bytes(input)
+    };
+    let unit_len = view.unit_len();
+    let Some(start) = substring_start(position, unit_len, policy) else {
+        return Ok(writer.write_ref(Some(b"")));
+    };
+    let end = match length {
+        SubstringLength::Tail => unit_len,
+        SubstringLength::Wire(len) => start.saturating_add(len).min(unit_len),
+        SubstringLength::Native(len) if len <= 0 => start,
+        SubstringLength::Native(len) => {
+            let Some(end) = (start as Int).checked_add(len) else {
+                return Ok(writer.write_ref(Some(b"")));
+            };
+            (end as usize).min(unit_len)
+        }
+        SubstringLength::Legacy(len) => {
+            let Ok(len) = i64::try_from(decode_substring_i128(len)?) else {
+                return Ok(writer.write(None));
+            };
+            if len < 0 {
+                return Ok(writer.write_ref(Some(b"")));
+            }
+            let start = start as Int;
+            (start + len).min(unit_len as Int) as usize
+        }
+    };
+    view.write_range(start, end, policy, writer)
 }
 
 #[cfg(test)]

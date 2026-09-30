@@ -3,6 +3,7 @@
 mod charset;
 pub mod collator;
 pub mod encoding;
+pub mod gb;
 pub mod pattern;
 
 use std::{

@@ -833,6 +833,14 @@ pub enum EvaluatedBytesOp {
     InsertUtf8Native,
     LowerAsciiNative,
     UpperAsciiNative,
+    Substring2BytesNative,
+    Substring3BytesNative,
+    Substring2Utf8Native,
+    Substring3Utf8Native,
+    Substring2BytesLegacy,
+    Substring3BytesLegacy,
+    Substring2Utf8Legacy,
+    Substring3Utf8Legacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -854,6 +862,8 @@ pub(crate) enum EvaluatedArgsRole {
     ReadyBytesInt,
     ReadyBytesBytesInt,
     PadPacket,
+    SubstringNative,
+    SubstringLegacy,
 }
 
 impl EvaluatedBytesOp {
@@ -1041,6 +1051,46 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::UpperAsciiNative,
                 );
             }
+            Self::Substring2BytesNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Substring2BytesNative,
+                );
+            }
+            Self::Substring3BytesNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Substring3BytesNative,
+                );
+            }
+            Self::Substring2Utf8Native => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Substring2Utf8Native,
+                );
+            }
+            Self::Substring3Utf8Native => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Substring3Utf8Native,
+                );
+            }
+            Self::Substring2BytesLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Substring2BytesLegacy,
+                );
+            }
+            Self::Substring3BytesLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Substring3BytesLegacy,
+                );
+            }
+            Self::Substring2Utf8Legacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Substring2Utf8Legacy,
+                );
+            }
+            Self::Substring3Utf8Legacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Substring3Utf8Legacy,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1059,6 +1109,14 @@ impl EvaluatedBytesOp {
             Self::PiRaw => EvaluatedArgsRole::NoArgs,
             Self::Sha2Native => EvaluatedArgsRole::ReadyBytesInt,
             Self::LogNative | Self::PowNative => EvaluatedArgsRole::Ieee754Bits2,
+            Self::Substring2BytesNative
+            | Self::Substring3BytesNative
+            | Self::Substring2Utf8Native
+            | Self::Substring3Utf8Native => EvaluatedArgsRole::SubstringNative,
+            Self::Substring2BytesLegacy
+            | Self::Substring3BytesLegacy
+            | Self::Substring2Utf8Legacy
+            | Self::Substring3Utf8Legacy => EvaluatedArgsRole::SubstringLegacy,
             Self::SubstringIndexSignedNative | Self::SubstringIndexUnsignedNative => {
                 EvaluatedArgsRole::ReadyBytesBytesInt
             }
@@ -1094,6 +1152,36 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn is_insert(self) -> bool {
         matches!(self, Self::Insert | Self::InsertUtf8Native)
+    }
+
+    pub(crate) fn is_substring_native(self) -> bool {
+        matches!(
+            self,
+            Self::Substring2BytesNative
+                | Self::Substring3BytesNative
+                | Self::Substring2Utf8Native
+                | Self::Substring3Utf8Native
+        )
+    }
+
+    pub(crate) fn is_substring_legacy(self) -> bool {
+        matches!(
+            self,
+            Self::Substring2BytesLegacy
+                | Self::Substring3BytesLegacy
+                | Self::Substring2Utf8Legacy
+                | Self::Substring3Utf8Legacy
+        )
+    }
+
+    pub(crate) fn substring_is_utf8(self) -> bool {
+        matches!(
+            self,
+            Self::Substring2Utf8Native
+                | Self::Substring3Utf8Native
+                | Self::Substring2Utf8Legacy
+                | Self::Substring3Utf8Legacy
+        )
     }
 
     /// ORD receives one already-encoded native character, never an arbitrary
@@ -1224,6 +1312,14 @@ impl EvaluatedBytesOp {
             Self::InsertUtf8Native => crate::impl_string::insert_utf8_native_fn_meta(),
             Self::LowerAsciiNative => crate::impl_string::lower_ascii_native_fn_meta(),
             Self::UpperAsciiNative => crate::impl_string::upper_ascii_native_fn_meta(),
+            Self::Substring2BytesNative => crate::impl_string::substring_2_bytes_native_fn_meta(),
+            Self::Substring3BytesNative => crate::impl_string::substring_3_bytes_native_fn_meta(),
+            Self::Substring2Utf8Native => crate::impl_string::substring_2_utf8_native_fn_meta(),
+            Self::Substring3Utf8Native => crate::impl_string::substring_3_utf8_native_fn_meta(),
+            Self::Substring2BytesLegacy => crate::impl_string::substring_2_bytes_legacy_fn_meta(),
+            Self::Substring3BytesLegacy => crate::impl_string::substring_3_bytes_legacy_fn_meta(),
+            Self::Substring2Utf8Legacy => crate::impl_string::substring_2_utf8_legacy_fn_meta(),
+            Self::Substring3Utf8Legacy => crate::impl_string::substring_3_utf8_legacy_fn_meta(),
         }
     }
 
@@ -1312,7 +1408,15 @@ impl EvaluatedBytesOp {
             | Self::Insert
             | Self::InsertUtf8Native
             | Self::LowerAsciiNative
-            | Self::UpperAsciiNative => EvalType::Bytes,
+            | Self::UpperAsciiNative
+            | Self::Substring2BytesNative
+            | Self::Substring3BytesNative
+            | Self::Substring2Utf8Native
+            | Self::Substring3Utf8Native
+            | Self::Substring2BytesLegacy
+            | Self::Substring3BytesLegacy
+            | Self::Substring2Utf8Legacy
+            | Self::Substring3Utf8Legacy => EvalType::Bytes,
         }
     }
 
@@ -1327,6 +1431,18 @@ impl EvaluatedBytesOp {
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
             Self::PiRaw => &[],
+            Self::Substring2BytesNative | Self::Substring2Utf8Native => {
+                &[EvalType::Bytes, EvalType::Int]
+            }
+            Self::Substring3BytesNative | Self::Substring3Utf8Native => {
+                &[EvalType::Bytes, EvalType::Int, EvalType::Int]
+            }
+            Self::Substring2BytesLegacy | Self::Substring2Utf8Legacy => {
+                &[EvalType::Bytes, EvalType::Bytes]
+            }
+            Self::Substring3BytesLegacy | Self::Substring3Utf8Legacy => {
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
+            }
             Self::HexInt
             | Self::Bin
             | Self::BitCount
@@ -1507,6 +1623,15 @@ pub enum ReadyIeee754Arg {
     Undemanded,
 }
 
+/// Only legacy SUBSTRING transports this full integer domain. An i128 which
+/// cannot become i64 remains a non-NULL input; its result policy is in the
+/// kernel. Undemanded is admitted only by that recipe's demand conditions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadySubstringI128 {
+    Value(Option<i128>),
+    Undemanded,
+}
+
 /// Owned ready arguments and explicit demand markers for closed recipes. Int
 /// carries the original 64-bit pattern: callers may pass a u64 as i64 without
 /// numeric narrowing. Coercion, diagnostics, argument demand and text
@@ -1564,6 +1689,24 @@ pub enum EvaluatedArgs {
         left: ReadyIeee754Arg,
         right: ReadyIeee754Arg,
     },
+    Substring2Ready {
+        bytes: ReadyBytesArg,
+        pos: ReadyIntArg,
+    },
+    Substring3Ready {
+        bytes: ReadyBytesArg,
+        pos: ReadyIntArg,
+        len: ReadyIntArg,
+    },
+    LegacySubstring2Ready {
+        bytes: Option<Vec<u8>>,
+        pos: ReadySubstringI128,
+    },
+    LegacySubstring3Ready {
+        bytes: Option<Vec<u8>>,
+        pos: ReadySubstringI128,
+        len: ReadySubstringI128,
+    },
 }
 
 impl EvaluatedArgs {
@@ -1575,6 +1718,12 @@ impl EvaluatedArgs {
             Self::BytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesInt,
             Self::BytesBytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesBytesInt,
             Self::PacketBytesIntBytes { .. } => EvaluatedArgsRole::PadPacket,
+            Self::Substring2Ready { .. } | Self::Substring3Ready { .. } => {
+                EvaluatedArgsRole::SubstringNative
+            }
+            Self::LegacySubstring2Ready { .. } | Self::LegacySubstring3Ready { .. } => {
+                EvaluatedArgsRole::SubstringLegacy
+            }
             Self::PacketInt { .. } | Self::PacketBytes { .. } | Self::PacketBytesInt { .. } => {
                 EvaluatedArgsRole::Packet
             }
@@ -1594,6 +1743,12 @@ impl EvaluatedArgs {
                 EvalType::Bytes,
             ],
             Self::BytesBytesIntReady { .. } => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
+            Self::Substring2Ready { .. } => &[EvalType::Bytes, EvalType::Int],
+            Self::Substring3Ready { .. } => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
+            Self::LegacySubstring2Ready { .. } => &[EvalType::Bytes, EvalType::Bytes],
+            Self::LegacySubstring3Ready { .. } => {
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
+            }
             Self::PacketBytesIntBytes { .. } => &[
                 EvalType::Bytes,
                 EvalType::Int,
@@ -1613,6 +1768,49 @@ impl EvaluatedArgs {
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
         match self {
             Self::Bytes(bytes) => operation.ready_bytes_match(bytes.as_deref()),
+            Self::Substring2Ready { bytes, pos } => {
+                operation.is_substring_native()
+                    && ((matches!(bytes, ReadyBytesArg::Value(_))
+                        && matches!(pos, ReadyIntArg::Value(_)))
+                        || matches!(bytes, ReadyBytesArg::Value(None))
+                        || matches!(pos, ReadyIntArg::Value(None)))
+            }
+            Self::Substring3Ready { bytes, pos, len } => {
+                operation.is_substring_native()
+                    && ((matches!(bytes, ReadyBytesArg::Value(_))
+                        && matches!(pos, ReadyIntArg::Value(_))
+                        && matches!(len, ReadyIntArg::Value(_)))
+                        || matches!(bytes, ReadyBytesArg::Value(None))
+                        || matches!(pos, ReadyIntArg::Value(None))
+                        || matches!(len, ReadyIntArg::Value(None)))
+            }
+            Self::LegacySubstring2Ready { bytes, pos } => {
+                operation.is_substring_legacy()
+                    && (!matches!(pos, ReadySubstringI128::Undemanded) || bytes.is_none())
+            }
+            Self::LegacySubstring3Ready { bytes, pos, len } => {
+                if !operation.is_substring_legacy()
+                    || (matches!(pos, ReadySubstringI128::Undemanded) && bytes.is_some())
+                {
+                    false
+                } else {
+                    let needs_len = match (bytes.as_deref(), pos) {
+                        (Some(source), ReadySubstringI128::Value(Some(position))) => {
+                            crate::impl_string::legacy_substring_needs_len(
+                                source,
+                                *position,
+                                operation.substring_is_utf8(),
+                            )
+                        }
+                        _ => false,
+                    };
+                    if needs_len {
+                        matches!(len, ReadySubstringI128::Value(_))
+                    } else {
+                        matches!(len, ReadySubstringI128::Undemanded)
+                    }
+                }
+            }
             Self::Ieee754Bits2 { left, right } => match (left, right) {
                 (ReadyIeee754Arg::Value(_), ReadyIeee754Arg::Value(_)) => true,
                 (ReadyIeee754Arg::Undemanded, ReadyIeee754Arg::Value(None))
@@ -1677,6 +1875,42 @@ impl EvaluatedArgs {
             Self::NoArgs => ([Int(None), Int(None), Int(None), Int(None)], 0),
             Self::Bytes(value) => ([Bytes(value), Int(None), Int(None), Int(None)], 1),
             Self::Bytes2(a, b) => ([Bytes(a), Bytes(b), Int(None), Int(None)], 2),
+            Self::Substring2Ready { bytes, pos } => (
+                [
+                    Self::substring_bytes_value(bytes),
+                    Self::substring_int_value(pos),
+                    Int(None),
+                    Int(None),
+                ],
+                2,
+            ),
+            Self::Substring3Ready { bytes, pos, len } => (
+                [
+                    Self::substring_bytes_value(bytes),
+                    Self::substring_int_value(pos),
+                    Self::substring_int_value(len),
+                    Int(None),
+                ],
+                3,
+            ),
+            Self::LegacySubstring2Ready { bytes, pos } => (
+                [
+                    Bytes(bytes),
+                    Self::substring_i128_value(pos)?,
+                    Int(None),
+                    Int(None),
+                ],
+                2,
+            ),
+            Self::LegacySubstring3Ready { bytes, pos, len } => (
+                [
+                    Bytes(bytes),
+                    Self::substring_i128_value(pos)?,
+                    Self::substring_i128_value(len)?,
+                    Int(None),
+                ],
+                3,
+            ),
             Self::Int(value) => ([Int(value), Int(None), Int(None), Int(None)], 1),
             Self::BytesInt(bytes, int) => ([Bytes(bytes), Int(int), Int(None), Int(None)], 2),
             Self::BytesIntIntBytes(bytes, position, length, replacement) => (
@@ -1787,6 +2021,42 @@ impl EvaluatedArgs {
                 )
             }
         })
+    }
+
+    fn substring_bytes_value(arg: ReadyBytesArg) -> ScalarValue {
+        // A genuine NULL elsewhere has validated this non-NULL representative.
+        ScalarValue::Bytes(match arg {
+            ReadyBytesArg::Value(value) => value,
+            ReadyBytesArg::Undemanded => Some(Vec::new()),
+        })
+    }
+
+    fn substring_int_value(arg: ReadyIntArg) -> ScalarValue {
+        ScalarValue::Int(match arg {
+            ReadyIntArg::Value(value) => value,
+            ReadyIntArg::Undemanded => Some(0),
+        })
+    }
+
+    fn substring_i128_value(arg: ReadySubstringI128) -> LocalResult<ScalarValue> {
+        let value = match arg {
+            ReadySubstringI128::Value(value) => value,
+            // Checked legacy demand, not an evaluated integer or SQL NULL.
+            ReadySubstringI128::Undemanded => Some(0),
+        };
+        let value = value
+            .map(|value| -> LocalResult<Vec<u8>> {
+                let mut bytes = Vec::new();
+                bytes.try_reserve_exact(16).map_err(|_| {
+                    LocalError::ResourceLimit(
+                        "legacy SUBSTRING i128 input allocation failed".into(),
+                    )
+                })?;
+                bytes.extend_from_slice(&value.to_le_bytes());
+                Ok(bytes)
+            })
+            .transpose()?;
+        Ok(ScalarValue::Bytes(value))
     }
 
     fn ieee754_value(value: Option<u64>) -> LocalResult<ScalarValue> {

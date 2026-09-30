@@ -335,6 +335,17 @@ short-circuit admission policy described above.
   never decodes replacement bytes. Original wire UTF8 strict decoding and its
   character-offset-as-byte-offset behavior remain. Packet refusal follows the
   actual result in the frontend, not a suppression flag or fake NULL input.
+- SUBSTRING has eight closed Native/Legacy × two/three-argument × Bytes/UTF8
+  recipes over one range core. Two arguments mean a true tail, not synthetic MAX:
+  Native3 checked overflow yields empty, while legacy keeps its unchecked add.
+  Native ready markers require a real NULL peer; the separate Legacy role keeps
+  full i128 operands in validated 16-byte little-endian slots, not ordinary Bytes
+  recipes. `legacy_substring_needs_len` only asks whether the length child is
+  demanded; final admission checks that same predicate and the real kernel owns
+  all NULL/empty/value results. Legacy position0/wide rejection, out-of-range
+  skip-length and Rust-lossy grouping remain distinct. Only legacy materializes
+  a character-unit slice to preserve its natural invalid-range behavior; wire
+  and native retain iterator output. No graph/driver/four-column limit changes.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake
@@ -426,6 +437,20 @@ short-circuit admission policy described above.
   services, tasks and evaluation frames never survive into reusable worker state.
 
 ### Shared collation and Decimal boundary contracts
+
+- `codec::collation::gb` owns shared GB compare/key and native codec leaves.
+  `GbPolicy::{Wire,Native}` preserves existing contracts, not operand provenance.
+  Native GB18030 key-only PUA NULs never become comparison bytes; NoPad is explicit.
+  The original four wire data images and 2103-pair override table remain canonical.
+  Native uses the matching CI weights and 2094-pair subset, excluding nine explicit
+  wire-only codes; BIN and codec differences are not inferred away from CI table
+  equality. A derived rune index replaces duplicate full mappings. Wire keeps git
+  encoding_rs0.8.29; the native compatibility alias pins registry0.8.35.
+  TiDB facades/generators consume or verify this owner instead of keeping copied
+  tables. From this checkout, run the collation filter:
+  `cargo test --locked -p tidb_query_datatype --lib codec::collation:: -- --test-threads=1`.
+  Full codec-domain equivalence and the
+  unrelated native default-registry assertion are not claimed green.
 
 - `Collator::write_sort_key_with_options`, owned keys and borrowed `Cow` keys
   use one unpadded writer after the collator's preprocessing. `KeyOptions::NoPad`
@@ -558,7 +583,7 @@ wide Decimal arithmetic, complete raw physical compatibility or performance.
 
 ## Start Here
 
-- `components/tidb_query_datatype/src/codec/collation/mod.rs` and `pattern.rs`
+- `components/tidb_query_datatype/src/codec/collation/mod.rs`, `pattern.rs`, and `gb.rs`
 - `components/tidb_query_datatype/src/codec/mysql/decimal.rs`
 - `components/tidb_query_expr/src/types/function.rs` and `local/`
 - `src/coprocessor/mod.rs`

@@ -104,7 +104,15 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::UncompressedLengthNative
         | LocalFunctionId::InsertUtf8Native
         | LocalFunctionId::LowerAsciiNative
-        | LocalFunctionId::UpperAsciiNative => Err(other_err!(
+        | LocalFunctionId::UpperAsciiNative
+        | LocalFunctionId::Substring2BytesNative
+        | LocalFunctionId::Substring3BytesNative
+        | LocalFunctionId::Substring2Utf8Native
+        | LocalFunctionId::Substring3Utf8Native
+        | LocalFunctionId::Substring2BytesLegacy
+        | LocalFunctionId::Substring3BytesLegacy
+        | LocalFunctionId::Substring2Utf8Legacy
+        | LocalFunctionId::Substring3Utf8Legacy => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

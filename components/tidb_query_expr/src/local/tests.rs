@@ -3102,3 +3102,486 @@ fn local_evaluated_bytes_ascii_case_conversion_preserves_high_bytes() {
         }
     }
 }
+
+#[test]
+fn local_evaluated_args_native_substrings_preserve_units_and_nulls() {
+    let two_cases: &[([Option<&[u8]>; 2], Option<i64>, [Option<&[u8]>; 2])] = &[
+        ([Some(b"abcd"); 2], Some(2), [Some(b"bcd"); 2]),
+        (
+            [Some("中abc".as_bytes()); 2],
+            Some(2),
+            [Some(b"\xb8\xadabc"), Some(b"abc")],
+        ),
+        (
+            [Some(b"\xe2\x82a"), Some("\u{fffd}\u{fffd}a".as_bytes())],
+            Some(2),
+            [Some(b"\x82a"), Some("\u{fffd}a".as_bytes())],
+        ),
+        ([Some(b"abcd"); 2], Some(0), [Some(b""); 2]),
+        ([None; 2], Some(2), [None; 2]),
+        ([Some(b"abcd"); 2], None, [None; 2]),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::Substring2BytesNative,
+        EvaluatedBytesOp::Substring2Utf8Native,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, position, expected)) in two_cases.iter().enumerate() {
+            let args = EvaluatedArgs::Substring2Ready {
+                bytes: ReadyBytesArg::Value(input[column].map(|bytes| bytes.to_vec())),
+                pos: ReadyIntArg::Value(position),
+            };
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("native SUBSTRING2 returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+    let three_cases: &[(
+        [Option<&[u8]>; 2],
+        Option<i64>,
+        Option<i64>,
+        [Option<&[u8]>; 2],
+    )] = &[
+        (
+            [Some("中abc".as_bytes()); 2],
+            Some(2),
+            Some(1),
+            [Some(b"\xb8"), Some(b"a")],
+        ),
+        (
+            [Some(b"\xe2\x82a"), Some("\u{fffd}\u{fffd}a".as_bytes())],
+            Some(2),
+            Some(1),
+            [Some(b"\x82"), Some("\u{fffd}".as_bytes())],
+        ),
+        ([Some(b"abcd"); 2], Some(2), Some(i64::MAX), [Some(b""); 2]),
+        ([Some(b"abcd"); 2], Some(2), Some(-1), [Some(b""); 2]),
+        ([Some(b"abcd"); 2], Some(0), Some(1), [Some(b""); 2]),
+        ([Some(b"abcd"); 2], Some(2), None, [None; 2]),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::Substring3BytesNative,
+        EvaluatedBytesOp::Substring3Utf8Native,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, position, length, expected)) in three_cases.iter().enumerate() {
+            let args = EvaluatedArgs::Substring3Ready {
+                bytes: ReadyBytesArg::Value(input[column].map(|bytes| bytes.to_vec())),
+                pos: ReadyIntArg::Value(position),
+                len: ReadyIntArg::Value(length),
+            };
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("native SUBSTRING3 returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_native_substring_markers_require_true_null() {
+    let groups: [(
+        EvaluatedBytesOp,
+        Vec<EvaluatedArgs>,
+        Vec<(EvaluatedArgs, Option<&[u8]>)>,
+    ); 2] = [
+        (
+            EvaluatedBytesOp::Substring2BytesNative,
+            vec![
+                EvaluatedArgs::Substring2Ready {
+                    bytes: ReadyBytesArg::Undemanded,
+                    pos: ReadyIntArg::Undemanded,
+                },
+                EvaluatedArgs::Substring2Ready {
+                    bytes: ReadyBytesArg::Value(Some(Vec::new())),
+                    pos: ReadyIntArg::Undemanded,
+                },
+                EvaluatedArgs::Substring2Ready {
+                    bytes: ReadyBytesArg::Undemanded,
+                    pos: ReadyIntArg::Value(Some(0)),
+                },
+            ],
+            vec![
+                (
+                    EvaluatedArgs::Substring2Ready {
+                        bytes: ReadyBytesArg::Value(None),
+                        pos: ReadyIntArg::Undemanded,
+                    },
+                    None,
+                ),
+                (
+                    EvaluatedArgs::Substring2Ready {
+                        bytes: ReadyBytesArg::Undemanded,
+                        pos: ReadyIntArg::Value(None),
+                    },
+                    None,
+                ),
+                (
+                    EvaluatedArgs::Substring2Ready {
+                        bytes: ReadyBytesArg::Value(Some(b"abcd".to_vec())),
+                        pos: ReadyIntArg::Value(Some(2)),
+                    },
+                    Some(b"bcd"),
+                ),
+            ],
+        ),
+        (
+            EvaluatedBytesOp::Substring3Utf8Native,
+            vec![
+                EvaluatedArgs::Substring3Ready {
+                    bytes: ReadyBytesArg::Undemanded,
+                    pos: ReadyIntArg::Undemanded,
+                    len: ReadyIntArg::Undemanded,
+                },
+                EvaluatedArgs::Substring3Ready {
+                    bytes: ReadyBytesArg::Undemanded,
+                    pos: ReadyIntArg::Value(Some(0)),
+                    len: ReadyIntArg::Value(Some(1)),
+                },
+                EvaluatedArgs::Substring3Ready {
+                    bytes: ReadyBytesArg::Value(Some(Vec::new())),
+                    pos: ReadyIntArg::Undemanded,
+                    len: ReadyIntArg::Value(Some(1)),
+                },
+                EvaluatedArgs::Substring3Ready {
+                    bytes: ReadyBytesArg::Value(Some(b"abcd".to_vec())),
+                    pos: ReadyIntArg::Value(Some(2)),
+                    len: ReadyIntArg::Undemanded,
+                },
+            ],
+            vec![
+                (
+                    EvaluatedArgs::Substring3Ready {
+                        bytes: ReadyBytesArg::Value(None),
+                        pos: ReadyIntArg::Undemanded,
+                        len: ReadyIntArg::Undemanded,
+                    },
+                    None,
+                ),
+                (
+                    EvaluatedArgs::Substring3Ready {
+                        bytes: ReadyBytesArg::Undemanded,
+                        pos: ReadyIntArg::Value(None),
+                        len: ReadyIntArg::Undemanded,
+                    },
+                    None,
+                ),
+                (
+                    EvaluatedArgs::Substring3Ready {
+                        bytes: ReadyBytesArg::Undemanded,
+                        pos: ReadyIntArg::Undemanded,
+                        len: ReadyIntArg::Value(None),
+                    },
+                    None,
+                ),
+                (
+                    EvaluatedArgs::Substring3Ready {
+                        bytes: ReadyBytesArg::Value(Some(b"abcd".to_vec())),
+                        pos: ReadyIntArg::Value(Some(2)),
+                        len: ReadyIntArg::Value(Some(1)),
+                    },
+                    Some(b"b"),
+                ),
+            ],
+        ),
+    ];
+    for (operation, invalid, valid) in groups {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for args in invalid {
+            assert!(matches!(
+                worker.eval_args(args),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        for (index, (args, expected)) in valid.into_iter().enumerate() {
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("native substring marker returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_legacy_substring_length_demand_is_explicit() {
+    use ReadySubstringI128::{Undemanded, Value};
+
+    let wide = i128::from(i64::MAX) + 1;
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::Substring3BytesLegacy,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::Substring3BytesLegacy);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    let demands: &[(&[u8], i128, bool, bool)] = &[
+        (b"abcd", 0, false, false),
+        (b"abcd", 2, false, true),
+        (b"abcd", -2, true, true),
+        (b"abcd", wide, false, false),
+        (b"abcd", 6, true, false),
+        ("中a".as_bytes(), 4, false, true),
+        ("中a".as_bytes(), 4, true, false),
+    ];
+    for &(source, position, utf8, expected) in demands {
+        assert_eq!(
+            super::legacy_substring_needs_len(source, position, utf8),
+            expected
+        );
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    for invalid in [
+        EvaluatedArgs::LegacySubstring3Ready {
+            bytes: Some(b"abcd".to_vec()),
+            pos: Value(Some(2)),
+            len: Undemanded,
+        },
+        EvaluatedArgs::LegacySubstring3Ready {
+            bytes: Some(b"abcd".to_vec()),
+            pos: Value(Some(0)),
+            len: Value(Some(1)),
+        },
+        EvaluatedArgs::LegacySubstring3Ready {
+            bytes: Some(Vec::new()),
+            pos: Undemanded,
+            len: Undemanded,
+        },
+        EvaluatedArgs::LegacySubstring3Ready {
+            bytes: None,
+            pos: Undemanded,
+            len: Value(None),
+        },
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let cases: [(
+        Option<&[u8]>,
+        ReadySubstringI128,
+        ReadySubstringI128,
+        Option<&[u8]>,
+    ); 10] = [
+        (None, Undemanded, Undemanded, None),
+        (None, Value(Some(2)), Undemanded, None),
+        (Some(b"abcd"), Value(None), Undemanded, None),
+        (Some(b"abcd"), Value(Some(0)), Undemanded, None),
+        (Some(b"abcd"), Value(Some(wide)), Undemanded, None),
+        (Some(b"abcd"), Value(Some(6)), Undemanded, Some(b"")),
+        (Some(b"abcd"), Value(Some(2)), Value(None), None),
+        (Some(b"abcd"), Value(Some(2)), Value(Some(wide)), None),
+        (Some(b"abcd"), Value(Some(-2)), Value(Some(1)), Some(b"c")),
+        (Some(b"abcd"), Value(Some(2)), Value(Some(1)), Some(b"b")),
+    ];
+    for (index, (input, pos, len, expected)) in cases.into_iter().enumerate() {
+        let args = EvaluatedArgs::LegacySubstring3Ready {
+            bytes: input.map(|bytes| bytes.to_vec()),
+            pos,
+            len,
+        };
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("legacy substring demand returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_legacy_substrings_preserve_i128_and_lossy_units() {
+    use ReadySubstringI128::{Undemanded, Value};
+
+    let wide = i128::from(i64::MAX) + 1;
+    for (column, operation) in [
+        EvaluatedBytesOp::Substring2BytesLegacy,
+        EvaluatedBytesOp::Substring2Utf8Legacy,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let cases: [(Option<&[u8]>, ReadySubstringI128, [Option<&[u8]>; 2]); 7] = [
+            (
+                Some(b"\xe2\x82a"),
+                Value(Some(2)),
+                [Some(b"\x82a"), Some(b"a")],
+            ),
+            (Some(b"abcd"), Value(Some(-2)), [Some(b"cd"); 2]),
+            (Some(b"abcd"), Value(Some(0)), [None; 2]),
+            (Some(b"abcd"), Value(Some(wide)), [None; 2]),
+            (Some(b"abcd"), Value(None), [None; 2]),
+            (None, Undemanded, [None; 2]),
+            (None, Value(Some(2)), [None; 2]),
+        ];
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::LegacySubstring2Ready {
+                bytes: Some(Vec::new()),
+                pos: Undemanded,
+            }),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        for (index, (input, pos, expected)) in cases.into_iter().enumerate() {
+            let args = EvaluatedArgs::LegacySubstring2Ready {
+                bytes: input.map(|bytes| bytes.to_vec()),
+                pos,
+            };
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("legacy SUBSTRING2 returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+    for (column, operation) in [
+        EvaluatedBytesOp::Substring3BytesLegacy,
+        EvaluatedBytesOp::Substring3Utf8Legacy,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let unit_length = if column == 0 {
+            Value(Some(1))
+        } else {
+            Undemanded
+        };
+        let cases: [(
+            Option<&[u8]>,
+            ReadySubstringI128,
+            ReadySubstringI128,
+            [Option<&[u8]>; 2],
+        ); 3] = [
+            (
+                Some(b"\xe2\x82a"),
+                Value(Some(2)),
+                Value(Some(1)),
+                [Some(b"\x82"), Some(b"a")],
+            ),
+            (
+                Some("中a".as_bytes()),
+                Value(Some(4)),
+                unit_length,
+                [Some(b"a"), Some(b"")],
+            ),
+            (None, Undemanded, Undemanded, [None; 2]),
+        ];
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, (input, pos, len, expected)) in cases.into_iter().enumerate() {
+            let args = EvaluatedArgs::LegacySubstring3Ready {
+                bytes: input.map(|bytes| bytes.to_vec()),
+                pos,
+                len,
+            };
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("legacy SUBSTRING3 returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
