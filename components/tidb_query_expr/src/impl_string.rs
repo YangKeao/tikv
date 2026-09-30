@@ -53,7 +53,12 @@ pub fn bin(num: &Int, writer: BytesWriter) -> Result<BytesGuard> {
 #[rpn_fn(writer)]
 #[inline]
 pub fn oct_int(num: &Int, writer: BytesWriter) -> Result<BytesGuard> {
-    Ok(writer.write(Some(Bytes::from(format!("{:o}", num)))))
+    oct_bits(*num as u64, writer)
+}
+
+#[inline]
+fn oct_bits(bits: u64, writer: BytesWriter) -> Result<BytesGuard> {
+    Ok(writer.write(Some(format!("{:o}", bits).into_bytes())))
 }
 
 #[rpn_fn(writer)]
@@ -62,24 +67,51 @@ pub fn oct_string(s: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
     if s.is_empty() {
         return Ok(writer.write(None));
     }
+    let bits = oct_decimal_prefix(s.iter().copied().skip_while(u8::is_ascii_whitespace));
+    oct_bits(bits, writer)
+}
 
-    let mut trimmed = s.iter().skip_while(|x| x.is_ascii_whitespace());
+#[rpn_fn(writer)]
+#[inline]
+fn oct_string_native(s: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    if s.is_empty() {
+        return Ok(writer.write(None));
+    }
+    let trimmed = match str::from_utf8(s) {
+        Ok(text) => text.trim().as_bytes(),
+        Err(_) => {
+            let mut start = 0;
+            let mut end = s.len();
+            while start < end && s[start].is_ascii_whitespace() {
+                start += 1;
+            }
+            while end > start && s[end - 1].is_ascii_whitespace() {
+                end -= 1;
+            }
+            &s[start..end]
+        }
+    };
+    oct_bits(oct_decimal_prefix(trimmed.iter().copied()), writer)
+}
+
+#[inline]
+fn oct_decimal_prefix(mut bytes: impl Iterator<Item = u8>) -> u64 {
     let mut r = Some(0u64);
     let mut negative = false;
     let mut overflow = false;
-    if let Some(&c) = trimmed.next() {
+    if let Some(c) = bytes.next() {
         if c == b'-' {
             negative = true;
         } else if c.is_ascii_digit() {
             r = Some(u64::from(c) - u64::from(b'0'));
         } else if c != b'+' {
-            return Ok(writer.write(Some(b"0".to_vec())));
+            return 0;
         }
 
-        for c in trimmed.take_while(|&c| c.is_ascii_digit()) {
+        for c in bytes.take_while(u8::is_ascii_digit) {
             r = r
                 .and_then(|r| r.checked_mul(10))
-                .and_then(|r| r.checked_add(u64::from(*c - b'0')));
+                .and_then(|r| r.checked_add(u64::from(c - b'0')));
             if r.is_none() {
                 overflow = true;
                 break;
@@ -90,8 +122,7 @@ pub fn oct_string(s: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
     if negative && !overflow {
         r = r.wrapping_neg();
     }
-
-    Ok(writer.write(Some(format!("{:o}", r as i64).into_bytes())))
+    r
 }
 
 #[rpn_fn]
@@ -345,9 +376,9 @@ fn ord_impl(bytes: BytesRef) -> Int {
 #[inline]
 pub fn concat(args: &[BytesRef], writer: BytesWriter) -> Result<BytesGuard> {
     let mut writer = writer.begin();
-    for arg in args {
-        writer.partial_write(arg);
-    }
+    concat_join(args.iter().copied().map(Ok), None, |part| {
+        writer.partial_write(part);
+    })?;
     Ok(writer.finish())
 }
 
@@ -355,16 +386,471 @@ pub fn concat(args: &[BytesRef], writer: BytesWriter) -> Result<BytesGuard> {
 #[inline]
 pub fn concat_ws(args: &[Option<BytesRef>]) -> Result<Option<Bytes>> {
     if let Some(sep) = args[0] {
-        let rest = &args[1..];
-        Ok(Some(
-            rest.iter()
-                .filter_map(|x| *x)
-                .collect::<Vec<&[u8]>>()
-                .join::<&[u8]>(sep),
-        ))
+        let mut output = Vec::new();
+        concat_join(
+            args[1..].iter().filter_map(|arg| *arg).map(Ok),
+            Some(sep),
+            |part| {
+                output.extend_from_slice(part);
+            },
+        )?;
+        Ok(Some(output))
     } else {
         Ok(None)
     }
+}
+
+fn concat_join<'a>(
+    parts: impl Iterator<Item = Result<&'a [u8]>>,
+    separator: Option<&[u8]>,
+    mut write: impl FnMut(&[u8]),
+) -> Result<()> {
+    let mut first = true;
+    for part in parts {
+        let part = part?;
+        if !first {
+            if let Some(separator) = separator {
+                write(separator);
+            }
+        }
+        write(part);
+        first = false;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConcatKind {
+    Concat,
+    ConcatWs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConcatTerminal {
+    Complete,
+    InputNull,
+    PacketExceeded { limit: u64 },
+}
+
+/// An owned, checked encoding of only the actually demanded SQL prefix.
+#[derive(Clone, Debug)]
+pub struct PreparedConcatArgs {
+    kind: ConcatKind,
+    encoded: Vec<u8>,
+}
+
+impl PreparedConcatArgs {
+    pub(crate) fn kind(&self) -> ConcatKind {
+        self.kind
+    }
+
+    pub(crate) fn into_encoded(self) -> Vec<u8> {
+        self.encoded
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ConcatHeader {
+    kind: ConcatKind,
+    total: usize,
+    prefix_count: usize,
+    terminal: ConcatTerminal,
+}
+
+struct ConcatValidation {
+    header: ConcatHeader,
+    observed: usize,
+    separator_len: u64,
+    concat_len: usize,
+    ws_budget: u64,
+}
+
+fn invalid_concat(message: &str) -> LocalError {
+    LocalError::InvalidBatch(message.into())
+}
+
+impl ConcatValidation {
+    fn new(header: ConcatHeader) -> LocalResult<Self> {
+        let minimum = match header.kind {
+            ConcatKind::Concat => 1,
+            ConcatKind::ConcatWs => 2,
+        };
+        if header.total < minimum || header.prefix_count == 0 || header.prefix_count > header.total
+        {
+            return Err(invalid_concat(
+                "Invalid CONCAT SQL arity or demanded prefix length",
+            ));
+        }
+        match header.terminal {
+            ConcatTerminal::Complete if header.prefix_count != header.total => {
+                return Err(invalid_concat(
+                    "Complete CONCAT requires every SQL argument",
+                ));
+            }
+            ConcatTerminal::InputNull
+                if header.kind == ConcatKind::ConcatWs && header.prefix_count != 1 =>
+            {
+                return Err(invalid_concat(
+                    "NULL CONCAT_WS requires only the NULL separator",
+                ));
+            }
+            ConcatTerminal::PacketExceeded { .. }
+                if header.kind == ConcatKind::ConcatWs && header.prefix_count < 2 =>
+            {
+                return Err(invalid_concat(
+                    "CONCAT_WS packet prefix requires a data argument",
+                ));
+            }
+            _ => {}
+        }
+        Ok(Self {
+            header,
+            observed: 0,
+            separator_len: 0,
+            concat_len: 0,
+            ws_budget: 0,
+        })
+    }
+
+    fn observe(&mut self, value: Option<&[u8]>) -> LocalResult<()> {
+        let index = self.observed;
+        if index >= self.header.prefix_count {
+            return Err(invalid_concat("Too many prepared CONCAT arguments"));
+        }
+        let last = index == self.header.prefix_count - 1;
+        match self.header.kind {
+            ConcatKind::Concat => {
+                let must_be_null = self.header.terminal == ConcatTerminal::InputNull && last;
+                if value.is_none() != must_be_null {
+                    return Err(invalid_concat("Invalid NULL position in CONCAT prefix"));
+                }
+            }
+            ConcatKind::ConcatWs => {
+                if index == 0 {
+                    let must_be_null = self.header.terminal == ConcatTerminal::InputNull;
+                    if value.is_none() != must_be_null {
+                        return Err(invalid_concat("Invalid CONCAT_WS separator nullness"));
+                    }
+                } else if last
+                    && matches!(self.header.terminal, ConcatTerminal::PacketExceeded { .. })
+                    && value.is_none()
+                {
+                    return Err(invalid_concat(
+                        "CONCAT_WS packet trigger must be a non-NULL data argument",
+                    ));
+                }
+            }
+        }
+        if let Some(bytes) = value {
+            match self.header.kind {
+                ConcatKind::Concat => self.concat_len = self.concat_len.saturating_add(bytes.len()),
+                ConcatKind::ConcatWs if index == 0 => self.separator_len = bytes.len() as u64,
+                ConcatKind::ConcatWs => {
+                    self.ws_budget = self.ws_budget.saturating_add(bytes.len() as u64);
+                    // SQL data index, including NULL slots, not surviving-part index.
+                    if index > 1 {
+                        self.ws_budget = self.ws_budget.saturating_add(self.separator_len);
+                    }
+                }
+            }
+        }
+        self.observed = index
+            .checked_add(1)
+            .ok_or_else(|| invalid_concat("Prepared CONCAT argument count overflow"))?;
+        Ok(())
+    }
+
+    fn finish(self) -> LocalResult<()> {
+        if self.observed != self.header.prefix_count {
+            return Err(invalid_concat("Incomplete prepared CONCAT prefix"));
+        }
+        if let ConcatTerminal::PacketExceeded { limit } = self.header.terminal {
+            let requested = match self.header.kind {
+                ConcatKind::Concat => self.concat_len as u64,
+                ConcatKind::ConcatWs => self.ws_budget,
+            };
+            // Authenticate the recorded terminal, not another context decision.
+            if requested <= limit {
+                return Err(invalid_concat(
+                    "Prepared CONCAT packet prefix does not exceed its observed limit",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Encode a real coerced prefix, without joining bytes or deciding a SQL
+/// result.
+pub fn prepare_concat_args(
+    kind: ConcatKind,
+    total_sql_arity: usize,
+    prefix: Vec<Option<Vec<u8>>>,
+    terminal: ConcatTerminal,
+    max_encoded_bytes: usize,
+) -> LocalResult<PreparedConcatArgs> {
+    let header = ConcatHeader {
+        kind,
+        total: total_sql_arity,
+        prefix_count: prefix.len(),
+        terminal,
+    };
+    let mut validation = ConcatValidation::new(header)?;
+    let total = u64::try_from(total_sql_arity).map_err(|_| {
+        LocalError::ResourceLimit("CONCAT SQL arity exceeds transport width".into())
+    })?;
+    let count = u64::try_from(prefix.len()).map_err(|_| {
+        LocalError::ResourceLimit("CONCAT prefix count exceeds transport width".into())
+    })?;
+    let mut encoded = Vec::new();
+    let header_len = if matches!(terminal, ConcatTerminal::PacketExceeded { .. }) {
+        26
+    } else {
+        18
+    };
+    reserve_concat_encoding(&mut encoded, header_len, max_encoded_bytes)?;
+    encoded.push(match kind {
+        ConcatKind::Concat => 0,
+        ConcatKind::ConcatWs => 1,
+    });
+    encoded.push(match terminal {
+        ConcatTerminal::Complete => 0,
+        ConcatTerminal::InputNull => 1,
+        ConcatTerminal::PacketExceeded { .. } => 2,
+    });
+    encoded.extend_from_slice(&total.to_le_bytes());
+    encoded.extend_from_slice(&count.to_le_bytes());
+    if let ConcatTerminal::PacketExceeded { limit } = terminal {
+        encoded.extend_from_slice(&limit.to_le_bytes());
+    }
+    for value in prefix {
+        validation.observe(value.as_deref())?;
+        match value {
+            None => {
+                reserve_concat_encoding(&mut encoded, 1, max_encoded_bytes)?;
+                encoded.push(0);
+            }
+            Some(bytes) => {
+                let length = u64::try_from(bytes.len()).map_err(|_| {
+                    LocalError::ResourceLimit("CONCAT argument exceeds transport width".into())
+                })?;
+                let additional = 9_usize.checked_add(bytes.len()).ok_or_else(|| {
+                    LocalError::ResourceLimit("CONCAT encoded argument size overflow".into())
+                })?;
+                reserve_concat_encoding(&mut encoded, additional, max_encoded_bytes)?;
+                encoded.push(1);
+                encoded.extend_from_slice(&length.to_le_bytes());
+                encoded.extend_from_slice(&bytes);
+            }
+        }
+    }
+    validation.finish()?;
+    Ok(PreparedConcatArgs { kind, encoded })
+}
+
+fn reserve_concat_encoding(
+    encoded: &mut Vec<u8>,
+    additional: usize,
+    cap: usize,
+) -> LocalResult<()> {
+    let length = encoded
+        .len()
+        .checked_add(additional)
+        .ok_or_else(|| LocalError::ResourceLimit("CONCAT encoded size overflow".into()))?;
+    if length > cap {
+        return Err(LocalError::ResourceLimit(
+            "CONCAT encoded byte cap exceeded".into(),
+        ));
+    }
+    // Amortized growth keeps a many-argument prefix linear, rather than
+    // requesting an exact reallocation for every record.
+    encoded.try_reserve(additional).map_err(|error| {
+        LocalError::ResourceLimit(format!("CONCAT encoding allocation: {}", error))
+    })
+}
+
+#[derive(Clone)]
+struct ConcatArgIter<'a> {
+    encoded: &'a [u8],
+    remaining: usize,
+    offset: usize,
+    finished: bool,
+}
+
+impl<'a> ConcatArgIter<'a> {
+    fn read_arg(&mut self) -> LocalResult<Option<&'a [u8]>> {
+        let tag = self
+            .encoded
+            .get(self.offset)
+            .copied()
+            .ok_or_else(|| invalid_concat("Truncated CONCAT argument tag"))?;
+        self.offset = self
+            .offset
+            .checked_add(1)
+            .ok_or_else(|| invalid_concat("CONCAT argument offset overflow"))?;
+        match tag {
+            0 => Ok(None),
+            1 => {
+                let length = usize::try_from(read_concat_word(self.encoded, &mut self.offset)?)
+                    .map_err(|_| invalid_concat("CONCAT argument length exceeds usize"))?;
+                let end = self
+                    .offset
+                    .checked_add(length)
+                    .ok_or_else(|| invalid_concat("CONCAT argument end overflow"))?;
+                let bytes = self
+                    .encoded
+                    .get(self.offset..end)
+                    .ok_or_else(|| invalid_concat("Truncated CONCAT argument bytes"))?;
+                self.offset = end;
+                Ok(Some(bytes))
+            }
+            _ => Err(invalid_concat("Invalid CONCAT argument tag")),
+        }
+    }
+}
+
+impl<'a> Iterator for ConcatArgIter<'a> {
+    type Item = LocalResult<Option<&'a [u8]>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        if self.remaining == 0 {
+            self.finished = true;
+            return (self.offset != self.encoded.len())
+                .then(|| Err(invalid_concat("Trailing prepared CONCAT bytes")));
+        }
+        self.remaining -= 1;
+        let value = self.read_arg();
+        if value.is_err() {
+            self.finished = true;
+        }
+        Some(value)
+    }
+}
+
+fn read_concat_word(encoded: &[u8], offset: &mut usize) -> LocalResult<u64> {
+    let end = (*offset)
+        .checked_add(8)
+        .ok_or_else(|| invalid_concat("CONCAT word offset overflow"))?;
+    let bytes = encoded
+        .get(*offset..end)
+        .ok_or_else(|| invalid_concat("Truncated CONCAT word"))?;
+    let bytes =
+        <[u8; 8]>::try_from(bytes).map_err(|_| invalid_concat("Invalid CONCAT word width"))?;
+    *offset = end;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+struct DecodedConcat<'a> {
+    terminal: ConcatTerminal,
+    args: ConcatArgIter<'a>,
+}
+
+fn decode_concat_args(encoded: &[u8], kind: ConcatKind) -> LocalResult<DecodedConcat<'_>> {
+    let actual_kind = match encoded.first().copied() {
+        Some(0) => ConcatKind::Concat,
+        Some(1) => ConcatKind::ConcatWs,
+        _ => return Err(invalid_concat("Invalid prepared CONCAT kind")),
+    };
+    if actual_kind != kind {
+        return Err(invalid_concat(
+            "Prepared CONCAT kind does not match its operation",
+        ));
+    }
+    let terminal_tag = encoded
+        .get(1)
+        .copied()
+        .ok_or_else(|| invalid_concat("Missing CONCAT terminal tag"))?;
+    let mut offset = 2;
+    let total = usize::try_from(read_concat_word(encoded, &mut offset)?)
+        .map_err(|_| invalid_concat("CONCAT SQL arity exceeds usize"))?;
+    let prefix_count = usize::try_from(read_concat_word(encoded, &mut offset)?)
+        .map_err(|_| invalid_concat("CONCAT prefix count exceeds usize"))?;
+    let terminal = match terminal_tag {
+        0 => ConcatTerminal::Complete,
+        1 => ConcatTerminal::InputNull,
+        2 => ConcatTerminal::PacketExceeded {
+            limit: read_concat_word(encoded, &mut offset)?,
+        },
+        _ => return Err(invalid_concat("Invalid CONCAT terminal tag")),
+    };
+    let mut validation = ConcatValidation::new(ConcatHeader {
+        kind,
+        total,
+        prefix_count,
+        terminal,
+    })?;
+    let bytes_left = encoded
+        .len()
+        .checked_sub(offset)
+        .ok_or_else(|| invalid_concat("Invalid CONCAT header length"))?;
+    if prefix_count > bytes_left {
+        return Err(invalid_concat("Truncated CONCAT argument records"));
+    }
+    let args = ConcatArgIter {
+        encoded,
+        remaining: prefix_count,
+        offset,
+        finished: false,
+    };
+    for value in args.clone() {
+        validation.observe(value?)?;
+    }
+    validation.finish()?;
+    Ok(DecodedConcat { terminal, args })
+}
+
+pub(crate) fn prepared_concat_args_match(encoded: Option<&[u8]>, kind: ConcatKind) -> bool {
+    encoded.is_some_and(|encoded| decode_concat_args(encoded, kind).is_ok())
+}
+
+fn concat_eval_error(error: LocalError) -> tidb_query_common::Error {
+    other_err!("Invalid prepared CONCAT arguments: {}", error)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn concat_native(encoded: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    concat_native_impl(encoded, ConcatKind::Concat, writer)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn concat_ws_native(encoded: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    concat_native_impl(encoded, ConcatKind::ConcatWs, writer)
+}
+
+fn concat_native_impl(
+    encoded: BytesRef,
+    kind: ConcatKind,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    let decoded = decode_concat_args(encoded, kind).map_err(concat_eval_error)?;
+    if decoded.terminal != ConcatTerminal::Complete {
+        return Ok(writer.write(None));
+    }
+    let mut args = decoded.args.map(|value| value.map_err(concat_eval_error));
+    let separator = if kind == ConcatKind::ConcatWs {
+        Some(
+            args.next()
+                .transpose()?
+                .flatten()
+                .ok_or_else(|| other_err!("Missing non-NULL prepared CONCAT_WS separator"))?,
+        )
+    } else {
+        None
+    };
+    let mut writer = writer.begin();
+    concat_join(
+        args.filter_map(|value| value.transpose()),
+        separator,
+        |part| {
+            writer.partial_write(part);
+        },
+    )?;
+    Ok(writer.finish())
 }
 
 // Observed only by an isolated test that joins all of its workers. Ordinary
@@ -948,21 +1434,35 @@ pub fn make_set(raw_args: &[ScalarValueRef]) -> Result<Option<Bytes>> {
     Ok(Some(output))
 }
 
+/// Returns a demanded SQL operand offset; total arity includes the index.
+pub fn elt_selected_arg(index: Option<i64>, total_sql_arity: usize) -> Option<usize> {
+    let index = usize::try_from(index?).ok()?;
+    if index == 0 || index >= total_sql_arity {
+        None
+    } else {
+        Some(index)
+    }
+}
+
 #[rpn_fn(nullable, raw_varg, min_args = 2, extra_validator = elt_validator)]
 #[inline]
 pub fn elt(raw_args: &[ScalarValueRef]) -> Result<Option<Bytes>> {
     assert!(raw_args.len() >= 2);
-    let index = raw_args[0].as_int();
-    Ok(match index {
-        None => None,
-        Some(i) => {
-            let i = *i;
-            if i <= 0 || i >= raw_args.len() as i64 {
-                return Ok(None);
-            }
-            raw_args[i as usize].as_bytes().map(|x| x.to_vec())
-        }
-    })
+    Ok(
+        elt_selected_arg(raw_args[0].as_int().copied(), raw_args.len())
+            .and_then(|selected| raw_args[selected].as_bytes().map(|bytes| bytes.to_vec())),
+    )
+}
+
+#[rpn_fn]
+#[inline]
+fn elt_native(index: &Int, raw_arity: &Int, selected: BytesRef) -> Result<Option<Bytes>> {
+    let total_sql_arity = usize::try_from(*raw_arity as u64)
+        .map_err(|_| other_err!("ELT total arity exceeds usize"))?;
+    if total_sql_arity < 2 {
+        return Err(other_err!("ELT requires at least two SQL arguments"));
+    }
+    Ok(elt_selected_arg(Some(*index), total_sql_arity).map(|_| selected.to_vec()))
 }
 
 /// validate the arguments are `(Option<&Int>, &[Option<BytesRef>)])`

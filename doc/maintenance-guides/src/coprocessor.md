@@ -335,6 +335,20 @@ short-circuit admission policy described above.
   never decodes replacement bytes. Original wire UTF8 strict decoding and its
   character-offset-as-byte-offset behavior remain. Packet refusal follows the
   actual result in the frontend, not a suppression flag or fake NULL input.
+- Full-arity CONCAT/CONCAT_WS use a dedicated opaque prepared prefix, not a
+  general variadic graph or prejoined SQL result. One physical Bytes input holds
+  true SQL arity, each demanded nullable operand and a checked terminal state.
+  InputNull preserves the actual NULL slot; PacketExceeded retains the triggering
+  value and first observed limit. The frontend owns child demand, coercion,
+  packet getters and diagnostics; the backend validates the complete prefix and
+  joins once using the same primitive as wire CONCAT/CONCAT_WS. WS packet sizing
+  keeps original operand indices even across NULLs; output separators still join
+  surviving values. No four-column whitelist expansion is needed.
+  ELT's pure selector returns a SQL operand offset from index plus total arity
+  including the index operand. It controls conversion of already-eagerly-evaluated
+  values, not SQL-child evaluation; the final three-column recipe revalidates the
+  chosen/undemanded value. OCT keeps raw64 integer formatting and explicit native
+  Unicode-trim versus wire ASCII-trim policies over one decimal-prefix scanner.
 - Seven collated-string recipes cover native STRCMP, LOCATE2/3, both extension
   LOCATE3 unit policies, dynamic FIND_IN_SET and prepared-key FIND_IN_SET.
   `NativeSearchPolicy::{Bytes,Utf8(NativeCollation)}` separates units from

@@ -199,6 +199,9 @@ pub(crate) use self::{
 };
 pub use crate::{
     CallMetadata, FunctionRef, LiteralKind, LocalFunctionId,
-    impl_string::{PreparedFindInSetKeys, legacy_substring_needs_len, prepare_find_in_set_keys},
+    impl_string::{
+        ConcatKind, ConcatTerminal, PreparedConcatArgs, PreparedFindInSetKeys, elt_selected_arg,
+        legacy_substring_needs_len, prepare_concat_args, prepare_find_in_set_keys,
+    },
     types::function::PreparedOrdinaryCall,
 };

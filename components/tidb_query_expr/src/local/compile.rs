@@ -1601,6 +1601,11 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::Locate3Utf8ExtNative,
             EvaluatedBytesOp::FindInSetNative,
             EvaluatedBytesOp::FindInSetPreparedNative,
+            EvaluatedBytesOp::OctInt,
+            EvaluatedBytesOp::OctStringNative,
+            EvaluatedBytesOp::ConcatNative,
+            EvaluatedBytesOp::ConcatWsNative,
+            EvaluatedBytesOp::EltNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

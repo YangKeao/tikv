@@ -350,6 +350,29 @@ fn evaluated_ready_args_match(
             EvaluatedArgsRole::NoArgs => values.is_empty(),
             EvaluatedArgsRole::Values => true,
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
+            EvaluatedArgsRole::ConcatPacked => match (operation.concat_kind(), values) {
+                (Some(kind), [ScalarValue::Bytes(bytes)]) if bytes.is_some() => {
+                    crate::impl_string::prepared_concat_args_match(bytes.as_deref(), kind)
+                }
+                _ => false,
+            },
+            EvaluatedArgsRole::EltReady => {
+                operation == EvaluatedBytesOp::EltNative
+                    && match values {
+                        [
+                            ScalarValue::Int(index),
+                            ScalarValue::Int(Some(raw_count)),
+                            ScalarValue::Bytes(selected),
+                        ] => match usize::try_from(*raw_count as u64) {
+                            Ok(total_sql_arity) if total_sql_arity >= 2 => {
+                                crate::local::elt_selected_arg(*index, total_sql_arity).is_some()
+                                    || matches!(selected, Some(bytes) if bytes.is_empty())
+                            }
+                            _ => false,
+                        },
+                        _ => false,
+                    }
+            }
             EvaluatedArgsRole::CollatedBytes2 => {
                 matches!(
                     operation,
@@ -3208,9 +3231,9 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..44 {
+        for mismatch in 0..52 {
             let operation = match mismatch {
-                3 | 5 => EvaluatedBytesOp::Md5,
+                3 | 5 | 45 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
                 8..=10 => EvaluatedBytesOp::SpaceNative,
                 11 => EvaluatedBytesOp::BitAnd,
@@ -3233,10 +3256,14 @@ mod tests {
                 36 | 40..=43 => EvaluatedBytesOp::FindInSetPreparedNative,
                 37 => EvaluatedBytesOp::FindInSetNative,
                 39 => EvaluatedBytesOp::Locate2Native,
+                44 | 46 | 47 => EvaluatedBytesOp::ConcatNative,
+                48..=51 => EvaluatedBytesOp::EltNative,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
-                0 | 6 | 8 | 13 | 15 | 16 | 22 | 26 | 28 | 32 | 34 => EvaluatedArgsRole::Values,
+                0 | 6 | 8 | 13 | 15 | 16 | 22 | 26 | 28 | 32 | 34 | 44 | 48 => {
+                    EvaluatedArgsRole::Values
+                }
                 4 | 5 => EvaluatedArgsRole::NoArgs,
                 9..=12 | 17 => EvaluatedArgsRole::Packet,
                 14 => EvaluatedArgsRole::ReadyBytesInt,
@@ -3248,6 +3275,8 @@ mod tests {
                 33 | 36 | 38 => EvaluatedArgsRole::CollatedBytes2,
                 35 | 39 => EvaluatedArgsRole::NativeSearch,
                 37 | 40..=43 => EvaluatedArgsRole::FindInSetPrepared,
+                45..=47 => EvaluatedArgsRole::ConcatPacked,
+                49..=51 => EvaluatedArgsRole::EltReady,
                 _ => EvaluatedArgsRole::Ieee754Bits,
             };
             let schema: Vec<_> = (0..operation.input_types().len())
@@ -3287,7 +3316,23 @@ mod tests {
             {
                 ready[1] = ScalarValue::Bytes(Some(0u64.to_le_bytes().to_vec()));
             }
-            if matches!(mismatch, 13 | 14 | 16..=43) {
+            if matches!(mismatch, 44..=47) {
+                let packed = crate::local::prepare_concat_args(
+                    crate::local::ConcatKind::Concat,
+                    1,
+                    vec![Some(Vec::new())],
+                    crate::local::ConcatTerminal::Complete,
+                    usize::MAX,
+                )
+                .unwrap()
+                .into_encoded();
+                ready[0] = ScalarValue::Bytes(Some(packed));
+            }
+            if operation == EvaluatedBytesOp::EltNative {
+                ready[0] = ScalarValue::Int(Some(1));
+                ready[1] = ScalarValue::Int(Some(2));
+            }
+            if matches!(mismatch, 13 | 14 | 16..=51) {
                 assert!(evaluated_ready_args_match(
                     operation,
                     &ready,
@@ -3320,6 +3365,16 @@ mod tests {
                 let mut keys = 0u64.to_le_bytes().to_vec();
                 keys.push(0);
                 ready[1] = ScalarValue::Bytes(Some(keys));
+            } else if mismatch == 46 {
+                ready[0] = ScalarValue::Bytes(None);
+            } else if mismatch == 47 {
+                ready[0] = ScalarValue::Bytes(Some(Vec::new()));
+            } else if mismatch == 49 {
+                ready[1] = ScalarValue::Int(None);
+            } else if mismatch == 50 {
+                ready[1] = ScalarValue::Int(Some(1));
+            } else if mismatch == 51 {
+                ready[0] = ScalarValue::Int(Some(2));
             }
             if mismatch == 15 {
                 let input = EvalInput::ReadyBytes {

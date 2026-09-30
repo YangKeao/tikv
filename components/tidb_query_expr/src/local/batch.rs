@@ -28,7 +28,7 @@ use super::{
 };
 use crate::{
     RpnExpressionNode, RpnStackNode, RpnStackNodeVectorValue,
-    impl_string::PreparedFindInSetKeys,
+    impl_string::{ConcatKind, PreparedConcatArgs, PreparedFindInSetKeys},
     types::expr_eval::{EvalInput, EvaluatedAsciiWitness, FrameResult, evaluated_bytes_shape},
 };
 
@@ -850,6 +850,11 @@ pub enum EvaluatedBytesOp {
     Locate3Utf8ExtNative,
     FindInSetNative,
     FindInSetPreparedNative,
+    OctInt,
+    OctStringNative,
+    ConcatNative,
+    ConcatWsNative,
+    EltNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -876,6 +881,8 @@ pub(crate) enum EvaluatedArgsRole {
     CollatedBytes2,
     NativeSearch,
     FindInSetPrepared,
+    ConcatPacked,
+    EltReady,
 }
 
 impl EvaluatedBytesOp {
@@ -897,6 +904,7 @@ impl EvaluatedBytesOp {
             Self::HexInt => ScalarFuncSig::HexIntArg,
             Self::HexStr => ScalarFuncSig::HexStrArg,
             Self::Bin => ScalarFuncSig::Bin,
+            Self::OctInt => ScalarFuncSig::OctInt,
             Self::Left => ScalarFuncSig::Left,
             Self::LeftUtf8 => ScalarFuncSig::LeftUtf8,
             Self::Right => ScalarFuncSig::Right,
@@ -1130,6 +1138,18 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::FindInSetPreparedNative,
                 );
             }
+            Self::OctStringNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::OctStringNative);
+            }
+            Self::ConcatNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ConcatNative);
+            }
+            Self::ConcatWsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ConcatWsNative);
+            }
+            Self::EltNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::EltNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1145,6 +1165,8 @@ impl EvaluatedBytesOp {
         // A private identity does not determine its carrier or packet policy.
         // In particular, value-only FROM_BASE64 keeps the ordinary Bytes role.
         match self {
+            Self::ConcatNative | Self::ConcatWsNative => EvaluatedArgsRole::ConcatPacked,
+            Self::EltNative => EvaluatedArgsRole::EltReady,
             Self::StrcmpNative | Self::FindInSetNative => EvaluatedArgsRole::CollatedBytes2,
             Self::Locate2Native | Self::Locate3Native => EvaluatedArgsRole::NativeSearch,
             Self::FindInSetPreparedNative => EvaluatedArgsRole::FindInSetPrepared,
@@ -1194,6 +1216,14 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn is_insert(self) -> bool {
         matches!(self, Self::Insert | Self::InsertUtf8Native)
+    }
+
+    pub(crate) fn concat_kind(self) -> Option<ConcatKind> {
+        match self {
+            Self::ConcatNative => Some(ConcatKind::Concat),
+            Self::ConcatWsNative => Some(ConcatKind::ConcatWs),
+            _ => None,
+        }
     }
 
     pub(crate) fn is_locate3_native(self) -> bool {
@@ -1272,6 +1302,11 @@ impl EvaluatedBytesOp {
             Self::HexInt => crate::impl_string::hex_int_arg_fn_meta(),
             Self::HexStr => crate::impl_string::hex_str_arg_fn_meta(),
             Self::Bin => crate::impl_string::bin_fn_meta(),
+            Self::OctInt => crate::impl_string::oct_int_fn_meta(),
+            Self::OctStringNative => crate::impl_string::oct_string_native_fn_meta(),
+            Self::ConcatNative => crate::impl_string::concat_native_fn_meta(),
+            Self::ConcatWsNative => crate::impl_string::concat_ws_native_fn_meta(),
+            Self::EltNative => crate::impl_string::elt_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1478,7 +1513,12 @@ impl EvaluatedBytesOp {
             | Self::Substring2BytesLegacy
             | Self::Substring3BytesLegacy
             | Self::Substring2Utf8Legacy
-            | Self::Substring3Utf8Legacy => EvalType::Bytes,
+            | Self::Substring3Utf8Legacy
+            | Self::OctInt
+            | Self::OctStringNative
+            | Self::ConcatNative
+            | Self::ConcatWsNative
+            | Self::EltNative => EvalType::Bytes,
         }
     }
 
@@ -1493,6 +1533,9 @@ impl EvaluatedBytesOp {
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
             Self::PiRaw => &[],
+            Self::OctInt => &[EvalType::Int],
+            Self::OctStringNative | Self::ConcatNative | Self::ConcatWsNative => &[EvalType::Bytes],
+            Self::EltNative => &[EvalType::Int, EvalType::Int, EvalType::Bytes],
             Self::StrcmpNative
             | Self::Locate2Native
             | Self::Locate3BytesExtNative
@@ -1830,11 +1873,19 @@ pub enum EvaluatedArgs {
         keys: PreparedFindInSetKeys,
         collation: NativeCollation,
     },
+    ConcatReady(PreparedConcatArgs),
+    EltReady {
+        index: Option<i64>,
+        total_sql_arity: usize,
+        selected: ReadyBytesArg,
+    },
 }
 
 impl EvaluatedArgs {
     fn role(&self) -> EvaluatedArgsRole {
         match self {
+            Self::ConcatReady(_) => EvaluatedArgsRole::ConcatPacked,
+            Self::EltReady { .. } => EvaluatedArgsRole::EltReady,
             Self::CollatedBytes2 { .. } => EvaluatedArgsRole::CollatedBytes2,
             Self::SearchBytes2 { .. } | Self::SearchBytes2IntReady { .. } => {
                 EvaluatedArgsRole::NativeSearch
@@ -1862,6 +1913,8 @@ impl EvaluatedArgs {
     fn input_types(&self) -> &'static [EvalType] {
         match self {
             Self::NoArgs => &[],
+            Self::ConcatReady(_) => &[EvalType::Bytes],
+            Self::EltReady { .. } => &[EvalType::Int, EvalType::Int, EvalType::Bytes],
             Self::CollatedBytes2 { .. }
             | Self::SearchBytes2 { .. }
             | Self::FindInSetPreparedReady { .. }
@@ -1906,6 +1959,20 @@ impl EvaluatedArgs {
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
         match self {
             Self::Bytes(bytes) => operation.ready_bytes_match(bytes.as_deref()),
+            Self::ConcatReady(args) => operation.concat_kind() == Some(args.kind()),
+            Self::EltReady {
+                index,
+                total_sql_arity,
+                selected,
+            } => {
+                operation == EvaluatedBytesOp::EltNative
+                    && *total_sql_arity >= 2
+                    && if crate::impl_string::elt_selected_arg(*index, *total_sql_arity).is_some() {
+                        matches!(selected, ReadyBytesArg::Value(_))
+                    } else {
+                        matches!(selected, ReadyBytesArg::Undemanded)
+                    }
+            }
             Self::SearchBytes2IntReady {
                 needle,
                 haystack,
@@ -2026,6 +2093,34 @@ impl EvaluatedArgs {
         use ScalarValue::{Bytes, Int};
         Ok(match self {
             Self::NoArgs => ([Int(None), Int(None), Int(None), Int(None)], 0),
+            Self::ConcatReady(args) => (
+                [
+                    Bytes(Some(args.into_encoded())),
+                    Int(None),
+                    Int(None),
+                    Int(None),
+                ],
+                1,
+            ),
+            Self::EltReady {
+                index,
+                total_sql_arity,
+                selected,
+            } => {
+                // This is an unsigned arity carrier, not a signed SQL operand.
+                let arity = u64::try_from(total_sql_arity).map_err(|_| {
+                    LocalError::ResourceLimit("ELT total arity exceeds u64 transport".into())
+                })?;
+                (
+                    [
+                        Int(index),
+                        Int(Some(arity as i64)),
+                        Self::ready_bytes_value(selected),
+                        Int(None),
+                    ],
+                    3,
+                )
+            }
             Self::Bytes(value) => ([Bytes(value), Int(None), Int(None), Int(None)], 1),
             Self::Bytes2(a, b) => ([Bytes(a), Bytes(b), Int(None), Int(None)], 2),
             Self::CollatedBytes2 {
@@ -2233,7 +2328,7 @@ impl EvaluatedArgs {
     }
 
     fn ready_bytes_value(arg: ReadyBytesArg) -> ScalarValue {
-        // A genuine NULL elsewhere has validated this non-NULL representative.
+        // Admission proved this operand irrelevant; the representative is not NULL.
         ScalarValue::Bytes(match arg {
             ReadyBytesArg::Value(value) => value,
             ReadyBytesArg::Undemanded => Some(Vec::new()),

@@ -4001,3 +4001,354 @@ fn local_evaluated_args_prepared_find_in_set_keeps_captured_keys() {
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
 }
+
+#[test]
+fn local_evaluated_args_oct_preserves_raw_bits_and_native_whitespace() {
+    use tidb_query_datatype::codec::data_type::Bytes;
+
+    let wire = crate::test_util::RpnFnScalarEvaluator::new()
+        .push_param(Some("\u{a0}8".as_bytes().to_vec()))
+        .evaluate::<Bytes>(ScalarFuncSig::OctString)
+        .unwrap();
+    assert_eq!(wire, Some(b"0".to_vec()));
+    let integer_cases: &[(Option<i64>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(i64::MIN), Some(b"1000000000000000000000")),
+        (Some(u64::MAX as i64), Some(b"1777777777777777777777")),
+        (Some(8), Some(b"10")),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::OctInt,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::OctInt);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(input, expected)) in integer_cases.iter().enumerate() {
+        let ComputedValue::Bytes(value) = worker.eval_args(EvaluatedArgs::Int(input)).unwrap()
+        else {
+            panic!("OCT integer returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let string_cases: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(b""), None),
+        (Some("\u{a0}8".as_bytes()), Some(b"10")),
+        (Some("\u{a0} \t\n".as_bytes()), Some(b"0")),
+        (Some(b"\xff"), Some(b"0")),
+        (Some(b"-18446744073709551615"), Some(b"1")),
+        (
+            Some(b"-184467440737095516151"),
+            Some(b"1777777777777777777777"),
+        ),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::OctStringNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::OctStringNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(input, expected)) in string_cases.iter().enumerate() {
+        let args = EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec()));
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("OCT native string returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_concat_preserves_coerced_prefix_and_terminal() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::ConcatNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::ConcatNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (total, prefix, terminal) in [
+        (0, vec![], ConcatTerminal::Complete),
+        (2, vec![Some(b"a".to_vec())], ConcatTerminal::Complete),
+        (
+            2,
+            vec![Some(b"a".to_vec()), Some(b"b".to_vec())],
+            ConcatTerminal::InputNull,
+        ),
+        (
+            2,
+            vec![Some(b"a".to_vec())],
+            ConcatTerminal::PacketExceeded { limit: 1 },
+        ),
+    ] {
+        assert!(matches!(
+            prepare_concat_args(ConcatKind::Concat, total, prefix, terminal, usize::MAX),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    assert!(matches!(
+        prepare_concat_args(
+            ConcatKind::Concat,
+            1,
+            vec![Some(b"a".to_vec())],
+            ConcatTerminal::Complete,
+            0,
+        ),
+        Err(LocalError::ResourceLimit(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases: [(usize, Vec<Option<Vec<u8>>>, ConcatTerminal, Option<&[u8]>); 4] = [
+        (
+            5,
+            vec![
+                Some(b"a".to_vec()),
+                Some(b"b".to_vec()),
+                Some(b"c".to_vec()),
+                Some(b"d".to_vec()),
+                Some(b"e".to_vec()),
+            ],
+            ConcatTerminal::Complete,
+            Some(b"abcde"),
+        ),
+        (
+            1,
+            vec![Some(Vec::new())],
+            ConcatTerminal::Complete,
+            Some(b""),
+        ),
+        (
+            5,
+            vec![Some(b"a".to_vec()), None],
+            ConcatTerminal::InputNull,
+            None,
+        ),
+        (
+            5,
+            vec![Some(b"ab".to_vec())],
+            ConcatTerminal::PacketExceeded { limit: 1 },
+            None,
+        ),
+    ];
+    for (index, (total, prefix, terminal, expected)) in cases.into_iter().enumerate() {
+        let prepared =
+            prepare_concat_args(ConcatKind::Concat, total, prefix, terminal, usize::MAX).unwrap();
+        assert_eq!(worker.kernel_invocations(), index as u64);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::ConcatReady(prepared))
+            .unwrap()
+        else {
+            panic!("CONCAT ready prefix returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_concat_ws_keeps_null_slots_in_packet_budget() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::ConcatWsNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::ConcatWsNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (total, prefix, terminal) in [
+        (1, vec![Some(b",".to_vec())], ConcatTerminal::Complete),
+        (2, vec![None, Some(b"a".to_vec())], ConcatTerminal::Complete),
+        (
+            4,
+            vec![Some(b"xx".to_vec()), None, Some(b"a".to_vec())],
+            ConcatTerminal::PacketExceeded { limit: 3 },
+        ),
+    ] {
+        assert!(matches!(
+            prepare_concat_args(ConcatKind::ConcatWs, total, prefix, terminal, usize::MAX),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let cases: [(usize, Vec<Option<Vec<u8>>>, ConcatTerminal, Option<&[u8]>); 5] = [
+        (
+            4,
+            vec![
+                Some(b"-".to_vec()),
+                Some(b"a".to_vec()),
+                None,
+                Some(b"b".to_vec()),
+            ],
+            ConcatTerminal::Complete,
+            Some(b"a-b"),
+        ),
+        (
+            3,
+            vec![Some(b"xx".to_vec()), None, Some(b"a".to_vec())],
+            ConcatTerminal::Complete,
+            Some(b"a"),
+        ),
+        (
+            2,
+            vec![Some(b",".to_vec()), None],
+            ConcatTerminal::Complete,
+            Some(b""),
+        ),
+        (3, vec![None], ConcatTerminal::InputNull, None),
+        // The original second data slot budgets two separator bytes: 3 > 1.
+        (
+            4,
+            vec![Some(b"xx".to_vec()), None, Some(b"a".to_vec())],
+            ConcatTerminal::PacketExceeded { limit: 1 },
+            None,
+        ),
+    ];
+    for (index, (total, prefix, terminal, expected)) in cases.into_iter().enumerate() {
+        let prepared =
+            prepare_concat_args(ConcatKind::ConcatWs, total, prefix, terminal, usize::MAX).unwrap();
+        assert_eq!(worker.kernel_invocations(), index as u64);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::ConcatReady(prepared))
+            .unwrap()
+        else {
+            panic!("CONCAT_WS ready prefix returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_elt_uses_sql_offsets_and_full_arity() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::EltNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::EltNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, total, expected) in [
+        (Some(1), 3, Some(1)),
+        (Some(2), 3, Some(2)),
+        (Some(0), 3, None),
+        (Some(-1), 3, None),
+        (None, 3, None),
+        (Some(3), 3, None),
+        (Some(i64::MAX), usize::MAX, Some(i64::MAX as usize)),
+    ] {
+        assert_eq!(elt_selected_arg(index, total), expected);
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    for invalid in [
+        EvaluatedArgs::EltReady {
+            index: Some(1),
+            total_sql_arity: 2,
+            selected: ReadyBytesArg::Undemanded,
+        },
+        EvaluatedArgs::EltReady {
+            index: Some(1),
+            total_sql_arity: 1,
+            selected: ReadyBytesArg::Value(Some(b"a".to_vec())),
+        },
+        EvaluatedArgs::EltReady {
+            index: Some(0),
+            total_sql_arity: 3,
+            selected: ReadyBytesArg::Value(None),
+        },
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let cases: [(Option<i64>, usize, ReadyBytesArg, Option<&[u8]>); 8] = [
+        (
+            Some(1),
+            2,
+            ReadyBytesArg::Value(Some(Vec::new())),
+            Some(b""),
+        ),
+        (Some(2), 3, ReadyBytesArg::Value(None), None),
+        (
+            Some(1),
+            2,
+            ReadyBytesArg::Value(Some(b"value".to_vec())),
+            Some(b"value"),
+        ),
+        (Some(0), 3, ReadyBytesArg::Undemanded, None),
+        (Some(-1), 3, ReadyBytesArg::Undemanded, None),
+        (None, 3, ReadyBytesArg::Undemanded, None),
+        (Some(3), 3, ReadyBytesArg::Undemanded, None),
+        (
+            Some(i64::MAX),
+            usize::MAX,
+            ReadyBytesArg::Value(Some(b"wide".to_vec())),
+            Some(b"wide"),
+        ),
+    ];
+    for (invocations, (index, total_sql_arity, selected, expected)) in cases.into_iter().enumerate()
+    {
+        let args = EvaluatedArgs::EltReady {
+            index,
+            total_sql_arity,
+            selected,
+        };
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("ELT ready selection returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), invocations as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}

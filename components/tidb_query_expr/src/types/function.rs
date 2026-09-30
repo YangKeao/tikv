@@ -169,6 +169,10 @@ pub enum LocalFunctionId {
     Locate3Utf8ExtNative,
     FindInSetNative,
     FindInSetPreparedNative,
+    OctStringNative,
+    ConcatNative,
+    ConcatWsNative,
+    EltNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

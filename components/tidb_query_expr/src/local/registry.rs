@@ -119,7 +119,11 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::Locate3BytesExtNative
         | LocalFunctionId::Locate3Utf8ExtNative
         | LocalFunctionId::FindInSetNative
-        | LocalFunctionId::FindInSetPreparedNative => Err(other_err!(
+        | LocalFunctionId::FindInSetPreparedNative
+        | LocalFunctionId::OctStringNative
+        | LocalFunctionId::ConcatNative
+        | LocalFunctionId::ConcatWsNative
+        | LocalFunctionId::EltNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),
