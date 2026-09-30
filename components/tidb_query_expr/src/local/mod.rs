@@ -28,8 +28,10 @@
 //! a closed operation on ready nullable Int/Bytes: ASCII, LENGTH/OCTET_LENGTH,
 //! BIT_LENGTH, LTRIM, RTRIM, UNHEX, CRC32, REVERSE, CHAR_LENGTH, QUOTE, HEX,
 //! BIN, LEFT, RIGHT, REPLACE, BIT_COUNT, bitwise NOT/AND/OR/XOR, shifts and
-//! normalized truth/presence predicates, logical AND/OR/XOR, MD5 and SHA/SHA1.
-//! Hashes consume ready raw Bytes; hash-input conversion and text packing
+//! normalized truth/presence predicates, logical AND/OR/XOR, MD5, SHA/SHA1,
+//! INET_ATON, INET_NTOA, INET6_ATON and INET6_NTOA. Address argument coercion
+//! and binary/text/UInt packing stay in the frontend; INET_NTOA consumes Int
+//! bits. Hashes consume ready raw Bytes; hash-input conversion and text packing
 //! remain frontend responsibilities. Numeric/byte/UTF8 variants are explicit.
 //! `EvaluatedArgs` owns fixed shapes, including Int2; Int preserves
 //! all 64 bits. Boolean operations instead consume frontend-normalized Int

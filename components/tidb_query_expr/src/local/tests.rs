@@ -1384,3 +1384,123 @@ fn local_evaluated_args_logical_ops_use_ready_three_valued_inputs() {
         }
     }
 }
+
+#[test]
+fn local_evaluated_bytes_inet_aton_preserves_ipv4_forms() {
+    let cases: &[(Option<&[u8]>, Option<i64>)] = &[
+        (None, None),
+        (Some(b""), None),
+        (Some(b"127.0.0.1"), Some(2_130_706_433)),
+        (Some(b"255.255.255.255"), Some(4_294_967_295)),
+        (Some(b"1"), Some(1)),
+        (Some(b"1.2"), Some(16_777_218)),
+        (Some(b"0.1.2"), Some(65_538)),
+        (Some(b"1..2"), Some(16_777_218)),
+        (Some(b"256"), None),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::InetAton,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::InetAton);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(input, expected)) in cases.iter().enumerate() {
+        let ComputedValue::Int(value) = worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+        else {
+            panic!("INET_ATON returned Bytes");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_inet_ntoa_checks_unsigned_range() {
+    let cases: &[(Option<i64>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(0), Some(b"0.0.0.0")),
+        (Some(4_294_967_295), Some(b"255.255.255.255")),
+        (Some(4_294_967_296), None),
+        (Some(u64::MAX as i64), None),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::InetNtoa,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::InetNtoa);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(input, expected)) in cases.iter().enumerate() {
+        let ComputedValue::Bytes(value) = worker.eval_args(EvaluatedArgs::Int(input)).unwrap()
+        else {
+            panic!("INET_NTOA returned Int");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_inet6_preserves_binary_and_text_forms() {
+    let ipv4: &[u8] = &[10, 0, 5, 9];
+    let mapped: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 1, 2, 3, 4];
+    let compatible: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4];
+    let aton_cases: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(b""), None),
+        (Some(b"10.0.5.9"), Some(ipv4)),
+        (Some(b"::FFFF:1.2.3.4"), Some(mapped)),
+        (Some(b"::1.2.3.4"), Some(compatible)),
+    ];
+    let ntoa_cases: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(b""), None),
+        (Some(ipv4), Some(b"10.0.5.9")),
+        (Some(mapped), Some(b"::ffff:1.2.3.4")),
+        (Some(compatible), Some(b"::102:304")),
+        (Some(b"\x01\x02\x03"), None),
+    ];
+    for (operation, cases) in [
+        (EvaluatedBytesOp::Inet6Aton, aton_cases),
+        (EvaluatedBytesOp::Inet6Ntoa, ntoa_cases),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Bytes(value) =
+                worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+            else {
+                panic!("INET6 operation returned Int");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

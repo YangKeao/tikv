@@ -1510,6 +1510,10 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::LogicalAnd,
             EvaluatedBytesOp::LogicalOr,
             EvaluatedBytesOp::LogicalXor,
+            EvaluatedBytesOp::InetAton,
+            EvaluatedBytesOp::InetNtoa,
+            EvaluatedBytesOp::Inet6Aton,
+            EvaluatedBytesOp::Inet6Ntoa,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

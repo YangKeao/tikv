@@ -2922,6 +2922,8 @@ mod tests {
             ),
             (EvaluatedBytesOp::Quote, EvaluatedBytesOp::UnHex),
             (EvaluatedBytesOp::Md5, EvaluatedBytesOp::Sha1),
+            (EvaluatedBytesOp::InetAton, EvaluatedBytesOp::Crc32),
+            (EvaluatedBytesOp::Inet6Aton, EvaluatedBytesOp::Inet6Ntoa),
         ] {
             // Isolate each guard: neither a matching carrier nor a matching
             // display name grants admission for a different kernel or metadata.

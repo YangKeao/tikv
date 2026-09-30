@@ -786,6 +786,10 @@ pub enum EvaluatedBytesOp {
     LogicalAnd,
     LogicalOr,
     LogicalXor,
+    InetAton,
+    InetNtoa,
+    Inet6Aton,
+    Inet6Ntoa,
 }
 
 impl EvaluatedBytesOp {
@@ -831,6 +835,10 @@ impl EvaluatedBytesOp {
             Self::LogicalAnd => ScalarFuncSig::LogicalAnd,
             Self::LogicalOr => ScalarFuncSig::LogicalOr,
             Self::LogicalXor => ScalarFuncSig::LogicalXor,
+            Self::InetAton => ScalarFuncSig::InetAton,
+            Self::InetNtoa => ScalarFuncSig::InetNtoa,
+            Self::Inet6Aton => ScalarFuncSig::Inet6Aton,
+            Self::Inet6Ntoa => ScalarFuncSig::Inet6Ntoa,
         }
     }
 
@@ -881,6 +889,10 @@ impl EvaluatedBytesOp {
             Self::LogicalAnd => crate::impl_op::logical_and_fn_meta(),
             Self::LogicalOr => crate::impl_op::logical_or_fn_meta(),
             Self::LogicalXor => crate::impl_op::logical_xor_fn_meta(),
+            Self::InetAton => crate::impl_miscellaneous::inet_aton_fn_meta(),
+            Self::InetNtoa => crate::impl_miscellaneous::inet_ntoa_fn_meta(),
+            Self::Inet6Aton => crate::impl_miscellaneous::inet6_aton_fn_meta(),
+            Self::Inet6Ntoa => crate::impl_miscellaneous::inet6_ntoa_fn_meta(),
         }
     }
 
@@ -909,7 +921,8 @@ impl EvaluatedBytesOp {
             | Self::IsNotFalse
             | Self::LogicalAnd
             | Self::LogicalOr
-            | Self::LogicalXor => EvalType::Int,
+            | Self::LogicalXor
+            | Self::InetAton => EvalType::Int,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -925,7 +938,10 @@ impl EvaluatedBytesOp {
             | Self::RightUtf8
             | Self::Replace
             | Self::Md5
-            | Self::Sha1 => EvalType::Bytes,
+            | Self::Sha1
+            | Self::InetNtoa
+            | Self::Inet6Aton
+            | Self::Inet6Ntoa => EvalType::Bytes,
         }
     }
 
@@ -950,7 +966,8 @@ impl EvaluatedBytesOp {
             | Self::IsTrueWithNull
             | Self::IsNotNull
             | Self::IsNotTrue
-            | Self::IsNotFalse => &[EvalType::Int],
+            | Self::IsNotFalse
+            | Self::InetNtoa => &[EvalType::Int],
             Self::BitAnd
             | Self::BitOr
             | Self::BitXor
@@ -977,7 +994,10 @@ impl EvaluatedBytesOp {
             | Self::Quote
             | Self::HexStr
             | Self::Md5
-            | Self::Sha1 => &[EvalType::Bytes],
+            | Self::Sha1
+            | Self::InetAton
+            | Self::Inet6Aton
+            | Self::Inet6Ntoa => &[EvalType::Bytes],
         }
     }
 

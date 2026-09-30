@@ -242,6 +242,11 @@ short-circuit admission policy described above.
   demand. It may supply an irrelevant RHS representative only after validating
   explicit AND(false, undemanded) or OR(true, undemanded); this is not a claim that
   RHS was evaluated as NULL. The real kernel still computes every result.
+  INET_ATON, INET_NTOA, INET6_ATON and INET6_NTOA use the existing nullable
+  Bytes/Int shapes and official parse/range/format kernels. The frontend retains
+  text/raw-byte coercion, integer warnings, UInt bit transport and result tags.
+  Malformed raw INET6 bytes reach the kernel unchanged. Four IS_IP predicates
+  are not included: native NULL behavior and IPv4 leading-zero parsing differ.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake
