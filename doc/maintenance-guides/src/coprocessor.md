@@ -206,7 +206,8 @@ short-circuit admission policy described above.
   slots and returns an opaque worker, not a raw program/context/graph. Its legacy
   name also covers fixed Int and multi-input string operations. `EvaluatedArgs`
   admits only nullable Bytes, Int (including an explicitly normalized bit pattern),
-  two Ints, Bytes+Int, two/three Bytes, or typed ready-count/packet operands. The operation fixes ordered slot
+  two Ints, Bytes+Int, two/three Bytes, raw IEEE singles/pairs, Bytes/Int/Int/Bytes,
+  or typed ready-count/packet operands. The operation fixes ordered slot
   types/arity and an exact call recipe; callers cannot supply arbitrary FieldTypes.
   Existing operations use one FnCall. Closed negated boolean tests use only
   base+UnaryNot, checking each stage's signature, name, function pointer, arity and
@@ -285,7 +286,11 @@ short-circuit admission policy described above.
   LOWER/UPPER binary variants use their real wire no-op kernels. UTF8 variants
   bind the existing EncodingUtf8Mb4 getters privately: the canonical descriptor
   has empty charset and zero type heap, so invoking the charset-dependent wire
-  selector would be incorrect. No case table or case algorithm is added.
+  selector would be incorrect. No Unicode case table or algorithm is added.
+  Legacy ASCII LowerAsciiNative/UpperAsciiNative are separate private one-Bytes
+  wrappers around the sole byte-ASCII transformations; high octets stay unchanged.
+  They are not the wire binary no-ops. Legacy UTF8 reuses Utf8Ready after its own
+  Rust grouped-lossy preparation. All four legacy NULL paths invoke the worker.
   SHA2's selector/digest/hex core is shared: wire invalid selectors still append
   warning1583 and return NULL; native private selection returns quiet NULL.
   The renamed ReadyIntArg also serves the independent BytesIntReady role;
@@ -306,15 +311,30 @@ short-circuit admission policy described above.
   only NULL count, packet suppression or out-of-range count permits the latter,
   lowered after validation to irrelevant non-NULL empty-byte representatives.
   Zero/valid width still demands both strings. Three closed shape guards admit
-  arity four/call one only for these four operations; two inline arrays grow to
-  four slots without publishing extra operands on old recipes. Caller compile
-  limits are five nodes only for pad, otherwise four, with depth three unchanged.
+  arity four/call one only for these four pad operations and the two INSERT
+  operations; two inline arrays hold four slots without extra operands on old
+  recipes. Caller compile limits are five nodes only for these six operations,
+  otherwise four, with depth three unchanged.
   One quotient/remainder construction core retains Wire < versus Native <=
   truncation, wire empty-pad-growth NULL versus native empty, and wire UTF8 *4
   versus native character-count limits. Existing wire nonzero equal-length
   empty-pad division and SUBSTRING_INDEX MIN abs behavior are left unchanged;
   this is neither a hidden bug fix nor a new artificial panic. General graph
   admission, the driver, pool and canonical zero-heap metadata are unchanged.
+  LN/LOG/LOG2/POW share their sole f64 primitives with wire wrappers; private
+  kernels compute raw NaN/Inf/domain bits without wire filtering. Ieee754Bits2
+  is distinct from ordinary Bytes2. Only PowNative permits one Undemanded side
+  with a genuinely NULL peer, validated before lowering to irrelevant +0 bits;
+  two undemanded operands and LOG demand markers are rejected. Native3020 and
+  finite-result errors remain frontend policies; legacy POW retains raw NaN/Inf.
+  UNCOMPRESSED_LENGTH has one empty/short/full-LE32 core: NULL stays NULL,
+  empty/1..4 bytes yield0, and all32 length bits survive. Only wire appends1259;
+  the native frontend preserves its own short-header warning, without packet policy.
+  INSERT uses real Bytes/Int/Int/Bytes inputs, one range helper and one splice.
+  Wire binary uses byte bounds; native UTF8 uses true character boundaries and
+  never decodes replacement bytes. Original wire UTF8 strict decoding and its
+  character-offset-as-byte-offset behavior remain. Packet refusal follows the
+  actual result in the frontend, not a suppression flag or fake NULL input.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake

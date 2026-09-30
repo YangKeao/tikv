@@ -569,21 +569,10 @@ pub fn insert(
     newstr: BytesRef,
     writer: BytesWriter,
 ) -> Result<BytesGuard> {
-    let pos = *pos;
-    let len = *len;
-    let upos: usize = pos as usize;
-    let mut ulen: usize = len as usize;
-    if pos < 1 || upos > s.len() {
+    let Some((start, end)) = insert_range(*pos, *len, s.len()) else {
         return Ok(writer.write_ref(Some(s)));
-    }
-    if ulen > s.len() - upos + 1 || len < 0 {
-        ulen = s.len() - upos + 1;
-    }
-    let mut ret = Vec::with_capacity(newstr.len() + s.len());
-    ret.extend_from_slice(&s[0..upos - 1]);
-    ret.extend_from_slice(newstr);
-    ret.extend_from_slice(&s[upos + ulen - 1..]);
-    Ok(writer.write(Some(ret)))
+    };
+    insert_splice(s, start, end, newstr, writer)
 }
 
 #[rpn_fn(writer)]
@@ -597,22 +586,57 @@ pub fn insert_utf8(
 ) -> Result<BytesGuard> {
     let s = str::from_utf8(s_utf8)?;
     let newstr = str::from_utf8(newstr_utf8)?;
-    let pos = *pos;
-    let len = *len;
-    let upos: usize = pos as usize;
-    let slen = s.chars().count();
-    let mut ulen: usize = len as usize;
-    if pos < 1 || upos > slen {
+    let Some((start, end)) = insert_range(*pos, *len, s.chars().count()) else {
         return Ok(writer.write_ref(Some(s_utf8)));
+    };
+    // Preserve the wire use of character offsets as byte offsets.
+    insert_splice(s.as_bytes(), start, end, newstr.as_bytes(), writer)
+}
+
+#[rpn_fn(writer)]
+#[inline]
+fn insert_utf8_native(
+    s_utf8: BytesRef,
+    pos: &Int,
+    len: &Int,
+    newstr: BytesRef,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    let s = str::from_utf8(s_utf8)?;
+    let Some((start, end)) = insert_range(*pos, *len, s.chars().count()) else {
+        return Ok(writer.write_ref(Some(s_utf8)));
+    };
+    let start = get_utf8_byte_index(s, start);
+    let end = get_utf8_byte_index(s, end);
+    insert_splice(s_utf8, start, end, newstr, writer)
+}
+
+#[inline]
+fn insert_range(pos: Int, len: Int, source_len: usize) -> Option<(usize, usize)> {
+    let upos: usize = pos as usize;
+    let mut ulen: usize = len as usize;
+    if pos < 1 || upos > source_len {
+        return None;
     }
-    if ulen > slen - upos + 1 || len < 0 {
-        ulen = slen - upos + 1;
+    if ulen > source_len - upos + 1 || len < 0 {
+        ulen = source_len - upos + 1;
     }
-    let mut pw = writer.begin();
-    pw.partial_write(&s.as_bytes()[0..upos - 1]);
-    pw.partial_write(newstr.as_bytes());
-    pw.partial_write(&s.as_bytes()[upos + ulen - 1..]);
-    Ok(pw.finish())
+    Some((upos - 1, upos + ulen - 1))
+}
+
+#[inline]
+fn insert_splice(
+    src: BytesRef,
+    start: usize,
+    end: usize,
+    replacement: BytesRef,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    let mut writer = writer.begin();
+    writer.partial_write(&src[..start]);
+    writer.partial_write(replacement);
+    writer.partial_write(&src[end..]);
+    Ok(writer.finish())
 }
 
 #[rpn_fn(writer)]
@@ -663,6 +687,18 @@ pub fn lower_utf8<E: Encoding>(arg: BytesRef, writer: BytesWriter) -> Result<Byt
 pub fn lower(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
     // Noop for binary strings
     Ok(writer.write_ref(Some(arg)))
+}
+
+#[rpn_fn]
+#[inline]
+fn lower_ascii_native(arg: BytesRef) -> Result<Option<Bytes>> {
+    Ok(Some(arg.to_ascii_lowercase()))
+}
+
+#[rpn_fn]
+#[inline]
+fn upper_ascii_native(arg: BytesRef) -> Result<Option<Bytes>> {
+    Ok(Some(arg.to_ascii_uppercase()))
 }
 
 #[rpn_fn(writer)]

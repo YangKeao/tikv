@@ -79,7 +79,11 @@
 //! while wire retains warning 1583. Lower/Upper dispatch the binary no-op
 //! kernels; LowerUtf8Ready/UpperUtf8Ready bind the original EncodingUtf8Mb4
 //! kernels without adding charset owners to the zero-heap transport ABI.
-//! Frontends retain signature choice and one-U+FFFD-per-invalid-byte repair.
+//! LowerAsciiNative/UpperAsciiNative instead preserve the legacy ASCII-only
+//! contract through private byte-case wrappers: only ASCII letters change,
+//! bytes >= 128 remain exact, and NULL propagates. They use ordinary Bytes and
+//! neither impersonate wire no-ops nor decode/repair Unicode. Frontends retain
+//! signature choice and one-U+FFFD-per-invalid-byte repair where required.
 //! OrdNative folds a frontend-prepared encoded first-character slice, not a
 //! whole string. None or at most four bytes is its checked input domain, not a
 //! resource limit; oversize inputs are refused, never truncated. Wire ORD keeps
@@ -94,8 +98,8 @@
 //! genuinely NULL count as Value(None) before applying the empty-delimiter
 //! rule. Native suffixes use forward non-overlapping matches; wire keeps its
 //! original reverse search and signed-abs behavior. Unsigned counts retain
-//! their raw bits. The four Lpad/Rpad Bytes/Utf8Native recipes alone admit four
-//! ready columns and five nodes, via PacketBytesIntBytes and PadPacket.
+//! their raw bits. The four Lpad/Rpad Bytes/Utf8Native recipes admit four ready
+//! columns and five nodes, via PacketBytesIntBytes and PadPacket.
 //! ReadyBytesArg pairs must both be Value, or both Undemanded for NULL/invalid
 //! length or packet suppression. Even zero length or truncation requires both
 //! evaluated strings when Allow applies. Validated undemanded strings use
@@ -106,8 +110,27 @@
 //! empty; wire keeps its old strict-less truncation, NULL growth and UTF8
 //! four-byte bound. Its existing nonzero equal-length/empty-pad
 //! division-by-zero bug is not fixed or replaced by an artificial panic here.
-//! No general graph or driver limit is widened. Results are owned values, not
-//! native SQL descriptors. Frontends retain demand/coercion order,
+//! LnNative/Log2Native use single IEEE754 inputs; LogNative/PowNative require
+//! the distinct Ieee754Bits2 carrier. LOG takes base then value; POW takes base
+//! then exponent. ReadyIeee754Arg::Undemanded is permitted on either side only
+//! for PowNative with Value(None) opposite, never on both sides. Its validated
+//! +0-bit representative is not an evaluated operand or SQL NULL. Non-NULL
+//! inputs, including domain errors, run the shared std primitive and return
+//! actual NaN/Inf bits; frontend warnings/domain masks and finite-result policy
+//! remain outside. Wire math retains its original domain/finite/error envelope.
+//! UncompressedLengthNative shares the empty/short/little-endian-u32 core:
+//! empty and lengths 1..4 yield zero, NULL stays NULL, all 32 header bits are
+//! retained. The private path is quiet; wire retains short-input warning 1259.
+//! Insert and InsertUtf8Native also admit four columns/five nodes, using
+//! ordinary BytesIntIntBytes with real position and length Int values. Along
+//! with the four PAD recipes, these are the entire four-column whitelist. The
+//! binary Insert uses the existing wire signature; native UTF8 maps true
+//! character boundaries and accepts raw replacement bytes. All share one byte
+//! splice; wire UTF8 keeps strict decoding of both strings and its old
+//! character-index as byte-offset bug. INSERT packet checks belong after a
+//! successful kernel result, against actual result bytes, not a pre-dispatch
+//! flag. No general graph or driver limit is widened. Results are owned values,
+//! not native SQL descriptors. Frontends retain demand/coercion order,
 //! normalization, signature selection and result packing (including
 //! CRC32/bitwise UInt). The old single-Bytes eval_one and ASCII-only facade use
 //! the same compiler/worker/driver. No native child, binding-service or Host
@@ -143,7 +166,7 @@ pub use self::{
         ComputedBytes, ComputedBytesMetadata, ComputedIeee754Bits, ComputedIeee754BitsMetadata,
         ComputedInt, ComputedIntMetadata, ComputedValue, EvaluatedArgs, EvaluatedAsciiWorker,
         EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState, OutputDisposition,
-        ReadyBytesArg, ReadyIntArg, WorkerStorage, prepare_evaluated_ascii,
+        ReadyBytesArg, ReadyIeee754Arg, ReadyIntArg, WorkerStorage, prepare_evaluated_ascii,
         prepare_evaluated_bytes,
     },
     compile::{

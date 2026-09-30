@@ -182,17 +182,30 @@ fn hex_digest(hashtype: MessageDigest, input: &[u8]) -> Result<Bytes> {
 #[rpn_fn(nullable, capture = [ctx])]
 #[inline]
 pub fn uncompressed_length(ctx: &mut EvalContext, arg: Option<BytesRef>) -> Result<Option<Int>> {
-    use byteorder::{ByteOrder, LittleEndian};
-    Ok(arg.as_ref().map(|s| {
-        if s.is_empty() {
-            0
-        } else if s.len() <= 4 {
+    Ok(arg.map(|s| {
+        let (value, short) = uncompressed_length_impl(s);
+        if short {
             ctx.warnings.append_warning(Error::zlib_data_corrupted());
-            0
-        } else {
-            Int::from(LittleEndian::read_u32(&s[0..4]))
         }
+        value
     }))
+}
+
+#[rpn_fn]
+#[inline]
+fn uncompressed_length_native(arg: BytesRef) -> Result<Option<Int>> {
+    Ok(Some(uncompressed_length_impl(arg).0))
+}
+
+#[inline]
+fn uncompressed_length_impl(arg: BytesRef) -> (Int, bool) {
+    if arg.is_empty() {
+        (0, false)
+    } else if arg.len() <= 4 {
+        (0, true)
+    } else {
+        (Int::from(LittleEndian::read_u32(&arg[0..4])), false)
+    }
 }
 
 #[rpn_fn(nullable, capture = [ctx])]

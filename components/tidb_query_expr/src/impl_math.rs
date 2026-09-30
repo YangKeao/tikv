@@ -38,9 +38,25 @@ pub fn crc32(arg: BytesRef) -> Result<Option<Int>> {
 }
 
 #[inline]
+fn ln_f64(arg: f64) -> f64 {
+    arg.ln()
+}
+
+#[inline]
 #[rpn_fn]
 pub fn log_1_arg(arg: &Real) -> Result<Option<Real>> {
-    Ok(f64_to_real(arg.ln()))
+    Ok(f64_to_real(ln_f64(**arg)))
+}
+
+#[inline]
+#[rpn_fn(nullable)]
+fn ln_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?.map(ln_f64).map(encode_raw_f64))
+}
+
+#[inline]
+fn log_f64(base: f64, value: f64) -> f64 {
+    value.log(base)
 }
 
 #[inline]
@@ -51,15 +67,35 @@ pub fn log_2_arg(arg0: &Real, arg1: &Real) -> Result<Option<Real>> {
         if **arg0 <= 0f64 || **arg0 == 1f64 || **arg1 <= 0f64 {
             None
         } else {
-            f64_to_real(arg1.log(**arg0))
+            f64_to_real(log_f64(**arg0, **arg1))
         }
     })
 }
 
 #[inline]
+#[rpn_fn(nullable)]
+fn log_native(base: Option<BytesRef>, value: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(base)?
+        .zip(decode_raw_f64(value)?)
+        .map(|(base, value)| log_f64(base, value))
+        .map(encode_raw_f64))
+}
+
+#[inline]
+fn log2_f64(arg: f64) -> f64 {
+    arg.log2()
+}
+
+#[inline]
 #[rpn_fn]
 pub fn log2(arg: &Real) -> Result<Option<Real>> {
-    Ok(f64_to_real(arg.log2()))
+    Ok(f64_to_real(log2_f64(**arg)))
+}
+
+#[inline]
+#[rpn_fn(nullable)]
+fn log2_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?.map(log2_f64).map(encode_raw_f64))
 }
 
 #[inline]
@@ -376,14 +412,28 @@ fn cot(arg: &Real) -> Result<Option<Real>> {
 }
 
 #[inline]
+fn pow_f64(base: f64, exponent: f64) -> f64 {
+    base.pow(exponent)
+}
+
+#[inline]
 #[rpn_fn]
 fn pow(lhs: &Real, rhs: &Real) -> Result<Option<Real>> {
-    let pow = (lhs.into_inner()).pow(rhs.into_inner());
+    let pow = pow_f64(lhs.into_inner(), rhs.into_inner());
     if pow.is_infinite() {
         Err(Error::overflow("DOUBLE", format!("pow({}, {})", lhs, rhs)).into())
     } else {
         Ok(Real::new(pow).ok())
     }
+}
+
+#[inline]
+#[rpn_fn(nullable)]
+fn pow_native(base: Option<BytesRef>, exponent: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(base)?
+        .zip(decode_raw_f64(exponent)?)
+        .map(|(base, exponent)| pow_f64(base, exponent))
+        .map(encode_raw_f64))
 }
 
 #[inline]

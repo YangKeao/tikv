@@ -132,7 +132,8 @@ fn check_evaluated_bytes_source(
         (EvaluatedBytesOp::PiRaw, EvaluatedArgsRole::NoArgs) => arity == 0 && calls == 1,
         (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
-        _ => !operation.is_pad_native() && (1..=3).contains(&arity),
+        (_, EvaluatedArgsRole::Values) if operation.is_insert() => arity == 4 && calls == 1,
+        _ => !operation.is_pad_native() && !operation.is_insert() && (1..=3).contains(&arity),
     };
     if !arity_matches
         || !(1..=2).contains(&calls)
@@ -1568,6 +1569,15 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::RpadBytesNative,
             EvaluatedBytesOp::LpadUtf8Native,
             EvaluatedBytesOp::RpadUtf8Native,
+            EvaluatedBytesOp::LnNative,
+            EvaluatedBytesOp::Log2Native,
+            EvaluatedBytesOp::LogNative,
+            EvaluatedBytesOp::PowNative,
+            EvaluatedBytesOp::UncompressedLengthNative,
+            EvaluatedBytesOp::Insert,
+            EvaluatedBytesOp::InsertUtf8Native,
+            EvaluatedBytesOp::LowerAsciiNative,
+            EvaluatedBytesOp::UpperAsciiNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
@@ -1600,7 +1610,8 @@ mod evaluated_ascii_compile_tests {
                     .unwrap();
             }
             assert!(operation.call_operation(calls).is_none());
-            if operation.is_pad_native() {
+            // Four inputs remain closed to four pad and two insert operations.
+            if operation.is_pad_native() || operation.is_insert() {
                 assert_eq!(arity, 4);
                 assert_eq!(calls, 1);
                 assert!(matches!(

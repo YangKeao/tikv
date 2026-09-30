@@ -2695,3 +2695,410 @@ fn local_evaluated_args_pad_marker_admission_is_preflight() {
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
 }
+
+#[test]
+fn local_evaluated_args_native_logarithms_and_power_preserve_ieee754_classes() {
+    use tidb_query_datatype::codec::data_type::Real;
+
+    assert!(
+        crate::test_util::RpnFnScalarEvaluator::new()
+            .push_param(Some(Real::new(1e308).unwrap()))
+            .push_param(Some(Real::new(2.0).unwrap()))
+            .evaluate::<Real>(ScalarFuncSig::Pow)
+            .is_err()
+    );
+    let wire_nan = crate::test_util::RpnFnScalarEvaluator::new()
+        .push_param(Some(Real::new(-1.0).unwrap()))
+        .push_param(Some(Real::new(0.5).unwrap()))
+        .evaluate::<Real>(ScalarFuncSig::Pow)
+        .unwrap();
+    assert_eq!(wire_nan, None);
+
+    let ln_cases: &[(Option<f64>, Option<f64>)] = &[
+        (None, None),
+        (Some(1.0), Some(0.0)),
+        (Some(0.0), Some(f64::NEG_INFINITY)),
+        (Some(-1.0), Some(f64::NAN)),
+        (Some(f64::NAN), Some(f64::NAN)),
+        (Some(f64::INFINITY), Some(f64::INFINITY)),
+    ];
+    let log2_cases: &[(Option<f64>, Option<f64>)] = &[
+        (None, None),
+        (Some(8.0), Some(3.0)),
+        (Some(0.0), Some(f64::NEG_INFINITY)),
+        (Some(-1.0), Some(f64::NAN)),
+        (Some(f64::NAN), Some(f64::NAN)),
+        (Some(f64::INFINITY), Some(f64::INFINITY)),
+    ];
+    for (operation, cases) in [
+        (EvaluatedBytesOp::LnNative, ln_cases),
+        (EvaluatedBytesOp::Log2Native, log2_cases),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let args = EvaluatedArgs::Ieee754Bits(input.map(f64::to_bits));
+            let ComputedValue::Ieee754Bits(value) = worker.eval_args(args).unwrap() else {
+                panic!("native logarithm returned a non-IEEE-754 value");
+            };
+            let bits = value.value();
+            match expected {
+                Some(expected) if expected.is_nan() => {
+                    assert!(bits.is_some_and(|bits| f64::from_bits(bits).is_nan()));
+                }
+                _ => assert_eq!(bits, expected.map(f64::to_bits)),
+            }
+            assert_eq!(
+                value.metadata(),
+                ComputedIeee754BitsMetadata::OwnIeee754Bits
+            );
+            assert_eq!(value.into_option(), bits);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+
+    let log_cases: &[(Option<f64>, Option<f64>, Option<f64>)] = &[
+        (Some(2.0), Some(4.0), Some(2.0)),
+        (Some(2.0), None, None),
+        (Some(2.0), Some(-1.0), Some(f64::NAN)),
+        (Some(1.0), Some(2.0), Some(f64::INFINITY)),
+        (Some(2.0), Some(f64::INFINITY), Some(f64::INFINITY)),
+        (Some(f64::NAN), Some(2.0), Some(f64::NAN)),
+    ];
+    let pow_cases: &[(Option<f64>, Option<f64>, Option<f64>)] = &[
+        (Some(2.0), Some(3.0), Some(8.0)),
+        (Some(2.0), None, None),
+        (Some(1e308), Some(2.0), Some(f64::INFINITY)),
+        (Some(-1.0), Some(0.5), Some(f64::NAN)),
+        (Some(f64::NAN), Some(0.0), Some(1.0)),
+        (Some(f64::INFINITY), Some(-1.0), Some(0.0)),
+    ];
+    for (operation, cases) in [
+        (EvaluatedBytesOp::LogNative, log_cases),
+        (EvaluatedBytesOp::PowNative, pow_cases),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(left, right, expected)) in cases.iter().enumerate() {
+            let args = EvaluatedArgs::Ieee754Bits2 {
+                left: ReadyIeee754Arg::Value(left.map(f64::to_bits)),
+                right: ReadyIeee754Arg::Value(right.map(f64::to_bits)),
+            };
+            let ComputedValue::Ieee754Bits(value) = worker.eval_args(args).unwrap() else {
+                panic!("native binary math returned a non-IEEE-754 value");
+            };
+            let bits = value.value();
+            match expected {
+                Some(expected) if expected.is_nan() => {
+                    assert!(bits.is_some_and(|bits| f64::from_bits(bits).is_nan()));
+                }
+                _ => assert_eq!(bits, expected.map(f64::to_bits)),
+            }
+            assert_eq!(
+                value.metadata(),
+                ComputedIeee754BitsMetadata::OwnIeee754Bits
+            );
+            assert_eq!(value.into_option(), bits);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_binary_ieee754_markers_are_role_checked() {
+    use ReadyIeee754Arg::{Undemanded, Value};
+
+    for operation in [EvaluatedBytesOp::LogNative, EvaluatedBytesOp::PowNative] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Ieee754Bits2 {
+                left: Undemanded,
+                right: Undemanded,
+            },
+            EvaluatedArgs::Ieee754Bits2 {
+                left: Undemanded,
+                right: Value(Some(f64::NAN.to_bits())),
+            },
+            EvaluatedArgs::Ieee754Bits2 {
+                left: Value(Some(2.0_f64.to_bits())),
+                right: Undemanded,
+            },
+            EvaluatedArgs::Bytes2(None, None),
+        ] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let mut invocations = 0_u64;
+        for (left, right) in [(Undemanded, Value(None)), (Value(None), Undemanded)] {
+            let result = worker.eval_args(EvaluatedArgs::Ieee754Bits2 { left, right });
+            if operation == EvaluatedBytesOp::PowNative {
+                let ComputedValue::Ieee754Bits(value) = result.unwrap() else {
+                    panic!("POW marker returned a non-IEEE-754 value");
+                };
+                assert_eq!(value.value(), None);
+                assert_eq!(
+                    value.metadata(),
+                    ComputedIeee754BitsMetadata::OwnIeee754Bits
+                );
+                assert_eq!(value.into_option(), None);
+                invocations += 1;
+            } else {
+                assert!(matches!(result, Err(LocalError::InvalidBatch(_))));
+            }
+            assert_eq!(worker.kernel_invocations(), invocations);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let ComputedValue::Ieee754Bits(value) = worker
+            .eval_args(EvaluatedArgs::Ieee754Bits2 {
+                left: Value(Some(2.0_f64.to_bits())),
+                right: Value(Some(4.0_f64.to_bits())),
+            })
+            .unwrap()
+        else {
+            panic!("binary IEEE-754 role reuse returned a non-IEEE-754 value");
+        };
+        let expected = if operation == EvaluatedBytesOp::PowNative {
+            16.0_f64
+        } else {
+            2.0_f64
+        };
+        assert_eq!(value.value(), Some(expected.to_bits()));
+        assert_eq!(
+            value.metadata(),
+            ComputedIeee754BitsMetadata::OwnIeee754Bits
+        );
+        assert_eq!(value.into_option(), Some(expected.to_bits()));
+        assert_eq!(worker.kernel_invocations(), invocations + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_uncompressed_length_native_is_quiet_and_unsigned() {
+    let (wire_result, wire_ctx) = crate::test_util::RpnFnScalarEvaluator::new()
+        .push_param(Some(b"\x78\x56\x34\x12".to_vec()))
+        .evaluate_raw(FieldTypeTp::LongLong, ScalarFuncSig::UncompressedLength);
+    assert!(matches!(wire_result.unwrap(), ScalarValue::Int(Some(0))));
+    assert_eq!(wire_ctx.warnings.warning_cnt, 1);
+    assert_eq!(wire_ctx.warnings.warnings.len(), 1);
+    assert_eq!(wire_ctx.warnings.warnings[0].get_code(), 1259);
+    let cases: &[(Option<&[u8]>, Option<i64>)] = &[
+        (None, None),
+        (Some(b""), Some(0)),
+        (Some(b"x"), Some(0)),
+        (Some(b"\x78\x56\x34\x12"), Some(0)),
+        (Some(b"\x78\x56\x34\x12\x00"), Some(305_419_896)),
+        (Some(b"\xff\xff\xff\xff\x00"), Some(4_294_967_295)),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::UncompressedLengthNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(
+        worker.operation(),
+        EvaluatedBytesOp::UncompressedLengthNative
+    );
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(input, expected)) in cases.iter().enumerate() {
+        let ComputedValue::Int(value) = worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+        else {
+            panic!("UNCOMPRESSED_LENGTH native returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_insert_preserves_byte_and_character_boundaries() {
+    use tidb_query_datatype::codec::data_type::Bytes;
+
+    for signature in [ScalarFuncSig::Insert, ScalarFuncSig::InsertUtf8] {
+        let wire = crate::test_util::RpnFnScalarEvaluator::new()
+            .push_param(Some("中a".as_bytes().to_vec()))
+            .push_param(Some(2_i64))
+            .push_param(Some(1_i64))
+            .push_param(Some(b"X".to_vec()))
+            .evaluate::<Bytes>(signature)
+            .unwrap();
+        assert_eq!(wire, Some(b"\xe4X\xada".to_vec()));
+    }
+    assert!(
+        crate::test_util::RpnFnScalarEvaluator::new()
+            .push_param(Some("中a".as_bytes().to_vec()))
+            .push_param(Some(2_i64))
+            .push_param(Some(1_i64))
+            .push_param(Some(b"\xff".to_vec()))
+            .evaluate::<Bytes>(ScalarFuncSig::InsertUtf8)
+            .is_err()
+    );
+    let cases: &[(
+        Option<&[u8]>,
+        Option<i64>,
+        Option<i64>,
+        Option<&[u8]>,
+        [Option<&[u8]>; 2],
+    )] = &[
+        (
+            Some("中a".as_bytes()),
+            Some(2),
+            Some(1),
+            Some(b"X"),
+            [Some(b"\xe4X\xada"), Some("中X".as_bytes())],
+        ),
+        (
+            Some("中a".as_bytes()),
+            Some(2),
+            Some(1),
+            Some(b"\xff"),
+            [Some(b"\xe4\xff\xada"), Some(b"\xe4\xb8\xad\xff")],
+        ),
+        (
+            Some("中a".as_bytes()),
+            Some(i64::MAX),
+            Some(1),
+            Some(b"X"),
+            [Some("中a".as_bytes()); 2],
+        ),
+        (
+            Some("中a".as_bytes()),
+            Some(0),
+            Some(1),
+            Some(b"X"),
+            [Some("中a".as_bytes()); 2],
+        ),
+        (
+            Some("中a".as_bytes()),
+            Some(2),
+            Some(i64::MIN),
+            Some(b"X"),
+            [Some(b"\xe4X"), Some("中X".as_bytes())],
+        ),
+        (None, Some(2), Some(1), Some(b"X"), [None; 2]),
+        (Some("中a".as_bytes()), Some(2), Some(1), None, [None; 2]),
+    ];
+    for (column, operation) in [EvaluatedBytesOp::Insert, EvaluatedBytesOp::InsertUtf8Native]
+        .into_iter()
+        .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, position, length, replacement, expected)) in cases.iter().enumerate() {
+            let args = EvaluatedArgs::BytesIntIntBytes(
+                input.map(|bytes| bytes.to_vec()),
+                position,
+                length,
+                replacement.map(|bytes| bytes.to_vec()),
+            );
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("INSERT returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_ascii_case_conversion_preserves_high_bytes() {
+    let cases: &[(Option<&[u8]>, [Option<&[u8]>; 2])] = &[
+        (None, [None, None]),
+        (Some(b""), [Some(b""), Some(b"")]),
+        (
+            Some(b"aZ\xff\xc3\xa9"),
+            [Some(b"az\xff\xc3\xa9"), Some(b"AZ\xff\xc3\xa9")],
+        ),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::LowerAsciiNative,
+        EvaluatedBytesOp::UpperAsciiNative,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let args = EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec()));
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("ASCII case conversion returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

@@ -146,6 +146,14 @@ pub enum LocalFunctionId {
     RpadBytesNative,
     LpadUtf8Native,
     RpadUtf8Native,
+    LnNative,
+    LogNative,
+    Log2Native,
+    PowNative,
+    UncompressedLengthNative,
+    InsertUtf8Native,
+    LowerAsciiNative,
+    UpperAsciiNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

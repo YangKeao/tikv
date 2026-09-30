@@ -824,6 +824,15 @@ pub enum EvaluatedBytesOp {
     RpadBytesNative,
     LpadUtf8Native,
     RpadUtf8Native,
+    LnNative,
+    LogNative,
+    Log2Native,
+    PowNative,
+    UncompressedLengthNative,
+    Insert,
+    InsertUtf8Native,
+    LowerAsciiNative,
+    UpperAsciiNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -839,6 +848,7 @@ pub(crate) enum EvaluatedKernelKind {
 pub(crate) enum EvaluatedArgsRole {
     Values,
     Ieee754Bits,
+    Ieee754Bits2,
     NoArgs,
     Packet,
     ReadyBytesInt,
@@ -895,6 +905,7 @@ impl EvaluatedBytesOp {
             Self::Inet6Ntoa => ScalarFuncSig::Inet6Ntoa,
             Self::Lower => ScalarFuncSig::Lower,
             Self::Upper => ScalarFuncSig::Upper,
+            Self::Insert => ScalarFuncSig::Insert,
             Self::AsinRaw => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AsinRaw);
             }
@@ -998,6 +1009,38 @@ impl EvaluatedBytesOp {
             Self::RpadUtf8Native => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::RpadUtf8Native);
             }
+            Self::LnNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::LnNative);
+            }
+            Self::LogNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::LogNative);
+            }
+            Self::Log2Native => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Log2Native);
+            }
+            Self::PowNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::PowNative);
+            }
+            Self::UncompressedLengthNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UncompressedLengthNative,
+                );
+            }
+            Self::InsertUtf8Native => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::InsertUtf8Native,
+                );
+            }
+            Self::LowerAsciiNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::LowerAsciiNative,
+                );
+            }
+            Self::UpperAsciiNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UpperAsciiNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1015,6 +1058,7 @@ impl EvaluatedBytesOp {
         match self {
             Self::PiRaw => EvaluatedArgsRole::NoArgs,
             Self::Sha2Native => EvaluatedArgsRole::ReadyBytesInt,
+            Self::LogNative | Self::PowNative => EvaluatedArgsRole::Ieee754Bits2,
             Self::SubstringIndexSignedNative | Self::SubstringIndexUnsignedNative => {
                 EvaluatedArgsRole::ReadyBytesBytesInt
             }
@@ -1031,7 +1075,9 @@ impl EvaluatedBytesOp {
             | Self::SqrtRaw
             | Self::SignRaw
             | Self::RadiansRaw
-            | Self::DegreesRaw => EvaluatedArgsRole::Ieee754Bits,
+            | Self::DegreesRaw
+            | Self::LnNative
+            | Self::Log2Native => EvaluatedArgsRole::Ieee754Bits,
             _ => EvaluatedArgsRole::Values,
         }
     }
@@ -1044,6 +1090,10 @@ impl EvaluatedBytesOp {
                 | Self::LpadUtf8Native
                 | Self::RpadUtf8Native
         )
+    }
+
+    pub(crate) fn is_insert(self) -> bool {
+        matches!(self, Self::Insert | Self::InsertUtf8Native)
     }
 
     /// ORD receives one already-encoded native character, never an arbitrary
@@ -1061,6 +1111,10 @@ impl EvaluatedBytesOp {
                 | Self::RadiansRaw
                 | Self::DegreesRaw
                 | Self::PiRaw
+                | Self::LnNative
+                | Self::LogNative
+                | Self::Log2Native
+                | Self::PowNative
         )
     }
 
@@ -1159,6 +1213,17 @@ impl EvaluatedBytesOp {
             Self::RpadBytesNative => crate::impl_string::rpad_bytes_native_fn_meta(),
             Self::LpadUtf8Native => crate::impl_string::lpad_utf8_native_fn_meta(),
             Self::RpadUtf8Native => crate::impl_string::rpad_utf8_native_fn_meta(),
+            Self::LnNative => crate::impl_math::ln_native_fn_meta(),
+            Self::LogNative => crate::impl_math::log_native_fn_meta(),
+            Self::Log2Native => crate::impl_math::log2_native_fn_meta(),
+            Self::PowNative => crate::impl_math::pow_native_fn_meta(),
+            Self::UncompressedLengthNative => {
+                crate::impl_encryption::uncompressed_length_native_fn_meta()
+            }
+            Self::Insert => crate::impl_string::insert_fn_meta(),
+            Self::InsertUtf8Native => crate::impl_string::insert_utf8_native_fn_meta(),
+            Self::LowerAsciiNative => crate::impl_string::lower_ascii_native_fn_meta(),
+            Self::UpperAsciiNative => crate::impl_string::upper_ascii_native_fn_meta(),
         }
     }
 
@@ -1194,7 +1259,8 @@ impl EvaluatedBytesOp {
             | Self::IsIpv6Nullable
             | Self::IsIpv4CompatNullable
             | Self::IsIpv4MappedNullable
-            | Self::OrdNative => EvalType::Int,
+            | Self::OrdNative
+            | Self::UncompressedLengthNative => EvalType::Int,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -1238,7 +1304,15 @@ impl EvaluatedBytesOp {
             | Self::LpadBytesNative
             | Self::RpadBytesNative
             | Self::LpadUtf8Native
-            | Self::RpadUtf8Native => EvalType::Bytes,
+            | Self::RpadUtf8Native
+            | Self::LnNative
+            | Self::LogNative
+            | Self::Log2Native
+            | Self::PowNative
+            | Self::Insert
+            | Self::InsertUtf8Native
+            | Self::LowerAsciiNative
+            | Self::UpperAsciiNative => EvalType::Bytes,
         }
     }
 
@@ -1283,9 +1357,17 @@ impl EvaluatedBytesOp {
             | Self::FromBase64Native
             | Self::Sha2Native => &[EvalType::Bytes, EvalType::Int],
             Self::RepeatNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
-            Self::TrimBothNative | Self::TrimLeadingNative | Self::TrimTrailingNative => {
-                &[EvalType::Bytes, EvalType::Bytes]
-            }
+            Self::TrimBothNative
+            | Self::TrimLeadingNative
+            | Self::TrimTrailingNative
+            | Self::LogNative
+            | Self::PowNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::Insert | Self::InsertUtf8Native => &[
+                EvalType::Bytes,
+                EvalType::Int,
+                EvalType::Int,
+                EvalType::Bytes,
+            ],
             Self::SubstringIndexSignedNative | Self::SubstringIndexUnsignedNative => {
                 &[EvalType::Bytes, EvalType::Bytes, EvalType::Int]
             }
@@ -1332,7 +1414,12 @@ impl EvaluatedBytesOp {
             | Self::Upper
             | Self::LowerUtf8Ready
             | Self::UpperUtf8Ready
-            | Self::OrdNative => &[EvalType::Bytes],
+            | Self::OrdNative
+            | Self::LnNative
+            | Self::Log2Native
+            | Self::UncompressedLengthNative
+            | Self::LowerAsciiNative
+            | Self::UpperAsciiNative => &[EvalType::Bytes],
         }
     }
 
@@ -1412,6 +1499,14 @@ pub enum ReadyBytesArg {
     Undemanded,
 }
 
+/// Raw floating-point demand is separate from SQL NULL. Only PowNative may
+/// have one undemanded operand, and only when the other is Value(None).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadyIeee754Arg {
+    Value(Option<u64>),
+    Undemanded,
+}
+
 /// Owned ready arguments and explicit demand markers for closed recipes. Int
 /// carries the original 64-bit pattern: callers may pass a u64 as i64 without
 /// numeric narrowing. Coercion, diagnostics, argument demand and text
@@ -1427,6 +1522,7 @@ pub enum EvaluatedArgs {
     Bytes2(Option<Vec<u8>>, Option<Vec<u8>>),
     Int(Option<i64>),
     BytesInt(Option<Vec<u8>>, Option<i64>),
+    BytesIntIntBytes(Option<Vec<u8>>, Option<i64>, Option<i64>, Option<Vec<u8>>),
     /// Ready values with an explicit integer-demand marker, not packet policy.
     BytesIntReady {
         bytes: Option<Vec<u8>>,
@@ -1464,6 +1560,10 @@ pub enum EvaluatedArgs {
     /// Nullable IEEE754 binary64 bits, not a SQL integer or ordinary Bytes.
     /// All bit patterns are admitted; only None represents an absent input.
     Ieee754Bits(Option<u64>),
+    Ieee754Bits2 {
+        left: ReadyIeee754Arg,
+        right: ReadyIeee754Arg,
+    },
 }
 
 impl EvaluatedArgs {
@@ -1471,6 +1571,7 @@ impl EvaluatedArgs {
         match self {
             Self::NoArgs => EvaluatedArgsRole::NoArgs,
             Self::Ieee754Bits(_) => EvaluatedArgsRole::Ieee754Bits,
+            Self::Ieee754Bits2 { .. } => EvaluatedArgsRole::Ieee754Bits2,
             Self::BytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesInt,
             Self::BytesBytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesBytesInt,
             Self::PacketBytesIntBytes { .. } => EvaluatedArgsRole::PadPacket,
@@ -1485,7 +1586,13 @@ impl EvaluatedArgs {
         match self {
             Self::NoArgs => &[],
             Self::Bytes(_) | Self::Ieee754Bits(_) => &[EvalType::Bytes],
-            Self::Bytes2(..) => &[EvalType::Bytes, EvalType::Bytes],
+            Self::Bytes2(..) | Self::Ieee754Bits2 { .. } => &[EvalType::Bytes, EvalType::Bytes],
+            Self::BytesIntIntBytes(..) => &[
+                EvalType::Bytes,
+                EvalType::Int,
+                EvalType::Int,
+                EvalType::Bytes,
+            ],
             Self::BytesBytesIntReady { .. } => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
             Self::PacketBytesIntBytes { .. } => &[
                 EvalType::Bytes,
@@ -1506,6 +1613,14 @@ impl EvaluatedArgs {
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
         match self {
             Self::Bytes(bytes) => operation.ready_bytes_match(bytes.as_deref()),
+            Self::Ieee754Bits2 { left, right } => match (left, right) {
+                (ReadyIeee754Arg::Value(_), ReadyIeee754Arg::Value(_)) => true,
+                (ReadyIeee754Arg::Undemanded, ReadyIeee754Arg::Value(None))
+                | (ReadyIeee754Arg::Value(None), ReadyIeee754Arg::Undemanded) => {
+                    operation == EvaluatedBytesOp::PowNative
+                }
+                _ => false,
+            },
             Self::BytesIntReady {
                 bytes,
                 count: ReadyIntArg::Undemanded,
@@ -1554,8 +1669,8 @@ impl EvaluatedArgs {
     }
 
     fn into_values(self) -> LocalResult<([ScalarValue; 4], usize)> {
-        // The fixed owner stays inline. Only the four PAD recipes publish all
-        // four slots; unused slots of older recipes never enter the driver.
+        // The fixed owner stays inline. Only four PAD and two INSERT recipes
+        // publish all slots; unused slots never enter the driver.
         // IEEE754's physical Byte8 allocation is charged like any Bytes owner.
         use ScalarValue::{Bytes, Int};
         Ok(match self {
@@ -1564,6 +1679,10 @@ impl EvaluatedArgs {
             Self::Bytes2(a, b) => ([Bytes(a), Bytes(b), Int(None), Int(None)], 2),
             Self::Int(value) => ([Int(value), Int(None), Int(None), Int(None)], 1),
             Self::BytesInt(bytes, int) => ([Bytes(bytes), Int(int), Int(None), Int(None)], 2),
+            Self::BytesIntIntBytes(bytes, position, length, replacement) => (
+                [Bytes(bytes), Int(position), Int(length), Bytes(replacement)],
+                4,
+            ),
             Self::BytesIntReady { bytes, count } => {
                 let count = match count {
                     ReadyIntArg::Value(value) => value,
@@ -1646,20 +1765,42 @@ impl EvaluatedArgs {
                     4,
                 )
             }
-            Self::Ieee754Bits(value) => {
-                let value = value
-                    .map(|bits| -> LocalResult<Vec<u8>> {
-                        let mut bytes = Vec::new();
-                        bytes.try_reserve_exact(8).map_err(|_| {
-                            LocalError::ResourceLimit("IEEE754 input allocation failed".into())
-                        })?;
-                        bytes.extend_from_slice(&bits.to_le_bytes());
-                        Ok(bytes)
-                    })
-                    .transpose()?;
-                ([Bytes(value), Int(None), Int(None), Int(None)], 1)
+            Self::Ieee754Bits(value) => (
+                [Self::ieee754_value(value)?, Int(None), Int(None), Int(None)],
+                1,
+            ),
+            Self::Ieee754Bits2 { left, right } => {
+                // Only validated POW + a truly NULL opposite operand permits
+                // this irrelevant +0 bit pattern; it is not a fake SQL NULL.
+                let into_ready = |arg: ReadyIeee754Arg| match arg {
+                    ReadyIeee754Arg::Value(value) => value,
+                    ReadyIeee754Arg::Undemanded => Some(0),
+                };
+                (
+                    [
+                        Self::ieee754_value(into_ready(left))?,
+                        Self::ieee754_value(into_ready(right))?,
+                        Int(None),
+                        Int(None),
+                    ],
+                    2,
+                )
             }
         })
+    }
+
+    fn ieee754_value(value: Option<u64>) -> LocalResult<ScalarValue> {
+        let value = value
+            .map(|bits| -> LocalResult<Vec<u8>> {
+                let mut bytes = Vec::new();
+                bytes.try_reserve_exact(8).map_err(|_| {
+                    LocalError::ResourceLimit("IEEE754 input allocation failed".into())
+                })?;
+                bytes.extend_from_slice(&bits.to_le_bytes());
+                Ok(bytes)
+            })
+            .transpose()?;
+        Ok(ScalarValue::Bytes(value))
     }
 }
 
