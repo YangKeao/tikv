@@ -162,6 +162,13 @@ pub enum LocalFunctionId {
     Substring3BytesLegacy,
     Substring2Utf8Legacy,
     Substring3Utf8Legacy,
+    StrcmpNative,
+    Locate2Native,
+    Locate3Native,
+    Locate3BytesExtNative,
+    Locate3Utf8ExtNative,
+    FindInSetNative,
+    FindInSetPreparedNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

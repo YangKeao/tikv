@@ -9,6 +9,7 @@ use tidb_query_datatype::{
     EvalType,
     codec::{
         batch::LazyBatchColumnVec,
+        collation::native::NativeCollation,
         data_type::{BATCH_MAX_SIZE, ChunkedVecBytes, ScalarValue, ScalarValueRef, VectorValue},
         mysql::{DEFAULT_DIV_FRAC_INCR, Tz},
     },
@@ -27,6 +28,7 @@ use super::{
 };
 use crate::{
     RpnExpressionNode, RpnStackNode, RpnStackNodeVectorValue,
+    impl_string::PreparedFindInSetKeys,
     types::expr_eval::{EvalInput, EvaluatedAsciiWitness, FrameResult, evaluated_bytes_shape},
 };
 
@@ -841,6 +843,13 @@ pub enum EvaluatedBytesOp {
     Substring3BytesLegacy,
     Substring2Utf8Legacy,
     Substring3Utf8Legacy,
+    StrcmpNative,
+    Locate2Native,
+    Locate3Native,
+    Locate3BytesExtNative,
+    Locate3Utf8ExtNative,
+    FindInSetNative,
+    FindInSetPreparedNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -864,6 +873,9 @@ pub(crate) enum EvaluatedArgsRole {
     PadPacket,
     SubstringNative,
     SubstringLegacy,
+    CollatedBytes2,
+    NativeSearch,
+    FindInSetPrepared,
 }
 
 impl EvaluatedBytesOp {
@@ -1091,6 +1103,33 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::Substring3Utf8Legacy,
                 );
             }
+            Self::StrcmpNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::StrcmpNative);
+            }
+            Self::Locate2Native => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Locate2Native);
+            }
+            Self::Locate3Native => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Locate3Native);
+            }
+            Self::Locate3BytesExtNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Locate3BytesExtNative,
+                );
+            }
+            Self::Locate3Utf8ExtNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Locate3Utf8ExtNative,
+                );
+            }
+            Self::FindInSetNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::FindInSetNative);
+            }
+            Self::FindInSetPreparedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FindInSetPreparedNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1106,6 +1145,9 @@ impl EvaluatedBytesOp {
         // A private identity does not determine its carrier or packet policy.
         // In particular, value-only FROM_BASE64 keeps the ordinary Bytes role.
         match self {
+            Self::StrcmpNative | Self::FindInSetNative => EvaluatedArgsRole::CollatedBytes2,
+            Self::Locate2Native | Self::Locate3Native => EvaluatedArgsRole::NativeSearch,
+            Self::FindInSetPreparedNative => EvaluatedArgsRole::FindInSetPrepared,
             Self::PiRaw => EvaluatedArgsRole::NoArgs,
             Self::Sha2Native => EvaluatedArgsRole::ReadyBytesInt,
             Self::LogNative | Self::PowNative => EvaluatedArgsRole::Ieee754Bits2,
@@ -1152,6 +1194,10 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn is_insert(self) -> bool {
         matches!(self, Self::Insert | Self::InsertUtf8Native)
+    }
+
+    pub(crate) fn is_locate3_native(self) -> bool {
+        self == Self::Locate3Native
     }
 
     pub(crate) fn is_substring_native(self) -> bool {
@@ -1320,6 +1366,15 @@ impl EvaluatedBytesOp {
             Self::Substring3BytesLegacy => crate::impl_string::substring_3_bytes_legacy_fn_meta(),
             Self::Substring2Utf8Legacy => crate::impl_string::substring_2_utf8_legacy_fn_meta(),
             Self::Substring3Utf8Legacy => crate::impl_string::substring_3_utf8_legacy_fn_meta(),
+            Self::StrcmpNative => crate::impl_string::strcmp_native_fn_meta(),
+            Self::Locate2Native => crate::impl_string::locate_2_native_fn_meta(),
+            Self::Locate3Native => crate::impl_string::locate_3_native_fn_meta(),
+            Self::Locate3BytesExtNative => crate::impl_string::locate_3_bytes_ext_native_fn_meta(),
+            Self::Locate3Utf8ExtNative => crate::impl_string::locate_3_utf8_ext_native_fn_meta(),
+            Self::FindInSetNative => crate::impl_string::find_in_set_native_fn_meta(),
+            Self::FindInSetPreparedNative => {
+                crate::impl_string::find_in_set_prepared_native_fn_meta()
+            }
         }
     }
 
@@ -1356,7 +1411,14 @@ impl EvaluatedBytesOp {
             | Self::IsIpv4CompatNullable
             | Self::IsIpv4MappedNullable
             | Self::OrdNative
-            | Self::UncompressedLengthNative => EvalType::Int,
+            | Self::UncompressedLengthNative
+            | Self::StrcmpNative
+            | Self::Locate2Native
+            | Self::Locate3Native
+            | Self::Locate3BytesExtNative
+            | Self::Locate3Utf8ExtNative
+            | Self::FindInSetNative
+            | Self::FindInSetPreparedNative => EvalType::Int,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -1431,6 +1493,18 @@ impl EvaluatedBytesOp {
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
             Self::PiRaw => &[],
+            Self::StrcmpNative
+            | Self::Locate2Native
+            | Self::Locate3BytesExtNative
+            | Self::Locate3Utf8ExtNative
+            | Self::FindInSetNative
+            | Self::FindInSetPreparedNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
+            Self::Locate3Native => &[
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Int,
+                EvalType::Int,
+            ],
             Self::Substring2BytesNative | Self::Substring2Utf8Native => {
                 &[EvalType::Bytes, EvalType::Int]
             }
@@ -1632,6 +1706,33 @@ pub enum ReadySubstringI128 {
     Undemanded,
 }
 
+/// Search units are explicit: a binary collation can still compare UTF8
+/// character windows (POSITION), independently of byte-oriented LOCATE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeSearchPolicy {
+    Bytes,
+    Utf8(NativeCollation),
+}
+
+impl NativeSearchPolicy {
+    pub(crate) fn tag(self) -> i64 {
+        match self {
+            Self::Bytes => 0,
+            Self::Utf8(collation) => 1 + collation.tag(),
+        }
+    }
+
+    pub(crate) fn from_tag(tag: i64) -> Option<Self> {
+        if tag == 0 {
+            Some(Self::Bytes)
+        } else {
+            tag.checked_sub(1)
+                .and_then(NativeCollation::from_tag)
+                .map(Self::Utf8)
+        }
+    }
+}
+
 /// Owned ready arguments and explicit demand markers for closed recipes. Int
 /// carries the original 64-bit pattern: callers may pass a u64 as i64 without
 /// numeric narrowing. Coercion, diagnostics, argument demand and text
@@ -1707,11 +1808,38 @@ pub enum EvaluatedArgs {
         pos: ReadySubstringI128,
         len: ReadySubstringI128,
     },
+    CollatedBytes2 {
+        left: Option<Vec<u8>>,
+        right: Option<Vec<u8>>,
+        collation: NativeCollation,
+    },
+    SearchBytes2 {
+        needle: Option<Vec<u8>>,
+        haystack: Option<Vec<u8>>,
+        policy: NativeSearchPolicy,
+    },
+    SearchBytes2IntReady {
+        needle: Option<Vec<u8>>,
+        haystack: Option<Vec<u8>>,
+        pos: ReadyIntArg,
+        policy: NativeSearchPolicy,
+    },
+    BytesBytesInt(Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>),
+    FindInSetPreparedReady {
+        needle: ReadyBytesArg,
+        keys: PreparedFindInSetKeys,
+        collation: NativeCollation,
+    },
 }
 
 impl EvaluatedArgs {
     fn role(&self) -> EvaluatedArgsRole {
         match self {
+            Self::CollatedBytes2 { .. } => EvaluatedArgsRole::CollatedBytes2,
+            Self::SearchBytes2 { .. } | Self::SearchBytes2IntReady { .. } => {
+                EvaluatedArgsRole::NativeSearch
+            }
+            Self::FindInSetPreparedReady { .. } => EvaluatedArgsRole::FindInSetPrepared,
             Self::NoArgs => EvaluatedArgsRole::NoArgs,
             Self::Ieee754Bits(_) => EvaluatedArgsRole::Ieee754Bits,
             Self::Ieee754Bits2 { .. } => EvaluatedArgsRole::Ieee754Bits2,
@@ -1734,6 +1862,16 @@ impl EvaluatedArgs {
     fn input_types(&self) -> &'static [EvalType] {
         match self {
             Self::NoArgs => &[],
+            Self::CollatedBytes2 { .. }
+            | Self::SearchBytes2 { .. }
+            | Self::FindInSetPreparedReady { .. }
+            | Self::BytesBytesInt(..) => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
+            Self::SearchBytes2IntReady { .. } => &[
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Int,
+                EvalType::Int,
+            ],
             Self::Bytes(_) | Self::Ieee754Bits(_) => &[EvalType::Bytes],
             Self::Bytes2(..) | Self::Ieee754Bits2 { .. } => &[EvalType::Bytes, EvalType::Bytes],
             Self::BytesIntIntBytes(..) => &[
@@ -1768,6 +1906,21 @@ impl EvaluatedArgs {
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
         match self {
             Self::Bytes(bytes) => operation.ready_bytes_match(bytes.as_deref()),
+            Self::SearchBytes2IntReady {
+                needle,
+                haystack,
+                pos,
+                ..
+            } => {
+                operation.is_locate3_native()
+                    && (!matches!(pos, ReadyIntArg::Undemanded)
+                        || needle.is_none()
+                        || haystack.is_none())
+            }
+            Self::FindInSetPreparedReady { needle, keys, .. } => {
+                operation == EvaluatedBytesOp::FindInSetPreparedNative
+                    && (!matches!(needle, ReadyBytesArg::Undemanded) || keys.is_null())
+            }
             Self::Substring2Ready { bytes, pos } => {
                 operation.is_substring_native()
                     && ((matches!(bytes, ReadyBytesArg::Value(_))
@@ -1867,18 +2020,74 @@ impl EvaluatedArgs {
     }
 
     fn into_values(self) -> LocalResult<([ScalarValue; 4], usize)> {
-        // The fixed owner stays inline. Only four PAD and two INSERT recipes
-        // publish all slots; unused slots never enter the driver.
+        // The fixed owner stays inline. Only four PAD, two INSERT and native
+        // LOCATE3 recipes publish all slots; unused slots never enter the driver.
         // IEEE754's physical Byte8 allocation is charged like any Bytes owner.
         use ScalarValue::{Bytes, Int};
         Ok(match self {
             Self::NoArgs => ([Int(None), Int(None), Int(None), Int(None)], 0),
             Self::Bytes(value) => ([Bytes(value), Int(None), Int(None), Int(None)], 1),
             Self::Bytes2(a, b) => ([Bytes(a), Bytes(b), Int(None), Int(None)], 2),
+            Self::CollatedBytes2 {
+                left,
+                right,
+                collation,
+            } => (
+                [
+                    Bytes(left),
+                    Bytes(right),
+                    Int(Some(collation.tag())),
+                    Int(None),
+                ],
+                3,
+            ),
+            Self::SearchBytes2 {
+                needle,
+                haystack,
+                policy,
+            } => (
+                [
+                    Bytes(needle),
+                    Bytes(haystack),
+                    Int(Some(policy.tag())),
+                    Int(None),
+                ],
+                3,
+            ),
+            Self::SearchBytes2IntReady {
+                needle,
+                haystack,
+                pos,
+                policy,
+            } => (
+                [
+                    Bytes(needle),
+                    Bytes(haystack),
+                    Self::ready_int_value(pos),
+                    Int(Some(policy.tag())),
+                ],
+                4,
+            ),
+            Self::BytesBytesInt(left, right, value) => {
+                ([Bytes(left), Bytes(right), Int(value), Int(None)], 3)
+            }
+            Self::FindInSetPreparedReady {
+                needle,
+                keys,
+                collation,
+            } => (
+                [
+                    Self::ready_bytes_value(needle),
+                    Bytes(keys.into_encoded()?),
+                    Int(Some(collation.tag())),
+                    Int(None),
+                ],
+                3,
+            ),
             Self::Substring2Ready { bytes, pos } => (
                 [
-                    Self::substring_bytes_value(bytes),
-                    Self::substring_int_value(pos),
+                    Self::ready_bytes_value(bytes),
+                    Self::ready_int_value(pos),
                     Int(None),
                     Int(None),
                 ],
@@ -1886,9 +2095,9 @@ impl EvaluatedArgs {
             ),
             Self::Substring3Ready { bytes, pos, len } => (
                 [
-                    Self::substring_bytes_value(bytes),
-                    Self::substring_int_value(pos),
-                    Self::substring_int_value(len),
+                    Self::ready_bytes_value(bytes),
+                    Self::ready_int_value(pos),
+                    Self::ready_int_value(len),
                     Int(None),
                 ],
                 3,
@@ -2023,7 +2232,7 @@ impl EvaluatedArgs {
         })
     }
 
-    fn substring_bytes_value(arg: ReadyBytesArg) -> ScalarValue {
+    fn ready_bytes_value(arg: ReadyBytesArg) -> ScalarValue {
         // A genuine NULL elsewhere has validated this non-NULL representative.
         ScalarValue::Bytes(match arg {
             ReadyBytesArg::Value(value) => value,
@@ -2031,7 +2240,7 @@ impl EvaluatedArgs {
         })
     }
 
-    fn substring_int_value(arg: ReadyIntArg) -> ScalarValue {
+    fn ready_int_value(arg: ReadyIntArg) -> ScalarValue {
         ScalarValue::Int(match arg {
             ReadyIntArg::Value(value) => value,
             ReadyIntArg::Undemanded => Some(0),

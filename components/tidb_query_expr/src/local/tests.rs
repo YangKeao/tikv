@@ -3585,3 +3585,419 @@ fn local_evaluated_args_legacy_substrings_preserve_i128_and_lossy_units() {
         }
     }
 }
+
+#[test]
+fn local_evaluated_args_strcmp_and_locate2_keep_policies_explicit() {
+    use tidb_query_datatype::{Collation, builder::FieldTypeBuilder, codec::data_type::Int};
+
+    let wire = crate::test_util::RpnFnScalarEvaluator::new()
+        .return_field_type(
+            FieldTypeBuilder::new()
+                .tp(FieldTypeTp::LongLong)
+                .collation(Collation::Utf8Mb4GeneralCi)
+                .build(),
+        )
+        .push_param(Some(b"e".to_vec()))
+        .push_param(Some("é".as_bytes().to_vec()))
+        .evaluate::<Int>(ScalarFuncSig::Locate2ArgsUtf8)
+        .unwrap();
+    assert_eq!(wire, Some(0));
+    let comparisons: [(Option<&[u8]>, Option<&[u8]>, NativeCollation, Option<i64>); 4] = [
+        (
+            Some(b"a"),
+            Some(b"a "),
+            NativeCollation::Utf8Mb4Bin,
+            Some(0),
+        ),
+        (Some(b"a"), Some(b"a "), NativeCollation::Binary, Some(-1)),
+        (
+            Some(b"A"),
+            Some(b"a "),
+            NativeCollation::Utf8Mb4GeneralCi,
+            Some(0),
+        ),
+        (None, Some(b"a"), NativeCollation::Binary, None),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::StrcmpNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::StrcmpNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, (left, right, collation, expected)) in comparisons.into_iter().enumerate() {
+        let args = EvaluatedArgs::CollatedBytes2 {
+            left: left.map(|bytes| bytes.to_vec()),
+            right: right.map(|bytes| bytes.to_vec()),
+            collation,
+        };
+        let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+            panic!("native STRCMP returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let searches: [(
+        Option<&[u8]>,
+        Option<&[u8]>,
+        NativeSearchPolicy,
+        Option<i64>,
+    ); 4] = [
+        (
+            Some(b"a"),
+            Some("中a".as_bytes()),
+            NativeSearchPolicy::Bytes,
+            Some(4),
+        ),
+        (
+            Some(b"a"),
+            Some("中a".as_bytes()),
+            NativeSearchPolicy::Utf8(NativeCollation::Binary),
+            Some(2),
+        ),
+        (
+            Some(b"e"),
+            Some("é".as_bytes()),
+            NativeSearchPolicy::Utf8(NativeCollation::Utf8Mb4GeneralCi),
+            Some(1),
+        ),
+        (None, Some(b"abc"), NativeSearchPolicy::Bytes, None),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::Locate2Native,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::Locate2Native);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, (needle, haystack, policy, expected)) in searches.into_iter().enumerate() {
+        let args = EvaluatedArgs::SearchBytes2 {
+            needle: needle.map(|bytes| bytes.to_vec()),
+            haystack: haystack.map(|bytes| bytes.to_vec()),
+            policy,
+        };
+        let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+            panic!("native LOCATE2 returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_locate3_preserves_position_roles_and_ext_units() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::Locate3Native,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::Locate3Native);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (needle, haystack) in [
+        (b"a".as_slice(), b"abc".as_slice()),
+        (b"".as_slice(), b"".as_slice()),
+    ] {
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::SearchBytes2IntReady {
+                needle: Some(needle.to_vec()),
+                haystack: Some(haystack.to_vec()),
+                pos: ReadyIntArg::Undemanded,
+                policy: NativeSearchPolicy::Bytes,
+            }),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let cases: [(
+        Option<&[u8]>,
+        Option<&[u8]>,
+        ReadyIntArg,
+        NativeSearchPolicy,
+        Option<i64>,
+    ); 6] = [
+        (
+            Some(b"a"),
+            Some(b"abca"),
+            ReadyIntArg::Value(Some(2)),
+            NativeSearchPolicy::Bytes,
+            Some(4),
+        ),
+        (
+            Some(b"a"),
+            Some("中a".as_bytes()),
+            ReadyIntArg::Value(Some(1)),
+            NativeSearchPolicy::Utf8(NativeCollation::Binary),
+            Some(2),
+        ),
+        (
+            Some(b"a"),
+            Some(b"abc"),
+            ReadyIntArg::Value(Some(0)),
+            NativeSearchPolicy::Bytes,
+            Some(0),
+        ),
+        (
+            Some(b"a"),
+            Some(b"abc"),
+            ReadyIntArg::Value(None),
+            NativeSearchPolicy::Bytes,
+            None,
+        ),
+        (
+            None,
+            Some(b"abc"),
+            ReadyIntArg::Undemanded,
+            NativeSearchPolicy::Bytes,
+            None,
+        ),
+        (
+            Some(b"a"),
+            None,
+            ReadyIntArg::Undemanded,
+            NativeSearchPolicy::Utf8(NativeCollation::Binary),
+            None,
+        ),
+    ];
+    for (index, (needle, haystack, pos, policy, expected)) in cases.into_iter().enumerate() {
+        let args = EvaluatedArgs::SearchBytes2IntReady {
+            needle: needle.map(|bytes| bytes.to_vec()),
+            haystack: haystack.map(|bytes| bytes.to_vec()),
+            pos,
+            policy,
+        };
+        let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+            panic!("native LOCATE3 returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let ext_cases: &[(Option<&[u8]>, Option<&[u8]>, Option<i64>, [Option<i64>; 2])] = &[
+        (
+            Some("\u{fffd}".as_bytes()),
+            Some("\u{fffd}\u{fffd}a".as_bytes()),
+            Some(2),
+            [Some(4), Some(2)],
+        ),
+        (Some(b"a"), Some(b"abc"), Some(i64::MIN), [Some(0); 2]),
+        (Some(b"a"), Some(b"abc"), None, [None; 2]),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::Locate3BytesExtNative,
+        EvaluatedBytesOp::Locate3Utf8ExtNative,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(needle, haystack, pos, expected)) in ext_cases.iter().enumerate() {
+            let args = EvaluatedArgs::BytesBytesInt(
+                needle.map(|bytes| bytes.to_vec()),
+                haystack.map(|bytes| bytes.to_vec()),
+                pos,
+            );
+            let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+                panic!("extended LOCATE3 returned a non-Int value");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected[column]);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_find_in_set_native_uses_no_pad_keys() {
+    use tidb_query_datatype::{Collation, builder::FieldTypeBuilder, codec::data_type::Int};
+
+    let wire = crate::test_util::RpnFnScalarEvaluator::new()
+        .return_field_type(
+            FieldTypeBuilder::new()
+                .tp(FieldTypeTp::LongLong)
+                .collation(Collation::Utf8Mb4GeneralCi)
+                .build(),
+        )
+        .push_param(Some(b"a".to_vec()))
+        .push_param(Some(b"a ,a".to_vec()))
+        .evaluate::<Int>(ScalarFuncSig::FindInSet)
+        .unwrap();
+    assert_eq!(wire, Some(1));
+    let cases: &[(Option<&[u8]>, Option<&[u8]>, Option<i64>)] = &[
+        (Some(b"a"), Some(b"a ,a"), Some(2)),
+        (Some(b""), Some(b""), Some(0)),
+        (Some(b""), Some(b",x"), Some(1)),
+        (None, Some(b"a"), None),
+        (Some(b"a"), None, None),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::FindInSetNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::FindInSetNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(needle, list, expected)) in cases.iter().enumerate() {
+        let args = EvaluatedArgs::CollatedBytes2 {
+            left: needle.map(|bytes| bytes.to_vec()),
+            right: list.map(|bytes| bytes.to_vec()),
+            collation: NativeCollation::Utf8Mb4GeneralCi,
+        };
+        let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+            panic!("native FIND_IN_SET returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_prepared_find_in_set_keeps_captured_keys() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::FindInSetPreparedNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(
+        worker.operation(),
+        EvaluatedBytesOp::FindInSetPreparedNative
+    );
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    let captured =
+        prepare_find_in_set_keys(Some(b"B,x,B"), NativeCollation::Binary, usize::MAX).unwrap();
+    let no_pad_keys =
+        prepare_find_in_set_keys(Some(b"a ,a"), NativeCollation::Utf8Mb4GeneralCi, usize::MAX)
+            .unwrap();
+    let null_keys = prepare_find_in_set_keys(None, NativeCollation::Binary, usize::MAX).unwrap();
+    let empty_keys =
+        prepare_find_in_set_keys(Some(b""), NativeCollation::Binary, usize::MAX).unwrap();
+    let leading_empty =
+        prepare_find_in_set_keys(Some(b",x"), NativeCollation::Binary, usize::MAX).unwrap();
+    assert!(!captured.is_null());
+    assert!(!no_pad_keys.is_null());
+    assert!(null_keys.is_null());
+    assert!(!empty_keys.is_null());
+    assert!(!leading_empty.is_null());
+    assert!(matches!(
+        prepare_find_in_set_keys(Some(b"B"), NativeCollation::Binary, 0),
+        Err(LocalError::ResourceLimit(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::FindInSetPreparedReady {
+            needle: ReadyBytesArg::Undemanded,
+            keys: empty_keys.clone(),
+            collation: NativeCollation::Binary,
+        }),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases = [
+        (
+            ReadyBytesArg::Value(Some(b"B".to_vec())),
+            captured.clone(),
+            NativeCollation::Binary,
+            Some(1),
+        ),
+        // GeneralCi probes use two-byte weights, not the captured Binary key B.
+        (
+            ReadyBytesArg::Value(Some(b"B".to_vec())),
+            captured.clone(),
+            NativeCollation::Utf8Mb4GeneralCi,
+            Some(0),
+        ),
+        (
+            ReadyBytesArg::Value(Some(b"a".to_vec())),
+            no_pad_keys,
+            NativeCollation::Utf8Mb4GeneralCi,
+            Some(2),
+        ),
+        (
+            ReadyBytesArg::Value(None),
+            captured,
+            NativeCollation::Binary,
+            None,
+        ),
+        (
+            ReadyBytesArg::Undemanded,
+            null_keys,
+            NativeCollation::Binary,
+            None,
+        ),
+        (
+            ReadyBytesArg::Value(Some(Vec::new())),
+            empty_keys,
+            NativeCollation::Binary,
+            Some(0),
+        ),
+        (
+            ReadyBytesArg::Value(Some(Vec::new())),
+            leading_empty,
+            NativeCollation::Binary,
+            Some(1),
+        ),
+    ];
+    for (index, (needle, keys, collation, expected)) in cases.into_iter().enumerate() {
+        let args = EvaluatedArgs::FindInSetPreparedReady {
+            needle,
+            keys,
+            collation,
+        };
+        let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+            panic!("prepared FIND_IN_SET returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}

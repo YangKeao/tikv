@@ -311,9 +311,9 @@ short-circuit admission policy described above.
   only NULL count, packet suppression or out-of-range count permits the latter,
   lowered after validation to irrelevant non-NULL empty-byte representatives.
   Zero/valid width still demands both strings. Three closed shape guards admit
-  arity four/call one only for these four pad operations and the two INSERT
-  operations; two inline arrays hold four slots without extra operands on old
-  recipes. Caller compile limits are five nodes only for these six operations,
+  arity four/call one only for these four pad operations, the two INSERT
+  operations and `Locate3Native`; two inline arrays hold four slots without
+  extra operands on old recipes. Caller compile limits are five nodes only for these seven operations,
   otherwise four, with depth three unchanged.
   One quotient/remainder construction core retains Wire < versus Native <=
   truncation, wire empty-pad-growth NULL versus native empty, and wire UTF8 *4
@@ -335,6 +335,25 @@ short-circuit admission policy described above.
   never decodes replacement bytes. Original wire UTF8 strict decoding and its
   character-offset-as-byte-offset behavior remain. Packet refusal follows the
   actual result in the frontend, not a suppression flag or fake NULL input.
+- Seven collated-string recipes cover native STRCMP, LOCATE2/3, both extension
+  LOCATE3 unit policies, dynamic FIND_IN_SET and prepared-key FIND_IN_SET.
+  `NativeSearchPolicy::{Bytes,Utf8(NativeCollation)}` separates units from
+  comparison: UTF8 with Binary comparison still returns character positions.
+  Native search uses collated fixed-size windows, not wire lowercase/memmem
+  semantics; only native3 applies the existing Go simple lowercase for CI.
+  Its original unchecked position decrement differs from extension wrapping.
+  Only `Locate3Native` adds four actual references/five compile nodes; no general
+  graph or callback admission changes. Explicit policy tags are validated data,
+  not normalized wire IDs or hidden operand provenance.
+  Native FIND uses NoPad key equality, not compare. `prepare_find_in_set_keys`
+  produces an opaque shared key snapshot, never a SQL answer. The frontend keeps
+  context-once list evaluation, NULL demand, retries and cache invalidation;
+  lookup selects its current policy without rebuilding the frozen keys. NULL
+  cache alone permits an undemanded needle. An empty non-NULL cache still computes
+  the real needle key before its zero result. Prepared payload validation and
+  necessary Vec-column copying do not imply preserved HashMap O(1) performance.
+  Actual pure-builder errors retain an unattributed phase at the native boundary,
+  never a fabricated worker Prepare/Invoke phase or SQL overflow classification.
 - SUBSTRING has eight closed Native/Legacy × two/three-argument × Bytes/UTF8
   recipes over one range core. Two arguments mean a true tail, not synthetic MAX:
   Native3 checked overflow yields empty, while legacy keeps its unchecked add.
@@ -438,6 +457,12 @@ short-circuit admission policy described above.
 
 ### Shared collation and Decimal boundary contracts
 
+- `codec::collation::native::NativeCollation` owns the explicit native selector
+  for compare/key, pattern, COW and capability helpers over existing primitives.
+  Sixteen checked tags are policy identities, not registry IDs. Its `is_ci`
+  preserves the old seven-identity set; Pinyin remains the old panic stub, not
+  newly implemented support. Native global-mode resolution stays frontend-owned.
+  DerivedBinary LIKE keeps rune semantics rather than becoming byte LIKE.
 - `codec::collation::gb` owns shared GB compare/key and native codec leaves.
   `GbPolicy::{Wire,Native}` preserves existing contracts, not operand provenance.
   Native GB18030 key-only PUA NULs never become comparison bytes; NoPad is explicit.

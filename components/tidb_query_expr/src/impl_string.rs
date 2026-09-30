@@ -1,17 +1,23 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{borrow::Cow, cmp::Ordering, convert::TryFrom, iter, str};
+use std::{borrow::Cow, cmp::Ordering, convert::TryFrom, iter, str, sync::Arc};
 
 use bstr::ByteSlice;
 use memchr::memmem;
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::{
-    codec::{collation::*, data_type::*},
+    codec::{
+        collation::{encoding::unicode_to_lower, native::NativeCollation, *},
+        data_type::*,
+    },
     *,
 };
 
-use crate::impl_math::i64_to_usize;
+use crate::{
+    impl_math::i64_to_usize,
+    local::{LocalError, LocalResult, NativeSearchPolicy},
+};
 
 const SPACE: u8 = 0o40u8;
 const MAX_BLOB_WIDTH: i32 = 16_777_216; // FIXME: Should be isize
@@ -109,8 +115,13 @@ pub fn unhex(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
 }
 
 #[inline]
+fn search_bytes(haystack: BytesRef, needle: BytesRef) -> Option<usize> {
+    memmem::find(haystack, needle)
+}
+
+#[inline]
 fn find_str(text: &str, pattern: &str) -> Option<usize> {
-    memmem::find(text.as_bytes(), pattern.as_bytes()).map(|i| text[..i].chars().count())
+    search_bytes(text.as_bytes(), pattern.as_bytes()).map(|i| text[..i].chars().count())
 }
 
 #[rpn_fn]
@@ -153,6 +164,141 @@ pub fn locate_3_args_utf8<C: Collator>(
         find_str(&s[start..], substr)
     };
     Ok(Some(offset.map_or(0, |i| pos + i as i64)))
+}
+
+#[derive(Clone, Copy)]
+enum NativeLocatePolicy {
+    Bytes,
+    Utf8(Option<NativeCollation>),
+}
+
+fn decode_native_collation(tag: &Int) -> Result<NativeCollation> {
+    NativeCollation::from_tag(*tag)
+        .ok_or_else(|| other_err!("Invalid native collation policy {}", tag))
+}
+
+fn decode_native_search_policy(tag: &Int) -> Result<NativeLocatePolicy> {
+    match NativeSearchPolicy::from_tag(*tag) {
+        Some(NativeSearchPolicy::Bytes) => Ok(NativeLocatePolicy::Bytes),
+        Some(NativeSearchPolicy::Utf8(collation)) => Ok(NativeLocatePolicy::Utf8(Some(collation))),
+        None => Err(other_err!("Invalid native search policy {}", tag)),
+    }
+}
+
+#[rpn_fn]
+#[inline]
+fn locate_2_native(needle: BytesRef, haystack: BytesRef, policy: &Int) -> Result<Option<Int>> {
+    Ok(Some(native_locate_impl(
+        needle,
+        haystack,
+        0,
+        decode_native_search_policy(policy)?,
+        false,
+    )?))
+}
+
+#[rpn_fn]
+#[inline]
+fn locate_3_native(
+    needle: BytesRef,
+    haystack: BytesRef,
+    position: &Int,
+    policy: &Int,
+) -> Result<Option<Int>> {
+    let policy = decode_native_search_policy(policy)?;
+    // Preserve the native source's unchecked subtraction, including MIN.
+    let start = *position - 1;
+    Ok(Some(native_locate_impl(
+        needle, haystack, start, policy, true,
+    )?))
+}
+
+#[rpn_fn]
+#[inline]
+fn locate_3_bytes_ext_native(
+    needle: BytesRef,
+    haystack: BytesRef,
+    position: &Int,
+) -> Result<Option<Int>> {
+    Ok(Some(native_locate_impl(
+        needle,
+        haystack,
+        position.wrapping_sub(1),
+        NativeLocatePolicy::Bytes,
+        false,
+    )?))
+}
+
+#[rpn_fn]
+#[inline]
+fn locate_3_utf8_ext_native(
+    needle: BytesRef,
+    haystack: BytesRef,
+    position: &Int,
+) -> Result<Option<Int>> {
+    Ok(Some(native_locate_impl(
+        needle,
+        haystack,
+        position.wrapping_sub(1),
+        NativeLocatePolicy::Utf8(None),
+        false,
+    )?))
+}
+
+fn native_locate_impl(
+    needle: BytesRef,
+    haystack: BytesRef,
+    start: Int,
+    policy: NativeLocatePolicy,
+    lower_ci: bool,
+) -> Result<Int> {
+    let collation = match policy {
+        NativeLocatePolicy::Bytes => {
+            if start < 0 || start > haystack.len() as Int - needle.len() as Int {
+                return Ok(0);
+            }
+            return Ok(search_bytes(&haystack[start as usize..], needle)
+                .map_or(0, |offset| start + offset as Int + 1));
+        }
+        NativeLocatePolicy::Utf8(collation) => collation,
+    };
+    let needle = str::from_utf8(needle)?;
+    let haystack = str::from_utf8(haystack)?;
+    let (needle, haystack) = if lower_ci && collation.is_some_and(|c| c.is_ci()) {
+        let lower = |input: &str| {
+            input
+                .chars()
+                .map(|ch| unicode_to_lower(ch).unwrap_or(ch))
+                .collect::<String>()
+        };
+        (Cow::Owned(lower(needle)), Cow::Owned(lower(haystack)))
+    } else {
+        (Cow::Borrowed(needle), Cow::Borrowed(haystack))
+    };
+    let needle_len = needle.chars().count();
+    let boundaries: Vec<usize> = haystack
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(iter::once(haystack.len()))
+        .collect();
+    let haystack_len = boundaries.len() - 1;
+    if start < 0 || start > haystack_len as Int - needle_len as Int {
+        return Ok(0);
+    }
+    if needle_len == 0 {
+        return Ok(start + 1);
+    }
+    for index in start as usize..=haystack_len - needle_len {
+        let candidate = &haystack.as_bytes()[boundaries[index]..boundaries[index + needle_len]];
+        let matches = match collation {
+            Some(collation) => collation.compare(candidate, needle.as_bytes())? == Ordering::Equal,
+            None => candidate == needle.as_bytes(),
+        };
+        if matches {
+            return Ok(index as Int + 1);
+        }
+    }
+    Ok(0)
 }
 
 #[rpn_fn]
@@ -710,7 +856,7 @@ pub fn hex_str_arg(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
 #[rpn_fn]
 #[inline]
 pub fn locate_2_args(substr: BytesRef, s: BytesRef) -> Result<Option<i64>> {
-    Ok(memmem::find(s, substr).map(|i| 1 + i as i64).or(Some(0)))
+    Ok(search_bytes(s, substr).map(|i| 1 + i as i64).or(Some(0)))
 }
 
 #[rpn_fn(writer)]
@@ -727,7 +873,7 @@ pub fn locate_3_args(substr: BytesRef, s: BytesRef, pos: &Int) -> Result<Option<
     if *pos < 1 || *pos as usize > s.len() + 1 {
         return Ok(Some(0));
     }
-    Ok(memmem::find(&s[*pos as usize - 1..], substr)
+    Ok(search_bytes(&s[*pos as usize - 1..], substr)
         .map(|i| pos + i as i64)
         .or(Some(0)))
 }
@@ -986,21 +1132,33 @@ fn substring_index_scan(
     (bound, remaining_pattern_count)
 }
 
+#[inline]
+fn strcmp_result(ordering: Ordering) -> Int {
+    match ordering {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    }
+}
+
 #[rpn_fn]
 #[inline]
 pub fn strcmp<C: Collator>(left: BytesRef, right: BytesRef) -> Result<Option<i64>> {
-    use std::cmp::Ordering::*;
-    Ok(Some(match C::sort_compare(left, right, false)? {
-        Less => -1,
-        Equal => 0,
-        Greater => 1,
-    }))
+    Ok(Some(strcmp_result(C::sort_compare(left, right, false)?)))
+}
+
+#[rpn_fn]
+#[inline]
+fn strcmp_native(left: BytesRef, right: BytesRef, policy: &Int) -> Result<Option<Int>> {
+    Ok(Some(strcmp_result(
+        decode_native_collation(policy)?.compare(left, right)?,
+    )))
 }
 
 #[rpn_fn]
 #[inline]
 pub fn instr(s: BytesRef, substr: BytesRef) -> Result<Option<Int>> {
-    Ok(memmem::find(s, substr).map(|i| 1 + i as i64).or(Some(0)))
+    Ok(search_bytes(s, substr).map(|i| 1 + i as i64).or(Some(0)))
 }
 
 #[rpn_fn]
@@ -1008,7 +1166,7 @@ pub fn instr(s: BytesRef, substr: BytesRef) -> Result<Option<Int>> {
 pub fn instr_utf8(s: BytesRef, substr: BytesRef) -> Result<Option<Int>> {
     let s = String::from_utf8_lossy(s);
     let substr = String::from_utf8_lossy(substr);
-    let index = memmem::find(
+    let index = search_bytes(
         s.to_lowercase().as_bytes(),
         substr.to_lowercase().as_bytes(),
     )
@@ -1024,19 +1182,272 @@ pub fn find_in_set<C: Collator>(s: BytesRef, str_list: BytesRef) -> Result<Optio
     if str_list.is_empty() {
         return Ok(Some(0));
     }
-
-    let result = str_list
-        .split_str(",")
-        .position(|str_in_set| {
-            C::sort_compare(str_in_set.as_bytes(), s, false)
+    let found = first_find_in_set_match(
+        find_in_set_entries(str_list).map(|entry| {
+            Ok(C::sort_compare(entry, s, false)
                 .ok()
-                .filter(|o| *o == Ordering::Equal)
-                .is_some()
-        })
-        .map(|p| p as i64 + 1)
-        .or(Some(0));
+                .filter(|ordering| *ordering == Ordering::Equal)
+                .is_some())
+        }),
+        false,
+    )?;
+    Ok(Some(found.map_or(0, |index| index as Int + 1)))
+}
 
-    Ok(result)
+#[rpn_fn]
+#[inline]
+fn find_in_set_native(s: BytesRef, list: BytesRef, policy: &Int) -> Result<Option<Int>> {
+    let policy = decode_native_collation(policy)?;
+    if list.is_empty() {
+        return Ok(Some(0));
+    }
+    let needle = policy.key(s, KeyOptions::NoPad)?;
+    Ok(Some(find_in_set_key_position(
+        &needle,
+        find_in_set_keys(list, policy),
+        false,
+    )?))
+}
+
+#[rpn_fn]
+#[inline]
+fn find_in_set_prepared_native(
+    s: BytesRef,
+    encoded_keys: BytesRef,
+    policy: &Int,
+) -> Result<Option<Int>> {
+    let policy = decode_native_collation(policy)?;
+    let keys = PreparedFindInSetKeyIter::new(encoded_keys)?;
+    // Even an empty, non-NULL cache probes the current policy once. In
+    // particular this must not hide the existing Pinyin panic stub.
+    let needle = policy.key(s, KeyOptions::NoPad)?;
+    Ok(Some(find_in_set_key_position(&needle, keys, true)?))
+}
+
+fn find_in_set_entries(list: BytesRef) -> impl Iterator<Item = BytesRef<'_>> {
+    list.split_str(",")
+        .take(if list.is_empty() { 0 } else { usize::MAX })
+}
+
+fn find_in_set_keys(
+    list: BytesRef,
+    policy: NativeCollation,
+) -> impl Iterator<Item = Result<Bytes>> + '_ {
+    find_in_set_entries(list)
+        .map(move |entry| policy.key(entry, KeyOptions::NoPad).map_err(Into::into))
+}
+
+fn first_find_in_set_match(
+    matches: impl Iterator<Item = Result<bool>>,
+    scan_all: bool,
+) -> Result<Option<usize>> {
+    let mut first = None;
+    for (index, matches) in matches.enumerate() {
+        if matches? && first.is_none() {
+            first = Some(index);
+            if !scan_all {
+                break;
+            }
+        }
+    }
+    Ok(first)
+}
+
+fn find_in_set_key_position<K: AsRef<[u8]>>(
+    needle: &[u8],
+    keys: impl Iterator<Item = Result<K>>,
+    scan_all: bool,
+) -> Result<Int> {
+    let found = first_find_in_set_match(keys.map(|key| Ok(key?.as_ref() == needle)), scan_all)?;
+    match found {
+        None => Ok(0),
+        Some(index) => index
+            .checked_add(1)
+            .and_then(|ordinal| Int::try_from(ordinal).ok())
+            .ok_or_else(|| other_err!("FIND_IN_SET ordinal exceeds signed Int")),
+    }
+}
+
+/// Immutable original build-time keys; no source list or probe policy is kept.
+#[derive(Clone, Debug)]
+pub struct PreparedFindInSetKeys {
+    encoded: Option<Arc<Vec<u8>>>,
+}
+
+impl PreparedFindInSetKeys {
+    pub fn is_null(&self) -> bool {
+        self.encoded.is_none()
+    }
+
+    pub(crate) fn into_encoded(self) -> LocalResult<Option<Vec<u8>>> {
+        let Some(encoded) = self.encoded else {
+            return Ok(None);
+        };
+        match Arc::try_unwrap(encoded) {
+            Ok(encoded) => Ok(Some(encoded)),
+            Err(shared) => {
+                let mut encoded = Vec::new();
+                encoded.try_reserve_exact(shared.len()).map_err(|error| {
+                    LocalError::ResourceLimit(format!(
+                        "Prepared FIND_IN_SET copy allocation: {}",
+                        error
+                    ))
+                })?;
+                encoded.extend_from_slice(shared.as_slice());
+                Ok(Some(encoded))
+            }
+        }
+    }
+}
+
+/// Build original ordered keys without executing a FIND_IN_SET query.
+pub fn prepare_find_in_set_keys(
+    list: Option<&[u8]>,
+    key_policy: NativeCollation,
+    max_encoded_bytes: usize,
+) -> LocalResult<PreparedFindInSetKeys> {
+    let Some(list) = list else {
+        return Ok(PreparedFindInSetKeys { encoded: None });
+    };
+    let mut encoded = Vec::new();
+    reserve_find_in_set_encoding(&mut encoded, 8, max_encoded_bytes)?;
+    encoded.extend_from_slice(&0_u64.to_le_bytes());
+    let mut count = 0_u64;
+    for key in find_in_set_keys(list, key_policy) {
+        let key = key.map_err(LocalError::Evaluation)?;
+        count = count
+            .checked_add(1)
+            .filter(|count| *count <= Int::MAX as u64)
+            .ok_or_else(|| {
+                LocalError::ResourceLimit("Prepared FIND_IN_SET key count overflow".into())
+            })?;
+        let length = u64::try_from(key.len()).map_err(|_| {
+            LocalError::ResourceLimit("Prepared FIND_IN_SET key length overflow".into())
+        })?;
+        let additional = 8_usize.checked_add(key.len()).ok_or_else(|| {
+            LocalError::ResourceLimit("Prepared FIND_IN_SET encoded size overflow".into())
+        })?;
+        reserve_find_in_set_encoding(&mut encoded, additional, max_encoded_bytes)?;
+        encoded.extend_from_slice(&length.to_le_bytes());
+        encoded.extend_from_slice(&key);
+    }
+    encoded[..8].copy_from_slice(&count.to_le_bytes());
+    Ok(PreparedFindInSetKeys {
+        encoded: Some(Arc::new(encoded)),
+    })
+}
+
+fn reserve_find_in_set_encoding(
+    encoded: &mut Vec<u8>,
+    additional: usize,
+    max_encoded_bytes: usize,
+) -> LocalResult<()> {
+    let length = encoded.len().checked_add(additional).ok_or_else(|| {
+        LocalError::ResourceLimit("Prepared FIND_IN_SET encoded size overflow".into())
+    })?;
+    if length > max_encoded_bytes {
+        return Err(LocalError::ResourceLimit(
+            "Prepared FIND_IN_SET encoded byte cap exceeded".into(),
+        ));
+    }
+    encoded.try_reserve_exact(additional).map_err(|error| {
+        LocalError::ResourceLimit(format!("Prepared FIND_IN_SET allocation: {}", error))
+    })
+}
+
+// Closed physical protocol: LE-u64 count, then count repetitions of
+// LE-u64 key length and the original key bytes. No trailing bytes are allowed.
+struct PreparedFindInSetKeyIter<'a> {
+    encoded: &'a [u8],
+    remaining: usize,
+    offset: usize,
+    finished: bool,
+}
+
+impl<'a> PreparedFindInSetKeyIter<'a> {
+    fn new(encoded: &'a [u8]) -> Result<Self> {
+        let mut offset = 0;
+        let count = read_find_in_set_word(encoded, &mut offset)?;
+        if count > Int::MAX as u64 {
+            return Err(other_err!(
+                "Prepared FIND_IN_SET key count exceeds signed Int"
+            ));
+        }
+        let remaining = usize::try_from(count)
+            .map_err(|_| other_err!("Prepared FIND_IN_SET key count exceeds usize"))?;
+        let bytes_left = encoded
+            .len()
+            .checked_sub(offset)
+            .ok_or_else(|| other_err!("Invalid prepared FIND_IN_SET header"))?;
+        if remaining > bytes_left / 8 {
+            return Err(other_err!("Truncated prepared FIND_IN_SET key headers"));
+        }
+        Ok(Self {
+            encoded,
+            remaining,
+            offset,
+            finished: false,
+        })
+    }
+
+    fn read_key(&mut self) -> Result<&'a [u8]> {
+        let length = read_find_in_set_word(self.encoded, &mut self.offset)?;
+        let length = usize::try_from(length)
+            .map_err(|_| other_err!("Prepared FIND_IN_SET key length exceeds usize"))?;
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or_else(|| other_err!("Prepared FIND_IN_SET key offset overflow"))?;
+        let key = self
+            .encoded
+            .get(self.offset..end)
+            .ok_or_else(|| other_err!("Truncated prepared FIND_IN_SET key"))?;
+        self.offset = end;
+        Ok(key)
+    }
+}
+
+impl<'a> Iterator for PreparedFindInSetKeyIter<'a> {
+    type Item = Result<&'a [u8]>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        if self.remaining == 0 {
+            self.finished = true;
+            return (self.offset != self.encoded.len())
+                .then(|| Err(other_err!("Trailing bytes in prepared FIND_IN_SET keys")));
+        }
+        self.remaining -= 1;
+        let key = self.read_key();
+        if key.is_err() {
+            self.finished = true;
+        }
+        Some(key)
+    }
+}
+
+fn read_find_in_set_word(encoded: &[u8], offset: &mut usize) -> Result<u64> {
+    let end = (*offset)
+        .checked_add(8)
+        .ok_or_else(|| other_err!("Prepared FIND_IN_SET header offset overflow"))?;
+    let bytes = encoded
+        .get(*offset..end)
+        .ok_or_else(|| other_err!("Truncated prepared FIND_IN_SET header"))?;
+    let bytes = <[u8; 8]>::try_from(bytes)
+        .map_err(|_| other_err!("Invalid prepared FIND_IN_SET header width"))?;
+    *offset = end;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+pub(crate) fn prepared_find_in_set_keys_match(encoded: Option<&[u8]>) -> bool {
+    match encoded {
+        None => true,
+        Some(encoded) => PreparedFindInSetKeyIter::new(encoded)
+            .and_then(|mut keys| keys.try_for_each(|key| key.map(|_| ())))
+            .is_ok(),
+    }
 }
 
 #[rpn_fn(writer)]

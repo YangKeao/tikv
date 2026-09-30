@@ -309,6 +309,7 @@ fn evaluated_ready_args_match(
     values: &[ScalarValue],
     role: EvaluatedArgsRole,
 ) -> bool {
+    use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
         (EvaluatedBytesOp::PiRaw, EvaluatedArgsRole::NoArgs) => {
@@ -321,7 +322,15 @@ fn evaluated_ready_args_match(
         (_, EvaluatedArgsRole::Values) if operation.is_insert() => {
             types.len() == 4 && operation.call_count() == 1
         }
-        _ => !operation.is_pad_native() && !operation.is_insert() && (1..=3).contains(&types.len()),
+        (_, EvaluatedArgsRole::NativeSearch) if operation.is_locate3_native() => {
+            types.len() == 4 && operation.call_count() == 1
+        }
+        _ => {
+            !operation.is_pad_native()
+                && !operation.is_insert()
+                && !operation.is_locate3_native()
+                && (1..=3).contains(&types.len())
+        }
     };
     operation.input_role() == role
         && arity_matches
@@ -341,6 +350,27 @@ fn evaluated_ready_args_match(
             EvaluatedArgsRole::NoArgs => values.is_empty(),
             EvaluatedArgsRole::Values => true,
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
+            EvaluatedArgsRole::CollatedBytes2 => {
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::StrcmpNative | EvaluatedBytesOp::FindInSetNative
+                ) && matches!(values.last(), Some(ScalarValue::Int(Some(tag)))
+                        if NativeCollation::from_tag(*tag).is_some())
+            }
+            EvaluatedArgsRole::NativeSearch => {
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::Locate2Native | EvaluatedBytesOp::Locate3Native
+                ) && matches!(values.last(), Some(ScalarValue::Int(Some(tag)))
+                        if crate::local::NativeSearchPolicy::from_tag(*tag).is_some())
+            }
+            EvaluatedArgsRole::FindInSetPrepared => {
+                operation == EvaluatedBytesOp::FindInSetPreparedNative
+                    && matches!(values.last(), Some(ScalarValue::Int(Some(tag)))
+                        if NativeCollation::from_tag(*tag).is_some())
+                    && matches!(values.get(1), Some(ScalarValue::Bytes(keys))
+                        if crate::impl_string::prepared_find_in_set_keys_match(keys.as_deref()))
+            }
             EvaluatedArgsRole::SubstringNative => operation.is_substring_native(),
             EvaluatedArgsRole::SubstringLegacy => {
                 operation.is_substring_legacy()
@@ -519,7 +549,15 @@ pub(crate) fn evaluated_bytes_shape(
         (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
         (_, EvaluatedArgsRole::Values) if operation.is_insert() => arity == 4 && calls == 1,
-        _ => !operation.is_pad_native() && !operation.is_insert() && (1..=3).contains(&arity),
+        (_, EvaluatedArgsRole::NativeSearch) if operation.is_locate3_native() => {
+            arity == 4 && calls == 1
+        }
+        _ => {
+            !operation.is_pad_native()
+                && !operation.is_insert()
+                && !operation.is_locate3_native()
+                && (1..=3).contains(&arity)
+        }
     };
     if !arity_matches
         || !(1..=2).contains(&calls)
@@ -3170,7 +3208,7 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..32 {
+        for mismatch in 0..44 {
             let operation = match mismatch {
                 3 | 5 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
@@ -3189,10 +3227,16 @@ mod tests {
                 26 => EvaluatedBytesOp::Substring2BytesNative,
                 28 | 30 => EvaluatedBytesOp::Substring2BytesLegacy,
                 31 => EvaluatedBytesOp::Substring3Utf8Legacy,
+                32 | 38 => EvaluatedBytesOp::StrcmpNative,
+                33 | 35 => EvaluatedBytesOp::Locate3BytesExtNative,
+                34 => EvaluatedBytesOp::Locate3Native,
+                36 | 40..=43 => EvaluatedBytesOp::FindInSetPreparedNative,
+                37 => EvaluatedBytesOp::FindInSetNative,
+                39 => EvaluatedBytesOp::Locate2Native,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
-                0 | 6 | 8 | 13 | 15 | 16 | 22 | 26 | 28 => EvaluatedArgsRole::Values,
+                0 | 6 | 8 | 13 | 15 | 16 | 22 | 26 | 28 | 32 | 34 => EvaluatedArgsRole::Values,
                 4 | 5 => EvaluatedArgsRole::NoArgs,
                 9..=12 | 17 => EvaluatedArgsRole::Packet,
                 14 => EvaluatedArgsRole::ReadyBytesInt,
@@ -3201,6 +3245,9 @@ mod tests {
                 23..=25 => EvaluatedArgsRole::Ieee754Bits2,
                 27 => EvaluatedArgsRole::SubstringNative,
                 29..=31 => EvaluatedArgsRole::SubstringLegacy,
+                33 | 36 | 38 => EvaluatedArgsRole::CollatedBytes2,
+                35 | 39 => EvaluatedArgsRole::NativeSearch,
+                37 | 40..=43 => EvaluatedArgsRole::FindInSetPrepared,
                 _ => EvaluatedArgsRole::Ieee754Bits,
             };
             let schema: Vec<_> = (0..operation.input_types().len())
@@ -3235,7 +3282,12 @@ mod tests {
             } else if mismatch == 10 {
                 ready[1] = ScalarValue::Int(Some(2));
             }
-            if matches!(mismatch, 13 | 14 | 16..=31) {
+            if operation == EvaluatedBytesOp::FindInSetPreparedNative
+                || role == EvaluatedArgsRole::FindInSetPrepared
+            {
+                ready[1] = ScalarValue::Bytes(Some(0u64.to_le_bytes().to_vec()));
+            }
+            if matches!(mismatch, 13 | 14 | 16..=43) {
                 assert!(evaluated_ready_args_match(
                     operation,
                     &ready,
@@ -3254,6 +3306,20 @@ mod tests {
                 ready[1] = ScalarValue::Bytes(Some(Vec::new()));
             } else if mismatch == 31 {
                 ready[2] = ScalarValue::Bytes(Some(vec![0; 15]));
+            } else if mismatch == 38 {
+                ready[2] = ScalarValue::Int(Some(16));
+            } else if mismatch == 39 {
+                ready[2] = ScalarValue::Int(Some(17));
+            } else if mismatch == 40 {
+                ready[2] = ScalarValue::Int(None);
+            } else if mismatch == 41 {
+                ready[1] = ScalarValue::Bytes(Some(Vec::new()));
+            } else if mismatch == 42 {
+                ready[1] = ScalarValue::Bytes(Some(1u64.to_le_bytes().to_vec()));
+            } else if mismatch == 43 {
+                let mut keys = 0u64.to_le_bytes().to_vec();
+                keys.push(0);
+                ready[1] = ScalarValue::Bytes(Some(keys));
             }
             if mismatch == 15 {
                 let input = EvalInput::ReadyBytes {

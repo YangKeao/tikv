@@ -133,7 +133,15 @@ fn check_evaluated_bytes_source(
         (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
         (_, EvaluatedArgsRole::Values) if operation.is_insert() => arity == 4 && calls == 1,
-        _ => !operation.is_pad_native() && !operation.is_insert() && (1..=3).contains(&arity),
+        (_, EvaluatedArgsRole::NativeSearch) if operation.is_locate3_native() => {
+            arity == 4 && calls == 1
+        }
+        _ => {
+            !operation.is_pad_native()
+                && !operation.is_insert()
+                && !operation.is_locate3_native()
+                && (1..=3).contains(&arity)
+        }
     };
     if !arity_matches
         || !(1..=2).contains(&calls)
@@ -1586,6 +1594,13 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::Substring3BytesLegacy,
             EvaluatedBytesOp::Substring2Utf8Legacy,
             EvaluatedBytesOp::Substring3Utf8Legacy,
+            EvaluatedBytesOp::StrcmpNative,
+            EvaluatedBytesOp::Locate2Native,
+            EvaluatedBytesOp::Locate3Native,
+            EvaluatedBytesOp::Locate3BytesExtNative,
+            EvaluatedBytesOp::Locate3Utf8ExtNative,
+            EvaluatedBytesOp::FindInSetNative,
+            EvaluatedBytesOp::FindInSetPreparedNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
@@ -1618,8 +1633,9 @@ mod evaluated_ascii_compile_tests {
                     .unwrap();
             }
             assert!(operation.call_operation(calls).is_none());
-            // Four inputs remain closed to four pad and two insert operations.
-            if operation.is_pad_native() || operation.is_insert() {
+            // Four inputs remain closed to four pad, two insert, and Locate3Native
+            // operations.
+            if operation.is_pad_native() || operation.is_insert() || operation.is_locate3_native() {
                 assert_eq!(arity, 4);
                 assert_eq!(calls, 1);
                 assert!(matches!(

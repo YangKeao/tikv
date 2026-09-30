@@ -123,8 +123,9 @@
 //! retained. The private path is quiet; wire retains short-input warning 1259.
 //! Insert and InsertUtf8Native also admit four columns/five nodes, using
 //! ordinary BytesIntIntBytes with real position and length Int values. Along
-//! with the four PAD recipes, these are the entire four-column whitelist. The
-//! binary Insert uses the existing wire signature; native UTF8 maps true
+//! with the four PAD recipes and Locate3Native, these are the entire
+//! four-column whitelist. The binary Insert uses the existing wire signature;
+//! native UTF8 maps true
 //! character boundaries and accepts raw replacement bytes. All share one byte
 //! splice; wire UTF8 keeps strict decoding of both strings and its old
 //! character-index as byte-offset bug. INSERT packet checks belong after a
@@ -161,13 +162,15 @@ mod spec;
 #[cfg(test)]
 mod tests;
 
+pub use tidb_query_datatype::codec::collation::native::NativeCollation;
+
 pub use self::{
     batch::{
         ComputedBytes, ComputedBytesMetadata, ComputedIeee754Bits, ComputedIeee754BitsMetadata,
         ComputedInt, ComputedIntMetadata, ComputedValue, EvaluatedArgs, EvaluatedAsciiWorker,
-        EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState, OutputDisposition,
-        ReadyBytesArg, ReadyIeee754Arg, ReadyIntArg, ReadySubstringI128, WorkerStorage,
-        prepare_evaluated_ascii, prepare_evaluated_bytes,
+        EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState, NativeSearchPolicy,
+        OutputDisposition, ReadyBytesArg, ReadyIeee754Arg, ReadyIntArg, ReadySubstringI128,
+        WorkerStorage, prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,
@@ -196,5 +199,6 @@ pub(crate) use self::{
 };
 pub use crate::{
     CallMetadata, FunctionRef, LiteralKind, LocalFunctionId,
-    impl_string::legacy_substring_needs_len, types::function::PreparedOrdinaryCall,
+    impl_string::{PreparedFindInSetKeys, legacy_substring_needs_len, prepare_find_in_set_keys},
+    types::function::PreparedOrdinaryCall,
 };
