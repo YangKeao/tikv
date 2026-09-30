@@ -231,6 +231,10 @@ short-circuit admission policy described above.
   NULL IS NOT TRUE/FALSE requires base+UnaryNot, not substituting the opposite IS
   test. Both official wrappers really execute, so the dispatch counter is two.
   Structural factory prewarming still executes no kernel.
+  MD5 and SHA1 use the existing official nullable Bytes-to-Bytes kernels, including
+  their lowercase hex output and OpenSSL errors. Native text conversion/packing is
+  outside the kernel; no retry or second digest implementation is provided here.
+  SHA2 and warning-producing compression operations are not admitted by this step.
 - These closed context-free kernels permit one private UTC/default/zero-detail
   context per created worker. No session/native context or callback is accepted.
   Fixed metadata caches are prewarmed before publication without executing a fake

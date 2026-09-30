@@ -2921,6 +2921,7 @@ mod tests {
                 EvaluatedBytesOp::CharLengthUtf8,
             ),
             (EvaluatedBytesOp::Quote, EvaluatedBytesOp::UnHex),
+            (EvaluatedBytesOp::Md5, EvaluatedBytesOp::Sha1),
         ] {
             // Isolate each guard: neither a matching carrier nor a matching
             // display name grants admission for a different kernel or metadata.

@@ -1480,6 +1480,8 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::IsNotNull,
             EvaluatedBytesOp::IsNotTrue,
             EvaluatedBytesOp::IsNotFalse,
+            EvaluatedBytesOp::Md5,
+            EvaluatedBytesOp::Sha1,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

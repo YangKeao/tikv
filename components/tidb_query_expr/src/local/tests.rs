@@ -1270,3 +1270,62 @@ fn local_evaluated_args_composite_truth_predicates_require_depth_three() {
         assert_eq!(worker.kernel_invocations(), 0);
     }
 }
+
+#[test]
+fn local_evaluated_bytes_digests_preserve_raw_bytes_and_nulls() {
+    let cases: &[(Option<&[u8]>, [Option<&[u8]>; 2])] = &[
+        (None, [None, None]),
+        (
+            Some(b""),
+            [
+                Some(b"d41d8cd98f00b204e9800998ecf8427e"),
+                Some(b"da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+            ],
+        ),
+        (
+            Some(b"abc"),
+            [
+                Some(b"900150983cd24fb0d6963f7d28e17f72"),
+                Some(b"a9993e364706816aba3e25717850c26c9cd0d89d"),
+            ],
+        ),
+        (
+            Some(b"\xc0\x80"),
+            [
+                Some(b"b26555f33aedac7b2684438cc5d4d05e"),
+                Some(b"8bf4822782a21d7ac68ece130ac36987548003bd"),
+            ],
+        ),
+    ];
+    for (column, operation) in [EvaluatedBytesOp::Md5, EvaluatedBytesOp::Sha1]
+        .into_iter()
+        .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Bytes(value) =
+                worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+            else {
+                panic!("digest operation returned Int");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                value.into_option(),
+                expected[column].map(|bytes| bytes.to_vec())
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

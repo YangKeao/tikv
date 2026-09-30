@@ -735,8 +735,9 @@ impl LocalNumericBatchProgram {
 }
 
 /// Closed operations over already-evaluated nullable Int/Bytes arguments.
-/// LENGTH and OCTET_LENGTH share Length; no arbitrary signature or SQL
-/// descriptor is accepted. UTF8 variants require the caller's normalized UTF8;
+/// LENGTH/OCTET_LENGTH share Length and SHA/SHA1 share Sha1; no arbitrary
+/// signature or SQL descriptor is accepted. Hashes consume raw ready Bytes.
+/// UTF8 variants require the caller's normalized UTF8;
 /// this boundary never chooses a SQL charset or performs lossy conversion.
 /// Quote uses its official nullable kernel: a NULL input yields non-NULL
 /// "NULL". Boolean operations take frontend-normalized Int truth/presence
@@ -780,6 +781,8 @@ pub enum EvaluatedBytesOp {
     IsNotNull,
     IsNotTrue,
     IsNotFalse,
+    Md5,
+    Sha1,
 }
 
 impl EvaluatedBytesOp {
@@ -820,6 +823,8 @@ impl EvaluatedBytesOp {
             Self::IsTrue => ScalarFuncSig::IntIsTrue,
             Self::IsFalse => ScalarFuncSig::IntIsFalse,
             Self::IsTrueWithNull => ScalarFuncSig::IntIsTrueWithNull,
+            Self::Md5 => ScalarFuncSig::Md5,
+            Self::Sha1 => ScalarFuncSig::Sha1,
         }
     }
 
@@ -865,6 +870,8 @@ impl EvaluatedBytesOp {
             Self::IsTrueWithNull => {
                 crate::impl_op::int_is_true_fn_meta::<crate::impl_op::KeepNullOn>()
             }
+            Self::Md5 => crate::impl_encryption::md5_fn_meta(),
+            Self::Sha1 => crate::impl_encryption::sha1_fn_meta(),
         }
     }
 
@@ -904,7 +911,9 @@ impl EvaluatedBytesOp {
             | Self::LeftUtf8
             | Self::Right
             | Self::RightUtf8
-            | Self::Replace => EvalType::Bytes,
+            | Self::Replace
+            | Self::Md5
+            | Self::Sha1 => EvalType::Bytes,
         }
     }
 
@@ -949,7 +958,9 @@ impl EvaluatedBytesOp {
             | Self::CharLength
             | Self::CharLengthUtf8
             | Self::Quote
-            | Self::HexStr => &[EvalType::Bytes],
+            | Self::HexStr
+            | Self::Md5
+            | Self::Sha1 => &[EvalType::Bytes],
         }
     }
 
