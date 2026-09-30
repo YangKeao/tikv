@@ -545,3 +545,157 @@ fn local_evaluated_bytes_output_outlives_worker() {
         assert_eq!(second.into_option(), Some(second_expected.to_vec()));
     }
 }
+
+#[test]
+fn local_evaluated_bytes_crc32_preserves_unsigned_bits() {
+    let cases: &[(Option<&[u8]>, Option<i64>)] = &[
+        (None, None),
+        (Some(b""), Some(0)),
+        (Some(b"123456789"), Some(0xcbf4_3926)),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::Crc32,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::Crc32);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(input, expected)) in cases.iter().enumerate() {
+        let ComputedValue::Int(value) = worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+        else {
+            panic!("CRC32 returned Bytes");
+        };
+        assert_eq!(value.value(), expected);
+        if input == Some(b"123456789".as_slice()) {
+            assert!(value.value().unwrap() > i64::from(i32::MAX));
+        }
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_reverse_respects_units() {
+    let binary_cases: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(b""), Some(b"")),
+        (Some("aé🦀".as_bytes()), Some(b"\x80\xa6\x9f\xf0\xa9\xc3a")),
+        (Some(b"\xff\0a"), Some(b"a\0\xff")),
+    ];
+    let utf8_cases: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        (None, None),
+        (Some(b""), Some(b"")),
+        (Some("aé🦀".as_bytes()), Some("🦀éa".as_bytes())),
+        (Some("a\u{fffd}".as_bytes()), Some("\u{fffd}a".as_bytes())),
+    ];
+    for (operation, cases) in [
+        (EvaluatedBytesOp::Reverse, binary_cases),
+        (EvaluatedBytesOp::ReverseUtf8, utf8_cases),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Bytes(value) =
+                worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+            else {
+                panic!("REVERSE returned Int");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_char_length_respects_units() {
+    let cases: &[(Option<&[u8]>, [Option<i64>; 2])] = &[
+        (None, [None, None]),
+        (Some(b""), [Some(0), Some(0)]),
+        (Some("aé🦀".as_bytes()), [Some(7), Some(3)]),
+        (Some("a\u{fffd}".as_bytes()), [Some(4), Some(2)]),
+    ];
+    for (column, operation) in [
+        EvaluatedBytesOp::CharLength,
+        EvaluatedBytesOp::CharLengthUtf8,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for (index, &(input, expected)) in cases.iter().enumerate() {
+            let ComputedValue::Int(value) =
+                worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+            else {
+                panic!("CHAR_LENGTH returned Bytes");
+            };
+            assert_eq!(value.value(), expected[column]);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected[column]);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_bytes_quote_preserves_raw_bytes_and_null_text() {
+    let cases: &[(Option<&[u8]>, &[u8])] = &[
+        (None, b"NULL"),
+        (Some(b""), b"''"),
+        (Some(b"'"), b"'\\''"),
+        (Some(b"\\"), b"'\\\\'"),
+        (Some(b"\0\x1a"), b"'\\0\\Z'"),
+        (Some(b"\xff"), b"'\xff'"),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::Quote,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::Quote);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, &(input, expected)) in cases.iter().enumerate() {
+        let ComputedValue::Bytes(value) =
+            worker.eval_one(input.map(|bytes| bytes.to_vec())).unwrap()
+        else {
+            panic!("QUOTE returned Int");
+        };
+        assert_eq!(value.value(), Some(expected));
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), Some(expected.to_vec()));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}

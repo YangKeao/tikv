@@ -736,7 +736,10 @@ impl LocalNumericBatchProgram {
 
 /// Closed unary operations over already-evaluated nullable Bytes. LENGTH and
 /// OCTET_LENGTH share Length; no arbitrary signature or SQL descriptor is
-/// accepted.
+/// accepted. UTF8 variants require the caller's already-normalized UTF8 bytes;
+/// this boundary never chooses a SQL charset or performs lossy conversion.
+/// Quote uses its official nullable kernel: a NULL input yields non-NULL
+/// "NULL".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EvaluatedBytesOp {
     Ascii,
@@ -745,6 +748,12 @@ pub enum EvaluatedBytesOp {
     LTrim,
     RTrim,
     UnHex,
+    Crc32,
+    Reverse,
+    ReverseUtf8,
+    CharLength,
+    CharLengthUtf8,
+    Quote,
 }
 
 impl EvaluatedBytesOp {
@@ -757,6 +766,12 @@ impl EvaluatedBytesOp {
             Self::LTrim => ScalarFuncSig::LTrim,
             Self::RTrim => ScalarFuncSig::RTrim,
             Self::UnHex => ScalarFuncSig::UnHex,
+            Self::Crc32 => ScalarFuncSig::Crc32,
+            Self::Reverse => ScalarFuncSig::Reverse,
+            Self::ReverseUtf8 => ScalarFuncSig::ReverseUtf8,
+            Self::CharLength => ScalarFuncSig::CharLength,
+            Self::CharLengthUtf8 => ScalarFuncSig::CharLengthUtf8,
+            Self::Quote => ScalarFuncSig::Quote,
         }
     }
 
@@ -770,13 +785,29 @@ impl EvaluatedBytesOp {
             Self::LTrim => crate::impl_string::ltrim_fn_meta(),
             Self::RTrim => crate::impl_string::rtrim_fn_meta(),
             Self::UnHex => crate::impl_string::unhex_fn_meta(),
+            Self::Crc32 => crate::impl_math::crc32_fn_meta(),
+            Self::Reverse => crate::impl_string::reverse_fn_meta(),
+            Self::ReverseUtf8 => crate::impl_string::reverse_utf8_fn_meta(),
+            Self::CharLength => crate::impl_string::char_length_fn_meta(),
+            Self::CharLengthUtf8 => crate::impl_string::char_length_utf8_fn_meta(),
+            Self::Quote => crate::impl_string::quote_fn_meta(),
         }
     }
 
-    fn eval_type(self) -> EvalType {
+    pub(crate) fn eval_type(self) -> EvalType {
         match self {
-            Self::Ascii | Self::Length | Self::BitLength => EvalType::Int,
-            Self::LTrim | Self::RTrim | Self::UnHex => EvalType::Bytes,
+            Self::Ascii
+            | Self::Length
+            | Self::BitLength
+            | Self::Crc32
+            | Self::CharLength
+            | Self::CharLengthUtf8 => EvalType::Int,
+            Self::LTrim
+            | Self::RTrim
+            | Self::UnHex
+            | Self::Reverse
+            | Self::ReverseUtf8
+            | Self::Quote => EvalType::Bytes,
         }
     }
 
@@ -986,9 +1017,10 @@ impl std::fmt::Debug for EvaluatedBytesWorker {
 /// Prepare one fixed operation after the frontend has produced a demanded ready
 /// value, under the caller's creating-worker reservation. No kernel is
 /// evaluated (not even a fake NULL), and no native descriptor or SQL context is
-/// retained. All six official kernels are context-free on ready Bytes; the
-/// private UTC context disables warning storage and still checks that no
-/// warning was raised.
+/// retained. The admitted official kernels are context-free on ready Bytes;
+/// the private UTC context disables warning storage and still checks that no
+/// warning was raised. Prewarming inspects structure, never a fabricated input
+/// or an assumption that NULL input must produce NULL output.
 pub fn prepare_evaluated_bytes(
     operation: EvaluatedBytesOp,
     cx: LocalCompileContext,

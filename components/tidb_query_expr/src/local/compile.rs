@@ -1370,6 +1370,12 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::LTrim,
             EvaluatedBytesOp::RTrim,
             EvaluatedBytesOp::UnHex,
+            EvaluatedBytesOp::Crc32,
+            EvaluatedBytesOp::Reverse,
+            EvaluatedBytesOp::ReverseUtf8,
+            EvaluatedBytesOp::CharLength,
+            EvaluatedBytesOp::CharLengthUtf8,
+            EvaluatedBytesOp::Quote,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

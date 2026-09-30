@@ -26,15 +26,19 @@
 //! or authenticate native source/consumer origin.
 //! `prepare_evaluated_bytes` separately prepares an opaque reusable worker for
 //! one closed unary operation on already-normalized nullable Bytes: ASCII,
-//! LENGTH/OCTET_LENGTH, BIT_LENGTH, LTRIM, RTRIM or UNHEX. The fixed two-node
-//! recipe uses its official nullable wrapper even for ready NULL and returns an
-//! owned computed Int/Bytes carrier. `prepare_evaluated_ascii` retains the old
-//! ASCII-only API as a thin facade over this same compiler/worker/driver.
-//! No native child, binding-service or Host callback, arbitrary signature,
-//! original SQL/PB schema, or raw-program escape is exposed. The sealed pure
-//! context and actual wrapper-dispatch witness persist per worker, not per row;
-//! caller coercion, charset/return metadata, diagnostics and execution-owner
-//! lifetime remain outside this boundary. Wrapper counts are not body counts.
+//! LENGTH/OCTET_LENGTH, BIT_LENGTH, LTRIM, RTRIM, UNHEX, CRC32, REVERSE,
+//! CHAR_LENGTH or QUOTE, with separate byte/UTF8 variants where required. The
+//! fixed two-node recipe dispatches its official wrapper even for ready NULL;
+//! QUOTE(NULL) returns owned non-NULL bytes "NULL". Result carriers remain
+//! owned Int/Bytes, not native SQL descriptors. Frontends retain text
+//! normalization, signature selection and CRC32's unsigned packing.
+//! `prepare_evaluated_ascii` keeps the old ASCII-only API over the same
+//! compiler/worker/driver. No native child, binding-service or Host callback,
+//! arbitrary signature, original SQL/PB schema, or raw-program escape is
+//! exposed. The sealed pure context and actual wrapper-dispatch witness persist
+//! per worker, not per row; caller coercion, charset/return metadata,
+//! diagnostics and execution-owner lifetime remain outside this boundary.
+//! Wrapper counts are not body counts.
 
 mod batch;
 mod compile;

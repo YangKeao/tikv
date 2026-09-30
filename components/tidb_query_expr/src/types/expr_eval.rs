@@ -604,13 +604,14 @@ impl<'a> ProgramFrame<'a> {
         } else if let Some(operation) = execution.evaluated_bytes_operation() {
             match node {
                 RpnExpressionNode::ColumnRef { offset: 0 } => 0,
-                RpnExpressionNode::FnCall { .. } => match operation {
-                    EvaluatedBytesOp::Ascii
-                    | EvaluatedBytesOp::Length
-                    | EvaluatedBytesOp::BitLength => int_min_storage_bytes(1).unwrap_or(usize::MAX),
-                    EvaluatedBytesOp::LTrim | EvaluatedBytesOp::RTrim | EvaluatedBytesOp::UnHex => {
+                RpnExpressionNode::FnCall { .. } => match operation.eval_type() {
+                    tidb_query_datatype::EvalType::Int => {
+                        int_min_storage_bytes(1).unwrap_or(usize::MAX)
+                    }
+                    tidb_query_datatype::EvalType::Bytes => {
                         bytes_min_storage_bytes(1, 0).unwrap_or(usize::MAX)
                     }
+                    _ => unreachable!("the closed ready-Bytes result is Int or Bytes"),
                 },
                 _ => usize::MAX, // the complete fixed shape was checked first.
             }
@@ -2786,6 +2787,13 @@ mod tests {
         for (operation, other) in [
             (EvaluatedBytesOp::Length, EvaluatedBytesOp::BitLength),
             (EvaluatedBytesOp::LTrim, EvaluatedBytesOp::RTrim),
+            (EvaluatedBytesOp::Crc32, EvaluatedBytesOp::Length),
+            (EvaluatedBytesOp::Reverse, EvaluatedBytesOp::ReverseUtf8),
+            (
+                EvaluatedBytesOp::CharLength,
+                EvaluatedBytesOp::CharLengthUtf8,
+            ),
+            (EvaluatedBytesOp::Quote, EvaluatedBytesOp::UnHex),
         ] {
             // Isolate each guard: neither a matching carrier nor a matching
             // display name grants admission for a different kernel or metadata.
