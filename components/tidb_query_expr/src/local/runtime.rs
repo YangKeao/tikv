@@ -3,7 +3,7 @@
 use std::{alloc::Layout, mem};
 
 use tidb_query_datatype::{
-    codec::data_type::{ChunkRef, ChunkedVec, ChunkedVecSized, Int, VectorValue},
+    codec::data_type::{ChunkRef, ChunkedVec, ChunkedVecSized, Decimal, Int, VectorValue},
     expr::EvalContext,
 };
 use tipb::FieldType;
@@ -102,6 +102,7 @@ pub(crate) fn vector_storage_bytes(value: &VectorValue, mode: StorageMode) -> us
         StorageMode::ExactRetained => match value {
             VectorValue::Int(values) => int_vector_storage_bytes(values),
             VectorValue::Bytes(values) => values.retained_heap_bytes(),
+            VectorValue::Decimal(values) => decimal_vector_storage_bytes(values),
             _ => None,
         }
         .unwrap_or(usize::MAX),
@@ -116,6 +117,15 @@ pub(crate) fn int_vector_storage_bytes(values: &ChunkedVecSized<Int>) -> Option<
         .capacity()
         .checked_mul(mem::size_of::<Int>())?
         .checked_add(values.get_bit_vec().retained_heap_bytes()?)
+}
+
+/// Includes every initialized Decimal's spill, even behind a NULL bitmap bit.
+pub(crate) fn decimal_vector_storage_bytes(values: &ChunkedVecSized<Decimal>) -> Option<usize> {
+    values
+        .capacity()
+        .checked_mul(mem::size_of::<Decimal>())?
+        .checked_add(values.get_bit_vec().retained_heap_bytes()?)?
+        .checked_add(values.checked_decimal_spill_bytes()?)
 }
 
 fn minimum_array_bytes<T>(elements: usize) -> Option<usize> {
@@ -135,6 +145,11 @@ fn bitmap_min_storage_bytes(rows: usize) -> Option<usize> {
 /// reserving.
 pub(crate) fn int_min_storage_bytes(rows: usize) -> Option<usize> {
     minimum_array_bytes::<Int>(rows)?.checked_add(bitmap_min_storage_bytes(rows)?)
+}
+
+/// Minimum Decimal cell/bitmap layout only; live spills are charged separately.
+pub(crate) fn decimal_min_storage_bytes(rows: usize) -> Option<usize> {
+    minimum_array_bytes::<Decimal>(rows)?.checked_add(bitmap_min_storage_bytes(rows)?)
 }
 
 /// Minimum data/offset/bitmap layout, including the empty vector's zero offset.
@@ -295,6 +310,37 @@ mod tests {
     use tidb_query_datatype::{EvalType, codec::data_type::ChunkedVecBytes};
 
     use super::*;
+
+    #[test]
+    fn test_decimal_exact_storage_includes_owned_spill() {
+        let decimal = Decimal::try_from_native_digits(false, &[b'7'; 90], 0, 0, 1024).unwrap();
+        let spill = decimal.spill_capacity_bytes();
+        assert!(spill > 0);
+        let mut values = ChunkedVecSized::<Decimal>::with_capacity(3);
+        values.push(Some(decimal));
+        values.push(None);
+        let cells_and_bitmap = values.capacity() * mem::size_of::<Decimal>()
+            + values.get_bit_vec().retained_heap_bytes().unwrap();
+        assert_eq!(
+            decimal_vector_storage_bytes(&values),
+            Some(cells_and_bitmap + spill)
+        );
+        let value = VectorValue::Decimal(values);
+        assert_eq!(
+            vector_storage_bytes(&value, StorageMode::ExactRetained),
+            cells_and_bitmap + spill
+        );
+        assert_eq!(
+            vector_storage_bytes(&value, StorageMode::ConservativeInt),
+            int_storage_bytes(value.capacity())
+        );
+        assert_eq!(decimal_min_storage_bytes(0), Some(0));
+        assert_eq!(
+            decimal_min_storage_bytes(1),
+            Some(mem::size_of::<Decimal>() + mem::size_of::<u64>())
+        );
+        assert_eq!(decimal_min_storage_bytes(usize::MAX), None);
+    }
 
     #[test]
     fn test_storage_modes_preserve_conservative_and_measure_lineage() {

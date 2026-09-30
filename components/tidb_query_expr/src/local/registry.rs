@@ -128,7 +128,30 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::FieldIntNative
         | LocalFunctionId::FieldRealNative
         | LocalFunctionId::MakeSetNative
-        | LocalFunctionId::ExportSetNative => Err(other_err!(
+        | LocalFunctionId::ExportSetNative
+        | LocalFunctionId::AbsIntNative
+        | LocalFunctionId::AbsUIntNative
+        | LocalFunctionId::AbsRealNative
+        | LocalFunctionId::AbsDecimalNative
+        | LocalFunctionId::CeilIntNative
+        | LocalFunctionId::FloorIntNative
+        | LocalFunctionId::CeilRealNative
+        | LocalFunctionId::FloorRealNative
+        | LocalFunctionId::CeilDecimalNative
+        | LocalFunctionId::FloorDecimalNative
+        | LocalFunctionId::RoundIntNative
+        | LocalFunctionId::RoundIntWithScaleNative
+        | LocalFunctionId::RoundRealNative
+        | LocalFunctionId::RoundDecimalNative
+        | LocalFunctionId::TruncateIntNative
+        | LocalFunctionId::TruncateUIntNative
+        | LocalFunctionId::TruncateIntUnsignedScaleNative
+        | LocalFunctionId::TruncateRealNative
+        | LocalFunctionId::TruncateDecimalNative
+        | LocalFunctionId::RoundInt128Legacy
+        | LocalFunctionId::RoundRealLegacy
+        | LocalFunctionId::RoundDecimalLegacy
+        | LocalFunctionId::MathNullWitnessNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

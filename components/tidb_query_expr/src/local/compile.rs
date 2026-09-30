@@ -87,6 +87,10 @@ pub(super) fn evaluated_ascii_int_type() -> FieldType {
     FieldType::from(tidb_query_datatype::FieldTypeTp::LongLong)
 }
 
+pub(crate) fn evaluated_ascii_decimal_type() -> FieldType {
+    FieldType::from(tidb_query_datatype::FieldTypeTp::NewDecimal)
+}
+
 fn invalid(error: tidb_query_common::Error) -> LocalError {
     LocalError::InvalidSpec(error.to_string())
 }
@@ -1611,6 +1615,29 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::FieldRealNative,
             EvaluatedBytesOp::MakeSetNative,
             EvaluatedBytesOp::ExportSetNative,
+            EvaluatedBytesOp::AbsIntNative,
+            EvaluatedBytesOp::AbsUIntNative,
+            EvaluatedBytesOp::AbsRealNative,
+            EvaluatedBytesOp::AbsDecimalNative,
+            EvaluatedBytesOp::CeilIntNative,
+            EvaluatedBytesOp::FloorIntNative,
+            EvaluatedBytesOp::CeilRealNative,
+            EvaluatedBytesOp::FloorRealNative,
+            EvaluatedBytesOp::CeilDecimalNative,
+            EvaluatedBytesOp::FloorDecimalNative,
+            EvaluatedBytesOp::RoundIntNative,
+            EvaluatedBytesOp::RoundIntWithScaleNative,
+            EvaluatedBytesOp::RoundRealNative,
+            EvaluatedBytesOp::RoundDecimalNative,
+            EvaluatedBytesOp::TruncateIntNative,
+            EvaluatedBytesOp::TruncateUIntNative,
+            EvaluatedBytesOp::TruncateIntUnsignedScaleNative,
+            EvaluatedBytesOp::TruncateRealNative,
+            EvaluatedBytesOp::TruncateDecimalNative,
+            EvaluatedBytesOp::RoundInt128Legacy,
+            EvaluatedBytesOp::RoundRealLegacy,
+            EvaluatedBytesOp::RoundDecimalLegacy,
+            EvaluatedBytesOp::MathNullWitnessNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

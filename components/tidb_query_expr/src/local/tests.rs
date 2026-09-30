@@ -2112,7 +2112,11 @@ fn local_evaluated_args_packet_roles_reject_plain_carriers() {
                 assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
                 assert_eq!(value.into_option(), None);
             }
-            _ => panic!("packet role check returned an unexpected output type"),
+            ComputedValue::Ieee754Bits(_)
+            | ComputedValue::Decimal(_)
+            | ComputedValue::Int128(_) => {
+                panic!("packet role check returned an unexpected output type")
+            }
         }
         assert_eq!(worker.kernel_invocations(), 1);
         assert!(worker.is_healthy());
@@ -4874,4 +4878,364 @@ fn local_evaluated_args_export_set_preserves_defaults_clamps_and_null_witnesses(
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
+}
+
+#[test]
+fn local_evaluated_args_decimal_owns_spilled_results_and_checked_ceil_view() {
+    use tidb_query_datatype::codec::mysql::Decimal;
+
+    let wide = Decimal::try_from_native_digits(false, &[b'9'; 90], 0, 0, usize::MAX).unwrap();
+    assert!(wide.words().words.len() > 9);
+    let retained = {
+        let mut worker = prepare_evaluated_bytes(
+            EvaluatedBytesOp::AbsDecimalNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), EvaluatedBytesOp::AbsDecimalNative);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        let cases = [
+            (None, None),
+            (Some(Decimal::from(-7_i64)), Some(Decimal::from(7_i64))),
+            (Some(wide.clone()), Some(wide.clone())),
+        ];
+        let mut retained = None;
+        for (index, (input, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Decimal(value) =
+                worker.eval_args(EvaluatedArgs::Decimal(input)).unwrap()
+            else {
+                panic!("ABS Decimal returned an unexpected output type");
+            };
+            assert_eq!(value.value(), expected.as_ref());
+            assert_eq!(value.metadata(), ComputedDecimalMetadata::OwnDecimal);
+            retained = value.into_option();
+            assert_eq!(retained.as_ref(), expected.as_ref());
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        retained
+    };
+    assert_eq!(retained.as_ref(), Some(&wide));
+    assert!(retained.as_ref().unwrap().words().words.len() > 9);
+    let fractional = Decimal::try_from_native_digits(false, b"12", 1, 1, usize::MAX).unwrap();
+    let cases = [
+        (None, None, None),
+        (Some(fractional), Some(Decimal::from(2_i64)), Some(2)),
+        (Some(wide.clone()), Some(wide), None),
+    ];
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::CeilDecimalNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::CeilDecimalNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, (input, expected, checked)) in cases.into_iter().enumerate() {
+        let ComputedValue::Decimal(value) =
+            worker.eval_args(EvaluatedArgs::Decimal(input)).unwrap()
+        else {
+            panic!("CEIL Decimal returned an unexpected output type");
+        };
+        assert_eq!(value.value(), expected.as_ref());
+        assert_eq!(value.metadata(), ComputedDecimalMetadata::OwnDecimal);
+        assert_eq!(value.checked_i64_view(), checked);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_int128_null_witness_and_round_policy_keep_carriers() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::RoundInt128Legacy,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::RoundInt128Legacy);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for (index, input) in [
+        None,
+        Some(i128::from(i64::MAX) + 1),
+        Some(i128::from(i64::MIN) - 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ComputedValue::Int128(value) = worker.eval_args(EvaluatedArgs::Int128(input)).unwrap()
+        else {
+            panic!("legacy integer ROUND returned a non-Int128 value");
+        };
+        assert_eq!(value.value(), input);
+        assert_eq!(value.metadata(), ComputedInt128Metadata::OwnInt128);
+        assert_eq!(value.into_option(), input);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::MathNullWitnessNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::MathNullWitnessNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::NullWitness(Some(0)),
+        EvaluatedArgs::Int(None),
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let ComputedValue::Int(value) = worker.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+    else {
+        panic!("NULL witness returned a non-Int value");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    for (operation, args, expected) in [
+        (
+            EvaluatedBytesOp::RoundRealNative,
+            EvaluatedArgs::Ieee754BitsInt {
+                value: Some(2.5_f64.to_bits()),
+                scale: Some(0),
+            },
+            Some(2.0_f64.to_bits()),
+        ),
+        (
+            EvaluatedBytesOp::RoundRealLegacy,
+            EvaluatedArgs::Ieee754Bits(Some(2.5_f64.to_bits())),
+            Some(3.0_f64.to_bits()),
+        ),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        let ComputedValue::Ieee754Bits(value) = worker.eval_args(args).unwrap() else {
+            panic!("real ROUND returned a non-IEEE754 value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(
+            value.metadata(),
+            ComputedIeee754BitsMetadata::OwnIeee754Bits
+        );
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_decimal_ready_budget_and_null_markers_are_distinct() {
+    use tidb_query_common::error::{ErrorInner, EvaluateError};
+    use tidb_query_datatype::codec::mysql::decimal::{Decimal, NativeDecimalError};
+
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::RoundDecimalNative,
+        LocalCompileContext::default(),
+        ExecutionLimits {
+            max_retained_bytes: 16 * 1024,
+            ..ExecutionLimits::default()
+        },
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::RoundDecimalNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::Decimal(None),
+        EvaluatedArgs::DecimalIntReady {
+            value: ReadyDecimalArg::Undemanded,
+            scale: ReadyIntArg::Undemanded,
+        },
+        EvaluatedArgs::DecimalIntReady {
+            value: ReadyDecimalArg::Value(Some(Decimal::from(1_i64))),
+            scale: ReadyIntArg::Undemanded,
+        },
+    ] {
+        let failure = worker.eval_args_reported(invalid).unwrap_err();
+        assert!(matches!(failure.error(), LocalError::InvalidBatch(_)));
+        assert!(failure.sql_failure().is_none());
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    // A resolved i32 ready-boundary scale, not SQL ROUND's frontend scale policy.
+    let failure = worker
+        .eval_args_reported(EvaluatedArgs::DecimalIntReady {
+            value: ReadyDecimalArg::Value(Some(Decimal::from(1_i64))),
+            scale: ReadyIntArg::Value(Some(100_000)),
+        })
+        .unwrap_err();
+    assert!(matches!(
+        failure.error(),
+        LocalError::Evaluation(error)
+            if matches!(
+                error.0.as_ref(),
+                ErrorInner::Evaluate(EvaluateError::Caused(source))
+                    if matches!(source.downcast_ref::<NativeDecimalError>(), Some(NativeDecimalError::Resource(_)))
+            )
+    ));
+    assert!(failure.sql_failure().is_none());
+    let preserved = failure.into_error();
+    assert!(matches!(
+        preserved,
+        LocalError::Evaluation(error)
+            if matches!(
+                error.0.as_ref(),
+                ErrorInner::Evaluate(EvaluateError::Caused(source))
+                    if matches!(source.downcast_ref::<NativeDecimalError>(), Some(NativeDecimalError::Resource(_)))
+            )
+    ));
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases = [
+        (ReadyDecimalArg::Value(None), ReadyIntArg::Undemanded, None),
+        (ReadyDecimalArg::Undemanded, ReadyIntArg::Value(None), None),
+        (
+            ReadyDecimalArg::Value(Some(Decimal::from(1_i64))),
+            ReadyIntArg::Value(Some(0)),
+            Some(Decimal::from(1_i64)),
+        ),
+    ];
+    for (index, (value, scale, expected)) in cases.into_iter().enumerate() {
+        let ComputedValue::Decimal(value) = worker
+            .eval_args(EvaluatedArgs::DecimalIntReady { value, scale })
+            .unwrap()
+        else {
+            panic!("ready decimal ROUND returned an unexpected output type");
+        };
+        assert_eq!(value.value(), expected.as_ref());
+        assert_eq!(value.metadata(), ComputedDecimalMetadata::OwnDecimal);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 2);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_abs_failure_receipt_preserves_primary_and_call_scope() {
+    use tidb_query_common::error::{ErrorInner, EvaluateError};
+
+    let wire = crate::test_util::RpnFnScalarEvaluator::new()
+        .push_param(Some(i64::MIN))
+        .evaluate::<i64>(ScalarFuncSig::AbsInt)
+        .unwrap_err();
+    let ErrorInner::Evaluate(wire_cause) = wire.0.as_ref() else {
+        panic!("wire ABS overflow lost its evaluation cause");
+    };
+    assert_eq!(wire_cause.code(), 1690);
+    assert!(!matches!(
+        wire_cause,
+        EvaluateError::AbsSignedOverflow { .. }
+    ));
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::AbsIntNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::AbsIntNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    let failure = worker
+        .eval_args_reported(EvaluatedArgs::Bytes(None))
+        .unwrap_err();
+    assert!(matches!(failure.error(), LocalError::InvalidBatch(_)));
+    assert!(failure.sql_failure().is_none());
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let ComputedValue::Int(value) = worker.eval_args(EvaluatedArgs::Int(Some(-7))).unwrap() else {
+        panic!("native ABS returned a non-Int value");
+    };
+    assert_eq!(value.value(), Some(7));
+    assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+    assert_eq!(value.into_option(), Some(7));
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let failure = worker
+        .eval_args_reported(EvaluatedArgs::Int(Some(i64::MIN)))
+        .unwrap_err();
+    assert_eq!(failure.operation(), Some(EvaluatedBytesOp::AbsIntNative));
+    assert!(matches!(
+        failure.sql_failure(),
+        Some(EvaluatedSqlFailureKind::AbsSignedOverflow)
+    ));
+    assert!(matches!(
+        failure.error(),
+        LocalError::Evaluation(error)
+            if matches!(error.0.as_ref(), ErrorInner::Evaluate(cause) if cause.code() == 1690)
+    ));
+    let primary_text = failure.error().to_string();
+    let primary = failure.into_error();
+    assert_eq!(primary.to_string(), primary_text);
+    assert!(matches!(primary, LocalError::Evaluation(_)));
+    // The qualifying failure is this call's single dispatch, not cumulative one.
+    assert_eq!(worker.kernel_invocations(), 2);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let ComputedValue::Int(value) = worker.eval_args_reported(EvaluatedArgs::Int(None)).unwrap()
+    else {
+        panic!("nullable native ABS returned a non-Int value");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(worker.kernel_invocations(), 3);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let plain = worker
+        .eval_args(EvaluatedArgs::Int(Some(i64::MIN)))
+        .unwrap_err();
+    assert_eq!(plain.to_string(), primary_text);
+    assert!(matches!(plain, LocalError::Evaluation(_)));
+    assert_eq!(worker.kernel_invocations(), 4);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let ComputedValue::Int(value) = worker.eval_args(EvaluatedArgs::Int(Some(-1))).unwrap() else {
+        panic!("reused native ABS returned a non-Int value");
+    };
+    assert_eq!(value.value(), Some(1));
+    assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+    assert_eq!(value.into_option(), Some(1));
+    assert_eq!(worker.kernel_invocations(), 5);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
 }

@@ -166,11 +166,14 @@ pub use tidb_query_datatype::codec::collation::native::NativeCollation;
 
 pub use self::{
     batch::{
-        ComputedBytes, ComputedBytesMetadata, ComputedIeee754Bits, ComputedIeee754BitsMetadata,
-        ComputedInt, ComputedIntMetadata, ComputedValue, EvaluatedArgs, EvaluatedAsciiWorker,
-        EvaluatedBytesOp, EvaluatedBytesWorker, LocalBatch, LocalEvalState, NativeSearchPolicy,
-        OutputDisposition, ReadyBytesArg, ReadyIeee754Arg, ReadyIntArg, ReadySubstringI128,
-        WorkerStorage, prepare_evaluated_ascii, prepare_evaluated_bytes,
+        ComputedBytes, ComputedBytesMetadata, ComputedDecimal, ComputedDecimalMetadata,
+        ComputedIeee754Bits, ComputedIeee754BitsMetadata, ComputedInt, ComputedInt128,
+        ComputedInt128Metadata, ComputedIntMetadata, ComputedValue, EvaluatedArgs,
+        EvaluatedAsciiWorker, EvaluatedBytesOp, EvaluatedBytesWorker, EvaluatedSqlFailureKind,
+        LocalBatch, LocalEvalState, NativeSearchPolicy, OutputDisposition, ReadyBytesArg,
+        ReadyDecimalArg, ReadyIeee754Arg, ReadyIntArg, ReadySubstringI128,
+        ReportedEvaluatedFailure, WorkerStorage, native_decimal_bridge_error,
+        prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,
@@ -199,6 +202,7 @@ pub(crate) use self::{
 };
 pub use crate::{
     CallMetadata, FunctionRef, LiteralKind, LocalFunctionId,
+    impl_math::native_decimal_target_scale,
     impl_string::{
         ConcatKind, ConcatTerminal, FieldIntValue, FieldTerminal, PreparedConcatArgs,
         PreparedExportSetArgs, PreparedFieldArgs, PreparedFindInSetKeys, PreparedMakeSetArgs,

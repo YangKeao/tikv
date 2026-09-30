@@ -20,6 +20,17 @@ pub enum EvaluateError {
 
     #[error("{0}")]
     Other(String),
+
+    /// Explicit provenance for the private signed-ABS checked overflow only.
+    #[error("{source}")]
+    AbsSignedOverflow {
+        #[source]
+        source: Box<EvaluateError>,
+    },
+
+    /// An explicitly retained cause; legacy boxed-error conversion stays lossy.
+    #[error("{0}")]
+    Caused(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl EvaluateError {
@@ -29,7 +40,8 @@ impl EvaluateError {
             EvaluateError::InvalidCharacterString { .. } => 1300,
             EvaluateError::DeadlineExceeded => 9007,
             EvaluateError::Custom { code, .. } => *code,
-            EvaluateError::Other(_) => 10000,
+            EvaluateError::AbsSignedOverflow { source } => source.code(),
+            EvaluateError::Other(_) | EvaluateError::Caused(_) => 10000,
         }
     }
 }
@@ -81,7 +93,8 @@ impl ErrorCodeExt for EvaluateError {
                 error_code::coprocessor::INVALID_CHARACTER_STRING
             }
             EvaluateError::Custom { .. } => error_code::coprocessor::EVAL,
-            EvaluateError::Other(_) => error_code::UNKNOWN,
+            EvaluateError::AbsSignedOverflow { source } => source.error_code(),
+            EvaluateError::Other(_) | EvaluateError::Caused(_) => error_code::UNKNOWN,
         }
     }
 }

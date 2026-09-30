@@ -24,8 +24,9 @@ use crate::{
         LocalRuntimeServices, OrdinaryProfile, PreparedHostCall, PreparedOrdinaryCall,
         ResultMetaId,
         runtime::{
-            EvalBudget, StorageMode, bytes_min_storage_bytes, int_min_storage_bytes,
-            int_storage_bytes, int_vector_storage_bytes, vector_storage_bytes,
+            EvalBudget, StorageMode, bytes_min_storage_bytes, decimal_min_storage_bytes,
+            int_min_storage_bytes, int_storage_bytes, int_vector_storage_bytes,
+            vector_storage_bytes,
         },
     },
 };
@@ -296,6 +297,7 @@ impl EvalInput<'_, '_> {
             Self::ReadyArgs { values, .. } => values.iter().try_fold(0usize, |total, value| {
                 total.checked_add(match value {
                     ScalarValue::Bytes(Some(bytes)) => bytes.capacity(),
+                    ScalarValue::Decimal(Some(value)) => value.spill_capacity_bytes(),
                     _ => 0,
                 })
             }),
@@ -340,6 +342,10 @@ fn evaluated_ready_args_match(
                 (value, *eval_type),
                 (ScalarValue::Int(_), tidb_query_datatype::EvalType::Int)
                     | (ScalarValue::Bytes(_), tidb_query_datatype::EvalType::Bytes)
+                    | (
+                        ScalarValue::Decimal(_),
+                        tidb_query_datatype::EvalType::Decimal
+                    )
             )
         })
         && match values {
@@ -349,6 +355,40 @@ fn evaluated_ready_args_match(
         && match role {
             EvaluatedArgsRole::NoArgs => values.is_empty(),
             EvaluatedArgsRole::Values => true,
+            EvaluatedArgsRole::DecimalUnary => {
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::AbsDecimalNative
+                        | EvaluatedBytesOp::CeilDecimalNative
+                        | EvaluatedBytesOp::FloorDecimalNative
+                        | EvaluatedBytesOp::RoundDecimalLegacy
+                ) && matches!(values, [ScalarValue::Decimal(_), ScalarValue::Int(Some(raw_budget))]
+                        if usize::try_from(*raw_budget as u64).is_ok_and(|budget| budget != usize::MAX))
+            }
+            EvaluatedArgsRole::DecimalInt => {
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::RoundDecimalNative | EvaluatedBytesOp::TruncateDecimalNative
+                ) && matches!(values, [ScalarValue::Decimal(_), ScalarValue::Int(scale), ScalarValue::Int(Some(raw_budget))]
+                        if scale.is_none_or(|scale| i32::try_from(scale).is_ok())
+                            && usize::try_from(*raw_budget as u64).is_ok_and(|budget| budget != usize::MAX))
+            }
+            EvaluatedArgsRole::Ieee754Int => {
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::RoundRealNative | EvaluatedBytesOp::TruncateRealNative
+                ) && matches!(values, [ScalarValue::Bytes(bits), ScalarValue::Int(_)]
+                        if bits.as_ref().is_none_or(|bytes| bytes.len() == 8))
+            }
+            EvaluatedArgsRole::Int128 => {
+                operation == EvaluatedBytesOp::RoundInt128Legacy
+                    && matches!(values, [ScalarValue::Bytes(bits)]
+                        if bits.as_ref().is_none_or(|bytes| bytes.len() == 16))
+            }
+            EvaluatedArgsRole::NullWitness => {
+                operation == EvaluatedBytesOp::MathNullWitnessNative
+                    && matches!(values, [ScalarValue::Int(None)])
+            }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
             EvaluatedArgsRole::FieldPacked => match (operation.field_kind(), values) {
                 (Some(kind), [ScalarValue::Bytes(encoded)]) if encoded.is_some() => {
@@ -831,7 +871,10 @@ impl<'a> ProgramFrame<'a> {
                     tidb_query_datatype::EvalType::Bytes => {
                         bytes_min_storage_bytes(1, 0).unwrap_or(usize::MAX)
                     }
-                    _ => unreachable!("the closed ready-Bytes result is Int or Bytes"),
+                    tidb_query_datatype::EvalType::Decimal => {
+                        decimal_min_storage_bytes(1).unwrap_or(usize::MAX)
+                    }
+                    _ => unreachable!("the closed ready-value result is Int, Bytes, or Decimal"),
                 },
                 _ => usize::MAX, // the complete fixed shape was checked first.
             }
@@ -3249,7 +3292,7 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..62 {
+        for mismatch in 0..73 {
             let operation = match mismatch {
                 3 | 5 | 45 | 53 | 56 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
@@ -3280,12 +3323,31 @@ mod tests {
                 55 | 57 => EvaluatedBytesOp::MakeSetNative,
                 58 | 60 | 61 => EvaluatedBytesOp::ExportSetNative,
                 59 => EvaluatedBytesOp::Substring3BytesNative,
+                62 | 67 | 68 => EvaluatedBytesOp::AbsDecimalNative,
+                63 | 69 => EvaluatedBytesOp::RoundDecimalNative,
+                64 | 70 => EvaluatedBytesOp::RoundRealNative,
+                65 | 71 => EvaluatedBytesOp::RoundInt128Legacy,
+                66 | 72 => EvaluatedBytesOp::MathNullWitnessNative,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
-                0 | 6 | 8 | 13 | 15 | 16 | 22 | 26 | 28 | 32 | 34 | 44 | 48 | 52 | 55 | 58 => {
-                    EvaluatedArgsRole::Values
-                }
+                0
+                | 6
+                | 8
+                | 13
+                | 15
+                | 16
+                | 22
+                | 26
+                | 28
+                | 32
+                | 34
+                | 44
+                | 48
+                | 52
+                | 55
+                | 58
+                | 62..=66 => EvaluatedArgsRole::Values,
                 4 | 5 => EvaluatedArgsRole::NoArgs,
                 9..=12 | 17 => EvaluatedArgsRole::Packet,
                 14 => EvaluatedArgsRole::ReadyBytesInt,
@@ -3302,6 +3364,11 @@ mod tests {
                 53 | 54 => EvaluatedArgsRole::FieldPacked,
                 56 | 57 => EvaluatedArgsRole::MakeSetPacked,
                 59..=61 => EvaluatedArgsRole::ExportSetPacked,
+                67 | 68 => EvaluatedArgsRole::DecimalUnary,
+                69 => EvaluatedArgsRole::DecimalInt,
+                70 => EvaluatedArgsRole::Ieee754Int,
+                71 => EvaluatedArgsRole::Int128,
+                72 => EvaluatedArgsRole::NullWitness,
                 _ => EvaluatedArgsRole::Ieee754Bits,
             };
             let schema: Vec<_> = (0..operation.input_types().len())
@@ -3319,6 +3386,8 @@ mod tests {
                                 || role == EvaluatedArgsRole::SubstringLegacy)
                         {
                             16
+                        } else if operation == EvaluatedBytesOp::RoundInt128Legacy {
+                            16
                         } else {
                             match mismatch {
                                 1 => 7,
@@ -3328,7 +3397,8 @@ mod tests {
                         };
                         ScalarValue::Bytes(Some(vec![0; len]))
                     }
-                    _ => unreachable!("closed ready guard fixture requires Int or Bytes"),
+                    tidb_query_datatype::EvalType::Decimal => ScalarValue::Decimal(None),
+                    _ => unreachable!("closed ready guard fixture requires Int, Bytes, or Decimal"),
                 })
                 .collect();
             if mismatch == 9 {
@@ -3396,7 +3466,16 @@ mod tests {
                 ready[1] = ScalarValue::Int(bits);
                 ready[2] = ScalarValue::Int(count);
             }
-            if matches!(mismatch, 13 | 14 | 16..=61) {
+            if operation == EvaluatedBytesOp::MathNullWitnessNative {
+                ready[0] = ScalarValue::Int(None);
+            }
+            if operation == EvaluatedBytesOp::RoundRealNative {
+                ready[1] = ScalarValue::Int(Some(i64::MAX));
+            }
+            if operation == EvaluatedBytesOp::RoundDecimalNative {
+                ready[1] = ScalarValue::Int(None);
+            }
+            if matches!(mismatch, 13 | 14 | 16..=72) {
                 assert!(evaluated_ready_args_match(
                     operation,
                     &ready,
@@ -3445,6 +3524,18 @@ mod tests {
                 ready[0] = ScalarValue::Bytes(Some(Vec::new()));
             } else if mismatch == 61 {
                 ready[2] = ScalarValue::Int(None);
+            } else if mismatch == 67 {
+                ready[1] = ScalarValue::Int(None);
+            } else if mismatch == 68 {
+                ready[1] = ScalarValue::Int(Some(usize::MAX as u64 as i64));
+            } else if mismatch == 69 {
+                ready[1] = ScalarValue::Int(Some(i64::from(i32::MAX) + 1));
+            } else if mismatch == 70 {
+                ready[0] = ScalarValue::Bytes(Some(vec![0; 7]));
+            } else if mismatch == 71 {
+                ready[0] = ScalarValue::Bytes(Some(vec![0; 15]));
+            } else if mismatch == 72 {
+                ready[0] = ScalarValue::Int(Some(0));
             }
             if mismatch == 15 {
                 let input = EvalInput::ReadyBytes {

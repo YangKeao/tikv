@@ -5,13 +5,14 @@ use std::{
     sync::{Arc, atomic::AtomicUsize},
 };
 
+use tidb_query_common::error::{ErrorInner, EvaluateError};
 use tidb_query_datatype::{
     EvalType,
     codec::{
         batch::LazyBatchColumnVec,
         collation::native::NativeCollation,
         data_type::{BATCH_MAX_SIZE, ChunkedVecBytes, ScalarValue, ScalarValueRef, VectorValue},
-        mysql::{DEFAULT_DIV_FRAC_INCR, Tz},
+        mysql::{DEFAULT_DIV_FRAC_INCR, Decimal, Tz, decimal::NativeDecimalError},
     },
     expr::{EvalConfig, EvalContext},
 };
@@ -22,7 +23,7 @@ use super::{
     ReportedLocalFailure, ResultMetaId,
     compile::{
         LocalNumericBatchProgram, ProgramEntry, compile_evaluated_bytes,
-        evaluated_ascii_bytes_type, evaluated_ascii_int_type,
+        evaluated_ascii_bytes_type, evaluated_ascii_decimal_type, evaluated_ascii_int_type,
     },
     runtime::{EvalBudget, bytes_min_storage_bytes, int_min_storage_bytes, vector_storage_bytes},
 };
@@ -863,6 +864,29 @@ pub enum EvaluatedBytesOp {
     FieldRealNative,
     MakeSetNative,
     ExportSetNative,
+    AbsIntNative,
+    AbsUIntNative,
+    AbsRealNative,
+    AbsDecimalNative,
+    CeilIntNative,
+    FloorIntNative,
+    CeilRealNative,
+    FloorRealNative,
+    CeilDecimalNative,
+    FloorDecimalNative,
+    RoundIntNative,
+    RoundIntWithScaleNative,
+    RoundRealNative,
+    RoundDecimalNative,
+    TruncateIntNative,
+    TruncateUIntNative,
+    TruncateIntUnsignedScaleNative,
+    TruncateRealNative,
+    TruncateDecimalNative,
+    RoundInt128Legacy,
+    RoundRealLegacy,
+    RoundDecimalLegacy,
+    MathNullWitnessNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -894,6 +918,11 @@ pub(crate) enum EvaluatedArgsRole {
     FieldPacked,
     MakeSetPacked,
     ExportSetPacked,
+    DecimalUnary,
+    DecimalInt,
+    Ieee754Int,
+    Int128,
+    NullWitness,
 }
 
 impl EvaluatedBytesOp {
@@ -1178,6 +1207,99 @@ impl EvaluatedBytesOp {
             Self::ExportSetNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ExportSetNative);
             }
+            Self::AbsIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AbsIntNative);
+            }
+            Self::AbsUIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AbsUIntNative);
+            }
+            Self::AbsRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AbsRealNative);
+            }
+            Self::AbsDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AbsDecimalNative);
+            }
+            Self::CeilIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::CeilIntNative);
+            }
+            Self::FloorIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::FloorIntNative);
+            }
+            Self::CeilRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::CeilRealNative);
+            }
+            Self::FloorRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::FloorRealNative);
+            }
+            Self::CeilDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CeilDecimalNative,
+                );
+            }
+            Self::FloorDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FloorDecimalNative,
+                );
+            }
+            Self::RoundIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::RoundIntNative);
+            }
+            Self::RoundIntWithScaleNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RoundIntWithScaleNative,
+                );
+            }
+            Self::RoundRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::RoundRealNative);
+            }
+            Self::RoundDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RoundDecimalNative,
+                );
+            }
+            Self::TruncateIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TruncateIntNative,
+                );
+            }
+            Self::TruncateUIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TruncateUIntNative,
+                );
+            }
+            Self::TruncateIntUnsignedScaleNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TruncateIntUnsignedScaleNative,
+                );
+            }
+            Self::TruncateRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TruncateRealNative,
+                );
+            }
+            Self::TruncateDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TruncateDecimalNative,
+                );
+            }
+            Self::RoundInt128Legacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RoundInt128Legacy,
+                );
+            }
+            Self::RoundRealLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::RoundRealLegacy);
+            }
+            Self::RoundDecimalLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RoundDecimalLegacy,
+                );
+            }
+            Self::MathNullWitnessNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MathNullWitnessNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1200,6 +1322,18 @@ impl EvaluatedBytesOp {
             }
             Self::MakeSetNative => EvaluatedArgsRole::MakeSetPacked,
             Self::ExportSetNative => EvaluatedArgsRole::ExportSetPacked,
+            Self::AbsDecimalNative
+            | Self::CeilDecimalNative
+            | Self::FloorDecimalNative
+            | Self::RoundDecimalLegacy => EvaluatedArgsRole::DecimalUnary,
+            Self::RoundDecimalNative | Self::TruncateDecimalNative => EvaluatedArgsRole::DecimalInt,
+            Self::RoundRealNative | Self::TruncateRealNative => EvaluatedArgsRole::Ieee754Int,
+            Self::RoundInt128Legacy => EvaluatedArgsRole::Int128,
+            Self::MathNullWitnessNative => EvaluatedArgsRole::NullWitness,
+            Self::AbsRealNative
+            | Self::CeilRealNative
+            | Self::FloorRealNative
+            | Self::RoundRealLegacy => EvaluatedArgsRole::Ieee754Bits,
             Self::StrcmpNative | Self::FindInSetNative => EvaluatedArgsRole::CollatedBytes2,
             Self::Locate2Native | Self::Locate3Native => EvaluatedArgsRole::NativeSearch,
             Self::FindInSetPreparedNative => EvaluatedArgsRole::FindInSetPrepared,
@@ -1321,6 +1455,13 @@ impl EvaluatedBytesOp {
                 | Self::LogNative
                 | Self::Log2Native
                 | Self::PowNative
+                | Self::AbsRealNative
+                | Self::CeilRealNative
+                | Self::FloorRealNative
+                | Self::RoundRealNative
+                | Self::TruncateRealNative
+                | Self::RoundRealLegacy
+                | Self::RoundDecimalLegacy
         )
     }
 
@@ -1354,6 +1495,33 @@ impl EvaluatedBytesOp {
             Self::FieldRealNative => crate::impl_string::field_real_native_fn_meta(),
             Self::MakeSetNative => crate::impl_string::make_set_native_fn_meta(),
             Self::ExportSetNative => crate::impl_string::export_set_native_fn_meta(),
+            Self::AbsIntNative => crate::impl_math::abs_int_native_fn_meta(),
+            Self::AbsUIntNative => crate::impl_math::abs_uint_native_fn_meta(),
+            Self::AbsRealNative => crate::impl_math::abs_real_native_fn_meta(),
+            Self::AbsDecimalNative => crate::impl_math::abs_decimal_native_fn_meta(),
+            Self::CeilIntNative => crate::impl_math::ceil_int_native_fn_meta(),
+            Self::FloorIntNative => crate::impl_math::floor_int_native_fn_meta(),
+            Self::CeilRealNative => crate::impl_math::ceil_real_native_fn_meta(),
+            Self::FloorRealNative => crate::impl_math::floor_real_native_fn_meta(),
+            Self::CeilDecimalNative => crate::impl_math::ceil_decimal_native_fn_meta(),
+            Self::FloorDecimalNative => crate::impl_math::floor_decimal_native_fn_meta(),
+            Self::RoundIntNative => crate::impl_math::round_int_native_fn_meta(),
+            Self::RoundIntWithScaleNative => {
+                crate::impl_math::round_int_with_scale_native_fn_meta()
+            }
+            Self::RoundRealNative => crate::impl_math::round_real_native_fn_meta(),
+            Self::RoundDecimalNative => crate::impl_math::round_decimal_native_fn_meta(),
+            Self::TruncateIntNative => crate::impl_math::truncate_int_native_fn_meta(),
+            Self::TruncateUIntNative => crate::impl_math::truncate_uint_native_fn_meta(),
+            Self::TruncateIntUnsignedScaleNative => {
+                crate::impl_math::truncate_int_unsigned_scale_native_fn_meta()
+            }
+            Self::TruncateRealNative => crate::impl_math::truncate_real_native_fn_meta(),
+            Self::TruncateDecimalNative => crate::impl_math::truncate_decimal_native_fn_meta(),
+            Self::RoundInt128Legacy => crate::impl_math::round_int128_legacy_fn_meta(),
+            Self::RoundRealLegacy => crate::impl_math::round_real_legacy_fn_meta(),
+            Self::RoundDecimalLegacy => crate::impl_math::round_decimal_legacy_fn_meta(),
+            Self::MathNullWitnessNative => crate::impl_math::math_null_witness_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1503,7 +1671,22 @@ impl EvaluatedBytesOp {
             | Self::FindInSetPreparedNative
             | Self::FieldBytesNative
             | Self::FieldIntNative
-            | Self::FieldRealNative => EvalType::Int,
+            | Self::FieldRealNative
+            | Self::AbsIntNative
+            | Self::AbsUIntNative
+            | Self::CeilIntNative
+            | Self::FloorIntNative
+            | Self::RoundIntNative
+            | Self::RoundIntWithScaleNative
+            | Self::TruncateIntNative
+            | Self::TruncateUIntNative
+            | Self::TruncateIntUnsignedScaleNative
+            | Self::MathNullWitnessNative => EvalType::Int,
+            Self::AbsDecimalNative
+            | Self::CeilDecimalNative
+            | Self::FloorDecimalNative
+            | Self::RoundDecimalNative
+            | Self::TruncateDecimalNative => EvalType::Decimal,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -1570,7 +1753,15 @@ impl EvaluatedBytesOp {
             | Self::ConcatWsNative
             | Self::EltNative
             | Self::MakeSetNative
-            | Self::ExportSetNative => EvalType::Bytes,
+            | Self::ExportSetNative
+            | Self::AbsRealNative
+            | Self::CeilRealNative
+            | Self::FloorRealNative
+            | Self::RoundRealNative
+            | Self::TruncateRealNative
+            | Self::RoundRealLegacy
+            | Self::RoundDecimalLegacy
+            | Self::RoundInt128Legacy => EvalType::Bytes,
         }
     }
 
@@ -1578,7 +1769,8 @@ impl EvaluatedBytesOp {
         match self.eval_type() {
             EvalType::Int => evaluated_ascii_int_type(),
             EvalType::Bytes => evaluated_ascii_bytes_type(),
-            _ => unreachable!("the operation has a closed Int/Bytes result"),
+            EvalType::Decimal => evaluated_ascii_decimal_type(),
+            _ => unreachable!("the operation has a closed Int/Bytes/Decimal result"),
         }
     }
 
@@ -1593,6 +1785,29 @@ impl EvaluatedBytesOp {
             | Self::FieldRealNative
             | Self::MakeSetNative => &[EvalType::Bytes],
             Self::ExportSetNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
+            Self::AbsIntNative
+            | Self::AbsUIntNative
+            | Self::CeilIntNative
+            | Self::FloorIntNative
+            | Self::RoundIntNative
+            | Self::MathNullWitnessNative => &[EvalType::Int],
+            Self::RoundIntWithScaleNative
+            | Self::TruncateIntNative
+            | Self::TruncateUIntNative
+            | Self::TruncateIntUnsignedScaleNative => &[EvalType::Int, EvalType::Int],
+            Self::AbsRealNative
+            | Self::CeilRealNative
+            | Self::FloorRealNative
+            | Self::RoundRealLegacy
+            | Self::RoundInt128Legacy => &[EvalType::Bytes],
+            Self::RoundRealNative | Self::TruncateRealNative => &[EvalType::Bytes, EvalType::Int],
+            Self::AbsDecimalNative
+            | Self::CeilDecimalNative
+            | Self::FloorDecimalNative
+            | Self::RoundDecimalLegacy => &[EvalType::Decimal, EvalType::Int],
+            Self::RoundDecimalNative | Self::TruncateDecimalNative => {
+                &[EvalType::Decimal, EvalType::Int, EvalType::Int]
+            }
             Self::StrcmpNative
             | Self::Locate2Native
             | Self::Locate3BytesExtNative
@@ -1740,7 +1955,8 @@ impl EvaluatedBytesOp {
         self.input_types().get(slot).map(|kind| match kind {
             EvalType::Int => evaluated_ascii_int_type(),
             EvalType::Bytes => evaluated_ascii_bytes_type(),
-            _ => unreachable!("the operation has only Int/Bytes inputs"),
+            EvalType::Decimal => evaluated_ascii_decimal_type(),
+            _ => unreachable!("the operation has only Int/Bytes/Decimal inputs"),
         })
     }
 
@@ -1778,6 +1994,20 @@ impl OutputDisposition {
 pub enum ReadyIntArg {
     Value(Option<i64>),
     Undemanded,
+}
+
+/// A Decimal demand marker. Undemanded requires an actual NULL scale;
+/// it never substitutes for an evaluated SQL NULL numeric operand.
+#[derive(Debug)]
+pub enum ReadyDecimalArg {
+    Value(Option<Decimal>),
+    Undemanded,
+}
+
+/// Preserve a native Decimal bridge's concrete cause without classifying it
+/// as a SQL overflow or erasing it through the legacy boxed-error conversion.
+pub fn native_decimal_bridge_error(error: NativeDecimalError) -> LocalError {
+    LocalError::Evaluation(EvaluateError::Caused(Box::new(error)).into())
 }
 
 /// PAD's two string arguments are either both evaluated values or both
@@ -1844,6 +2074,18 @@ impl NativeSearchPolicy {
 pub enum EvaluatedArgs {
     /// A genuine zero-operand invocation, not a nullable dummy argument.
     NoArgs,
+    Decimal(Option<Decimal>),
+    DecimalIntReady {
+        value: ReadyDecimalArg,
+        scale: ReadyIntArg,
+    },
+    Ieee754BitsInt {
+        value: Option<u64>,
+        scale: Option<i64>,
+    },
+    Int128(Option<i128>),
+    /// Witness of some actually observed SQL NULL, not a claimed numeric value.
+    NullWitness(Option<i64>),
     Bytes(Option<Vec<u8>>),
     Bytes2(Option<Vec<u8>>, Option<Vec<u8>>),
     Int(Option<i64>),
@@ -1944,6 +2186,11 @@ pub enum EvaluatedArgs {
 impl EvaluatedArgs {
     fn role(&self) -> EvaluatedArgsRole {
         match self {
+            Self::Decimal(_) => EvaluatedArgsRole::DecimalUnary,
+            Self::DecimalIntReady { .. } => EvaluatedArgsRole::DecimalInt,
+            Self::Ieee754BitsInt { .. } => EvaluatedArgsRole::Ieee754Int,
+            Self::Int128(_) => EvaluatedArgsRole::Int128,
+            Self::NullWitness(_) => EvaluatedArgsRole::NullWitness,
             Self::ConcatReady(_) => EvaluatedArgsRole::ConcatPacked,
             Self::FieldReady(_) => EvaluatedArgsRole::FieldPacked,
             Self::MakeSetReady(_) => EvaluatedArgsRole::MakeSetPacked,
@@ -1976,6 +2223,11 @@ impl EvaluatedArgs {
     fn input_types(&self) -> &'static [EvalType] {
         match self {
             Self::NoArgs => &[],
+            Self::Decimal(_) => &[EvalType::Decimal, EvalType::Int],
+            Self::DecimalIntReady { .. } => &[EvalType::Decimal, EvalType::Int, EvalType::Int],
+            Self::Ieee754BitsInt { .. } => &[EvalType::Bytes, EvalType::Int],
+            Self::Int128(_) => &[EvalType::Bytes],
+            Self::NullWitness(_) => &[EvalType::Int],
             Self::ConcatReady(_) | Self::FieldReady(_) | Self::MakeSetReady(_) => {
                 &[EvalType::Bytes]
             }
@@ -2024,6 +2276,19 @@ impl EvaluatedArgs {
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
         match self {
+            Self::NullWitness(value) => {
+                operation == EvaluatedBytesOp::MathNullWitnessNative && value.is_none()
+            }
+            Self::DecimalIntReady { value, scale } => {
+                (!matches!(value, ReadyDecimalArg::Undemanded)
+                    || matches!(scale, ReadyIntArg::Value(None)))
+                    && (!matches!(scale, ReadyIntArg::Undemanded)
+                        || matches!(value, ReadyDecimalArg::Value(None)))
+                    && match scale {
+                        ReadyIntArg::Value(Some(scale)) => i32::try_from(*scale).is_ok(),
+                        _ => true,
+                    }
+            }
             Self::Bytes(bytes) => operation.ready_bytes_match(bytes.as_deref()),
             Self::ConcatReady(args) => operation.concat_kind() == Some(args.kind()),
             Self::FieldReady(args) => operation.field_kind() == Some(args.kind()),
@@ -2155,13 +2420,76 @@ impl EvaluatedArgs {
         }
     }
 
-    fn into_values(self) -> LocalResult<([ScalarValue; 4], usize)> {
+    fn decimal_materialization_budget(
+        value: Option<&Decimal>,
+        available: usize,
+    ) -> LocalResult<i64> {
+        let remaining = available
+            .checked_sub(value.map_or(0, Decimal::spill_capacity_bytes))
+            .filter(|remaining| *remaining != usize::MAX)
+            .ok_or_else(|| {
+                LocalError::ResourceLimit("Decimal math requires finite remaining storage".into())
+            })?;
+        let bits = u64::try_from(remaining).map_err(|_| evaluated_ascii_storage_overflow())?;
+        Ok(bits as i64)
+    }
+
+    fn into_values(self, decimal_available: usize) -> LocalResult<([ScalarValue; 4], usize)> {
         // The fixed owner stays inline. Only four PAD, two INSERT and native
         // LOCATE3 recipes publish all slots; unused slots never enter the driver.
         // IEEE754's physical Byte8 allocation is charged like any Bytes owner.
         use ScalarValue::{Bytes, Int};
         Ok(match self {
             Self::NoArgs => ([Int(None), Int(None), Int(None), Int(None)], 0),
+            Self::Decimal(value) => {
+                let limit =
+                    Self::decimal_materialization_budget(value.as_ref(), decimal_available)?;
+                (
+                    [
+                        ScalarValue::Decimal(value),
+                        Int(Some(limit)),
+                        Int(None),
+                        Int(None),
+                    ],
+                    2,
+                )
+            }
+            Self::DecimalIntReady { value, scale } => {
+                let value = match value {
+                    ReadyDecimalArg::Value(value) => value,
+                    ReadyDecimalArg::Undemanded => Some(Decimal::zero()),
+                };
+                let limit =
+                    Self::decimal_materialization_budget(value.as_ref(), decimal_available)?;
+                (
+                    [
+                        ScalarValue::Decimal(value),
+                        Self::ready_int_value(scale),
+                        Int(Some(limit)),
+                        Int(None),
+                    ],
+                    3,
+                )
+            }
+            Self::Ieee754BitsInt { value, scale } => (
+                [
+                    Self::ieee754_value(value)?,
+                    Int(scale),
+                    Int(None),
+                    Int(None),
+                ],
+                2,
+            ),
+            Self::Int128(value) => (
+                [
+                    Self::substring_i128_value(ReadySubstringI128::Value(value))?,
+                    Int(None),
+                    Int(None),
+                    Int(None),
+                ],
+                1,
+            ),
+            Self::NullWitness(value) => ([Int(value), Int(None), Int(None), Int(None)], 1),
             Self::FieldReady(args) => (
                 [
                     Bytes(Some(args.into_encoded())),
@@ -2548,6 +2876,108 @@ impl ComputedIeee754Bits {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputedDecimalMetadata {
+    OwnDecimal,
+}
+
+/// Owns the exact shared Decimal, including wide storage and presentation
+/// state.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ComputedDecimal {
+    value: Option<Decimal>,
+    checked_i64_view: Option<i64>,
+}
+
+impl ComputedDecimal {
+    pub fn value(&self) -> Option<&Decimal> {
+        self.value.as_ref()
+    }
+    pub fn into_option(self) -> Option<Decimal> {
+        self.value
+    }
+    pub fn metadata(&self) -> ComputedDecimalMetadata {
+        ComputedDecimalMetadata::OwnDecimal
+    }
+    /// Available only for integral CEIL/FLOOR results that fit exactly in i64.
+    /// None leaves the original Decimal intact, including out-of-range results.
+    pub fn checked_i64_view(&self) -> Option<i64> {
+        self.checked_i64_view
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputedInt128Metadata {
+    OwnInt128,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ComputedInt128 {
+    value: Option<i128>,
+}
+
+impl ComputedInt128 {
+    pub fn value(&self) -> Option<i128> {
+        self.value
+    }
+    pub fn into_option(self) -> Option<i128> {
+        self.value
+    }
+    pub fn metadata(&self) -> ComputedInt128Metadata {
+        ComputedInt128Metadata::OwnInt128
+    }
+}
+
+/// Only a semantic cause returned by the exact sealed ABS invocation can
+/// authorize this view. Neither numeric error codes nor messages classify it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvaluatedSqlFailureKind {
+    AbsSignedOverflow,
+}
+
+/// Fresh owned failure-only observation for one ready-value invocation.
+/// This is not retained in the worker, context, program, or pool.
+#[derive(Debug)]
+pub struct ReportedEvaluatedFailure {
+    error: LocalError,
+    operation: Option<EvaluatedBytesOp>,
+    sql_failure: Option<EvaluatedSqlFailureKind>,
+}
+
+impl ReportedEvaluatedFailure {
+    fn unreported(error: LocalError) -> Self {
+        Self {
+            error,
+            operation: None,
+            sql_failure: None,
+        }
+    }
+    pub fn error(&self) -> &LocalError {
+        &self.error
+    }
+    pub fn into_error(self) -> LocalError {
+        self.error
+    }
+    pub fn operation(&self) -> Option<EvaluatedBytesOp> {
+        self.operation
+    }
+    pub fn sql_failure(&self) -> Option<EvaluatedSqlFailureKind> {
+        self.sql_failure
+    }
+}
+
+impl std::fmt::Display for ReportedEvaluatedFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl std::error::Error for ReportedEvaluatedFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// The complete result domain of the closed ready-value worker. Every carrier
 /// owns its computed result, including NULL; none borrows the input/worker.
 #[derive(Debug, PartialEq, Eq)]
@@ -2555,6 +2985,8 @@ pub enum ComputedValue {
     Int(ComputedInt),
     Bytes(ComputedBytes),
     Ieee754Bits(ComputedIeee754Bits),
+    Decimal(ComputedDecimal),
+    Int128(ComputedInt128),
 }
 
 /// Checked retained storage for one worker. Inline bytes are separate so a
@@ -2785,7 +3217,10 @@ impl EvaluatedAsciiWorker {
     pub fn eval_one(&mut self, bytes: Option<Vec<u8>>) -> LocalResult<ComputedInt> {
         match self.inner.eval_one(bytes)? {
             ComputedValue::Int(value) => Ok(value),
-            ComputedValue::Bytes(_) | ComputedValue::Ieee754Bits(_) => {
+            ComputedValue::Bytes(_)
+            | ComputedValue::Ieee754Bits(_)
+            | ComputedValue::Decimal(_)
+            | ComputedValue::Int128(_) => {
                 self.inner.poisoned = true;
                 Err(LocalError::InvalidBatch(
                     "evaluated ASCII requires an owned canonical Int result".into(),
@@ -2910,21 +3345,57 @@ impl EvaluatedBytesWorker {
     /// reach the selected generated wrapper. Frontend demand/coercion order and
     /// return charset/type policy remain outside this owned-value boundary.
     pub fn eval_args(&mut self, args: EvaluatedArgs) -> LocalResult<ComputedValue> {
+        self.eval_args_reported(args)
+            .map_err(ReportedEvaluatedFailure::into_error)
+    }
+
+    /// The same single evaluation with a narrow, owned ABS failure receipt.
+    /// Preparation, resource and output failures remain the original
+    /// LocalError.
+    pub fn eval_args_reported(
+        &mut self,
+        args: EvaluatedArgs,
+    ) -> Result<ComputedValue, ReportedEvaluatedFailure> {
         // Preserve the semantic tag until after refusal. In particular, even
         // NULL or an eight-byte ordinary Bytes value cannot enter raw math.
         if args.role() != self.operation.input_role()
             || args.input_types() != self.operation.input_types()
             || !args.admission_matches(self.operation)
         {
-            return Err(LocalError::InvalidBatch(
-                "evaluated arguments differ from the operation's closed input shape".into(),
+            return Err(ReportedEvaluatedFailure::unreported(
+                LocalError::InvalidBatch(
+                    "evaluated arguments differ from the operation's closed input shape".into(),
+                ),
             ));
         }
-        self.begin_invocation()?;
-        let result = args
-            .into_values()
-            .and_then(|(ready, arity)| self.eval_ready(ready, arity));
+        self.begin_invocation()
+            .map_err(ReportedEvaluatedFailure::unreported)?;
+        let mut sql_failure = None;
+        let result = (|| {
+            let decimal_available = if matches!(
+                args.role(),
+                EvaluatedArgsRole::DecimalUnary | EvaluatedArgsRole::DecimalInt
+            ) {
+                // A real retained owner is already present even for inline or
+                // NULL Decimal input. Subtract it, not a guessed packet/scale
+                // cap; a caller's usize::MAX limit still leaves finite room.
+                self.state
+                    .limits
+                    .max_retained_bytes
+                    .checked_sub(self.observe_storage()?.total_bytes())
+                    .ok_or_else(evaluated_ascii_storage_overflow)?
+            } else {
+                0
+            };
+            let (ready, arity) = args.into_values(decimal_available)?;
+            self.eval_ready(ready, arity, &mut sql_failure)
+        })();
         self.finish_invocation(result)
+            .map_err(|error| ReportedEvaluatedFailure {
+                error,
+                operation: sql_failure.map(|_| self.operation),
+                sql_failure,
+            })
     }
 
     fn finish_invocation<T>(&mut self, result: LocalResult<T>) -> LocalResult<T> {
@@ -2958,10 +3429,16 @@ impl EvaluatedBytesWorker {
         }
     }
 
-    fn eval_ready(&mut self, ready: [ScalarValue; 4], arity: usize) -> LocalResult<ComputedValue> {
+    fn eval_ready(
+        &mut self,
+        ready: [ScalarValue; 4],
+        arity: usize,
+        sql_failure: &mut Option<EvaluatedSqlFailureKind>,
+    ) -> LocalResult<ComputedValue> {
         let input_bytes = ready[..arity].iter().try_fold(0usize, |total, value| {
             let bytes = match value {
                 ScalarValue::Bytes(Some(bytes)) => bytes.capacity(),
+                ScalarValue::Decimal(Some(value)) => value.spill_capacity_bytes(),
                 _ => 0,
             };
             total
@@ -2970,6 +3447,7 @@ impl EvaluatedBytesWorker {
         })?;
         self.state.row = [0];
         let mut budget = EvalBudget::exact(self.state.limits)?;
+        let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
             &mut self.ctx,
@@ -2979,7 +3457,19 @@ impl EvaluatedBytesWorker {
             &self.state.row,
             &mut self.witness,
             &mut budget,
-        )?;
+        ).map_err(|error| {
+            // This exact closed recipe has one canonical generated wrapper.
+            // Capture only its just-returned typed failure, not a later output
+            // or cleanup failure, an input error, or an overflow-looking code.
+            if self.operation == EvaluatedBytesOp::AbsIntNative
+                && calls_before.checked_add(1) == Some(self.witness.invocations())
+                && matches!(&error, LocalError::Evaluation(error)
+                    if matches!(error.0.as_ref(), ErrorInner::Evaluate(EvaluateError::AbsSignedOverflow { .. })))
+            {
+                *sql_failure = Some(EvaluatedSqlFailureKind::AbsSignedOverflow);
+            }
+            error
+        })?;
         let output = match result {
             RpnStackNode::Vector {
                 value: RpnStackNodeVectorValue::Generated { physical_value },
@@ -3014,6 +3504,68 @@ impl EvaluatedBytesWorker {
                 }),
                 0,
             ),
+            ScalarValueRef::Decimal(value) => {
+                let checked_i64_view = if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::CeilDecimalNative | EvaluatedBytesOp::FloorDecimalNative
+                ) {
+                    value.and_then(|value| match value.as_i64() {
+                        tidb_query_datatype::codec::mysql::decimal::Res::Ok(value) => Some(value),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+                let value = match value {
+                    None => None,
+                    Some(source) => {
+                        let overlap = output_bytes
+                            .checked_add(source.spill_capacity_bytes())
+                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        budget.check_output(overlap, input_bytes)?;
+                        let limit = self
+                            .state
+                            .limits
+                            .max_retained_bytes
+                            .checked_sub(input_bytes)
+                            .and_then(|remaining| remaining.checked_sub(output_bytes))
+                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        let owned = source
+                            .try_clone_native_math(limit)
+                            .map_err(native_decimal_bridge_error)?;
+                        let overlap = output_bytes
+                            .checked_add(owned.spill_capacity_bytes())
+                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        budget.check_output(overlap, input_bytes)?;
+                        Some(owned)
+                    }
+                };
+                let retained = value.as_ref().map_or(0, Decimal::spill_capacity_bytes);
+                (
+                    ComputedValue::Decimal(ComputedDecimal {
+                        value,
+                        checked_i64_view,
+                    }),
+                    retained,
+                )
+            }
+            ScalarValueRef::Bytes(value)
+                if self.operation == EvaluatedBytesOp::RoundInt128Legacy =>
+            {
+                let value = value
+                    .map(|source| {
+                        <[u8; 16]>::try_from(source)
+                            .map(i128::from_le_bytes)
+                            .map_err(|_| {
+                                LocalError::InvalidBatch(
+                                    "Int128 result transport must contain exactly sixteen bytes"
+                                        .into(),
+                                )
+                            })
+                    })
+                    .transpose()?;
+                (ComputedValue::Int128(ComputedInt128 { value }), 0)
+            }
             ScalarValueRef::Bytes(value) if self.operation.returns_ieee754_bits() => {
                 // The physical vector and input remain charged above while we
                 // copy an inline bit owner. No Bytes/SQL-Int result escapes.

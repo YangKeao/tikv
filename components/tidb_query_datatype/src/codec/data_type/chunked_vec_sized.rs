@@ -22,6 +22,19 @@ pub struct ChunkedVecSized<T: Sized> {
     phantom: std::marker::PhantomData<T>,
 }
 
+impl ChunkedVecSized<super::Decimal> {
+    /// Counts owned Decimal spill storage, including initialized NULL backing.
+    ///
+    /// This is retained payload accounting, not a logical-value iterator or an
+    /// allocator/peak-memory measurement. The vector's cells and bitmap are
+    /// accounted separately by their owner.
+    pub fn checked_decimal_spill_bytes(&self) -> Option<usize> {
+        self.data.iter().try_fold(0usize, |bytes, value| {
+            bytes.checked_add(value.spill_capacity_bytes())
+        })
+    }
+}
+
 impl<T: Sized + Clone> ChunkedVecSized<T> {
     #[inline]
     fn get(&self, idx: usize) -> Option<&T> {
@@ -167,6 +180,31 @@ mod tests {
         fn drop(&mut self) {
             self.drops.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn test_decimal_spill_accounting_includes_hidden_initialized_payload() {
+        let wide = Decimal::try_from_native_digits(false, &[b'9'; 108], 0, 0, 4096)
+            .expect("small wide Decimal fits the test budget");
+        assert!(wide.spill_capacity_bytes() > 0);
+        let mut values = ChunkedVecSized::<Decimal>::with_capacity(2);
+        values.push(Some(wide.clone()));
+        values.push(None);
+        // Simulate initialized storage hidden by NULL validity without exposing
+        // a production raw-value iterator to encoders.
+        values.data[1] = wide;
+        assert!(values.get(1).is_none());
+        let expected = values
+            .data
+            .iter()
+            .map(Decimal::spill_capacity_bytes)
+            .sum::<usize>();
+        assert_eq!(values.checked_decimal_spill_bytes(), Some(expected));
+        values.truncate(1);
+        assert_eq!(
+            values.checked_decimal_spill_bytes(),
+            Some(values.data[0].spill_capacity_bytes())
+        );
     }
 
     #[test]

@@ -204,10 +204,10 @@ short-circuit admission policy described above.
   genuine input versus kernel sites without replay or guessed SQL diagnostics.
 - `prepare_evaluated_bytes` constructs one closed operation over canonical ready
   slots and returns an opaque worker, not a raw program/context/graph. Its legacy
-  name also covers fixed Int and multi-input string operations. `EvaluatedArgs`
-  admits only nullable Bytes, Int (including an explicitly normalized bit pattern),
-  two Ints, Bytes+Int, two/three Bytes, raw IEEE singles/pairs, Bytes/Int/Int/Bytes,
-  or typed ready-count/packet operands. The operation fixes ordered slot
+  name also covers fixed Int, Decimal, full i128 and multi-input string operations.
+  `EvaluatedArgs` admits only the closed nullable Bytes/Int combinations, raw IEEE
+  singles/pairs or IEEE+Int, typed ready-count/packet operands, real Decimal or
+  Decimal+Int inputs, canonical LE16 Int128, and an actual-NULL witness role. The operation fixes ordered slot
   types/arity and an exact call recipe; callers cannot supply arbitrary FieldTypes.
   Existing operations use one FnCall. Closed negated boolean tests use only
   base+UnaryNot, checking each stage's signature, name, function pointer, arity and
@@ -225,7 +225,7 @@ short-circuit admission policy described above.
   BitCount and the six bitwise operations use the same Int carrier: it preserves
   all64 bits, not a checked unsigned-to-signed numeric narrowing. Logical shifts
   and counts>=64 come from the official kernels. Native string/Decimal/Real
-  normalization and SQL diagnostics happen before this ready-value boundary;
+  normalization and coercion diagnostics happen before this ready-value boundary;
   OwnSignedInt describes computed transport, not the caller's UInt SQL result.
   Boolean operations consume frontend-normalized truth/presence as nullable Int0/1;
   this does not restrict original SQL operands to Int or silently coerce NaN to NULL.
@@ -269,6 +269,30 @@ short-circuit admission policy described above.
   owns conversion and output policy: ordinary inverse trig maps NaN to NULL,
   legacy real consumers retain NaN, and native finite-result errors retain their
   original diagnostics. No alternate driver, callback or native fallback is added.
+  ABS/CEIL/FLOOR/ROUND/TRUNCATE and three legacy ROUND policies add 23 private
+  recipes in `impl_math.rs`. Decimal inputs/results use actual ScalarValue and
+  VectorValue Decimal storage, preserving wide words and independent storage/result
+  scales; there is no Display/parse or nine-word bridge. Decimal DI/DII recipes
+  append the worker's finite remaining retained budget, not a SQL argument or a
+  precision cap. Accounting includes initialized cells, bitmap and every owned
+  Decimal spill, including NULL backing, plus extraction coexistence. This is not
+  an allocator high-water claim. The controlled datatype facade shares the existing
+  round/shift/ABS workers while preserving native unchecked scale arithmetic and
+  distinct native-Go versus wire policies. Native wrappers remove the duplicated
+  arithmetic; the separate native ceiling-rounding helper is not part of this batch.
+  ComputedDecimal supplies a checked i64 view only for CEIL/FLOOR; out-of-range
+  values retain their Decimal fallback. Int128 uses strict LE16 transport and a
+  real identity kernel. Legacy real ROUND remains ties-away, distinct from native
+  ties-even; legacy Decimal rounding occurs before its storage-value f64 conversion.
+  MathNullWitnessNative accepts only an actually observed NULL, not a fabricated
+  numeric operand, allowing PB demand/arity precedence to remain frontend-owned.
+  `eval_args_reported` preserves the original LocalError and attaches a typed SQL
+  view only after the sealed AbsIntNative wrapper actually fails with the explicit
+  AbsSignedOverflow cause. It does not inspect SQL codes/messages or predict from
+  input. Explicit Caused errors preserve Decimal bridge/resource causes without
+  changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
+  maps the receipt back to its original error; no context-last-error channel,
+  general graph admission, alternate driver or four-column expansion is added.
   SPACE/REPEAT/TO_BASE64/FROM_BASE64 add an independent Packet argument role,
   carrying real nullable values plus typed Allow/SuppressByPacket (physical
   non-NULL 0/1). The private wrapper is actually invoked for suppressed NULL;

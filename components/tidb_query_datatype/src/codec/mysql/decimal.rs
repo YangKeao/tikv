@@ -1638,6 +1638,66 @@ pub struct DecimalParts {
     pub words: [u32; 9],
 }
 
+/// The exact native decimal math policies admitted by the closed value bridge.
+/// These are not the wire signatures or a public arithmetic-capacity policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeDecimalOp {
+    Abs,
+    Ceil,
+    Floor,
+    Round(i32),
+    Truncate(i32),
+}
+
+/// A bridge/resource refusal is not a SQL numeric overflow. Core failures keep
+/// their original owned cause; callers must not classify them by message text.
+#[derive(Debug)]
+pub enum NativeDecimalError {
+    InvalidInput(&'static str),
+    Resource(&'static str),
+    Core(Error),
+}
+
+impl fmt::Display for NativeDecimalError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput(detail) => write!(formatter, "invalid native decimal: {detail}"),
+            Self::Resource(detail) => {
+                write!(formatter, "native decimal resource refusal: {detail}")
+            }
+            Self::Core(error) => fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for NativeDecimalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Core(error) => Some(error),
+            Self::InvalidInput(_) | Self::Resource(_) => None,
+        }
+    }
+}
+
+type NativeDecimalResult<T> = std::result::Result<T, NativeDecimalError>;
+
+// A limit applies to ONE materialized word value/buffer, including its nine
+// initialized inline cells, not allocator capacity, headers or a combined peak.
+// Round/shift preflights may reserve a conservative carry/alignment bound.
+fn native_decimal_word_budget(words: usize, limit: usize) -> NativeDecimalResult<()> {
+    let bytes = words
+        .max(WORD_BUF_LEN)
+        .checked_mul(mem::size_of::<u32>())
+        .filter(|bytes| *bytes <= isize::MAX as usize)
+        .ok_or(NativeDecimalError::Resource(
+            "word-buffer byte count overflow",
+        ))?;
+    if bytes > limit {
+        return Err(NativeDecimalError::Resource("word buffer exceeds limit"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub enum RoundMode {
     // HalfEven rounds normally.
@@ -1656,6 +1716,329 @@ impl Default for Decimal {
 }
 
 impl Decimal {
+    /// Imports a native unsigned coefficient without text formatting/parsing or
+    /// a nine-word projection. Only the native logical domain is admitted:
+    /// nonempty ASCII digits, enough digits for storage, and result <= storage.
+    /// `limit` bounds each materialized word buffer's logical data bytes, never
+    /// precision. The borrowed coefficient and simultaneous owners are not a
+    /// combined physical-memory accounting claim.
+    pub fn try_from_native_digits(
+        negative: bool,
+        digits: &[u8],
+        storage: u32,
+        result: u32,
+        limit: usize,
+    ) -> std::result::Result<Self, NativeDecimalError> {
+        if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+            return Err(NativeDecimalError::InvalidInput(
+                "coefficient must contain ASCII digits",
+            ));
+        }
+        if result > storage {
+            return Err(NativeDecimalError::InvalidInput(
+                "result scale exceeds storage scale",
+            ));
+        }
+        let fraction = usize::try_from(storage)
+            .map_err(|_| NativeDecimalError::Resource("storage scale exceeds indexing width"))?;
+        let integer =
+            digits
+                .len()
+                .checked_sub(fraction)
+                .ok_or(NativeDecimalError::InvalidInput(
+                    "coefficient omits stored fraction digits",
+                ))?;
+        let int_words = integer.div_ceil(DIGITS_PER_WORD);
+        let active = int_words
+            .checked_add(fraction.div_ceil(DIGITS_PER_WORD))
+            .ok_or(NativeDecimalError::Resource("active word count overflow"))?;
+        native_decimal_word_budget(active, limit)?;
+        let mut words = Vec::new();
+        words
+            .try_reserve_exact(active)
+            .map_err(|_| NativeDecimalError::Resource("coefficient word allocation failed"))?;
+        words.resize(active, 0);
+        let word = |chunk: &[u8]| {
+            chunk
+                .iter()
+                .fold(0_u32, |value, digit| value * 10 + u32::from(*digit - b'0'))
+        };
+        let mut offset = 0;
+        for (index, destination) in words[..int_words].iter_mut().enumerate() {
+            let width = if index == 0 {
+                (integer - 1) % DIGITS_PER_WORD + 1
+            } else {
+                DIGITS_PER_WORD
+            };
+            *destination = word(&digits[offset..offset + width]);
+            offset += width;
+        }
+        for (destination, chunk) in words[int_words..]
+            .iter_mut()
+            .zip(digits[integer..].chunks(DIGITS_PER_WORD))
+        {
+            *destination = word(chunk) * TEN_POW[DIGITS_PER_WORD - chunk.len()];
+        }
+        Self::try_from_words(DecimalWordsRef {
+            int_digits: integer,
+            storage_frac: storage,
+            result_frac: result,
+            negative,
+            words: &words,
+        })
+        .map_err(NativeDecimalError::Core)
+    }
+
+    /// Fallible logical-value extraction for the native math result carrier.
+    /// This does not admit raw physical cells, visible-only padding, or
+    /// inactive heap payloads as native coefficients. The sign of zero is
+    /// transported; value-producing ABS/round operations normalize it
+    /// separately.
+    pub fn try_clone_native_math(
+        &self,
+        limit: usize,
+    ) -> std::result::Result<Self, NativeDecimalError> {
+        self.check_native_math_value(limit)?;
+        self.try_clone_for_worker()
+            .map_err(NativeDecimalError::Core)
+    }
+
+    /// Evaluates one admitted native policy using the existing exact workers.
+    /// SQL argument coercion, NULL, result-type selection and scale caps belong
+    /// to the closed expression caller. `limit` is a per-value/buffer logical
+    /// byte allowance, not a precision cap or a total allocation-peak bound.
+    pub fn try_native_math(
+        &self,
+        operation: NativeDecimalOp,
+        limit: usize,
+    ) -> std::result::Result<Self, NativeDecimalError> {
+        self.check_native_math_value(limit)?;
+        match operation {
+            NativeDecimalOp::Abs => {
+                let value = self
+                    .try_clone_for_worker()
+                    .map_err(NativeDecimalError::Core)?;
+                Self::try_finish_exact(value.abs(), self.result_frac_cnt)
+                    .map_err(NativeDecimalError::Core)
+            }
+            NativeDecimalOp::Ceil | NativeDecimalOp::Floor => {
+                let ceiling = operation == NativeDecimalOp::Ceil;
+                let mode = if ceiling != self.negative {
+                    RoundMode::Ceiling
+                } else {
+                    RoundMode::Truncate
+                };
+                self.native_math_round(0, mode, limit)
+            }
+            NativeDecimalOp::Round(scale) => {
+                self.native_math_round_compat(scale, true, scale.max(0) as u32, limit)
+            }
+            NativeDecimalOp::Truncate(scale) => {
+                self.native_math_round_compat(scale, false, scale.max(0) as u32, limit)
+            }
+        }
+    }
+
+    /// The same native round policy with explicitly retained storage scale.
+    /// This narrow bridge serves existing value consumers such as
+    /// multiplication; visible scale is max(scale, 0), and storage is at
+    /// least that visible scale. It is not a new precision limit or a
+    /// general rounding-mode interface.
+    pub fn try_native_round_with_storage(
+        &self,
+        scale: i32,
+        round: bool,
+        storage: u32,
+        limit: usize,
+    ) -> std::result::Result<Self, NativeDecimalError> {
+        self.check_native_math_value(limit)?;
+        self.native_math_round_compat(scale, round, storage, limit)
+    }
+
+    fn check_native_math_value(&self, limit: usize) -> NativeDecimalResult<()> {
+        if self.result_frac_cnt > self.frac_cnt {
+            return Err(NativeDecimalError::InvalidInput(
+                "result scale exceeds storage scale",
+            ));
+        }
+        self.int_cnt
+            .checked_add(self.frac_cnt)
+            .ok_or(NativeDecimalError::Resource(
+                "coefficient digit count overflow",
+            ))?;
+        let active = self
+            .int_words()
+            .checked_add(self.frac_words())
+            .ok_or(NativeDecimalError::Resource("active word count overflow"))?;
+        if active == 0 || active > self.word_buf.len() {
+            return Err(NativeDecimalError::InvalidInput(
+                "native coefficient requires initialized active words",
+            ));
+        }
+        native_decimal_word_budget(active, limit)?;
+        if self.word_buf[..active]
+            .iter()
+            .any(|word| *word >= WORD_BASE)
+        {
+            return Err(NativeDecimalError::InvalidInput(
+                "active word is not base-1e9",
+            ));
+        }
+        let head = self.int_cnt % DIGITS_PER_WORD;
+        if head != 0 && self.word_buf[0] >= TEN_POW[head] {
+            return Err(NativeDecimalError::InvalidInput(
+                "leading word exceeds its digit count",
+            ));
+        }
+        let tail = self.frac_cnt % DIGITS_PER_WORD;
+        if tail != 0 && self.word_buf[active - 1] % TEN_POW[DIGITS_PER_WORD - tail] != 0 {
+            return Err(NativeDecimalError::InvalidInput(
+                "fractional word has nonzero padding",
+            ));
+        }
+        Ok(())
+    }
+
+    fn native_math_round(
+        &self,
+        scale: i64,
+        mode: RoundMode,
+        limit: usize,
+    ) -> NativeDecimalResult<Self> {
+        let target = u32::try_from(scale.max(0))
+            .map_err(|_| NativeDecimalError::Resource("round scale exceeds u32"))?;
+        let target_words = usize::try_from(target)
+            .map_err(|_| NativeDecimalError::Resource("round scale exceeds indexing width"))?
+            .div_ceil(DIGITS_PER_WORD);
+        let mut bound = self
+            .int_words()
+            .checked_add(self.frac_words().max(target_words))
+            .ok_or(NativeDecimalError::Resource("round word count overflow"))?;
+        if scale < i64::from(self.storage_scale()) && !matches!(mode, RoundMode::Truncate) {
+            bound = bound
+                .checked_add(1)
+                .ok_or(NativeDecimalError::Resource("round carry count overflow"))?;
+        }
+        native_decimal_word_budget(bound, limit)?;
+        self.try_round_exact(scale, mode)
+            .map_err(NativeDecimalError::Core)
+    }
+
+    fn native_math_round_compat(
+        &self,
+        target: i32,
+        round: bool,
+        storage: u32,
+        limit: usize,
+    ) -> NativeDecimalResult<Self> {
+        let result_scale = target.max(0) as u32;
+        let storage_scale = storage.max(result_scale);
+        // These are deliberately the source unchecked expressions. The caller
+        // workspace's overflow-check setting, not debug_assertions, decides
+        // whether they panic or wrap. A wrapped branch is NOT mathematical zero.
+        let shift = self.storage_scale() as i32 - target;
+        if shift <= 0 {
+            let padding = storage_scale - self.storage_scale();
+            let displacement =
+                i64::from(self.storage_scale()) + i64::from(padding) - i64::from(storage_scale);
+            if displacement == 0 {
+                return self
+                    .try_clone_native_math(limit)?
+                    .native_math_output_storage(storage_scale, result_scale, limit);
+            }
+            // A wrapped pad adds 2^32 to the numeric exponent. Zero needs no
+            // padding allocation; a nonzero expanded value is preflighted below.
+            return self
+                .try_clone_native_math(limit)?
+                .native_math_shift_and_scale(displacement, storage_scale, result_scale, limit);
+        }
+        // Keep the remaining source unary-minus overflow point as well. A
+        // wrapped negative usize padding count is a resource refusal, not SQL
+        // overflow and not a reason to attempt a gigantic allocation.
+        let trailing = if target < 0 { (-target) as usize } else { 0 };
+        if trailing > isize::MAX as usize {
+            return Err(NativeDecimalError::Resource(
+                "native trailing padding exceeds indexing width",
+            ));
+        }
+        let effective_scale = i64::from(self.storage_scale()) - i64::from(shift);
+        let mode = if round {
+            RoundMode::HalfEven
+        } else {
+            RoundMode::Truncate
+        };
+        let value = self.native_math_round(effective_scale, mode, limit)?;
+        let displacement =
+            i128::from(effective_scale) + trailing as i128 - i128::from(result_scale);
+        let displacement = i64::try_from(displacement)
+            .map_err(|_| NativeDecimalError::Resource("native scale displacement exceeds i64"))?;
+        if displacement == 0 {
+            return value.native_math_output_storage(storage_scale, result_scale, limit);
+        }
+        value.native_math_shift_and_scale(displacement, storage_scale, result_scale, limit)
+    }
+
+    fn native_math_output_storage(
+        self,
+        storage_scale: u32,
+        result_scale: u32,
+        limit: usize,
+    ) -> NativeDecimalResult<Self> {
+        let storage = usize::try_from(storage_scale).map_err(|_| {
+            NativeDecimalError::Resource("output storage scale exceeds indexing width")
+        })?;
+        let result = usize::try_from(result_scale).map_err(|_| {
+            NativeDecimalError::Resource("output result scale exceeds indexing width")
+        })?;
+        let value = if self.frac_cnt == storage {
+            self
+        } else {
+            self.native_math_round(i64::from(storage_scale), RoundMode::Truncate, limit)?
+        };
+        Self::try_finish_exact(Res::Ok(value), result).map_err(NativeDecimalError::Core)
+    }
+
+    fn native_math_shift_and_scale(
+        self,
+        displacement: i64,
+        storage_scale: u32,
+        result_scale: u32,
+        limit: usize,
+    ) -> NativeDecimalResult<Self> {
+        if self.is_zero() {
+            return Self::zero().native_math_output_storage(storage_scale, result_scale, limit);
+        }
+        // Native wrapped-scale branches only increase the numeric exponent.
+        // This is a resource bound; the existing shift worker owns all digits.
+        let displacement_usize = usize::try_from(displacement).map_err(|_| {
+            NativeDecimalError::Resource("native scale displacement exceeds indexing width")
+        })?;
+        let integer =
+            self.int_cnt
+                .checked_add(displacement_usize)
+                .ok_or(NativeDecimalError::Resource(
+                    "native shifted integer count overflow",
+                ))?;
+        let bound = integer
+            .div_ceil(DIGITS_PER_WORD)
+            .checked_add(self.frac_words())
+            .ok_or(NativeDecimalError::Resource(
+                "native shifted word count overflow",
+            ))?;
+        native_decimal_word_budget(bound, limit)?;
+        let shifted = self
+            .shift_with_limit(
+                i128::from(displacement),
+                WordLimit::Grow,
+                ShiftDisposition::Legacy,
+            )
+            .map_err(NativeDecimalError::Core)?;
+        let storage = shifted.result.frac_cnt;
+        let shifted =
+            Self::try_finish_exact(shifted.result, storage).map_err(NativeDecimalError::Core)?;
+        shifted.native_math_output_storage(storage_scale, result_scale, limit)
+    }
+
     /// Imports exact bounded components without parsing, rounding or SQL
     /// policy.
     ///
@@ -4032,6 +4415,117 @@ mod tests {
         codec::error::*,
         expr::{EvalConfig, Flag},
     };
+
+    #[test]
+    fn test_native_math_five_policies_and_limits() {
+        use NativeDecimalOp::*;
+        let input = Decimal::try_from_native_digits(true, b"155", 1, 1, 1024).unwrap();
+        for (operation, expected) in [
+            (Abs, "15.5"),
+            (Ceil, "-15"),
+            (Floor, "-16"),
+            (Round(0), "-16"),
+            (Truncate(0), "-15"),
+            (Round(-1), "-20"),
+            (Truncate(-1), "-10"),
+        ] {
+            let output = input.try_native_math(operation, 1024).unwrap();
+            assert_eq!(output.to_string_value(), expected);
+        }
+        let retained = input
+            .try_native_round_with_storage(0, true, 4, 1024)
+            .unwrap();
+        assert_eq!(retained.to_string_value(), "-16.0000");
+        assert_eq!((retained.storage_scale(), retained.result_scale()), (4, 0));
+        let coefficient = format!("{}5", "9".repeat(108));
+        let wide =
+            Decimal::try_from_native_digits(false, coefficient.as_bytes(), 1, 1, 4096).unwrap();
+        assert_eq!(
+            wide.try_native_math(Round(0), 4096)
+                .unwrap()
+                .to_string_value(),
+            format!("1{}", "0".repeat(108))
+        );
+        assert!(matches!(
+            input.try_clone_native_math(1),
+            Err(NativeDecimalError::Resource(_))
+        ));
+        assert!(matches!(
+            input.try_native_math(Abs, 1),
+            Err(NativeDecimalError::Resource(_))
+        ));
+        assert!(matches!(
+            input.try_native_math(Round(i32::MAX), 64),
+            Err(NativeDecimalError::Resource(_))
+        ));
+        assert!(matches!(
+            Decimal::try_from_native_digits(false, b"1", 0, 0, 1),
+            Err(NativeDecimalError::Resource(_))
+        ));
+        for (digits, storage, result) in [
+            (b"".as_slice(), 0, 0),
+            (b"x".as_slice(), 0, 0),
+            (b"1".as_slice(), 2, 1),
+            (b"1".as_slice(), 0, 1),
+        ] {
+            assert!(matches!(
+                Decimal::try_from_native_digits(false, digits, storage, result, 1024),
+                Err(NativeDecimalError::InvalidInput(_))
+            ));
+        }
+        let failure = NativeDecimalError::Core(Error::InvalidDataType("original cause".to_owned()));
+        let NativeDecimalError::Core(original) = &failure else {
+            unreachable!()
+        };
+        let source = std::error::Error::source(&failure)
+            .unwrap()
+            .downcast_ref::<Error>()
+            .unwrap();
+        assert!(std::ptr::eq(original, source));
+        assert_eq!(failure.to_string(), original.to_string());
+    }
+
+    #[test]
+    fn test_native_math_scale_policy_follows_workspace_overflow() {
+        use std::{hint::black_box, panic::catch_unwind};
+        // Probe only the original arithmetic, never its enormous repeat/Vec.
+        // This compares the actual compiled overflow policy, not a debug cfg.
+        for storage in [0_u32, 1] {
+            let original = catch_unwind(|| {
+                let storage = black_box(storage);
+                let target = black_box(i32::MIN);
+                let shift = storage as i32 - target;
+                assert!(shift <= 0);
+                (target.max(0) as u32) - storage
+            });
+            let value = Decimal::try_from_native_digits(false, b"1", storage, storage, 64).unwrap();
+            for operation in [
+                NativeDecimalOp::Round(black_box(i32::MIN)),
+                NativeDecimalOp::Truncate(black_box(i32::MIN)),
+            ] {
+                let actual = catch_unwind(|| value.try_native_math(operation, 64));
+                match &original {
+                    Err(_) => assert!(actual.is_err()),
+                    Ok(0) => assert_eq!(actual.unwrap().unwrap().to_string_value(), "1"),
+                    Ok(_) => assert!(matches!(
+                        actual.unwrap(),
+                        Err(NativeDecimalError::Resource(_))
+                    )),
+                }
+            }
+            let zero = Decimal::try_from_native_digits(true, b"0", storage, storage, 64).unwrap();
+            let actual = catch_unwind(|| {
+                zero.try_native_math(NativeDecimalOp::Round(black_box(i32::MIN)), 64)
+            });
+            if original.is_err() {
+                assert!(actual.is_err());
+            } else {
+                let output = actual.unwrap().unwrap();
+                assert!(output.is_zero());
+                assert!(!output.is_negative());
+            }
+        }
+    }
 
     #[test]
     fn test_default_is_valid_zero() {

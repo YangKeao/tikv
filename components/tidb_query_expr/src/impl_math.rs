@@ -4,19 +4,21 @@ use std::{cell::RefCell, convert::TryFrom};
 
 use num::traits::Pow;
 use tidb_query_codegen::rpn_fn;
-use tidb_query_common::Result;
+use tidb_query_common::{Result, error::EvaluateError};
 use tidb_query_datatype::{
     codec::{
         self, Error,
+        convert::ConvertTo,
         data_type::*,
-        mysql::{DEFAULT_FSP, RoundMode},
+        mysql::{
+            DEFAULT_FSP, RoundMode,
+            decimal::{NativeDecimalError, NativeDecimalOp},
+        },
     },
     expr::EvalContext,
 };
 use tikv_util::time::get_time;
 
-const MAX_I64_DIGIT_LENGTH: i64 = 19;
-const MAX_U64_DIGIT_LENGTH: i64 = 20;
 const MAX_RAND_VALUE: u32 = 0x3FFFFFFF;
 
 #[rpn_fn]
@@ -114,6 +116,21 @@ fn f64_to_real(n: f64) -> Option<Real> {
 }
 
 #[inline]
+fn abs_int_value(value: Int) -> Option<Int> {
+    value.checked_abs()
+}
+
+#[inline]
+fn abs_f64(value: f64) -> f64 {
+    value.abs()
+}
+
+#[inline]
+fn ceil_floor_f64(value: f64, ceiling: bool) -> f64 {
+    if ceiling { value.ceil() } else { value.floor() }
+}
+
+#[inline]
 #[rpn_fn(capture = [ctx])]
 pub fn ceil<C: Ceil>(ctx: &mut EvalContext, arg: &C::Input) -> Result<Option<C::Output>> {
     C::ceil(ctx, arg)
@@ -134,7 +151,7 @@ impl Ceil for CeilReal {
 
     #[inline]
     fn ceil(_ctx: &mut EvalContext, arg: &Self::Input) -> Result<Option<Self::Output>> {
-        Ok(Some(Real::new(arg.ceil()).unwrap()))
+        Ok(Some(Real::new(ceil_floor_f64(**arg, true)).unwrap()))
     }
 }
 
@@ -209,7 +226,7 @@ impl Floor for FloorReal {
 
     #[inline]
     fn floor(_ctx: &mut EvalContext, arg: &Self::Input) -> Result<Option<Self::Output>> {
-        Ok(Some(Real::new(arg.floor()).unwrap()))
+        Ok(Some(Real::new(ceil_floor_f64(**arg, false)).unwrap()))
     }
 }
 
@@ -267,7 +284,7 @@ impl Floor for FloorIntToInt {
 #[rpn_fn]
 #[inline]
 fn abs_int(arg: &Int) -> Result<Option<Int>> {
-    match arg.checked_abs() {
+    match abs_int_value(*arg) {
         None => Err(Error::overflow("BIGINT", format!("abs({})", *arg)).into()),
         Some(arg_abs) => Ok(Some(arg_abs)),
     }
@@ -282,7 +299,7 @@ fn abs_uint(arg: &Int) -> Result<Option<Int>> {
 #[rpn_fn]
 #[inline]
 fn abs_real(arg: &Real) -> Result<Option<Real>> {
-    Ok(Some(num_traits::Signed::abs(arg)))
+    Ok(Some(Real::new(abs_f64(**arg)).unwrap()))
 }
 
 #[rpn_fn]
@@ -542,6 +559,303 @@ pub fn conv(n: BytesRef, from_base: &Int, to_base: &Int) -> Result<Option<Bytes>
     }
 }
 
+/// Resolves the native decimal scale policy before ready-argument construction.
+/// The wire signatures retain their own bounded/i8 policies. This cap is not a
+/// kernel memory budget; a finite logical byte allowance travels separately.
+#[inline]
+pub fn native_decimal_target_scale(requested: i64, result_decimal: Option<i64>) -> i32 {
+    let target = requested.clamp(i64::from(i32::MIN), 30);
+    result_decimal
+        .filter(|scale| *scale >= 0)
+        .map_or(target, |scale| target.min(scale)) as i32
+}
+
+// Go's math.Pow10 table policy. powi and a reciprocal positive power can have
+// different low bits; retain the original table and multiplication/division
+// order, including the asymmetric positive/negative exponent limits.
+fn go_pow10(n: i64) -> f64 {
+    const POW10_TAB: [f64; 32] = [
+        1e00, 1e01, 1e02, 1e03, 1e04, 1e05, 1e06, 1e07, 1e08, 1e09, 1e10, 1e11, 1e12, 1e13, 1e14,
+        1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22, 1e23, 1e24, 1e25, 1e26, 1e27, 1e28, 1e29,
+        1e30, 1e31,
+    ];
+    const POW10_POSTAB32: [f64; 10] = [
+        1e00, 1e32, 1e64, 1e96, 1e128, 1e160, 1e192, 1e224, 1e256, 1e288,
+    ];
+    const POW10_NEGTAB32: [f64; 11] = [
+        1e-00, 1e-32, 1e-64, 1e-96, 1e-128, 1e-160, 1e-192, 1e-224, 1e-256, 1e-288, 1e-320,
+    ];
+    if (0..=308).contains(&n) {
+        let n = n as usize;
+        POW10_POSTAB32[n / 32] * POW10_TAB[n % 32]
+    } else if (-323..=0).contains(&n) {
+        let n = (-n) as usize;
+        POW10_NEGTAB32[n / 32] / POW10_TAB[n % 32]
+    } else if n > 0 {
+        f64::INFINITY
+    } else {
+        0.0
+    }
+}
+
+// Native ROUND uses Go's multiply, ties-even, divide policy even for two-arg
+// integer signatures. Keep its NaN-to-zero guard distinct from the wire policy.
+fn go_round_float(value: f64, scale: i64) -> f64 {
+    let shift = go_pow10(scale);
+    let tmp = value * shift;
+    if tmp.is_infinite() {
+        return value;
+    }
+    let result = tmp.round_ties_even() / shift;
+    if result.is_nan() { 0.0 } else { result }
+}
+
+fn go_truncate_float(value: f64, scale: i64) -> f64 {
+    let shift = go_pow10(scale);
+    let tmp = value * shift;
+    if tmp.is_infinite() || tmp.is_nan() {
+        return value;
+    }
+    if shift == 0.0 {
+        return if value.is_nan() { value } else { 0.0 };
+    }
+    tmp.trunc() / shift
+}
+
+// These exact integer operations also implement the existing wire signed-scale
+// signatures: a power outside the signed/unsigned integer range yields zero.
+fn go_truncate_int(value: i64, scale: i64) -> i64 {
+    if scale >= 0 {
+        return value;
+    }
+    let shift = scale
+        .checked_neg()
+        .and_then(|n| u32::try_from(n).ok())
+        .and_then(|n| 10i64.checked_pow(n));
+    match shift {
+        Some(shift) => value / shift * shift,
+        None => 0,
+    }
+}
+
+fn go_truncate_uint(value: u64, scale: i64) -> u64 {
+    if scale >= 0 {
+        return value;
+    }
+    let shift = scale
+        .checked_neg()
+        .and_then(|n| u32::try_from(n).ok())
+        .and_then(|n| 10u64.checked_pow(n));
+    match shift {
+        Some(shift) => value / shift * shift,
+        None => 0,
+    }
+}
+
+fn native_decimal_failure(source: NativeDecimalError) -> tidb_query_common::Error {
+    // The blanket boxed-error conversion stringifies its source. This explicit
+    // carrier retains the actual native bridge/core/resource error instead.
+    EvaluateError::Caused(Box::new(source)).into()
+}
+
+fn native_decimal_math(
+    value: &Decimal,
+    operation: NativeDecimalOp,
+    raw_budget: &Int,
+) -> Result<Decimal> {
+    let budget = usize::try_from(*raw_budget as u64).map_err(|_| {
+        native_decimal_failure(NativeDecimalError::Resource(
+            "kernel budget exceeds indexing width",
+        ))
+    })?;
+    if budget == usize::MAX {
+        return Err(native_decimal_failure(NativeDecimalError::Resource(
+            "native math requires a finite kernel budget",
+        )));
+    }
+    value
+        .try_native_math(operation, budget)
+        .map_err(native_decimal_failure)
+}
+
+fn native_decimal_resolved_scale(scale: &Int) -> Result<i32> {
+    i32::try_from(*scale).map_err(|_| {
+        native_decimal_failure(NativeDecimalError::InvalidInput(
+            "resolved native scale exceeds i32",
+        ))
+    })
+}
+
+// Factory-only native policies. These wrappers do not change any wire signature
+// or add a PB dispatch surface. NULL still runs the RPN wrapper; no value-layer
+// answer or invented argument stands in for that invocation.
+#[rpn_fn]
+fn abs_int_native(arg: &Int) -> Result<Option<Int>> {
+    match abs_int_value(*arg) {
+        Some(value) => Ok(Some(value)),
+        None => {
+            let source: EvaluateError = Error::overflow("BIGINT", format!("abs({})", *arg)).into();
+            Err(EvaluateError::AbsSignedOverflow {
+                source: Box::new(source),
+            }
+            .into())
+        }
+    }
+}
+
+#[rpn_fn]
+fn abs_uint_native(arg: &Int) -> Result<Option<Int>> {
+    abs_uint(arg)
+}
+
+#[rpn_fn(nullable)]
+fn abs_real_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?.map(abs_f64).map(encode_raw_f64))
+}
+
+#[rpn_fn]
+fn abs_decimal_native(arg: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
+    native_decimal_math(arg, NativeDecimalOp::Abs, budget).map(Some)
+}
+
+#[rpn_fn]
+fn ceil_int_native(arg: &Int) -> Result<Option<Int>> {
+    Ok(Some(*arg))
+}
+
+#[rpn_fn]
+fn floor_int_native(arg: &Int) -> Result<Option<Int>> {
+    Ok(Some(*arg))
+}
+
+#[rpn_fn(nullable)]
+fn ceil_real_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?
+        .map(|value| ceil_floor_f64(value, true))
+        .map(encode_raw_f64))
+}
+
+#[rpn_fn(nullable)]
+fn floor_real_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?
+        .map(|value| ceil_floor_f64(value, false))
+        .map(encode_raw_f64))
+}
+
+#[rpn_fn]
+fn ceil_decimal_native(arg: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
+    native_decimal_math(arg, NativeDecimalOp::Ceil, budget).map(Some)
+}
+
+#[rpn_fn]
+fn floor_decimal_native(arg: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
+    native_decimal_math(arg, NativeDecimalOp::Floor, budget).map(Some)
+}
+
+#[rpn_fn]
+fn round_int_native(arg: &Int) -> Result<Option<Int>> {
+    round_int(arg)
+}
+
+#[rpn_fn]
+fn round_int_with_scale_native(arg: &Int, scale: &Int) -> Result<Option<Int>> {
+    // UInt uses these same signed bits; the native owner restores its unsigned
+    // result tag only after this signed f64 round-trip, including scale >= 0.
+    Ok(Some(go_round_float(*arg as f64, *scale) as Int))
+}
+
+#[rpn_fn]
+fn round_real_native(arg: BytesRef, scale: &Int) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(Some(arg))?
+        .map(|value| go_round_float(value, *scale))
+        .map(encode_raw_f64))
+}
+
+#[rpn_fn]
+fn round_decimal_native(arg: &Decimal, scale: &Int, budget: &Int) -> Result<Option<Decimal>> {
+    native_decimal_math(
+        arg,
+        NativeDecimalOp::Round(native_decimal_resolved_scale(scale)?),
+        budget,
+    )
+    .map(Some)
+}
+
+#[rpn_fn]
+fn truncate_int_native(arg: &Int, scale: &Int) -> Result<Option<Int>> {
+    truncate_int_with_int(arg, scale)
+}
+
+#[rpn_fn]
+fn truncate_uint_native(arg: &Int, scale: &Int) -> Result<Option<Int>> {
+    truncate_uint_with_int(arg, scale)
+}
+
+#[rpn_fn]
+fn truncate_int_unsigned_scale_native(arg: &Int, scale: &Int) -> Result<Option<Int>> {
+    // This identity works for either value signedness. The real unsigned scale
+    // remains an input: in particular the RPN NULL wrapper still observes it.
+    truncate_int_with_uint(arg, scale)
+}
+
+#[rpn_fn]
+fn truncate_real_native(arg: BytesRef, scale: &Int) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(Some(arg))?
+        .map(|value| go_truncate_float(value, *scale))
+        .map(encode_raw_f64))
+}
+
+#[rpn_fn]
+fn truncate_decimal_native(arg: &Decimal, scale: &Int, budget: &Int) -> Result<Option<Decimal>> {
+    native_decimal_math(
+        arg,
+        NativeDecimalOp::Truncate(native_decimal_resolved_scale(scale)?),
+        budget,
+    )
+    .map(Some)
+}
+
+#[rpn_fn]
+fn round_int128_legacy(arg: BytesRef) -> Result<Option<Bytes>> {
+    let bytes = <[u8; 16]>::try_from(arg).map_err(|_| {
+        other_err!(
+            "Internal raw i128 transport requires exactly 16 bytes, received {}",
+            arg.len()
+        )
+    })?;
+    Ok(Some(i128::from_le_bytes(bytes).to_le_bytes().to_vec()))
+}
+
+#[rpn_fn(nullable)]
+fn round_real_legacy(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?.map(f64::round).map(encode_raw_f64))
+}
+
+#[rpn_fn(capture = [ctx])]
+fn round_decimal_legacy(
+    ctx: &mut EvalContext,
+    arg: &Decimal,
+    budget: &Int,
+) -> Result<Option<Bytes>> {
+    let rounded = native_decimal_math(arg, NativeDecimalOp::Round(0), budget)?;
+    // At scale zero the exact result has matching storage/result scales. Use
+    // the existing Rust storage-value conversion, not a native display string.
+    let value: f64 = rounded
+        .convert(ctx)
+        .map_err(|source| native_decimal_failure(NativeDecimalError::Core(source)))?;
+    Ok(Some(encode_raw_f64(value)))
+}
+
+#[rpn_fn(nullable)]
+fn math_null_witness_native(arg: Option<&Int>) -> Result<Option<Int>> {
+    match arg {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Native math NULL witness must be an actual NULL"
+        )),
+    }
+}
+
 #[inline]
 #[rpn_fn]
 pub fn round_real(arg: &Real) -> Result<Option<Real>> {
@@ -567,14 +881,7 @@ pub fn round_dec(arg: &Decimal) -> Result<Option<Decimal>> {
 #[inline]
 #[rpn_fn]
 pub fn truncate_int_with_int(arg0: &Int, arg1: &Int) -> Result<Option<Int>> {
-    Ok(Some(if *arg1 >= 0 {
-        *arg0
-    } else if *arg1 <= -MAX_I64_DIGIT_LENGTH {
-        0
-    } else {
-        let shift = 10i64.pow(-*arg1 as u32);
-        *arg0 / shift * shift
-    }))
+    Ok(Some(go_truncate_int(*arg0, *arg1)))
 }
 
 #[inline]
@@ -586,14 +893,7 @@ pub fn truncate_int_with_uint(arg0: &Int, _arg1: &Int) -> Result<Option<Int>> {
 #[inline]
 #[rpn_fn]
 pub fn truncate_uint_with_int(arg0: &Int, arg1: &Int) -> Result<Option<Int>> {
-    Ok(Some(if *arg1 >= 0 {
-        *arg0
-    } else if *arg1 <= -MAX_U64_DIGIT_LENGTH {
-        0
-    } else {
-        let shift = 10u64.pow(-*arg1 as u32);
-        ((*arg0 as u64) / shift * shift) as Int
-    }))
+    Ok(Some(go_truncate_uint(*arg0 as u64, *arg1) as Int))
 }
 
 #[inline]
@@ -861,6 +1161,91 @@ mod tests {
 
     use super::*;
     use crate::types::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_native_math_scalar_policies_and_overflow_cause() {
+        let wide = 9_007_199_254_740_993;
+        assert_eq!(round_int_native(&wide).unwrap(), Some(wide));
+        assert_eq!(round_with_frac_int(&wide, &0).unwrap(), Some(wide));
+        assert_eq!(
+            round_int_with_scale_native(&wide, &0).unwrap(),
+            Some(wide - 1)
+        );
+        assert_eq!(round_int_with_scale_native(&-6, &-1).unwrap(), Some(-10));
+        assert_eq!(go_pow10(23).to_bits(), 1e23_f64.to_bits());
+        assert_eq!(go_round_float(2.5, 0).to_bits(), 2.0_f64.to_bits());
+        assert_eq!(go_round_float(0.0, 309).to_bits(), 0.0_f64.to_bits());
+        let nan = f64::from_bits(0x7ff8_0000_0000_0042);
+        assert_eq!(go_truncate_float(nan, i64::MIN).to_bits(), nan.to_bits());
+        assert_eq!(
+            go_truncate_float(1.0, i64::MIN).to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(truncate_int_native(&i64::MIN, &-19).unwrap(), Some(0));
+        assert_eq!(
+            truncate_uint_native(&-1, &-19).unwrap(),
+            Some(10_000_000_000_000_000_000_u64 as i64)
+        );
+        assert_eq!(
+            truncate_int_unsigned_scale_native(&-1, &-1).unwrap(),
+            Some(-1)
+        );
+        let bits = encode_raw_f64(2.5);
+        assert_eq!(
+            round_real_legacy(Some(bits.as_slice())).unwrap(),
+            Some(encode_raw_f64(3.0))
+        );
+        let wide_bits = i128::MIN.to_le_bytes();
+        assert_eq!(
+            round_int128_legacy(&wide_bits).unwrap(),
+            Some(wide_bits.to_vec())
+        );
+        assert!(round_int128_legacy(&wide_bits[..15]).is_err());
+        assert_eq!(math_null_witness_native(None).unwrap(), None);
+        assert!(math_null_witness_native(Some(&0)).is_err());
+        let native_error = abs_int_native(&i64::MIN).unwrap_err();
+        let tidb_query_common::error::ErrorInner::Evaluate(EvaluateError::AbsSignedOverflow {
+            source,
+        }) = native_error.0.as_ref()
+        else {
+            panic!("native ABS must retain its typed overflow source");
+        };
+        assert_eq!(source.code(), 1690);
+        assert!(matches!(
+            abs_int(&i64::MIN).unwrap_err().0.as_ref(),
+            tidb_query_common::error::ErrorInner::Evaluate(EvaluateError::Custom {
+                code: 1690,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_native_decimal_scale_policy_and_finite_budget_cause() {
+        assert_eq!(native_decimal_target_scale(i64::MIN, None), i32::MIN);
+        assert_eq!(native_decimal_target_scale(i64::MAX, Some(-1)), 30);
+        assert_eq!(native_decimal_target_scale(20, Some(2)), 2);
+        assert_eq!(native_decimal_target_scale(-129, Some(0)), -129);
+        // This is the actual TiKV Decimal constructor, not the native value
+        // type's distinct from_literal API or a wide transport through Display.
+        let value = Decimal::from_str("-2.5").unwrap();
+        assert_eq!(
+            round_decimal_native(&value, &0, &64).unwrap(),
+            Some(Decimal::from(-3))
+        );
+        assert!(round_decimal_native(&value, &i64::MAX, &64).is_err());
+        assert!(abs_decimal_native(&value, &-1).is_err());
+        let failure = abs_decimal_native(&value, &1).unwrap_err();
+        let tidb_query_common::error::ErrorInner::Evaluate(EvaluateError::Caused(source)) =
+            failure.0.as_ref()
+        else {
+            panic!("native decimal refusal must retain its owned cause");
+        };
+        assert!(matches!(
+            source.downcast_ref::<NativeDecimalError>(),
+            Some(NativeDecimalError::Resource(_))
+        ));
+    }
 
     #[test]
     fn test_pi() {
