@@ -308,6 +308,17 @@ pub enum LocalFunctionId {
     RegexpNullIntNative,
     RegexpNullBytesNative,
     RegexpMissingLegacyNative,
+    UnaryPlusIntNative,
+    UnaryPlusBitsNative,
+    UnaryPlusDecimalNative,
+    UnaryPlusBytesNative,
+    UnaryMinusIntNative,
+    UnaryMinusUIntNative,
+    UnaryMinusIntConstantNative,
+    UnaryMinusUIntConstantNative,
+    UnaryMinusBitsNative,
+    UnaryMinusDecimalNative,
+    UnaryNullNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

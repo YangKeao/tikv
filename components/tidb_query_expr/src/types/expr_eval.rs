@@ -461,6 +461,8 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::CeilDecimalNative
                         | EvaluatedBytesOp::FloorDecimalNative
                         | EvaluatedBytesOp::RoundDecimalLegacy
+                        | EvaluatedBytesOp::UnaryPlusDecimalNative
+                        | EvaluatedBytesOp::UnaryMinusDecimalNative
                 ) && matches!(values, [ScalarValue::Decimal(_), ScalarValue::Int(Some(raw_budget))]
                         if usize::try_from(*raw_budget as u64).is_ok_and(|budget| budget != usize::MAX))
             }
@@ -513,6 +515,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::VecRealNullNative
                         | EvaluatedBytesOp::RegexpNullIntNative
                         | EvaluatedBytesOp::RegexpNullBytesNative
+                        | EvaluatedBytesOp::UnaryNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,

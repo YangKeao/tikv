@@ -79,6 +79,7 @@ use self::{
 };
 pub use self::{
     impl_miscellaneous::{NATIVE_UUID_EPOCH_100NS, format_uuid_native},
+    impl_op::NativeUnaryMinusError,
     types::*,
 };
 

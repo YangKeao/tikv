@@ -1,14 +1,20 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::fmt;
+
 use tidb_query_codegen::rpn_fn;
-use tidb_query_common::Result;
+use tidb_query_common::{Result, error::EvaluateError};
 use tidb_query_datatype::{
-    codec::{Error, batch::LazyBatchColumnVec, data_type::*},
+    codec::{Error, batch::LazyBatchColumnVec, data_type::*, mysql::decimal::NativeDecimalOp},
     expr::EvalContext,
 };
 use tipb::FieldType;
 
-use crate::{RpnExpression, RpnStackNode, RpnStackNodeVectorValue, types::function::ControlKind};
+use crate::{
+    RpnExpression, RpnStackNode, RpnStackNodeVectorValue,
+    impl_math::{native_decimal_budget, native_decimal_failure},
+    types::function::ControlKind,
+};
 
 #[rpn_fn(nullable)]
 #[inline]
@@ -375,37 +381,70 @@ pub fn unary_not_json(arg: Option<JsonRef>) -> Result<Option<i64>> {
     }))
 }
 
-#[rpn_fn(nullable)]
-#[inline]
-pub fn unary_minus_uint(arg: Option<&Int>) -> Result<Option<Int>> {
-    use std::cmp::Ordering::*;
+/// Actual integer-negation overflow, retaining the original operand bits and
+/// interpretation. Frontends classify this typed cause, never its message text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeUnaryMinusError {
+    pub bits: u64,
+    pub unsigned: bool,
+}
 
-    match arg {
-        Some(val) => {
-            let uval = *val as u64;
-            match uval.cmp(&(i64::MAX as u64 + 1)) {
-                Greater => Err(Error::overflow("BIGINT", format!("-{}", uval)).into()),
-                Equal => Ok(Some(i64::MIN)),
-                Less => Ok(Some(-*val)),
-            }
+impl fmt::Display for NativeUnaryMinusError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.unsigned {
+            write!(formatter, "BIGINT unary minus overflow for {}", self.bits)
+        } else {
+            write!(
+                formatter,
+                "BIGINT unary minus overflow for {}",
+                self.bits as i64
+            )
         }
-        None => Ok(None),
+    }
+}
+
+impl std::error::Error for NativeUnaryMinusError {}
+
+fn checked_unary_minus_integer(
+    bits: u64,
+    unsigned: bool,
+) -> std::result::Result<Int, NativeUnaryMinusError> {
+    let value = if unsigned {
+        match bits.cmp(&(i64::MAX as u64 + 1)) {
+            std::cmp::Ordering::Greater => None,
+            std::cmp::Ordering::Equal => Some(i64::MIN),
+            std::cmp::Ordering::Less => Some(-(bits as i64)),
+        }
+    } else {
+        (bits as i64).checked_neg()
+    };
+    value.ok_or(NativeUnaryMinusError { bits, unsigned })
+}
+
+fn wire_unary_minus_error(error: NativeUnaryMinusError) -> tidb_query_common::Error {
+    if error.unsigned {
+        Error::overflow("BIGINT", format!("-{}", error.bits)).into()
+    } else {
+        Error::overflow("BIGINT", format!("-{}", error.bits as i64)).into()
     }
 }
 
 #[rpn_fn(nullable)]
 #[inline]
+pub fn unary_minus_uint(arg: Option<&Int>) -> Result<Option<Int>> {
+    arg.map(|value| {
+        checked_unary_minus_integer(*value as u64, true).map_err(wire_unary_minus_error)
+    })
+    .transpose()
+}
+
+#[rpn_fn(nullable)]
+#[inline]
 pub fn unary_minus_int(arg: Option<&Int>) -> Result<Option<Int>> {
-    match arg {
-        Some(val) => {
-            if *val == i64::MIN {
-                Err(Error::overflow("BIGINT", format!("-{}", *val)).into())
-            } else {
-                Ok(Some(-*val))
-            }
-        }
-        None => Ok(None),
-    }
+    arg.map(|value| {
+        checked_unary_minus_integer(*value as u64, false).map_err(wire_unary_minus_error)
+    })
+    .transpose()
 }
 
 #[rpn_fn(nullable)]
@@ -418,6 +457,107 @@ pub fn unary_minus_real(arg: Option<&Real>) -> Result<Option<Real>> {
 #[inline]
 pub fn unary_minus_decimal(arg: Option<&Decimal>) -> Result<Option<Decimal>> {
     Ok(arg.map(|val| -val.clone()))
+}
+
+fn native_unary_minus_error(error: NativeUnaryMinusError) -> tidb_query_common::Error {
+    EvaluateError::Caused(Box::new(error)).into()
+}
+
+fn native_unary_bits(arg: Option<BytesRef>) -> Result<Option<u64>> {
+    let Some(bytes) = arg else {
+        return Ok(None);
+    };
+    let bits = <[u8; 8]>::try_from(bytes).map_err(|_| {
+        other_err!(
+            "Internal unary f64 transport requires exactly 8 bytes, received {}",
+            bytes.len()
+        )
+    })?;
+    Ok(Some(u64::from_le_bytes(bits)))
+}
+
+fn native_unary_minus_constant(bits: u64, unsigned: bool) -> Decimal {
+    match checked_unary_minus_integer(bits, unsigned) {
+        Ok(value) => Decimal::from(value),
+        // The same checked leaf selects the actual Decimal result. Signed MIN
+        // has magnitude 2^63; overflowing UInt retains its full u64 magnitude.
+        Err(error) if error.unsigned => -Decimal::from(error.bits),
+        Err(error) => Decimal::from(error.bits),
+    }
+}
+
+// Factory-only unit-metadata recipes. Plus copies computed input values; native
+// callers retain only their original Datum/Float32(f64)/collation/header tags.
+#[rpn_fn]
+fn unary_plus_int_native(arg: &Int) -> Result<Option<Int>> {
+    Ok(Some(*arg))
+}
+
+#[rpn_fn(nullable)]
+fn unary_plus_bits_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(native_unary_bits(arg)?.map(|bits| bits.to_le_bytes().to_vec()))
+}
+
+#[rpn_fn]
+fn unary_plus_decimal_native(arg: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
+    arg.try_clone_native_math(native_decimal_budget(budget)?)
+        .map(Some)
+        .map_err(native_decimal_failure)
+}
+
+#[rpn_fn]
+fn unary_plus_bytes_native(arg: BytesRef) -> Result<Option<Bytes>> {
+    Ok(Some(arg.to_vec()))
+}
+
+#[rpn_fn]
+fn unary_minus_int_native(arg: &Int) -> Result<Option<Int>> {
+    checked_unary_minus_integer(*arg as u64, false)
+        .map(Some)
+        .map_err(native_unary_minus_error)
+}
+
+#[rpn_fn]
+fn unary_minus_uint_native(arg: &Int) -> Result<Option<Int>> {
+    checked_unary_minus_integer(*arg as u64, true)
+        .map(Some)
+        .map_err(native_unary_minus_error)
+}
+
+#[rpn_fn]
+fn unary_minus_int_constant_native(arg: &Int) -> Result<Option<Decimal>> {
+    Ok(Some(native_unary_minus_constant(*arg as u64, false)))
+}
+
+#[rpn_fn]
+fn unary_minus_uint_constant_native(arg: &Int) -> Result<Option<Decimal>> {
+    Ok(Some(native_unary_minus_constant(*arg as u64, true)))
+}
+
+#[rpn_fn(nullable)]
+fn unary_minus_bits_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    // Full f64 negation: no NotNan, finite-only projection, or f32 round trip.
+    Ok(
+        native_unary_bits(arg)?
+            .map(|bits| (-f64::from_bits(bits)).to_bits().to_le_bytes().to_vec()),
+    )
+}
+
+#[rpn_fn]
+fn unary_minus_decimal_native(arg: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
+    arg.try_native_math(NativeDecimalOp::Negate, native_decimal_budget(budget)?)
+        .map(Some)
+        .map_err(native_decimal_failure)
+}
+
+#[rpn_fn(nullable)]
+fn unary_null_native(arg: Option<&Int>) -> Result<Option<Int>> {
+    match arg {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Native unary NULL witness must be an actual NULL"
+        )),
+    }
 }
 
 #[inline]
@@ -584,6 +724,157 @@ fn right_shift(lhs: Option<&Int>, rhs: Option<&Int>) -> Result<Option<Int>> {
         }
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod native_unary_tests {
+    use tidb_query_common::error::ErrorInner;
+    use tidb_query_datatype::codec::{
+        convert::ToStringValue,
+        mysql::decimal::{NativeDecimalError, Res},
+    };
+
+    use super::*;
+
+    fn actual_cause<T: std::error::Error + 'static>(error: &tidb_query_common::Error) -> &T {
+        match error.0.as_ref() {
+            ErrorInner::Evaluate(EvaluateError::Caused(cause)) => {
+                cause.downcast_ref().expect("actual typed unary cause")
+            }
+            _ => panic!("lost unary cause: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn native_unary_integer_boundaries_share_checked_negation() {
+        // Hand-derived integer boundaries, never recorded from another kernel.
+        assert_eq!(unary_plus_int_native(&-1).unwrap(), Some(-1));
+        assert_eq!(unary_minus_int_native(&7).unwrap(), Some(-7));
+        assert_eq!(unary_minus_uint_native(&i64::MIN).unwrap(), Some(i64::MIN));
+        assert_eq!(unary_minus_uint(Some(&i64::MIN)).unwrap(), Some(i64::MIN));
+        assert_eq!(unary_minus_int(None).unwrap(), None);
+        assert_eq!(unary_minus_uint(None).unwrap(), None);
+        let signed = unary_minus_int_native(&i64::MIN).unwrap_err();
+        assert_eq!(
+            *actual_cause::<NativeUnaryMinusError>(&signed),
+            NativeUnaryMinusError {
+                bits: i64::MIN as u64,
+                unsigned: false,
+            }
+        );
+        let unsigned = unary_minus_uint_native(&-1).unwrap_err();
+        assert_eq!(
+            *actual_cause::<NativeUnaryMinusError>(&unsigned),
+            NativeUnaryMinusError {
+                bits: u64::MAX,
+                unsigned: true,
+            }
+        );
+        assert!(unary_minus_int(Some(&i64::MIN)).is_err());
+        assert!(unary_minus_uint(Some(&-1)).is_err());
+        for (value, expected) in [
+            (i64::MIN, "9223372036854775808"),
+            (7, "-7"),
+            (-7, "7"),
+            (0, "0"),
+        ] {
+            let actual = unary_minus_int_constant_native(&value).unwrap().unwrap();
+            assert_eq!(actual.to_string_value(), expected);
+        }
+        for (value, expected) in [
+            (0, "0"),
+            (7, "-7"),
+            (i64::MIN, "-9223372036854775808"),
+            (-1, "-18446744073709551615"),
+        ] {
+            let actual = unary_minus_uint_constant_native(&value).unwrap().unwrap();
+            assert_eq!(actual.to_string_value(), expected);
+        }
+        let signed_overflow = unary_minus_int_constant_native(&i64::MIN).unwrap().unwrap();
+        assert!(!matches!(signed_overflow.as_i64(), Res::Ok(_)));
+        let unsigned_edge = unary_minus_uint_constant_native(&i64::MIN)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(unsigned_edge.as_i64(), Res::Ok(i64::MIN)));
+        let unsigned_overflow = unary_minus_uint_constant_native(&-1).unwrap().unwrap();
+        assert!(!matches!(unsigned_overflow.as_i64(), Res::Ok(_)));
+    }
+
+    #[test]
+    fn native_unary_full_f64_bits_identity_bytes_and_null() {
+        for bits in [
+            0_u64,
+            1_u64 << 63,
+            f64::INFINITY.to_bits(),
+            0x7ff8_0000_0000_1234,
+            0x3ff0_0000_0000_0001,
+        ] {
+            let encoded = bits.to_le_bytes();
+            let plus = unary_plus_bits_native(Some(&encoded)).unwrap().unwrap();
+            assert_eq!(plus, encoded.to_vec());
+            let minus = unary_minus_bits_native(Some(&encoded)).unwrap().unwrap();
+            assert_eq!(minus, (bits ^ (1_u64 << 63)).to_le_bytes().to_vec());
+        }
+        // The final finite case cannot survive an f32 round trip unchanged.
+        assert_eq!(unary_plus_bits_native(None).unwrap(), None);
+        assert_eq!(unary_minus_bits_native(None).unwrap(), None);
+        assert!(unary_plus_bits_native(Some(b"short")).is_err());
+        assert!(unary_minus_bits_native(Some(b"short")).is_err());
+        assert_eq!(
+            unary_plus_bytes_native(b"\xff\0x").unwrap(),
+            Some(b"\xff\0x".to_vec())
+        );
+        assert_eq!(unary_null_native(None).unwrap(), None);
+        assert!(unary_null_native(Some(&0)).is_err());
+    }
+
+    #[test]
+    fn native_unary_decimal_keeps_wide_scales_and_separate_zero_policy() {
+        let coefficient = "1".repeat(110);
+        let value =
+            Decimal::try_from_native_digits(true, coefficient.as_bytes(), 13, 2, 4096).unwrap();
+        assert!(value.words().words.len() > 9);
+        let plus = unary_plus_decimal_native(&value, &4096).unwrap().unwrap();
+        assert!(plus.is_negative());
+        assert_eq!((plus.storage_scale(), plus.result_scale()), (13, 2));
+        assert_eq!(plus.words().int_digits, value.words().int_digits);
+        assert_eq!(plus.words().words, value.words().words);
+        let minus = unary_minus_decimal_native(&value, &4096).unwrap().unwrap();
+        assert!(!minus.is_negative());
+        assert_eq!((minus.storage_scale(), minus.result_scale()), (13, 2));
+        assert_eq!(minus.words().words, value.words().words);
+        let zero = Decimal::try_from_native_digits(true, b"000", 3, 3, 1024).unwrap();
+        assert!(
+            unary_plus_decimal_native(&zero, &1024)
+                .unwrap()
+                .unwrap()
+                .is_negative()
+        );
+        assert!(
+            unary_minus_decimal(Some(&zero))
+                .unwrap()
+                .unwrap()
+                .is_negative()
+        );
+        let native_zero = unary_minus_decimal_native(&zero, &1024).unwrap().unwrap();
+        assert!(native_zero.is_zero());
+        assert!(!native_zero.is_negative());
+        assert_eq!(
+            (native_zero.storage_scale(), native_zero.result_scale()),
+            (3, 3)
+        );
+        let plus_error = unary_plus_decimal_native(&value, &1).unwrap_err();
+        assert!(matches!(
+            actual_cause::<NativeDecimalError>(&plus_error),
+            NativeDecimalError::Resource(_)
+        ));
+        let minus_error = unary_minus_decimal_native(&value, &1).unwrap_err();
+        assert!(matches!(
+            actual_cause::<NativeDecimalError>(&minus_error),
+            NativeDecimalError::Resource(_)
+        ));
+        assert!(unary_minus_decimal_native(&value, &-1).is_err());
+    }
 }
 
 #[cfg(test)]

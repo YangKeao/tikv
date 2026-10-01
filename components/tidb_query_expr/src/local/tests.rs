@@ -7894,6 +7894,150 @@ fn local_evaluated_args_date_format_core_keeps_roles_and_missing_distinct() {
 }
 
 #[test]
+fn unary_dispatch_unit_getters_roles_and_private_shapes() {
+    use EvalType::{Bytes, Decimal, Int};
+    use EvaluatedArgsRole::{DecimalUnary, Ieee754Bits, NullWitness, Values};
+
+    use super::compile::{ProgramEntry, compile_evaluated_bytes};
+    use crate::RpnExpressionNode;
+    let cases = [
+        (
+            EvaluatedBytesOp::UnaryPlusIntNative,
+            crate::impl_op::unary_plus_int_native_fn_meta(),
+            Values,
+            Int,
+            Int,
+        ),
+        (
+            EvaluatedBytesOp::UnaryPlusBitsNative,
+            crate::impl_op::unary_plus_bits_native_fn_meta(),
+            Ieee754Bits,
+            Bytes,
+            Bytes,
+        ),
+        (
+            EvaluatedBytesOp::UnaryPlusDecimalNative,
+            crate::impl_op::unary_plus_decimal_native_fn_meta(),
+            DecimalUnary,
+            Decimal,
+            Decimal,
+        ),
+        (
+            EvaluatedBytesOp::UnaryPlusBytesNative,
+            crate::impl_op::unary_plus_bytes_native_fn_meta(),
+            Values,
+            Bytes,
+            Bytes,
+        ),
+        (
+            EvaluatedBytesOp::UnaryMinusIntNative,
+            crate::impl_op::unary_minus_int_native_fn_meta(),
+            Values,
+            Int,
+            Int,
+        ),
+        (
+            EvaluatedBytesOp::UnaryMinusUIntNative,
+            crate::impl_op::unary_minus_uint_native_fn_meta(),
+            Values,
+            Int,
+            Int,
+        ),
+        (
+            EvaluatedBytesOp::UnaryMinusIntConstantNative,
+            crate::impl_op::unary_minus_int_constant_native_fn_meta(),
+            Values,
+            Int,
+            Decimal,
+        ),
+        (
+            EvaluatedBytesOp::UnaryMinusUIntConstantNative,
+            crate::impl_op::unary_minus_uint_constant_native_fn_meta(),
+            Values,
+            Int,
+            Decimal,
+        ),
+        (
+            EvaluatedBytesOp::UnaryMinusBitsNative,
+            crate::impl_op::unary_minus_bits_native_fn_meta(),
+            Ieee754Bits,
+            Bytes,
+            Bytes,
+        ),
+        (
+            EvaluatedBytesOp::UnaryMinusDecimalNative,
+            crate::impl_op::unary_minus_decimal_native_fn_meta(),
+            DecimalUnary,
+            Decimal,
+            Decimal,
+        ),
+        (
+            EvaluatedBytesOp::UnaryNullNative,
+            crate::impl_op::unary_null_native_fn_meta(),
+            NullWitness,
+            Int,
+            Int,
+        ),
+    ];
+    for (operation, getter, role, input, output) in cases {
+        let types = if input == Decimal {
+            vec![Decimal, Int]
+        } else {
+            vec![input]
+        };
+        assert_eq!(operation.input_types(), types);
+        assert_eq!(operation.input_role(), role);
+        assert_eq!(operation.eval_type(), output);
+        assert_eq!(operation.call_count(), 1);
+        assert!(matches!(
+            operation.kernel_kind(),
+            EvaluatedKernelKind::ClosedPrivate(_)
+        ));
+        let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+        assert!(program.check_entry(ProgramEntry::EvaluatedBytes).is_ok());
+        assert!(program.check_entry(ProgramEntry::Row).is_err());
+        assert_eq!(program.expression.len(), types.len() + 1);
+        let RpnExpressionNode::FnCall {
+            func_meta,
+            args_len,
+            metadata,
+            ..
+        } = &program.expression[types.len()]
+        else {
+            panic!("missing unary generated call");
+        };
+        assert_eq!(*args_len, types.len());
+        assert!(metadata.is::<()>());
+        assert_eq!(func_meta.name, getter.name);
+        assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.validator_ptr,
+            getter.validator_ptr
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.metadata_ptr,
+            getter.metadata_ptr
+        ));
+        let spec = LocalExpr::Call {
+            function: operation.function_ref(),
+            args: program
+                .schema
+                .iter()
+                .enumerate()
+                .map(|(slot, field_type)| LocalExpr::InputSlot {
+                    slot,
+                    field_type: field_type.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            return_type: operation.return_type(),
+            metadata: crate::CallMetadata::None,
+        };
+        assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+    }
+}
+
+#[test]
 fn regexp_dispatch_exact_getters_metadata_and_closed_shapes() {
     use super::{
         compile::{ProgramEntry, compile_evaluated_bytes},

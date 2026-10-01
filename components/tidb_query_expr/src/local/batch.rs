@@ -34,8 +34,8 @@ use super::{
     runtime::{EvalBudget, bytes_min_storage_bytes, int_min_storage_bytes, vector_storage_bytes},
 };
 use crate::{
-    NativeRegexpError, NativeRegexpInvocation, RpnExpressionNode, RpnStackNode,
-    RpnStackNodeVectorValue,
+    NativeRegexpError, NativeRegexpInvocation, NativeUnaryMinusError, RpnExpressionNode,
+    RpnStackNode, RpnStackNodeVectorValue,
     impl_string::{
         ConcatKind, FieldKind, PreparedCharArgs, PreparedConcatArgs, PreparedExportSetArgs,
         PreparedFieldArgs, PreparedFindInSetKeys, PreparedMakeSetArgs,
@@ -1100,6 +1100,17 @@ pub enum EvaluatedBytesOp {
     RegexpNullIntNative,
     RegexpNullBytesNative,
     RegexpMissingLegacyNative,
+    UnaryPlusIntNative,
+    UnaryPlusBitsNative,
+    UnaryPlusDecimalNative,
+    UnaryPlusBytesNative,
+    UnaryMinusIntNative,
+    UnaryMinusUIntNative,
+    UnaryMinusIntConstantNative,
+    UnaryMinusUIntConstantNative,
+    UnaryMinusBitsNative,
+    UnaryMinusDecimalNative,
+    UnaryNullNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1984,6 +1995,59 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::RegexpMissingLegacyNative,
                 );
             }
+            Self::UnaryPlusIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnaryPlusIntNative,
+                );
+            }
+            Self::UnaryPlusBitsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnaryPlusBitsNative,
+                );
+            }
+            Self::UnaryPlusDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnaryPlusDecimalNative,
+                );
+            }
+            Self::UnaryPlusBytesNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnaryPlusBytesNative,
+                );
+            }
+            Self::UnaryMinusIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnaryMinusIntNative,
+                );
+            }
+            Self::UnaryMinusUIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnaryMinusUIntNative,
+                );
+            }
+            Self::UnaryMinusIntConstantNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnaryMinusIntConstantNative,
+                );
+            }
+            Self::UnaryMinusUIntConstantNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnaryMinusUIntConstantNative,
+                );
+            }
+            Self::UnaryMinusBitsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnaryMinusBitsNative,
+                );
+            }
+            Self::UnaryMinusDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnaryMinusDecimalNative,
+                );
+            }
+            Self::UnaryNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::UnaryNullNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -2039,7 +2103,9 @@ impl EvaluatedBytesOp {
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
-            | Self::RoundDecimalLegacy => EvaluatedArgsRole::DecimalUnary,
+            | Self::RoundDecimalLegacy
+            | Self::UnaryPlusDecimalNative
+            | Self::UnaryMinusDecimalNative => EvaluatedArgsRole::DecimalUnary,
             Self::RoundDecimalNative | Self::TruncateDecimalNative => EvaluatedArgsRole::DecimalInt,
             Self::RoundRealNative | Self::TruncateRealNative | Self::SecToTimeNative => {
                 EvaluatedArgsRole::Ieee754Int
@@ -2054,7 +2120,8 @@ impl EvaluatedBytesOp {
             | Self::SqlCryptNullNative
             | Self::VecRealNullNative
             | Self::RegexpNullIntNative
-            | Self::RegexpNullBytesNative => EvaluatedArgsRole::NullWitness,
+            | Self::RegexpNullBytesNative
+            | Self::UnaryNullNative => EvaluatedArgsRole::NullWitness,
             Self::DateDiffCoreNative => EvaluatedArgsRole::TimeCoreBits2,
             Self::DateFormatCoreNative => EvaluatedArgsRole::TimeCoreBitsBytes,
             Self::CharNative => EvaluatedArgsRole::CharReady,
@@ -2119,7 +2186,9 @@ impl EvaluatedBytesOp {
             | Self::CotLibmLegacy
             | Self::AtanLibmLegacy
             | Self::ExpGoNative
-            | Self::Log10GoNative => EvaluatedArgsRole::Ieee754Bits,
+            | Self::Log10GoNative
+            | Self::UnaryPlusBitsNative
+            | Self::UnaryMinusBitsNative => EvaluatedArgsRole::Ieee754Bits,
             _ => EvaluatedArgsRole::Values,
         }
     }
@@ -2209,7 +2278,9 @@ impl EvaluatedBytesOp {
     fn returns_ieee754_bits(self) -> bool {
         matches!(
             self,
-            Self::AsinRaw
+            Self::UnaryPlusBitsNative
+                | Self::UnaryMinusBitsNative
+                | Self::AsinRaw
                 | Self::AcosRaw
                 | Self::SqrtRaw
                 | Self::RadiansRaw
@@ -2254,6 +2325,21 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
+            Self::UnaryPlusBitsNative => crate::impl_op::unary_plus_bits_native_fn_meta(),
+            Self::UnaryPlusDecimalNative => crate::impl_op::unary_plus_decimal_native_fn_meta(),
+            Self::UnaryPlusBytesNative => crate::impl_op::unary_plus_bytes_native_fn_meta(),
+            Self::UnaryMinusIntNative => crate::impl_op::unary_minus_int_native_fn_meta(),
+            Self::UnaryMinusUIntNative => crate::impl_op::unary_minus_uint_native_fn_meta(),
+            Self::UnaryMinusIntConstantNative => {
+                crate::impl_op::unary_minus_int_constant_native_fn_meta()
+            }
+            Self::UnaryMinusUIntConstantNative => {
+                crate::impl_op::unary_minus_uint_constant_native_fn_meta()
+            }
+            Self::UnaryMinusBitsNative => crate::impl_op::unary_minus_bits_native_fn_meta(),
+            Self::UnaryMinusDecimalNative => crate::impl_op::unary_minus_decimal_native_fn_meta(),
+            Self::UnaryNullNative => crate::impl_op::unary_null_native_fn_meta(),
             Self::VecAsTextNative => crate::impl_vec::get_native_vec_as_text_fn_meta(),
             Self::VecDimsNative => crate::impl_vec::get_native_vec_dims_fn_meta(),
             Self::VecL1DistanceNative => crate::impl_vec::get_native_vec_l1_distance_fn_meta(),
@@ -2543,6 +2629,17 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::UnaryPlusIntNative
+            | Self::UnaryMinusIntNative
+            | Self::UnaryMinusUIntNative
+            | Self::UnaryNullNative => EvalType::Int,
+            Self::UnaryPlusDecimalNative
+            | Self::UnaryMinusDecimalNative
+            | Self::UnaryMinusIntConstantNative
+            | Self::UnaryMinusUIntConstantNative => EvalType::Decimal,
+            Self::UnaryPlusBitsNative | Self::UnaryMinusBitsNative | Self::UnaryPlusBytesNative => {
+                EvalType::Bytes
+            }
             Self::Ascii
             | Self::Length
             | Self::BitLength
@@ -2796,6 +2893,18 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::UnaryPlusIntNative
+            | Self::UnaryMinusIntNative
+            | Self::UnaryMinusUIntNative
+            | Self::UnaryMinusIntConstantNative
+            | Self::UnaryMinusUIntConstantNative
+            | Self::UnaryNullNative => &[EvalType::Int],
+            Self::UnaryPlusBitsNative | Self::UnaryMinusBitsNative | Self::UnaryPlusBytesNative => {
+                &[EvalType::Bytes]
+            }
+            Self::UnaryPlusDecimalNative | Self::UnaryMinusDecimalNative => {
+                &[EvalType::Decimal, EvalType::Int]
+            }
             Self::RegexpLikeNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::RegexpSubstrNative => &[
                 EvalType::Bytes,
@@ -3561,6 +3670,7 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::VecRealNullNative
                         | EvaluatedBytesOp::RegexpNullIntNative
                         | EvaluatedBytesOp::RegexpNullBytesNative
+                        | EvaluatedBytesOp::UnaryNullNative
                 ) && value.is_none()
             }
             Self::ConvReady {
@@ -4643,7 +4753,8 @@ impl ComputedDecimal {
     pub fn metadata(&self) -> ComputedDecimalMetadata {
         ComputedDecimalMetadata::OwnDecimal
     }
-    /// Available only for integral CEIL/FLOOR results that fit exactly in i64.
+    /// Available only for integral CEIL/FLOOR and constant integer-negation
+    /// results that fit exactly in i64.
     /// None leaves the original Decimal intact, including out-of-range results.
     pub fn checked_i64_view(&self) -> Option<i64> {
         self.checked_i64_view
@@ -4773,6 +4884,7 @@ pub enum EvaluatedSqlFailureKind {
     BinToUuidInvalidLength,
     VectorNative,
     RegexpNative,
+    UnaryMinusNative,
 }
 
 /// Fresh owned failure-only observation for one ready-value invocation.
@@ -4804,6 +4916,29 @@ impl ReportedEvaluatedFailure {
     pub fn sql_failure(&self) -> Option<EvaluatedSqlFailureKind> {
         self.sql_failure
     }
+    /// Only dynamic signed/unsigned negation authenticates this typed source.
+    /// A constant's Decimal widening and all scope failures are different
+    /// paths.
+    pub fn native_unary_minus_error(&self) -> Option<&NativeUnaryMinusError> {
+        if self.sql_failure != Some(EvaluatedSqlFailureKind::UnaryMinusNative) {
+            return None;
+        }
+        let unsigned = match self.operation {
+            Some(EvaluatedBytesOp::UnaryMinusIntNative) => false,
+            Some(EvaluatedBytesOp::UnaryMinusUIntNative) => true,
+            _ => return None,
+        };
+        match &self.error {
+            LocalError::Evaluation(error) => match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::Caused(source)) => source
+                    .downcast_ref::<NativeUnaryMinusError>()
+                    .filter(|cause| cause.unsigned == unsigned),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Only the four native regexp operations authenticate this actual cause.
     pub fn native_regexp_error(&self) -> Option<&NativeRegexpError> {
         if self.sql_failure != Some(EvaluatedSqlFailureKind::RegexpNative)
@@ -5495,6 +5630,19 @@ impl EvaluatedBytesWorker {
                 if let LocalError::Evaluation(cause) = &error {
                     *sql_failure = match (self.operation, cause.0.as_ref()) {
                         (
+                            EvaluatedBytesOp::UnaryMinusIntNative
+                            | EvaluatedBytesOp::UnaryMinusUIntNative,
+                            ErrorInner::Evaluate(EvaluateError::Caused(source)),
+                        ) if source.downcast_ref::<NativeUnaryMinusError>().is_some_and(
+                            |cause| {
+                                cause.unsigned
+                                    == (self.operation == EvaluatedBytesOp::UnaryMinusUIntNative)
+                            },
+                        ) =>
+                        {
+                            Some(EvaluatedSqlFailureKind::UnaryMinusNative)
+                        }
+                        (
                             EvaluatedBytesOp::RegexpLikeNative
                             | EvaluatedBytesOp::RegexpSubstrNative
                             | EvaluatedBytesOp::RegexpInstrNative
@@ -5593,7 +5741,10 @@ impl EvaluatedBytesWorker {
             ScalarValueRef::Decimal(value) => {
                 let checked_i64_view = if matches!(
                     self.operation,
-                    EvaluatedBytesOp::CeilDecimalNative | EvaluatedBytesOp::FloorDecimalNative
+                    EvaluatedBytesOp::CeilDecimalNative
+                        | EvaluatedBytesOp::FloorDecimalNative
+                        | EvaluatedBytesOp::UnaryMinusIntConstantNative
+                        | EvaluatedBytesOp::UnaryMinusUIntConstantNative
                 ) {
                     value.and_then(|value| match value.as_i64() {
                         tidb_query_datatype::codec::mysql::decimal::Res::Ok(value) => Some(value),
@@ -5804,6 +5955,155 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn unary_dispatch_dynamic_constant_boundaries_and_scope_receipts() {
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        for (operation, bad, unsigned, good, expected) in [
+            (
+                EvaluatedBytesOp::UnaryMinusIntNative,
+                i64::MIN,
+                false,
+                -7,
+                7,
+            ),
+            (
+                EvaluatedBytesOp::UnaryMinusUIntNative,
+                -1,
+                true,
+                i64::MIN,
+                i64::MIN,
+            ),
+        ] {
+            let mut worker = prepare(operation);
+            let storage = worker.retained_storage().unwrap();
+            let mut failure = worker
+                .eval_args_reported(EvaluatedArgs::Int(Some(bad)))
+                .unwrap_err();
+            assert_eq!(
+                failure.sql_failure(),
+                Some(EvaluatedSqlFailureKind::UnaryMinusNative)
+            );
+            let cause = failure.native_unary_minus_error().unwrap();
+            assert_eq!((cause.bits, cause.unsigned), (bad as u64, unsigned));
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            failure.operation = Some(if unsigned {
+                EvaluatedBytesOp::UnaryMinusIntNative
+            } else {
+                EvaluatedBytesOp::UnaryMinusUIntNative
+            });
+            assert!(failure.native_unary_minus_error().is_none());
+            failure.operation = Some(EvaluatedBytesOp::UnaryMinusIntConstantNative);
+            assert!(failure.native_unary_minus_error().is_none());
+            let ComputedValue::Int(value) =
+                worker.eval_args(EvaluatedArgs::Int(Some(good))).unwrap()
+            else {
+                panic!("dynamic negation must own signed Int");
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), Some(expected));
+            assert_eq!(worker.kernel_invocations(), 2);
+        }
+        // Hand-derived signed/unsigned boundaries: both constant kernels always
+        // return an actual Decimal; only its exact checked view permits packing Int.
+        for (operation, raw, text, checked) in [
+            (
+                EvaluatedBytesOp::UnaryMinusIntConstantNative,
+                i64::MIN,
+                "9223372036854775808",
+                None,
+            ),
+            (
+                EvaluatedBytesOp::UnaryMinusIntConstantNative,
+                7,
+                "-7",
+                Some(-7),
+            ),
+            (
+                EvaluatedBytesOp::UnaryMinusUIntConstantNative,
+                i64::MIN,
+                "-9223372036854775808",
+                Some(i64::MIN),
+            ),
+            (
+                EvaluatedBytesOp::UnaryMinusUIntConstantNative,
+                -1,
+                "-18446744073709551615",
+                None,
+            ),
+        ] {
+            let mut worker = prepare(operation);
+            let ComputedValue::Decimal(value) =
+                worker.eval_args(EvaluatedArgs::Int(Some(raw))).unwrap()
+            else {
+                panic!("constant negation must own real Decimal");
+            };
+            assert_eq!(value.metadata(), ComputedDecimalMetadata::OwnDecimal);
+            assert_eq!(value.value().unwrap().to_string(), text);
+            assert_eq!(value.checked_i64_view(), checked);
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+        }
+        for (operation, text) in [
+            (EvaluatedBytesOp::UnaryPlusDecimalNative, "7"),
+            (EvaluatedBytesOp::UnaryMinusDecimalNative, "-7"),
+        ] {
+            let ComputedValue::Decimal(value) = prepare(operation)
+                .eval_args(EvaluatedArgs::Decimal(Some(Decimal::from(7i64))))
+                .unwrap()
+            else {
+                panic!("Decimal unary must use the existing budgeted carrier");
+            };
+            assert_eq!(value.value().unwrap().to_string(), text);
+            assert_eq!(value.checked_i64_view(), None);
+        }
+        let mut bits = prepare(EvaluatedBytesOp::UnaryPlusBitsNative);
+        assert!(matches!(
+            bits.eval_args(EvaluatedArgs::Bytes(Some(vec![0; 8]))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(bits.kernel_invocations(), 0);
+        let mut null = prepare(EvaluatedBytesOp::UnaryNullNative);
+        assert!(matches!(
+            null.eval_args(EvaluatedArgs::NullWitness(Some(0))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(null.kernel_invocations(), 0);
+        let ComputedValue::Int(value) = null.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+        else {
+            panic!("unary NULL must be genuine");
+        };
+        assert_eq!(value.into_option(), None);
+        assert_eq!(null.kernel_invocations(), 1);
+        let mut zero = prepare_evaluated_bytes(
+            EvaluatedBytesOp::UnaryMinusIntNative,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_steps: 0,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        let failure = zero
+            .eval_args_reported(EvaluatedArgs::Int(Some(i64::MIN)))
+            .unwrap_err();
+        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+        assert_eq!(failure.sql_failure(), None);
+        assert!(failure.native_unary_minus_error().is_none());
+        assert_eq!(zero.kernel_invocations(), 0);
+        assert!(zero.is_healthy());
+    }
 
     #[test]
     fn regexp_dispatch_cache_identity_owner_reuse_and_typed_results() {

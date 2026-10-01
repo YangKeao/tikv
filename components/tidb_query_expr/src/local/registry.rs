@@ -258,7 +258,18 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::RegexpLikeLegacyBinNative
         | LocalFunctionId::RegexpNullIntNative
         | LocalFunctionId::RegexpNullBytesNative
-        | LocalFunctionId::RegexpMissingLegacyNative => Err(other_err!(
+        | LocalFunctionId::RegexpMissingLegacyNative
+        | LocalFunctionId::UnaryPlusIntNative
+        | LocalFunctionId::UnaryPlusBitsNative
+        | LocalFunctionId::UnaryPlusDecimalNative
+        | LocalFunctionId::UnaryPlusBytesNative
+        | LocalFunctionId::UnaryMinusIntNative
+        | LocalFunctionId::UnaryMinusUIntNative
+        | LocalFunctionId::UnaryMinusIntConstantNative
+        | LocalFunctionId::UnaryMinusUIntConstantNative
+        | LocalFunctionId::UnaryMinusBitsNative
+        | LocalFunctionId::UnaryMinusDecimalNative
+        | LocalFunctionId::UnaryNullNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

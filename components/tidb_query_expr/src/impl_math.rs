@@ -934,17 +934,13 @@ fn go_truncate_uint(value: u64, scale: i64) -> u64 {
     }
 }
 
-fn native_decimal_failure(source: NativeDecimalError) -> tidb_query_common::Error {
+pub(crate) fn native_decimal_failure(source: NativeDecimalError) -> tidb_query_common::Error {
     // The blanket boxed-error conversion stringifies its source. This explicit
     // carrier retains the actual native bridge/core/resource error instead.
     EvaluateError::Caused(Box::new(source)).into()
 }
 
-fn native_decimal_math(
-    value: &Decimal,
-    operation: NativeDecimalOp,
-    raw_budget: &Int,
-) -> Result<Decimal> {
+pub(crate) fn native_decimal_budget(raw_budget: &Int) -> Result<usize> {
     let budget = usize::try_from(*raw_budget as u64).map_err(|_| {
         native_decimal_failure(NativeDecimalError::Resource(
             "kernel budget exceeds indexing width",
@@ -955,8 +951,16 @@ fn native_decimal_math(
             "native math requires a finite kernel budget",
         )));
     }
+    Ok(budget)
+}
+
+fn native_decimal_math(
+    value: &Decimal,
+    operation: NativeDecimalOp,
+    raw_budget: &Int,
+) -> Result<Decimal> {
     value
-        .try_native_math(operation, budget)
+        .try_native_math(operation, native_decimal_budget(raw_budget)?)
         .map_err(native_decimal_failure)
 }
 

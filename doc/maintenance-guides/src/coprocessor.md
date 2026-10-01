@@ -280,8 +280,9 @@ short-circuit admission policy described above.
   round/shift/ABS workers while preserving native unchecked scale arithmetic and
   distinct native-Go versus wire policies. Native wrappers remove the duplicated
   arithmetic; the separate native ceiling-rounding helper is not part of this batch.
-  ComputedDecimal supplies a checked i64 view only for CEIL/FLOOR; out-of-range
-  values retain their Decimal fallback. Int128 uses strict LE16 transport and a
+  ComputedDecimal supplies a checked i64 view only for CEIL/FLOOR and the two
+  constant integer-negation recipes; out-of-range values retain their Decimal
+  representation. Int128 uses strict LE16 transport and a
   real identity kernel. Legacy real ROUND remains ties-away, distinct from native
   ties-even; legacy Decimal rounding occurs before its storage-value f64 conversion.
   MathNullWitnessNative accepts only an actually observed NULL, not a fabricated
@@ -293,6 +294,22 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  Numeric unary plus/minus use eleven unit-metadata recipes in `impl_op.rs`.
+  Int, full-f64 IEEE bytes, Bytes and actual-NULL witnesses reuse existing roles;
+  both Decimal recipes retain the actual `[Decimal, Int budget]` two-slot shape.
+  No factory bound, carrier, metadata binding or driver is expanded. Runtime plus
+  copies actual kernel input; native packing preserves UInt/Float32(f64), string
+  collation and plus-Decimal declared column shape, while SQL's existing plus
+  rewrite still removes the operator. The shared checked integer-negation leaf
+  serves wire and native policies. Column overflow carries an actual typed
+  `NativeUnaryMinusError`; only the two matching column operations, signedness,
+  and this call's dispatch witness authenticate the native SQL diagnostic.
+  Constant kernels promote in TiKV and return real Decimal values with the narrow
+  checked integer view, not host threshold decisions or answer-control bytes.
+  `NativeDecimalOp::Negate` reuses the wire `Neg` leaf and native finish; the native
+  public Decimal helper is a thin bridge. Native canonical zero and shape clearing
+  do not alter wire raw zero policy. Existing coercion/warnings, NOT/BitNeg, SQL
+  child demand and PB/legacy admission remain unchanged.
   Regexp algorithms remain shared in `components/tidb_query_expr/src/regexp_policy.rs`;
   `native_regexp.rs` owns the context cache, native compiler and typed causes.
   Cache-owner Clone resets, while explicit invocation handles share the actual

@@ -1643,6 +1643,7 @@ pub struct DecimalParts {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeDecimalOp {
     Abs,
+    Negate,
     Ceil,
     Floor,
     Round(i32),
@@ -1819,6 +1820,15 @@ impl Decimal {
                     .try_clone_for_worker()
                     .map_err(NativeDecimalError::Core)?;
                 Self::try_finish_exact(value.abs(), self.result_frac_cnt)
+                    .map_err(NativeDecimalError::Core)
+            }
+            NativeDecimalOp::Negate => {
+                let value = self
+                    .try_clone_for_worker()
+                    .map_err(NativeDecimalError::Core)?;
+                // Reuse the wire Neg leaf; only the native finish canonicalizes
+                // signed zero, preserving the wire/status-payload sign policy.
+                Self::try_finish_exact(Res::Ok(-value), self.result_frac_cnt)
                     .map_err(NativeDecimalError::Core)
             }
             NativeDecimalOp::Ceil | NativeDecimalOp::Floor => {
@@ -4403,6 +4413,46 @@ impl Hash for Decimal {
         // -0 should be not negative.
         let negative = self.negative && (start as isize <= end);
         negative.hash(state);
+    }
+}
+
+#[cfg(test)]
+mod native_negate_tests {
+    use super::*;
+
+    #[test]
+    fn native_negate_keeps_wide_scales_and_separate_wire_zero_policy() {
+        // Hand-derived exact coefficient/sign boundaries, not provider output.
+        let digits = format!("{}{}", "9".repeat(108), "1".repeat(120));
+        let wide =
+            Decimal::try_from_native_digits(false, digits.as_bytes(), 120, 31, 4096).unwrap();
+        let negative = wide.try_native_math(NativeDecimalOp::Negate, 4096).unwrap();
+        assert!(negative.is_negative());
+        assert_eq!(
+            (negative.storage_scale(), negative.result_scale()),
+            (120, 31)
+        );
+        assert!(wide.words().words.len() > 9);
+        assert_eq!(negative.words().int_digits, wide.words().int_digits);
+        assert_eq!(negative.words().words, wide.words().words);
+        let restored = negative
+            .try_native_math(NativeDecimalOp::Negate, 4096)
+            .unwrap();
+        assert!(!restored.is_negative());
+        assert_eq!(restored.words().words, wide.words().words);
+        let zero = Decimal::try_from_native_digits(true, b"000", 3, 3, 1024).unwrap();
+        assert!((-zero.clone()).is_negative()); // original wire Neg retains raw -0
+        let native_zero = zero.try_native_math(NativeDecimalOp::Negate, 1024).unwrap();
+        assert!(native_zero.is_zero());
+        assert!(!native_zero.is_negative());
+        assert_eq!(
+            (native_zero.storage_scale(), native_zero.result_scale()),
+            (3, 3)
+        );
+        assert!(matches!(
+            wide.try_native_math(NativeDecimalOp::Negate, 1),
+            Err(NativeDecimalError::Resource(_))
+        ));
     }
 }
 
