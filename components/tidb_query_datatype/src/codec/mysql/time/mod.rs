@@ -851,6 +851,14 @@ impl Time {
         native_daynr_arithmetic!(year, month, day)
     }
 
+    /// Compares raw calendar cores without calendar validation. The existing
+    /// Time ordering ignores the low four FSP/type bits and compares unsigned
+    /// fields through microseconds. Each month-through-second field is below
+    /// 100, preserving native YYYYMMDDHHMMSS ordering for invalid components.
+    pub fn native_core_compare(left: u64, right: u64) -> Ordering {
+        Self(left).cmp(&Self(right))
+    }
+
     /// Native packed-core date difference, preserving calcDaynr's zero and
     /// invalid-component domain while ignoring all stored clock fields.
     pub const fn native_core_date_diff(left: u64, right: u64) -> i32 {
@@ -3794,6 +3802,35 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn test_native_core_compare_raw_fields() {
+        let maximum_micro = ((1_u64 << 20) - 1) << 4;
+        let cases = [
+            (0, 15, Ordering::Equal),
+            (1 << 4, 15, Ordering::Greater),
+            (1 << 24, maximum_micro, Ordering::Greater),
+            ((63 << 24) | maximum_micro, 1 << 30, Ordering::Less),
+            (
+                (2024 << 50) | (15 << 46) | (31 << 41),
+                2025 << 50,
+                Ordering::Less,
+            ),
+            (1 << 63, (1 << 63) - 1, Ordering::Greater),
+            (u64::MAX, u64::MAX & !15, Ordering::Equal),
+        ];
+        for (left, right, expected) in cases {
+            // All FSP/type combinations are irrelevant, including invalid ones.
+            for left_low in 0..16 {
+                for right_low in 0..16 {
+                    let left = (left & !15) | left_low;
+                    let right = (right & !15) | right_low;
+                    assert_eq!(Time::native_core_compare(left, right), expected);
+                    assert_eq!(Time::native_core_compare(right, left), expected.reverse());
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_native_week_shared_source_vectors() {

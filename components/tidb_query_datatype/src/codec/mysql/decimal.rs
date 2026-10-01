@@ -144,6 +144,86 @@ impl<T> DerefMut for Res<T> {
     }
 }
 
+/// Borrowed native coefficient comparison input, without a word-buffer import.
+/// `digits` retains the native ASCII coefficient and `storage_scale` includes
+/// hidden fractional precision; visible scale and declared SQL shape are
+/// absent.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeDecimalCmpParts<'a> {
+    pub negative: bool,
+    pub digits: &'a str,
+    pub storage_scale: u32,
+}
+
+/// Allocation-free native coefficient order. This is the native character-
+/// coefficient storage policy, distinct from the unchanged word-backed
+/// `Decimal::cmp`/wire policy. It neither validates/imports a Decimal nor
+/// normalizes its sign: even raw negative zero retains sign-first ordering.
+/// Storage scales longer than the coefficient retain the native clamped split.
+pub fn native_decimal_cmp(
+    lhs: NativeDecimalCmpParts<'_>,
+    rhs: NativeDecimalCmpParts<'_>,
+) -> Ordering {
+    if lhs.negative != rhs.negative {
+        return if lhs.negative {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+    let mag_cmp =
+        native_decimal_cmp_magnitude(lhs.digits, lhs.storage_scale, rhs.digits, rhs.storage_scale);
+    if lhs.negative {
+        mag_cmp.reverse()
+    } else {
+        mag_cmp
+    }
+}
+
+/// Compares two unsigned coefficients placed at the decimal point:
+/// `digits * 10^-storage_scale` each, digit-by-digit with missing trailing
+/// fraction digits read as `0`. Equivalent to right-padding both sides to
+/// the common storage scale and comparing the digit strings.
+fn native_decimal_cmp_magnitude(
+    a_digits: &str,
+    a_storage_scale: u32,
+    b_digits: &str,
+    b_storage_scale: u32,
+) -> Ordering {
+    let a_int_end = a_digits.len() - (a_storage_scale as usize).min(a_digits.len());
+    let b_int_end = b_digits.len() - (b_storage_scale as usize).min(b_digits.len());
+    let (a_int, a_frac) = (&a_digits[..a_int_end], &a_digits[a_int_end..]);
+    let (b_int, b_frac) = (&b_digits[..b_int_end], &b_digits[b_int_end..]);
+    // Leading zeros carry no magnitude; strip them so length decides first.
+    let a_int_tz = a_int.trim_start_matches('0');
+    let b_int_tz = b_int.trim_start_matches('0');
+    match a_int_tz
+        .len()
+        .cmp(&b_int_tz.len())
+        .then_with(|| a_int_tz.cmp(b_int_tz))
+    {
+        Ordering::Equal => {}
+        non_eq => return non_eq,
+    }
+    // Equal-length ASCII digit strings compare numerically byte-wise.
+    let common = a_frac.len().min(b_frac.len());
+    match a_frac[..common].cmp(&b_frac[..common]) {
+        Ordering::Equal => {}
+        non_eq => return non_eq,
+    }
+    // A longer fraction only wins when its extra digits are not all zero.
+    let (rest, sign) = if a_frac.len() > b_frac.len() {
+        (&a_frac[common..], Ordering::Greater)
+    } else {
+        (&b_frac[common..], Ordering::Less)
+    };
+    if rest.bytes().any(|digit| digit != b'0') {
+        sign
+    } else {
+        Ordering::Equal
+    }
+}
+
 // The existing arithmetic policy and physical cell retain a nine-word limit.
 // This is not the capacity of the owning logical representation.
 const WORD_BUF_LEN: usize = 9;
@@ -5109,6 +5189,78 @@ impl Hash for Decimal {
         // -0 should be not negative.
         let negative = self.negative && (start as isize <= end);
         negative.hash(state);
+    }
+}
+
+#[cfg(test)]
+mod native_decimal_cmp_tests {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+
+    use super::{NativeDecimalCmpParts, native_decimal_cmp};
+
+    #[test]
+    fn native_decimal_cmp_borrowed_keeps_full_coefficient_policy() {
+        let cases = [
+            (false, "15", 1, false, "150", 2, Equal),
+            (false, "000010100", 4, false, "101", 2, Equal),
+            (false, "000", 0, false, "0", 3, Equal),
+            (false, "12345", 4, false, "12340", 4, Greater),
+            (false, "12340", 4, false, "1234001", 6, Less),
+            (false, "999", 0, false, "1000", 0, Less),
+            (false, "1001", 0, false, "1000", 0, Greater),
+            (true, "1", 0, true, "2", 0, Greater),
+            (true, "150", 2, true, "15", 1, Equal),
+            (true, "0", 0, false, "0", 0, Less),
+            (false, "0", 0, true, "0", 0, Greater),
+            // Preserve the original clamped coefficient split, not a new
+            // validating import or inferred leading fractional zeroes.
+            (false, "5", 3, false, "50", 2, Equal),
+            (false, "9", u32::MAX, false, "90", 2, Equal),
+            (false, "", u32::MAX, false, "000", 3, Equal),
+            // No nine-word/SQL precision cap or materialized word bridge.
+            (
+                false,
+                "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+                0,
+                false,
+                "1",
+                0,
+                Greater,
+            ),
+            (
+                false,
+                "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+                90,
+                false,
+                "0",
+                0,
+                Greater,
+            ),
+        ];
+        for (
+            negative,
+            digits,
+            storage_scale,
+            right_negative,
+            right_digits,
+            right_scale,
+            expected,
+        ) in cases
+        {
+            let lhs = NativeDecimalCmpParts {
+                negative,
+                digits,
+                storage_scale,
+            };
+            let rhs = NativeDecimalCmpParts {
+                negative: right_negative,
+                digits: right_digits,
+                storage_scale: right_scale,
+            };
+            assert_eq!(native_decimal_cmp(lhs, rhs), expected);
+            assert_eq!(native_decimal_cmp(rhs, lhs), expected.reverse());
+            assert_eq!(native_decimal_cmp(lhs, lhs), Equal);
+        }
     }
 }
 

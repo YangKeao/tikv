@@ -38,8 +38,8 @@ mod vector_native;
 
 pub use self::{
     decimal::{
-        Decimal, DecimalDecoder, DecimalEncoder, DecimalParts, DecimalWordsRef, Res, RoundMode,
-        dec_encoded_len,
+        Decimal, DecimalDecoder, DecimalEncoder, DecimalParts, DecimalWordsRef,
+        NativeDecimalCmpParts, Res, RoundMode, dec_encoded_len, native_decimal_cmp,
     },
     duration::{Duration, DurationDecoder, DurationEncoder},
     enums::{Enum, EnumDecoder, EnumEncoder, EnumRef},

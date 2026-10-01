@@ -344,6 +344,23 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  Native comparison preparation has a shared datatype substrate before the
+  six predicate evaluators migrate. `json/native_policy.rs` owns the native raw
+  comparator and its serde/lossless decoder closure, with a data-only generic
+  node and separate InvalidBinary/TooDeep error. Native duplicate-key vectors,
+  count-before-key ordering, exact double versus mixed-number epsilon rules,
+  opaque/temporal rank, malformed fallback and distinct decoder depth/slice
+  behavior do not become wire `JsonRef::cmp` semantics. Encoding and parsing
+  remain outside this ownership move. `Time::native_core_compare` reuses the
+  existing raw ordering for native calendar bits without validating them or
+  interpreting packed-wire time; only the low four metadata bits are ignored.
+  Borrowed `NativeDecimalCmpParts` and `native_decimal_cmp` retain the native
+  coefficient-storage policy without allocating an owned Decimal bridge or
+  changing word-backed wire ordering. These helpers add no evaluator family,
+  driver, result carrier, call binding or PB admission by themselves. Runtime
+  comparison demand, bool production and batch/legacy routing remain a separate
+  integration step; physical-heap/OOM and complete type-domain claims remain
+  outside this checkpoint.
   AES adds 24 unit-metadata value profiles (two directions, three key widths,
   four SQL modes) and one genuine NULL witness. ECB uses the existing two Bytes
   inputs; CBC/OFB/CFB use three, with full passwords and IVs retained until the

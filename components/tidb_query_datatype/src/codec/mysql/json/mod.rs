@@ -93,9 +93,10 @@ pub use self::{
     json_depth::{native_json_depth, native_json_depth_from_children},
     json_modify::ModifyType,
     native_policy::{
-        NativeJsonError, decode_native_json_uvarint, native_binary_json_type_name,
-        native_json_opaque, native_json_storage_size, native_json_type_name,
-        parse_native_json_document,
+        NativeBinaryJsonError, NativeJsonError, NativeJsonNode, compare_native_binary_json,
+        decode_native_binary_json_node, decode_native_binary_json_value,
+        decode_native_json_uvarint, native_binary_json_type_name, native_json_opaque,
+        native_json_storage_size, native_json_type_name, parse_native_json_document,
     },
     path_expr::{PathExpression, parse_json_path_expr},
 };
