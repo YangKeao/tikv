@@ -3,9 +3,15 @@
 //! Native JSON representation policies. Parsing and binary validation retain
 //! their existing boundaries; type names and depth use the shared kernels.
 
+use codec::number::NumberCodec;
 use serde_json::Value;
 
-use super::{JsonType, json_type::json_type_name};
+use super::{
+    JsonType,
+    constants::{LITERAL_LEN, NUMBER_LEN, TYPE_LEN},
+    jcodec::{array_metadata_len, object_metadata_len, out_of_line_payload_len},
+    json_type::json_type_name,
+};
 
 /// The native document/parser and binary-view errors, without SQL rendering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,6 +28,48 @@ pub fn parse_native_json_document(text: &str) -> Result<Value, NativeJsonError> 
         return Err(NativeJsonError::EmptyText);
     }
     serde_json::from_str(text).map_err(|_| NativeJsonError::InvalidText)
+}
+
+/// Measures the native text-domain binary layout, including the root type byte.
+/// This shares the encoder's metadata and inline-literal layout rules without
+/// encoding a document, narrowing its keys, or reclassifying its numbers.
+/// The contract is ordinary constructible sizes, not usize overflow or OOM
+/// equivalence with an allocating binary encoder.
+pub fn native_json_storage_size(value: &Value) -> usize {
+    native_json_value_size(value) + TYPE_LEN
+}
+
+fn native_json_child_payload_size(value: &Value) -> usize {
+    out_of_line_payload_len(
+        matches!(value, Value::Null | Value::Bool(_)),
+        native_json_value_size(value),
+    )
+}
+
+fn native_json_value_size(value: &Value) -> usize {
+    match value {
+        Value::Null | Value::Bool(_) => LITERAL_LEN,
+        Value::Number(_) => NUMBER_LEN,
+        Value::String(text) => {
+            let mut prefix = [0; 10];
+            NumberCodec::encode_var_u64(&mut prefix, text.len() as u64) + text.len()
+        }
+        Value::Array(values) => {
+            array_metadata_len(values.len())
+                + values
+                    .iter()
+                    .map(native_json_child_payload_size)
+                    .sum::<usize>()
+        }
+        Value::Object(values) => {
+            object_metadata_len(values.len())
+                + values.keys().map(|key| key.len()).sum::<usize>()
+                + values
+                    .values()
+                    .map(native_json_child_payload_size)
+                    .sum::<usize>()
+        }
+    }
 }
 
 /// Classifies a parsed native value, retaining the signed-boundary preference.
@@ -88,6 +136,39 @@ pub fn decode_native_json_uvarint(bytes: &[u8]) -> Result<(usize, usize), Native
 mod tests {
     use super::*;
     use crate::codec::mysql::json::{Json, JsonRef, native_json_depth};
+
+    #[test]
+    fn native_storage_size_keeps_text_layout_and_long_keys() {
+        // Existing native json2::json_storage_size_matches_go_vectors values.
+        for (text, expected) in [
+            ("null", 2),
+            ("true", 2),
+            ("1", 9),
+            (r#""1""#, 3),
+            ("{}", 9),
+            (r#"{"a":1}"#, 29),
+            (r#"[{"a":{"a":1},"b":2}]"#, 82),
+            (r#"{"a": 1000, "b": "wxyz", "c": "[1, 3, 5, 7]"}"#, 71),
+        ] {
+            let value = parse_native_json_document(text).unwrap();
+            assert_eq!(native_json_storage_size(&value), expected, "{text}");
+        }
+        // Original layout arithmetic: root 1 + header 8 + 3 inline entries * 5.
+        let inline = parse_native_json_document("[null,true,false]").unwrap();
+        assert_eq!(native_json_storage_size(&inline), 24);
+        // Last key wins: root 1 + header 8 + one entry (6+5) + key byte 1.
+        let duplicate = parse_native_json_document(r#"{"a":[1,2],"a":null}"#).unwrap();
+        assert_eq!(native_json_storage_size(&duplicate), 21);
+        let long_key = "k".repeat(65_536);
+        let document = format!("{{\"{}\":null}}", long_key);
+        let value = parse_native_json_document(&document).unwrap();
+        assert_eq!(native_json_storage_size(&value), 65_556);
+        // Root 1 + two-byte varuint length + 128 UTF-8 bytes.
+        assert_eq!(
+            native_json_storage_size(&Value::String("x".repeat(128))),
+            131
+        );
+    }
 
     #[test]
     fn native_json_type_policies_keep_numeric_and_binary_boundaries() {

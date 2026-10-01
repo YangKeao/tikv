@@ -94,7 +94,8 @@ pub use self::{
     json_modify::ModifyType,
     native_policy::{
         NativeJsonError, decode_native_json_uvarint, native_binary_json_type_name,
-        native_json_opaque, native_json_type_name, parse_native_json_document,
+        native_json_opaque, native_json_storage_size, native_json_type_name,
+        parse_native_json_document,
     },
     path_expr::{PathExpression, parse_json_path_expr},
 };

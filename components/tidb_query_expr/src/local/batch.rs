@@ -912,6 +912,9 @@ pub enum EvaluatedBytesOp {
     JsonTypeTextNative,
     JsonTypeBinaryNative,
     JsonDepthNative,
+    JsonStorageFreeNative,
+    JsonStorageSizeNative,
+    JsonQuoteNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1421,6 +1424,19 @@ impl EvaluatedBytesOp {
             Self::JsonDepthNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::JsonDepthNative);
             }
+            Self::JsonStorageFreeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonStorageFreeNative,
+                );
+            }
+            Self::JsonStorageSizeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonStorageSizeNative,
+                );
+            }
+            Self::JsonQuoteNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::JsonQuoteNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1582,7 +1598,11 @@ impl EvaluatedBytesOp {
     fn returns_json_report(self) -> bool {
         matches!(
             self,
-            Self::JsonTypeTextNative | Self::JsonTypeBinaryNative | Self::JsonDepthNative
+            Self::JsonTypeTextNative
+                | Self::JsonTypeBinaryNative
+                | Self::JsonDepthNative
+                | Self::JsonStorageFreeNative
+                | Self::JsonStorageSizeNative
         )
     }
 
@@ -1704,6 +1724,9 @@ impl EvaluatedBytesOp {
             Self::JsonTypeTextNative => crate::impl_json::json_type_text_native_fn_meta(),
             Self::JsonTypeBinaryNative => crate::impl_json::json_type_binary_native_fn_meta(),
             Self::JsonDepthNative => crate::impl_json::json_depth_native_fn_meta(),
+            Self::JsonStorageFreeNative => crate::impl_json::json_storage_free_native_fn_meta(),
+            Self::JsonStorageSizeNative => crate::impl_json::json_storage_size_native_fn_meta(),
+            Self::JsonQuoteNative => crate::impl_json::json_quote_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1968,7 +1991,10 @@ impl EvaluatedBytesOp {
             | Self::UncompressNative
             | Self::JsonTypeTextNative
             | Self::JsonTypeBinaryNative
-            | Self::JsonDepthNative => EvalType::Bytes,
+            | Self::JsonDepthNative
+            | Self::JsonStorageFreeNative
+            | Self::JsonStorageSizeNative
+            | Self::JsonQuoteNative => EvalType::Bytes,
         }
     }
 
@@ -2014,7 +2040,10 @@ impl EvaluatedBytesOp {
             | Self::JsonValidBinaryNative
             | Self::JsonTypeTextNative
             | Self::JsonTypeBinaryNative
-            | Self::JsonDepthNative => &[EvalType::Bytes],
+            | Self::JsonDepthNative
+            | Self::JsonStorageFreeNative
+            | Self::JsonStorageSizeNative
+            | Self::JsonQuoteNative => &[EvalType::Bytes],
             Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative
@@ -3259,7 +3288,7 @@ fn decode_uncompress_frame(encoded: Option<&[u8]>) -> LocalResult<UncompressFram
     }
 }
 
-/// A computed result of the three closed JSON report recipes. Text parser
+/// A computed result of the closed JSON report recipes. Text parser
 /// failures are explicit outcomes, not inferred SQL diagnostics or raw errors.
 #[derive(Debug, PartialEq, Eq)]
 pub enum JsonReportOutcome {
@@ -3314,12 +3343,27 @@ fn decode_json_report_frame(
     }
     match encoded {
         None => Ok(JsonReportFrame::Null),
-        Some([0, payload @ ..]) if operation == EvaluatedBytesOp::JsonDepthNative => {
+        Some([0, payload @ ..])
+            if matches!(
+                operation,
+                EvaluatedBytesOp::JsonDepthNative
+                    | EvaluatedBytesOp::JsonStorageFreeNative
+                    | EvaluatedBytesOp::JsonStorageSizeNative
+            ) =>
+        {
             let bytes = <[u8; 8]>::try_from(payload).map_err(|_| invalid())?;
             Ok(JsonReportFrame::Int(i64::from_le_bytes(bytes)))
         }
         Some([0, payload @ ..]) => Ok(JsonReportFrame::Bytes(payload)),
-        Some([1]) if operation != EvaluatedBytesOp::JsonTypeBinaryNative => {
+        Some([1])
+            if matches!(
+                operation,
+                EvaluatedBytesOp::JsonTypeTextNative
+                    | EvaluatedBytesOp::JsonDepthNative
+                    | EvaluatedBytesOp::JsonStorageFreeNative
+                    | EvaluatedBytesOp::JsonStorageSizeNative
+            ) =>
+        {
             Ok(JsonReportFrame::EmptyText)
         }
         Some([2]) => Ok(JsonReportFrame::InvalidText),
@@ -4249,8 +4293,17 @@ mod evaluated_ascii_tests {
 
     #[test]
     fn json_report_envelope_is_recipe_specific_and_exact() {
-        use EvaluatedBytesOp::{JsonDepthNative, JsonTypeBinaryNative, JsonTypeTextNative};
-        for operation in [JsonTypeTextNative, JsonTypeBinaryNative, JsonDepthNative] {
+        use EvaluatedBytesOp::{
+            JsonDepthNative, JsonStorageFreeNative, JsonStorageSizeNative, JsonTypeBinaryNative,
+            JsonTypeTextNative,
+        };
+        for operation in [
+            JsonTypeTextNative,
+            JsonTypeBinaryNative,
+            JsonDepthNative,
+            JsonStorageFreeNative,
+            JsonStorageSizeNative,
+        ] {
             assert_eq!(
                 decode_json_report_frame(operation, None).unwrap(),
                 JsonReportFrame::Null
@@ -4277,7 +4330,12 @@ mod evaluated_ascii_tests {
                 JsonReportFrame::Bytes(&[])
             );
         }
-        for operation in [JsonTypeTextNative, JsonDepthNative] {
+        for operation in [
+            JsonTypeTextNative,
+            JsonDepthNative,
+            JsonStorageFreeNative,
+            JsonStorageSizeNative,
+        ] {
             assert_eq!(
                 decode_json_report_frame(operation, Some(&[1])).unwrap(),
                 JsonReportFrame::EmptyText
@@ -4287,19 +4345,26 @@ mod evaluated_ascii_tests {
             decode_json_report_frame(JsonTypeBinaryNative, Some(&[1])),
             Err(LocalError::InvalidBatch(_))
         ));
-        assert_eq!(
-            decode_json_report_frame(JsonDepthNative, Some(&[0, 3, 0, 0, 0, 0, 0, 0, 0])).unwrap(),
-            JsonReportFrame::Int(3)
-        );
-        for encoded in [&[0][..], &[0; 8][..], &[0; 10][..]] {
-            assert!(matches!(
-                decode_json_report_frame(JsonDepthNative, Some(encoded)),
-                Err(LocalError::InvalidBatch(_))
-            ));
+        for operation in [
+            JsonDepthNative,
+            JsonStorageFreeNative,
+            JsonStorageSizeNative,
+        ] {
+            assert_eq!(
+                decode_json_report_frame(operation, Some(&[0, 3, 0, 0, 0, 0, 0, 0, 0])).unwrap(),
+                JsonReportFrame::Int(3)
+            );
+            for encoded in [&[0][..], &[0; 8][..], &[0; 10][..]] {
+                assert!(matches!(
+                    decode_json_report_frame(operation, Some(encoded)),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
         }
         for operation in [
             EvaluatedBytesOp::JsonValidTextNative,
             EvaluatedBytesOp::UncompressNative,
+            EvaluatedBytesOp::JsonQuoteNative,
         ] {
             assert!(matches!(
                 decode_json_report_frame(operation, None),

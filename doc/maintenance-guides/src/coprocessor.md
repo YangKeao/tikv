@@ -293,6 +293,17 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  JSON_STORAGE_FREE/SIZE reuse the closed JSON Int/error report recipes:
+  parse the actual prepared document before returning zero or measured size.
+  `native_policy` measures serde values through common `jcodec` container and
+  literal-inline layout primitives, without encoding a u16-key binary value;
+  string-prefix length comes from the existing varint encoder. JSON_QUOTE
+  returns ordinary owned bytes through one shared quote traversal with explicit
+  native/wire escape policies. Native standard JSON control escapes and raw
+  HTML/U+2028/U+2029 remain distinct from wire's bell/vertical-tab escapes and
+  other raw controls. These three entries add no role, kind, driver, NoArgs
+  exception or PB admission. Typed-payload size and path-key quote helpers
+  remain different APIs, not claimed equivalent to the SQL functions.
   JSON_VALID/TYPE/DEPTH use six private recipes in `impl_json.rs`. The datatype
   `codec/mysql/json/native_policy.rs` owns the existing native serde parser,
   opaque framing and uvarint policy; native and wire representations share one

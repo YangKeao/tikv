@@ -27,7 +27,7 @@ fn native_json_report_error(error: NativeJsonError) -> Bytes {
     }]
 }
 
-// Closed transport: tag 0 carries a type name or i64 LE8 depth, selected by the
+// Closed transport: tag 0 carries a type name or i64 LE8 value, selected by the
 // operation; exact one-byte tags 1/2 carry the computed parse error. Allocation
 // failures remain transport errors rather than fabricated JSON dispositions.
 fn native_json_report_value(payload: &[u8]) -> Result<Bytes> {
@@ -100,6 +100,44 @@ fn json_depth_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
         }
         Err(error) => Ok(Some(native_json_report_error(error))),
     }
+}
+
+#[rpn_fn(nullable)]
+fn json_storage_free_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let Some(bytes) = arg else {
+        return Ok(None);
+    };
+    // The worker must parse the actual document before reporting zero.
+    match native_json_report_parse(bytes) {
+        Ok(_) => native_json_report_value(&0i64.to_le_bytes()).map(Some),
+        Err(error) => Ok(Some(native_json_report_error(error))),
+    }
+}
+
+#[rpn_fn(nullable)]
+fn json_storage_size_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let Some(bytes) = arg else {
+        return Ok(None);
+    };
+    match native_json_report_parse(bytes) {
+        Ok(document) => {
+            // The shared size includes the root byte; retain the native cast.
+            let size = native_json_storage_size(&document) as i64;
+            native_json_report_value(&size.to_le_bytes()).map(Some)
+        }
+        Err(error) => Ok(Some(native_json_report_error(error))),
+    }
+}
+
+#[rpn_fn(nullable)]
+fn json_quote_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let Some(bytes) = arg else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(bytes).map_err(|source| {
+        other_err!("Native JSON_QUOTE transport is not valid UTF-8: {}", source)
+    })?;
+    native_quote(text).map(Some)
 }
 
 #[rpn_fn]
@@ -351,44 +389,63 @@ fn json_quote(input: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
     Ok(writer.write(quote(input)?))
 }
 
+#[derive(Clone, Copy)]
+enum JsonQuotePolicy {
+    Wire,
+    Native,
+}
+
 fn quote(bytes: BytesRef) -> Result<Option<Bytes>> {
     let mut result = Vec::with_capacity(bytes.len() * 2 + 2);
-    result.push(b'\"');
-    for byte in bytes.iter() {
-        if *byte == b'\"' || *byte == b'\\' {
+    quote_with_policy(bytes, JsonQuotePolicy::Wire, &mut result);
+    Ok(Some(result))
+}
+
+fn native_quote(text: &str) -> Result<Bytes> {
+    // Reserve a checked worst-case byte count, not serde's original allocation
+    // strategy or a guarantee about whole-call allocation peaks/OOM behavior.
+    let capacity = text
+        .len()
+        .checked_mul(6)
+        .and_then(|length| length.checked_add(2))
+        .ok_or_else(|| other_err!("Native JSON_QUOTE capacity overflow"))?;
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(capacity)
+        .map_err(|source| other_err!("Unable to allocate native JSON_QUOTE output: {}", source))?;
+    quote_with_policy(text.as_bytes(), JsonQuotePolicy::Native, &mut result);
+    Ok(result)
+}
+
+fn quote_with_policy(bytes: BytesRef, policy: JsonQuotePolicy, result: &mut Bytes) {
+    const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
+    result.push(b'"');
+    for &byte in bytes {
+        let escaped = match byte {
+            b'"' | b'\\' => Some(byte),
+            b'\x07' if matches!(policy, JsonQuotePolicy::Wire) => Some(b'a'),
+            b'\x0b' if matches!(policy, JsonQuotePolicy::Wire) => Some(b'v'),
+            b'\x08' => Some(b'b'),
+            b'\x0c' => Some(b'f'),
+            b'\t' => Some(b't'),
+            b'\n' => Some(b'n'),
+            b'\r' => Some(b'r'),
+            b'\x00'..=b'\x1f' if matches!(policy, JsonQuotePolicy::Native) => {
+                result.extend_from_slice(b"\\u00");
+                result.push(LOWER_HEX[(byte >> 4) as usize]);
+                result.push(LOWER_HEX[(byte & 0x0f) as usize]);
+                continue;
+            }
+            _ => None,
+        };
+        if let Some(escaped) = escaped {
             result.push(b'\\');
-            result.push(*byte)
-        } else if *byte == b'\x07' {
-            // \a alert
-            result.push(b'\\');
-            result.push(b'a');
-        } else if *byte == b'\x08' {
-            // \b backspace
-            result.push(b'\\');
-            result.push(b'b')
-        } else if *byte == b'\x0c' {
-            // \f form feed
-            result.push(b'\\');
-            result.push(b'f')
-        } else if *byte == b'\n' {
-            result.push(b'\\');
-            result.push(b'n');
-        } else if *byte == b'\r' {
-            result.push(b'\\');
-            result.push(b'r');
-        } else if *byte == b'\t' {
-            result.push(b'\\');
-            result.push(b't')
-        } else if *byte == b'\x0b' {
-            // \v vertical tab
-            result.push(b'\\');
-            result.push(b'v')
+            result.push(escaped);
         } else {
-            result.push(*byte)
+            result.push(byte);
         }
     }
-    result.push(b'\"');
-    Ok(Some(result))
+    result.push(b'"');
 }
 
 #[rpn_fn(nullable, raw_varg, min_args = 1, max_args = 1)]
@@ -620,6 +677,57 @@ mod tests {
 
     use super::*;
     use crate::types::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_json_storage_native_statuses() {
+        assert_eq!(json_storage_free_native(None).unwrap(), None);
+        assert_eq!(json_storage_size_native(None).unwrap(), None);
+        assert_eq!(json_storage_free_native(Some(b" ")).unwrap(), Some(vec![1]));
+        assert_eq!(json_storage_size_native(Some(b" ")).unwrap(), Some(vec![1]));
+        assert_eq!(json_storage_free_native(Some(b"[")).unwrap(), Some(vec![2]));
+        assert_eq!(json_storage_size_native(Some(b"[")).unwrap(), Some(vec![2]));
+        assert_eq!(
+            json_storage_free_native(Some(&[0xff])).unwrap(),
+            Some(vec![2])
+        );
+        assert_eq!(
+            json_storage_size_native(Some(&[0xff])).unwrap(),
+            Some(vec![2])
+        );
+        assert_eq!(
+            json_storage_free_native(Some(b"null")).unwrap(),
+            Some(vec![0; 9])
+        );
+        let mut size = vec![0];
+        size.extend_from_slice(&2i64.to_le_bytes());
+        assert_eq!(json_storage_size_native(Some(b"null")).unwrap(), Some(size));
+    }
+
+    #[test]
+    fn test_json_quote_native_and_wire_policies() {
+        assert_eq!(json_quote_native(None).unwrap(), None);
+        assert_eq!(
+            json_quote_native(Some(b"")).unwrap(),
+            Some(b"\"\"".to_vec())
+        );
+        assert!(json_quote_native(Some(&[0xff])).is_err());
+        let controls = b"\x00\x07\x0b\x1f\x08\x0c\t\n\r";
+        assert_eq!(
+            json_quote_native(Some(controls)).unwrap(),
+            Some(br#""\u0000\u0007\u000b\u001f\b\f\t\n\r""#.to_vec()),
+        );
+        assert_eq!(
+            quote(controls).unwrap(),
+            Some(b"\"\x00\\a\\v\x1f\\b\\f\\t\\n\\r\"".to_vec()),
+        );
+        let text = "\"\\<>&/\u{2028}\u{2029}中";
+        let expected = "\"\\\"\\\\<>&/\u{2028}\u{2029}中\"".as_bytes().to_vec();
+        assert_eq!(
+            json_quote_native(Some(text.as_bytes())).unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(quote(text.as_bytes()).unwrap(), Some(expected));
+    }
 
     #[test]
     fn test_json_valid_native_signatures_and_nulls() {

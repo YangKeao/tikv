@@ -1667,6 +1667,9 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::JsonTypeTextNative,
             EvaluatedBytesOp::JsonTypeBinaryNative,
             EvaluatedBytesOp::JsonDepthNative,
+            EvaluatedBytesOp::JsonStorageFreeNative,
+            EvaluatedBytesOp::JsonStorageSizeNative,
+            EvaluatedBytesOp::JsonQuoteNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

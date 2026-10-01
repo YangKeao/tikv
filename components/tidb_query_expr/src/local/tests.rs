@@ -6231,3 +6231,108 @@ fn local_evaluated_args_json_introspection_keeps_carriers_and_transport_errors_d
         }
     }
 }
+
+#[test]
+fn local_evaluated_args_json_storage_quote_preserves_computed_carriers() {
+    for (operation, storage_value) in [
+        (EvaluatedBytesOp::JsonStorageFreeNative, 0_i64),
+        (EvaluatedBytesOp::JsonStorageSizeNative, 9_i64),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_retained_bytes: 8 * 1024,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Int(Some(0))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        if operation == EvaluatedBytesOp::JsonStorageSizeNative {
+            let mut oversized = Vec::with_capacity(16 * 1024);
+            oversized.push(b'{');
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let cases: [(Option<&[u8]>, JsonReportOutcome); 4] = [
+            (None, JsonReportOutcome::Null),
+            (Some(b""), JsonReportOutcome::EmptyText),
+            (Some(b"{"), JsonReportOutcome::InvalidText),
+            (Some(b"0"), JsonReportOutcome::Int(storage_value)),
+        ];
+        for (index, (input, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::JsonReport(value) = worker
+                .eval_args(EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec())))
+                .unwrap()
+            else {
+                panic!("JSON storage returned an unexpected output type");
+            };
+            assert_eq!(value.metadata(), ComputedJsonReportMetadata::OwnJsonReport);
+            assert_eq!(value.outcome(), &expected);
+            assert_eq!(value.into_outcome(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+    let expected = b"\"a\\nb\"";
+    let quoted = {
+        let mut worker = prepare_evaluated_bytes(
+            EvaluatedBytesOp::JsonQuoteNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), EvaluatedBytesOp::JsonQuoteNative);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Ieee754Bits(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let ComputedValue::Bytes(value) = worker.eval_args(EvaluatedArgs::Bytes(None)).unwrap()
+        else {
+            panic!("nullable JSON_QUOTE returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), None);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), None);
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::Bytes(Some(b"a\nb".to_vec())))
+            .unwrap()
+        else {
+            panic!("JSON_QUOTE returned a report instead of Bytes");
+        };
+        assert_eq!(value.value(), Some(expected.as_slice()));
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        let quoted = value.into_option().unwrap();
+        assert_eq!(quoted.as_slice(), expected);
+        assert_eq!(worker.kernel_invocations(), 2);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        quoted
+    };
+    assert_eq!(quoted.as_slice(), expected);
+}

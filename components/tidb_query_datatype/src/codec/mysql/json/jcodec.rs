@@ -10,14 +10,27 @@ use crate::{
     codec::{Error, Result},
 };
 
+// Layout measurements shared by the encoder and native text-domain sizing.
+// These preserve ordinary constructible layouts, not a new overflow contract.
+pub(super) fn object_metadata_len(element_count: usize) -> usize {
+    let key_entries_len = KEY_ENTRY_LEN * element_count;
+    let value_entries_len = VALUE_ENTRY_LEN * element_count;
+    ELEMENT_COUNT_LEN + SIZE_LEN + key_entries_len + value_entries_len
+}
+
+pub(super) fn array_metadata_len(element_count: usize) -> usize {
+    let value_entries_len = VALUE_ENTRY_LEN * element_count;
+    ELEMENT_COUNT_LEN + SIZE_LEN + value_entries_len
+}
+
+pub(super) fn out_of_line_payload_len(is_literal: bool, payload_len: usize) -> usize {
+    // Literals live in the value entry, so append no separate payload.
+    if is_literal { 0 } else { payload_len }
+}
+
 impl JsonRef<'_> {
     fn encoded_len(&self) -> usize {
-        match self.type_code {
-            // Literal is encoded inline with value-entry, so nothing will be
-            // appended in value part
-            JsonType::Literal => 0,
-            _ => self.value.len(),
-        }
+        out_of_line_payload_len(self.type_code == JsonType::Literal, self.value.len())
     }
 }
 
@@ -36,17 +49,15 @@ pub trait JsonEncoder: NumberEncoder {
         // object: element-count size key-entry* value-entry* key* value*
         let element_count = entries.len();
         // key-entry ::= key-offset(uint32) key-length(uint16)
-        let key_entries_len = KEY_ENTRY_LEN * element_count;
         // value-entry ::= type(byte) offset-or-inlined-value(uint32)
-        let value_entries_len = VALUE_ENTRY_LEN * element_count;
+        let metadata_len = object_metadata_len(element_count);
         let kv_encoded_len = entries
             .iter()
             .fold(0, |acc, (k, v)| acc + k.len() + v.encoded_len());
-        let size =
-            ELEMENT_COUNT_LEN + SIZE_LEN + key_entries_len + value_entries_len + kv_encoded_len;
+        let size = metadata_len + kv_encoded_len;
         self.write_u32_le(element_count as u32)?;
         self.write_u32_le(size as u32)?;
-        let mut key_offset = ELEMENT_COUNT_LEN + SIZE_LEN + key_entries_len + value_entries_len;
+        let mut key_offset = metadata_len;
 
         // Write key entries
         for (key, _) in entries.iter() {
@@ -81,17 +92,15 @@ pub trait JsonEncoder: NumberEncoder {
         // object: element-count size key-entry* value-entry* key* value*
         let element_count = data.len();
         // key-entry ::= key-offset(uint32) key-length(uint16)
-        let key_entries_len = KEY_ENTRY_LEN * element_count;
         // value-entry ::= type(byte) offset-or-inlined-value(uint32)
-        let value_entries_len = VALUE_ENTRY_LEN * element_count;
+        let metadata_len = object_metadata_len(element_count);
         let kv_encoded_len = data
             .iter()
             .fold(0, |acc, (k, v)| acc + k.len() + v.as_ref().encoded_len());
-        let size =
-            ELEMENT_COUNT_LEN + SIZE_LEN + key_entries_len + value_entries_len + kv_encoded_len;
+        let size = metadata_len + kv_encoded_len;
         self.write_u32_le(element_count as u32)?;
         self.write_u32_le(size as u32)?;
-        let mut key_offset = ELEMENT_COUNT_LEN + SIZE_LEN + key_entries_len + value_entries_len;
+        let mut key_offset = metadata_len;
 
         // Write key entries
         for key in data.keys() {
@@ -124,12 +133,12 @@ pub trait JsonEncoder: NumberEncoder {
     // See `appendBinaryArray` in TiDB `types/json/binary.go`
     fn write_json_ref_array(&mut self, data: &[JsonRef<'_>]) -> Result<()> {
         let element_count = data.len();
-        let value_entries_len = VALUE_ENTRY_LEN * element_count;
+        let metadata_len = array_metadata_len(element_count);
         let values_len = data.iter().fold(0, |acc, v| acc + v.encoded_len());
-        let total_size = ELEMENT_COUNT_LEN + SIZE_LEN + value_entries_len + values_len;
+        let total_size = metadata_len + values_len;
         self.write_u32_le(element_count as u32)?;
         self.write_u32_le(total_size as u32)?;
-        let mut value_offset = (ELEMENT_COUNT_LEN + SIZE_LEN + value_entries_len) as u32;
+        let mut value_offset = metadata_len as u32;
         // Write value entries
         for v in data {
             self.write_value_entry(&mut value_offset, v)?;
@@ -147,12 +156,12 @@ pub trait JsonEncoder: NumberEncoder {
     fn write_json_array(&mut self, data: &[Json]) -> Result<()> {
         // array ::= element-count size value-entry* value*
         let element_count = data.len();
-        let value_entries_len = VALUE_ENTRY_LEN * element_count;
+        let metadata_len = array_metadata_len(element_count);
         let values_len = data.iter().fold(0, |acc, v| acc + v.as_ref().encoded_len());
-        let total_size = ELEMENT_COUNT_LEN + SIZE_LEN + value_entries_len + values_len;
+        let total_size = metadata_len + values_len;
         self.write_u32_le(element_count as u32)?;
         self.write_u32_le(total_size as u32)?;
-        let mut value_offset = (ELEMENT_COUNT_LEN + SIZE_LEN + value_entries_len) as u32;
+        let mut value_offset = metadata_len as u32;
         // Write value entries
         for v in data {
             self.write_value_entry(&mut value_offset, &v.as_ref())?;

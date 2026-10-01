@@ -226,6 +226,9 @@ pub enum LocalFunctionId {
     JsonTypeTextNative,
     JsonTypeBinaryNative,
     JsonDepthNative,
+    JsonStorageFreeNative,
+    JsonStorageSizeNative,
+    JsonQuoteNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.
