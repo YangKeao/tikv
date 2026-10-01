@@ -1,13 +1,17 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{borrow::Cow, collections::HashSet};
+use std::borrow::Cow;
 
 use regex::Regex;
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::codec::{Error, collation::Collator, data_type::*};
 
-use crate::types::function::CallBuild;
+use crate::{
+    NativeReplacementPart as ReplaceInstruction, RegexpPolicyError, RegexpReplacementEncoding,
+    regexp_instr_match, regexp_match_flags, regexp_replace_matches, regexp_replacement_parts,
+    regexp_substr_match, regexp_trim_at, types::function::CallBuild,
+};
 
 const PATTERN_IDX: usize = 1;
 const LIKE_MATCH_IDX: usize = 2;
@@ -19,32 +23,26 @@ fn invalid_pos_error(pos: i64, count: usize) -> Error {
     Error::regexp_error(format!("Invalid pos: {} in regexp, count: {}", pos, count))
 }
 
-fn is_valid_match_type(m: char) -> bool {
-    matches!(m, 'i' | 'c' | 'm' | 's')
+fn wire_regexp_policy_error(error: RegexpPolicyError) -> tidb_query_common::Error {
+    match error {
+        RegexpPolicyError::InvalidMatchType(m) => {
+            Error::regexp_error(format!("Invalid match type: {} in regexp", m)).into()
+        }
+        RegexpPolicyError::InvalidPosition { pos, count } => invalid_pos_error(pos, count).into(),
+        RegexpPolicyError::InvalidSubstitution(num) => {
+            Error::regexp_error(format!("Substitution number is out of range: {}", num)).into()
+        }
+        RegexpPolicyError::InvalidReplacementUtf8(error) => error.into(),
+    }
 }
 
 fn get_match_type<C: Collator>(match_type: &[u8]) -> Result<String> {
     let match_type = std::str::from_utf8(match_type)?;
-    let mut flag_set = HashSet::<char>::new();
+    let flag_set =
+        regexp_match_flags(match_type, C::IS_CASE_INSENSITIVE).map_err(wire_regexp_policy_error)?;
 
-    if C::IS_CASE_INSENSITIVE {
-        flag_set.insert('i');
-    }
-
-    for m in match_type.chars() {
-        if !is_valid_match_type(m) {
-            let err = format!("Invalid match type: {} in regexp", m);
-            return Err(Error::regexp_error(err).into());
-        }
-        if m == 'c' {
-            // re2 is case-sensitive by default, so we only need to delete 'i' flag
-            // to enable the case-sensitive for the regexp.
-            flag_set.remove(&'i');
-            continue;
-        }
-        flag_set.insert(m);
-    }
-
+    // Preserve the wire HashSet-to-inline-flags representation, including the
+    // pattern text used in the original Regex Debug compilation diagnostic.
     let mut flag = String::new();
     for m in flag_set {
         flag.push(m);
@@ -160,16 +158,9 @@ pub fn regexp_substr<C: Collator>(
             None => return Ok(None),
         };
 
-        if pos >= 1 {
-            if let Some((idx, _)) = expr.char_indices().nth((pos - 1) as usize) {
-                expr = &expr[idx..];
-            } else if pos != 1 {
-                // Char count == 0 && pos == 1 is valid.
-                return Err(invalid_pos_error(pos, expr.chars().count()).into());
-            }
-        } else {
-            return Err(invalid_pos_error(pos, expr.chars().count()).into());
-        }
+        expr = regexp_trim_at(expr, pos)
+            .map_err(wire_regexp_policy_error)?
+            .1;
     }
 
     let mut occurrence = 1i64;
@@ -178,17 +169,9 @@ pub fn regexp_substr<C: Collator>(
             Some::<&i64>(o) => *o,
             None => return Ok(None),
         };
-
-        if occurrence < 1 {
-            occurrence = 1;
-        }
     };
 
-    if let Some(m) = regex.find_iter(expr).nth((occurrence - 1) as usize) {
-        return Ok(Some(m.as_str().as_bytes().to_vec()));
-    }
-
-    Ok(None)
+    Ok(regexp_substr_match(&regex, expr, occurrence).map(|matched| matched.as_bytes().to_vec()))
 }
 
 /// Currently, TiDB only supports regular expressions for utf-8 strings.
@@ -218,16 +201,9 @@ pub fn regexp_instr<C: Collator>(
             None => return Ok(None),
         };
 
-        if pos >= 1 {
-            if let Some((idx, _)) = expr.char_indices().nth((pos - 1) as usize) {
-                expr = &expr[idx..];
-            } else if pos != 1 {
-                // Char count == 0 && pos == 1 is valid.
-                return Err(invalid_pos_error(pos, expr.chars().count()).into());
-            }
-        } else {
-            return Err(invalid_pos_error(pos, expr.chars().count()).into());
-        }
+        expr = regexp_trim_at(expr, pos)
+            .map_err(wire_regexp_policy_error)?
+            .1;
     }
 
     let mut occurrence = 1i64;
@@ -236,10 +212,6 @@ pub fn regexp_instr<C: Collator>(
             Some::<&i64>(o) => *o,
             None => return Ok(None),
         };
-
-        if occurrence < 1 {
-            occurrence = 1;
-        }
     };
 
     let mut return_option = 0i64;
@@ -255,24 +227,13 @@ pub fn regexp_instr<C: Collator>(
         }
     };
 
-    if let Some(m) = regex.find_iter(expr).nth((occurrence - 1) as usize) {
-        let find_pos = if return_option == 0 {
-            m.start()
-        } else {
-            m.end()
-        };
-
-        let count = expr[..find_pos].chars().count() as i64;
-        return Ok(Some(count + pos));
-    }
-
-    Ok(Some(0))
-}
-
-#[derive(Clone)]
-enum ReplaceInstruction {
-    SubstitutionNum(usize),
-    Literal(Vec<u8>),
+    Ok(Some(regexp_instr_match(
+        &regex,
+        expr,
+        pos,
+        occurrence,
+        return_option,
+    )))
 }
 
 pub struct ReplaceMetaData {
@@ -295,38 +256,7 @@ fn init_regexp_replace_data<C: Collator>(expr: &mut CallBuild) -> Result<Replace
 }
 
 fn init_replace_instructions(replace_expr: &[u8]) -> Vec<ReplaceInstruction> {
-    let mut instructions = Vec::new();
-    let len = replace_expr.len();
-    let mut literal = Vec::new();
-    let mut i = 0;
-    while i < len {
-        if replace_expr[i] == b'\\' {
-            if i + 1 >= len {
-                // This slash is in the end. Ignore it and break the loop.
-                break;
-            }
-            if replace_expr[i + 1].is_ascii_digit() {
-                if !literal.is_empty() {
-                    instructions.push(ReplaceInstruction::Literal(literal));
-                    literal = Vec::new();
-                }
-                instructions.push(ReplaceInstruction::SubstitutionNum(
-                    (replace_expr[i + 1] - b'0').into(),
-                ));
-            } else {
-                literal.push(replace_expr[i + 1]);
-            }
-            i += 2;
-        } else {
-            literal.push(replace_expr[i]);
-            i += 1;
-        }
-    }
-    if !literal.is_empty() {
-        instructions.push(ReplaceInstruction::Literal(literal));
-    }
-
-    instructions
+    regexp_replacement_parts(replace_expr)
 }
 
 /// Currently, TiDB only supports regular expressions for utf-8 strings.
@@ -363,17 +293,9 @@ pub fn regexp_replace<C: Collator>(
             None => return Ok(None),
         };
 
-        if pos >= 1 {
-            if let Some((idx, _)) = expr.char_indices().nth((pos - 1) as usize) {
-                before_trimmed = &expr[..idx];
-                trimmed = &expr[idx..];
-            } else if pos != 1 {
-                // Char count == 0 && pos == 1 is valid.
-                return Err(invalid_pos_error(pos, expr.chars().count()).into());
-            }
-        } else {
-            return Err(invalid_pos_error(pos, expr.chars().count()).into());
-        }
+        let (idx, suffix) = regexp_trim_at(expr, pos).map_err(wire_regexp_policy_error)?;
+        before_trimmed = &expr[..idx];
+        trimmed = suffix;
     }
 
     let mut occurrence = 0i64;
@@ -382,53 +304,18 @@ pub fn regexp_replace<C: Collator>(
             Some::<&i64>(o) => *o,
             None => return Ok(None),
         };
-
-        if occurrence < 0 {
-            occurrence = 1;
-        }
     };
 
-    let replace_work = |capture: &regex::Captures, res: &mut Vec<u8>| -> Result<()> {
-        for inst in replace_inst.as_ref() {
-            match inst {
-                ReplaceInstruction::SubstitutionNum(num) => {
-                    let m = capture.get(*num).ok_or_else(|| {
-                        Error::regexp_error(format!(
-                            "Substitution number is out of range: {}",
-                            *num
-                        ))
-                    })?;
-                    res.extend(m.as_str().as_bytes());
-                }
-                ReplaceInstruction::Literal(lit) => {
-                    res.extend(lit);
-                }
-            }
-        }
-        Ok(())
-    };
-
-    let mut result = Vec::new();
-    result.extend(before_trimmed.as_bytes());
-    let mut last_match = 0;
-    if occurrence == 0 {
-        for capture in regex.captures_iter(trimmed) {
-            // unwrap on 0 is OK because captures only reports matches.
-            let m = capture.get(0).unwrap();
-            result.extend(&trimmed.as_bytes()[last_match..m.start()]);
-            last_match = m.end();
-            replace_work(&capture, &mut result)?;
-        }
-    } else if let Some(capture) = regex.captures_iter(trimmed).nth((occurrence - 1) as usize) {
-        // unwrap on 0 is OK because captures only reports matches.
-        let m = capture.get(0).unwrap();
-        result.extend(&trimmed.as_bytes()[0..m.start()]);
-        last_match = m.end();
-        replace_work(&capture, &mut result)?;
-    }
-    result.extend(&trimmed.as_bytes()[last_match..]);
-
-    Ok(Some(result))
+    regexp_replace_matches(
+        before_trimmed,
+        trimmed,
+        &regex,
+        replace_inst.as_ref(),
+        occurrence,
+        RegexpReplacementEncoding::WireBytes,
+    )
+    .map(Some)
+    .map_err(wire_regexp_policy_error)
 }
 
 #[cfg(test)]

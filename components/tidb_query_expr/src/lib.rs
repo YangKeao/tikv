@@ -45,6 +45,12 @@ pub mod impl_string;
 pub mod impl_time;
 pub mod impl_vec;
 
+mod regexp_policy;
+pub use regexp_policy::{
+    NativeReplacementPart, RegexpPolicyError, RegexpReplacementEncoding, regexp_instr_match,
+    regexp_match_flags, regexp_replace_matches, regexp_replacement_parts, regexp_substr_match,
+    regexp_trim_at,
+};
 use tidb_query_common::Result;
 #[allow(unused_imports)]
 use tidb_query_datatype::{

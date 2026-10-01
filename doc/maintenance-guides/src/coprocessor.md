@@ -293,6 +293,17 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  Regexp foundation helpers in `components/tidb_query_expr/src/regexp_policy.rs`
+  share flag reduction, character trimming, substring/position search, replacement
+  tokens and capture/replacement assembly between wire and native callers. Typed
+  errors retain actual position/capture/UTF-8 details; frontends map their existing
+  diagnostics. Native replacement validates each selected expansion while wire
+  output permits raw bytes. Wire HashSet inline flags and native RegexBuilder
+  representation remain separate policies. Coercion, NULL and error precedence,
+  constant metadata and statement-context success/failure/replacement caches stay
+  with their existing callers. This foundation adds no closed evaluator recipes,
+  six-slot admission or migrated-family credit; cache-aware worker integration is
+  still pending. Allocation strategy and performance are not claimed equivalent.
   Eight native VECTOR functions use nine private `impl_vec.rs` recipes. The
   aligned native-policy type and complete public helpers live in datatype
   `codec/mysql/vector_native.rs`; the older packed wire type retains its own
