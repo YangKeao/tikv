@@ -1064,21 +1064,25 @@ fn divide_with_limit(
     divide_with_limit_and_budget(lhs, rhs, request, limit, result_frac_cnt, None)
 }
 
-// Only native MOD supplies a live scratch/output allowance. Existing wire and
-// private quotient callers retain their original allocation/count behavior.
+// Native MOD and MySQL division supply a live scratch/output allowance.
+// Existing wire/private callers retain their allocation/count behavior.
 fn divide_with_limit_and_budget(
     lhs: &Decimal,
     rhs: &Decimal,
     request: DivisionRequest,
     limit: WordLimit,
     result_frac_cnt: Option<usize>,
-    remainder_budget: Option<usize>,
+    native_budget: Option<usize>,
 ) -> Result<Option<DivisionOutput>> {
-    if remainder_budget.is_some()
-        && (request != DivisionRequest::Remainder || limit != WordLimit::Grow)
+    if native_budget.is_some()
+        && (limit != WordLimit::Grow
+            || !matches!(
+                request,
+                DivisionRequest::Remainder | DivisionRequest::RetainedQuotient { .. }
+            ))
     {
         return Err(Error::InvalidDataType(
-            "native remainder budget requires remainder-only Grow".to_owned(),
+            "native division budget requires a single Grow output".to_owned(),
         ));
     }
     if request == DivisionRequest::IntegerPair && limit != WordLimit::Grow {
@@ -1126,9 +1130,14 @@ fn divide_with_limit_and_budget(
         DivisionRequest::Remainder | DivisionRequest::IntegerPair => 0,
     };
     if l_prec == 0 {
-        if let Some(budget) = remainder_budget {
-            native_decimal_word_budget(remainder_scale.div_ceil(DIGITS_PER_WORD), budget)
-                .map_err(|_| decimal_resource_error("native remainder output exceeds limit"))?;
+        if let Some(budget) = native_budget {
+            let words = if request.quotient() {
+                requested_frac_words
+            } else {
+                remainder_scale.div_ceil(DIGITS_PER_WORD)
+            };
+            native_decimal_word_budget(words, budget)
+                .map_err(|_| decimal_resource_error("native division output exceeds limit"))?;
         }
         // Legacy zero uses the requested visible scale; AVG and exact
         // remainder instead retain their independently planned storage scale.
@@ -1193,7 +1202,9 @@ fn divide_with_limit_and_budget(
     };
     let mut int_word_to = division_word_count(int_digits, limit);
     let mut frac_word_to = requested_frac_words;
-    let mut quotient = if request.quotient() {
+    // A budgeted Grow quotient is allocated only after the shared scratch
+    // plan below. Unbudgeted callers keep their original allocation order.
+    let mut quotient = if request.quotient() && native_budget.is_none() {
         let status = limit.apply(int_word_to, frac_word_to)?;
         (int_word_to, frac_word_to) = (status.0, status.1);
         let mut value = Decimal::try_new(
@@ -1252,18 +1263,33 @@ fn divide_with_limit_and_budget(
         0
     };
     let scratch_words = 3.max(lhs_words).max(loop_words).max(remainder_stop);
-    if let Some(budget) = remainder_budget {
-        // The output's integer extent can only shrink as l_idx advances. A
-        // fractional gap occupies output cells even when no scratch is copied.
+    if let Some(budget) = native_budget {
+        // A remainder's integer extent only shrinks as l_idx advances; its
+        // fractional gap occupies cells even when no scratch is copied.
         // Charge both simultaneously live buffers, including inline output
         // cells, before either allocation. Borrowed inputs are not charged
         // again; exact finishing canonicalizes this output in place.
-        let output_words = WORD_BUF_LEN.max(remainder_stop).max(remainder_words);
+        let output_words = if request.quotient() {
+            WORD_BUF_LEN.max(end)
+        } else {
+            WORD_BUF_LEN.max(remainder_stop).max(remainder_words)
+        };
         let live_words = scratch_words
             .checked_add(output_words)
-            .ok_or_else(|| decimal_resource_error("native remainder live extent overflow"))?;
+            .ok_or_else(|| decimal_resource_error("native division live extent overflow"))?;
         native_decimal_word_budget(live_words, budget)
-            .map_err(|_| decimal_resource_error("native remainder live buffers exceed limit"))?;
+            .map_err(|_| decimal_resource_error("native division live buffers exceed limit"))?;
+        if request.quotient() {
+            let mut value = Decimal::try_new(
+                checked_word_digits(int_word_to)?,
+                checked_word_digits(frac_word_to)?,
+                lhs.negative != rhs.negative,
+            )?;
+            if let Some(scale) = result_frac_cnt {
+                value.result_frac_cnt = checked_fraction(scale)?;
+            }
+            quotient = Some(Res::Ok(value));
+        }
     }
     let mut buf = try_zeroed_words(scratch_words)?;
     let l_stop = l_start
@@ -2199,6 +2225,102 @@ impl Decimal {
         })?;
         Self::try_finish_exact(remainder, visible)
             .map(Some)
+            .map_err(NativeDecimalError::Core)
+    }
+
+    /// Native MySQL `/`, including the original u32 scale arithmetic and
+    /// nine-word result disposition. None means an actual zero divisor, not a
+    /// shape/count/resource refusal. `limit` covers the simultaneously live
+    /// scratch/output word bytes, not the already-owned borrowed operands.
+    pub fn try_native_mysql_div(
+        &self,
+        rhs: &Self,
+        frac_increment: u32,
+        limit: usize,
+    ) -> NativeDecimalResult<Option<Res<Self>>> {
+        self.check_native_math_value(limit)?;
+        rhs.check_native_math_value(limit)?;
+        if rhs.is_zero() {
+            return Ok(None);
+        }
+        // Keep these plain u32 expressions and their source order: the build's
+        // overflow-check policy decides panic versus wrap. Zero bypasses all
+        // retained-scale planning, but not the visible-scale addition.
+        let visible = ((self.result_frac_cnt as u32) + frac_increment).min(MAX_FRACTION as u32);
+        if self.is_zero() {
+            return Self::native_zero(false, visible, limit).map(|value| Some(Res::Ok(value)));
+        }
+        let word_scale =
+            |scale: u32| scale.div_ceil(DIGITS_PER_WORD as u32) * DIGITS_PER_WORD as u32;
+        let left_storage = self.frac_cnt as u32;
+        let right_storage = rhs.frac_cnt as u32;
+        let frac1 = word_scale(left_storage);
+        let frac2 = word_scale(right_storage);
+        let padding = (frac1 - left_storage) + (frac2 - right_storage);
+        let adjusted_increment = frac_increment.saturating_sub(padding);
+        let storage = word_scale(frac1 + frac2 + adjusted_increment);
+        if visible > storage {
+            return Err(NativeDecimalError::InvalidInput(
+                "wrapped result scale exceeds storage scale",
+            ));
+        }
+        // The source's checked fast path cannot succeed if this addition
+        // overflows. Its fallback then executes this plain addition/subtraction;
+        // in unchecked builds they cancel, leaving exactly `storage` padding.
+        let common_scale = left_storage.max(right_storage);
+        let numerator_scale = common_scale + storage;
+        let _numerator_padding = numerator_scale - common_scale;
+        let Some(output) = divide_with_limit_and_budget(
+            self,
+            rhs,
+            DivisionRequest::RetainedQuotient {
+                frac_words: (storage as usize).div_ceil(DIGITS_PER_WORD),
+            },
+            WordLimit::Grow,
+            Some(visible as usize),
+            Some(limit),
+        )
+        .map_err(NativeDecimalError::Core)?
+        else {
+            return Ok(None);
+        };
+        let quotient = output.quotient.ok_or_else(|| {
+            NativeDecimalError::Core(decimal_resource_error("missing requested native quotient"))
+        })?;
+        let mut value =
+            Self::try_finish_exact(quotient, visible as usize).map_err(NativeDecimalError::Core)?;
+        if value.frac_cnt != storage as usize {
+            // A wrapped word_scale may not be word-aligned. Consume the owned
+            // output rather than clone it; scratch is already gone.
+            let rounded = value
+                .round_with_limit(i128::from(storage), WordLimit::Grow, RoundMode::Truncate)
+                .map_err(NativeDecimalError::Core)?;
+            value = Self::try_finish_exact(rounded, visible as usize)
+                .map_err(NativeDecimalError::Core)?;
+        }
+        // Source bound_decimal_codec_result bypasses zero, counts the actual
+        // integer digits, preserves signed overflow saturation, and never
+        // truncates stored precision below the visible result scale.
+        if value.is_zero() {
+            return Ok(Some(Res::Ok(value)));
+        }
+        let integer_words = value.int_words();
+        if integer_words > WORD_BUF_LEN {
+            let negative = value.negative;
+            drop(value);
+            let mut maximum = Self::native_positive_maximum(limit)?;
+            maximum.negative = negative;
+            return Ok(Some(Res::Overflow(maximum)));
+        }
+        if integer_words + value.frac_words() <= WORD_BUF_LEN {
+            return Ok(Some(Res::Ok(value)));
+        }
+        let retained = ((WORD_BUF_LEN - integer_words) * DIGITS_PER_WORD).max(visible as usize);
+        let rounded = value
+            .round_with_limit(retained as i128, WordLimit::Grow, RoundMode::Truncate)
+            .map_err(NativeDecimalError::Core)?;
+        Self::try_finish_exact(rounded, visible as usize)
+            .map(|value| Some(Res::Truncated(value)))
             .map_err(NativeDecimalError::Core)
     }
 
@@ -4987,6 +5109,72 @@ impl Hash for Decimal {
         // -0 should be not negative.
         let negative = self.negative && (start as isize <= end);
         negative.hash(state);
+    }
+}
+
+#[cfg(test)]
+mod native_mysql_division_tests {
+    use super::*;
+
+    #[test]
+    fn native_mysql_division_budget_and_u32_scale_policy() {
+        use std::{hint::black_box, panic::catch_unwind};
+
+        let one = Decimal::try_from_native_digits(false, b"1", 0, 0, 512).unwrap();
+        let three = Decimal::try_from_native_digits(false, b"3", 0, 0, 512).unwrap();
+        assert!(matches!(
+            one.try_native_mysql_div(&three, 4, 47),
+            Err(NativeDecimalError::Core(_))
+        ));
+        let output = one.try_native_mysql_div(&three, 4, 48).unwrap().unwrap();
+        assert!(output.is_ok());
+        assert_eq!(output.to_string_value(), "0.333333333");
+        assert_eq!((output.storage_scale(), output.result_scale()), (9, 4));
+        let wide = one.try_native_mysql_div(&three, 256, 512).unwrap().unwrap();
+        assert!(wide.is_truncated());
+        assert_eq!(wide.to_string_value(), format!("0.{}", "3".repeat(81)));
+        assert_eq!((wide.storage_scale(), wide.result_scale()), (81, 30));
+
+        let scaled = Decimal::try_from_native_digits(false, b"13500000", 6, 6, 512).unwrap();
+        let zero = Decimal::try_from_native_digits(true, b"000000", 6, 6, 512).unwrap();
+        assert!(
+            scaled
+                .try_native_mysql_div(&zero, u32::MAX, 36)
+                .unwrap()
+                .is_none()
+        );
+        let output = zero.try_native_mysql_div(&three, 4, 36).unwrap().unwrap();
+        assert!(output.is_ok() && output.is_zero() && !output.is_negative());
+        assert_eq!((output.storage_scale(), output.result_scale()), (10, 10));
+        // Probe the source arithmetic only, never an enormous coefficient.
+        // Checked profiles panic; unchecked profiles have small valid plans.
+        for (increment, storage, visible, text) in
+            [(u32::MAX, 9, 5, "4.500000000"), (u32::MAX - 5, 0, 0, "4")]
+        {
+            let source = catch_unwind(|| black_box(6_u32) + black_box(increment));
+            let actual = catch_unwind(|| scaled.try_native_mysql_div(&three, increment, 512));
+            if source.is_err() {
+                assert!(actual.is_err());
+            } else {
+                let output = actual.unwrap().unwrap().unwrap();
+                assert!(output.is_ok());
+                assert_eq!(
+                    (output.storage_scale(), output.result_scale()),
+                    (storage, visible)
+                );
+                assert_eq!(output.to_string_value(), text);
+            }
+        }
+        let source = catch_unwind(|| black_box(u32::MAX).div_ceil(9) * 9);
+        let actual = catch_unwind(|| one.try_native_mysql_div(&three, black_box(u32::MAX), 512));
+        if source.is_err() {
+            assert!(actual.is_err());
+        } else {
+            assert!(matches!(
+                actual.unwrap(),
+                Err(NativeDecimalError::InvalidInput(_))
+            ));
+        }
     }
 }
 

@@ -2118,7 +2118,8 @@ fn local_evaluated_args_packet_roles_reject_plain_carriers() {
             | ComputedValue::Uncompress(_)
             | ComputedValue::JsonReport(_)
             | ComputedValue::NativeVector(_)
-            | ComputedValue::DecimalFast(_) => {
+            | ComputedValue::DecimalFast(_)
+            | ComputedValue::DecimalDivision(_) => {
                 panic!("packet role check returned an unexpected output type")
             }
         }

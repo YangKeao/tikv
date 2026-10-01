@@ -344,6 +344,24 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  True division adds four closed value profiles, native/legacy real and
+  native/legacy Decimal. Real uses existing IEEE-bit transport; Decimal uses
+  two official Decimal inputs and the existing third infrastructure budget slot.
+  Full-u32 precision lives in a transient typed metadata binding, not an invented
+  SQL operand. The actual wrapper enters once and records one disposition or
+  infrastructure-error terminal; metadata never stores a second Decimal owner.
+  Materialization checks this invocation's witness and actual official result
+  presence, then consumes the status into an owned DecimalDivision report before
+  the guard clears all binding state. Fixed metadata storage is accounted, and
+  invalid transitions prevent reuse without hiding the original error.
+  Native target-scale arithmetic after the real zero gate and legacy raw
+  increments remain distinct profiles. The shared datatype native quotient
+  wrapper reuses Grow long division with checked live scratch/output budgeting,
+  preserving signed overflow saturation, visible-floor truncation and full
+  stored precision. Native callers apply warning/error policy after the report;
+  legacy callers retain the payload silently. Genuine NULL/missing use the old
+  terminal recipes. Ordinary PB admission, wire Fixed9 policies and IntDIV
+  warning/conversion flow are unchanged; no second evaluator is introduced.
   MOD adds eight unit-metadata value recipes in `impl_arithmetic.rs`: four
   native integer signedness profiles, one full-i128 legacy profile, native/legacy
   raw-real profiles and a shared exact Decimal profile. Only these new recipes

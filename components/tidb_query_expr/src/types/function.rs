@@ -375,6 +375,10 @@ pub enum LocalFunctionId {
     ModRealNative,
     ModRealLegacy,
     ModDecimalNative,
+    DivRealNative,
+    DivRealLegacy,
+    DivDecimalNative,
+    DivDecimalLegacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

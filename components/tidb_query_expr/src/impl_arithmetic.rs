@@ -21,7 +21,11 @@ use tidb_query_datatype::{
     expr::EvalContext,
 };
 
-use crate::impl_math::{native_decimal_budget, native_decimal_failure};
+use crate::{
+    impl_math::{native_decimal_budget, native_decimal_failure},
+    local::{LocalError, NativeDecimalDivisionCallMetadata, NativeDecimalDivisionKind},
+    types::function::CallBuild,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinaryArithmeticOperation {
@@ -29,6 +33,7 @@ pub enum BinaryArithmeticOperation {
     Subtract,
     Multiply,
     Modulo,
+    Divide,
 }
 
 impl BinaryArithmeticOperation {
@@ -38,6 +43,7 @@ impl BinaryArithmeticOperation {
             Self::Subtract => "SUBTRACT",
             Self::Multiply => "MULTIPLY",
             Self::Modulo => "MOD",
+            Self::Divide => "/",
         }
     }
 
@@ -47,6 +53,7 @@ impl BinaryArithmeticOperation {
             Self::Subtract => NativeDecimalBinaryOp::Subtract,
             Self::Multiply => NativeDecimalBinaryOp::Multiply,
             Self::Modulo => unreachable!("MOD requires its dedicated remainder recipe"),
+            Self::Divide => unreachable!("/ requires its dedicated division recipe"),
         }
     }
 }
@@ -270,6 +277,9 @@ where
         BinaryArithmeticOperation::Modulo => {
             unreachable!("MOD requires its dedicated remainder recipe")
         }
+        BinaryArithmeticOperation::Divide => {
+            unreachable!("/ requires its dedicated division recipe")
+        }
     }
 }
 
@@ -296,6 +306,9 @@ fn native_integer_binary(
         }
         BinaryArithmeticOperation::Modulo => {
             return Err(other_err!("MOD requires its dedicated remainder recipe"));
+        }
+        BinaryArithmeticOperation::Divide => {
+            return Err(other_err!("/ requires its dedicated division recipe"));
         }
     };
     value.map(Some).ok_or_else(|| {
@@ -490,6 +503,9 @@ fn legacy_integer_binary(
         BinaryArithmeticOperation::Modulo => {
             return Err(other_err!("MOD requires its dedicated remainder recipe"));
         }
+        BinaryArithmeticOperation::Divide => {
+            return Err(other_err!("/ requires its dedicated division recipe"));
+        }
     };
     let negative = match reject {
         LegacyNegativeOperand::Neither => false,
@@ -621,6 +637,148 @@ fn mod_real_legacy(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
 fn mod_decimal_native(lhs: &Decimal, rhs: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
     lhs.try_native_rem(rhs, native_decimal_budget(budget)?)
         .map_err(native_decimal_failure)
+}
+
+/// Per-call decimal division disposition; the value itself remains the official
+/// RPN output and is never stored in call metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeDecimalDivisionDisposition {
+    Ok,
+    Truncated,
+    Overflow,
+    ZeroDivisor,
+}
+
+fn real_division(lhs: BytesRef, rhs: BytesRef, native: bool) -> Result<Option<Bytes>> {
+    let lhs = binary_raw_f64(Some(lhs))?.expect("non-NULL division operand");
+    let rhs = binary_raw_f64(Some(rhs))?.expect("non-NULL division operand");
+    if rhs == 0.0 {
+        return Ok(None);
+    }
+    let value = lhs / rhs;
+    if native && !value.is_finite() {
+        return Err(native_binary_arithmetic_error(
+            BinaryArithmeticOperation::Divide,
+            BinaryArithmeticErrorKind::FloatOverflow,
+        ));
+    }
+    Ok(Some(value.to_bits().to_le_bytes().to_vec()))
+}
+
+#[rpn_fn]
+fn div_real_native(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
+    real_division(lhs, rhs, true)
+}
+
+#[rpn_fn]
+fn div_real_legacy(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
+    real_division(lhs, rhs, false)
+}
+
+fn division_infrastructure_error(error: LocalError) -> tidb_query_common::Error {
+    EvaluateError::Caused(Box::new(error)).into()
+}
+
+fn init_div_decimal_native_data(
+    _expr: &mut CallBuild,
+) -> Result<NativeDecimalDivisionCallMetadata> {
+    Ok(NativeDecimalDivisionCallMetadata::new(
+        NativeDecimalDivisionKind::Native,
+    ))
+}
+
+fn init_div_decimal_legacy_data(
+    _expr: &mut CallBuild,
+) -> Result<NativeDecimalDivisionCallMetadata> {
+    Ok(NativeDecimalDivisionCallMetadata::new(
+        NativeDecimalDivisionKind::Legacy,
+    ))
+}
+
+fn decimal_division_result(
+    lhs: &Decimal,
+    rhs: &Decimal,
+    budget: &Int,
+    kind: NativeDecimalDivisionKind,
+    increment: u32,
+) -> Result<(Option<Decimal>, NativeDecimalDivisionDisposition)> {
+    let budget = native_decimal_budget(budget)?;
+    let increment = match kind {
+        NativeDecimalDivisionKind::Native if !rhs.is_zero() => {
+            // The frontend supplied the effective increment (including 0 -> 4).
+            // Retain the original plain-u32 target-scale addition before the
+            // true_div saturating subtraction, but never execute it for / zero.
+            (lhs.result_scale() + increment).saturating_sub(lhs.result_scale())
+        }
+        _ => increment,
+    };
+    let result = lhs
+        .try_native_mysql_div(rhs, increment, budget)
+        .map_err(native_decimal_failure)?;
+    Ok(match result {
+        None => (None, NativeDecimalDivisionDisposition::ZeroDivisor),
+        Some(Res::Ok(value)) => (Some(value), NativeDecimalDivisionDisposition::Ok),
+        Some(Res::Truncated(value)) => (Some(value), NativeDecimalDivisionDisposition::Truncated),
+        Some(Res::Overflow(value)) => (Some(value), NativeDecimalDivisionDisposition::Overflow),
+    })
+}
+
+fn evaluate_decimal_division(
+    metadata: &NativeDecimalDivisionCallMetadata,
+    kind: NativeDecimalDivisionKind,
+    lhs: &Decimal,
+    rhs: &Decimal,
+    budget: &Int,
+) -> Result<Option<Decimal>> {
+    let increment = metadata
+        .begin_kernel(kind)
+        .map_err(division_infrastructure_error)?;
+    match decimal_division_result(lhs, rhs, budget, kind, increment) {
+        Ok((value, disposition)) => {
+            metadata
+                .record_disposition(disposition)
+                .map_err(division_infrastructure_error)?;
+            Ok(value)
+        }
+        Err(error) => {
+            metadata
+                .record_error()
+                .map_err(division_infrastructure_error)?;
+            Err(error)
+        }
+    }
+}
+
+#[rpn_fn(capture = [metadata], metadata_mapper = init_div_decimal_native_data)]
+fn div_decimal_native(
+    metadata: &NativeDecimalDivisionCallMetadata,
+    lhs: &Decimal,
+    rhs: &Decimal,
+    budget: &Int,
+) -> Result<Option<Decimal>> {
+    evaluate_decimal_division(
+        metadata,
+        NativeDecimalDivisionKind::Native,
+        lhs,
+        rhs,
+        budget,
+    )
+}
+
+#[rpn_fn(capture = [metadata], metadata_mapper = init_div_decimal_legacy_data)]
+fn div_decimal_legacy(
+    metadata: &NativeDecimalDivisionCallMetadata,
+    lhs: &Decimal,
+    rhs: &Decimal,
+    budget: &Int,
+) -> Result<Option<Decimal>> {
+    evaluate_decimal_division(
+        metadata,
+        NativeDecimalDivisionKind::Legacy,
+        lhs,
+        rhs,
+        budget,
+    )
 }
 
 #[rpn_fn(nullable)]
@@ -1145,6 +1303,92 @@ impl ArithmeticOpWithCtx for RealDivide {
                 Some(result)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod native_division_tests {
+    use tidb_query_common::error::ErrorInner;
+
+    use super::*;
+
+    #[test]
+    fn division_real_profiles_preserve_ieee_and_typed_errors() {
+        let bits = |value: f64| value.to_bits().to_le_bytes();
+        let two = bits(2.0);
+        let negative_zero = bits(-0.0);
+        for recipe in [div_real_native, div_real_legacy] {
+            assert_eq!(recipe(&two, &negative_zero).unwrap(), None);
+            assert_eq!(
+                recipe(&negative_zero, &two).unwrap(),
+                Some(negative_zero.to_vec())
+            );
+            assert!(recipe(b"short", &negative_zero).is_err());
+            assert!(recipe(&two, b"short").is_err());
+        }
+        for value in [f64::INFINITY, f64::from_bits(0x7ff8_0000_0000_0042)] {
+            let error = div_real_native(&bits(value), &two).unwrap_err();
+            match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::Caused(cause)) => assert_eq!(
+                    cause.downcast_ref::<NativeBinaryArithmeticError>(),
+                    Some(&NativeBinaryArithmeticError {
+                        operation: BinaryArithmeticOperation::Divide,
+                        kind: BinaryArithmeticErrorKind::FloatOverflow,
+                    })
+                ),
+                _ => panic!("lost typed division error: {error:?}"),
+            }
+            let legacy = div_real_legacy(&bits(value), &two).unwrap().unwrap();
+            let legacy = binary_raw_f64(Some(&legacy)).unwrap().unwrap();
+            if value.is_nan() {
+                assert!(legacy.is_nan());
+            } else {
+                assert_eq!(legacy, f64::INFINITY);
+            }
+        }
+        assert_eq!(
+            div_real_native(&bits(-2.0), &bits(f64::INFINITY)).unwrap(),
+            Some(negative_zero.to_vec())
+        );
+        assert!(div_real_native(&bits(f64::MAX), &bits(0.5)).is_err());
+    }
+
+    #[test]
+    fn division_decimal_profiles_dispositions_and_zero_gated_precision() {
+        use NativeDecimalDivisionDisposition::{Ok as Exact, Overflow, Truncated, ZeroDivisor};
+        use NativeDecimalDivisionKind::{Legacy, Native};
+
+        let lhs = Decimal::try_from_native_digits(false, b"10", 1, 1, 4096).unwrap();
+        let three = Decimal::from(3_i64);
+        let (native, status) = decimal_division_result(&lhs, &three, &4096, Native, 4).unwrap();
+        assert_eq!(status, Exact);
+        assert_eq!(native.unwrap().result_scale(), 5);
+        let (legacy, status) = decimal_division_result(&lhs, &three, &4096, Legacy, 0).unwrap();
+        assert_eq!(status, Exact);
+        assert_eq!(legacy.unwrap().result_scale(), 1);
+        let zero = Decimal::from(0_i64);
+        assert_eq!(
+            decimal_division_result(&lhs, &zero, &4096, Native, u32::MAX).unwrap(),
+            (None, ZeroDivisor)
+        );
+        assert!(decimal_division_result(&lhs, &zero, &-1, Native, u32::MAX).is_err());
+        assert!(decimal_division_result(&lhs, &three, &0, Native, 4).is_err());
+        let (_, status) = decimal_division_result(&lhs, &three, &4096, Native, 100).unwrap();
+        assert_eq!(status, Truncated);
+        let wide =
+            Decimal::try_from_native_digits(true, "9".repeat(82).as_bytes(), 0, 0, 4096).unwrap();
+        let (value, status) =
+            decimal_division_result(&wide, &Decimal::from(1_i64), &4096, Legacy, 0).unwrap();
+        assert_eq!(status, Overflow);
+        assert!(value.unwrap() < zero);
+        let metadata = NativeDecimalDivisionCallMetadata::new(Native);
+        let error = div_decimal_native(&metadata, &lhs, &three, &4096).unwrap_err();
+        match error.0.as_ref() {
+            ErrorInner::Evaluate(EvaluateError::Caused(cause)) => {
+                assert!(cause.downcast_ref::<LocalError>().is_some());
+            }
+            _ => panic!("lost division infrastructure error: {error:?}"),
+        }
     }
 }
 

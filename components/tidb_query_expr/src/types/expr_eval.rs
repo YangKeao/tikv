@@ -377,7 +377,7 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
-        && (!operation.is_modulo_value()
+        && (!(operation.is_modulo_value() || operation.is_division_value())
             || values.iter().take(2).all(|value| {
                 matches!(
                     value,
@@ -481,6 +481,11 @@ fn evaluated_ready_args_match(
                     && matches!(values, [ScalarValue::Bytes(_), ScalarValue::Bytes(from), ScalarValue::Bytes(to)]
                         if from.as_ref().is_none_or(|bytes| bytes.len() == 16)
                             && to.as_ref().is_none_or(|bytes| bytes.len() == 16))
+            }
+            EvaluatedArgsRole::DecimalDivision => {
+                operation.decimal_division_kind().is_some()
+                    && matches!(values, [ScalarValue::Decimal(Some(_)), ScalarValue::Decimal(Some(_)), ScalarValue::Int(Some(raw_budget))]
+                        if usize::try_from(*raw_budget as u64).is_ok_and(|budget| budget != usize::MAX))
             }
             EvaluatedArgsRole::DecimalBinary => {
                 operation.is_binary_decimal()
@@ -685,6 +690,8 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::MulRealLegacy
                         | EvaluatedBytesOp::ModRealNative
                         | EvaluatedBytesOp::ModRealLegacy
+                        | EvaluatedBytesOp::DivRealNative
+                        | EvaluatedBytesOp::DivRealLegacy
                 ) && values.len() == 2
                     && values.iter().all(|value| match value {
                         ScalarValue::Bytes(None) => true,

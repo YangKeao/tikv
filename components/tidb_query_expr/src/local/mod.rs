@@ -166,17 +166,17 @@ pub use tidb_query_datatype::codec::collation::native::NativeCollation;
 
 pub use self::{
     batch::{
-        ComputedBytes, ComputedBytesMetadata, ComputedDecimal, ComputedDecimalFast,
-        ComputedDecimalFastMetadata, ComputedDecimalMetadata, ComputedIeee754Bits,
-        ComputedIeee754BitsMetadata, ComputedInt, ComputedInt128, ComputedInt128Metadata,
-        ComputedIntMetadata, ComputedJsonReport, ComputedJsonReportMetadata, ComputedNativeVector,
-        ComputedNativeVectorMetadata, ComputedUncompress, ComputedUncompressMetadata,
-        ComputedValue, EvaluatedArgs, EvaluatedAsciiWorker, EvaluatedBytesOp, EvaluatedBytesWorker,
-        EvaluatedSqlFailureKind, JsonReportOutcome, LocalBatch, LocalEvalState, NativeSearchPolicy,
-        OutputDisposition, ReadyBytesArg, ReadyConvBaseArg, ReadyDecimalArg, ReadyIeee754Arg,
-        ReadyIntArg, ReadySubstringI128, ReportedEvaluatedFailure, UncompressOutcome,
-        WorkerStorage, native_decimal_bridge_error, prepare_evaluated_ascii,
-        prepare_evaluated_bytes,
+        ComputedBytes, ComputedBytesMetadata, ComputedDecimal, ComputedDecimalDivision,
+        ComputedDecimalDivisionMetadata, ComputedDecimalFast, ComputedDecimalFastMetadata,
+        ComputedDecimalMetadata, ComputedIeee754Bits, ComputedIeee754BitsMetadata, ComputedInt,
+        ComputedInt128, ComputedInt128Metadata, ComputedIntMetadata, ComputedJsonReport,
+        ComputedJsonReportMetadata, ComputedNativeVector, ComputedNativeVectorMetadata,
+        ComputedUncompress, ComputedUncompressMetadata, ComputedValue, EvaluatedArgs,
+        EvaluatedAsciiWorker, EvaluatedBytesOp, EvaluatedBytesWorker, EvaluatedSqlFailureKind,
+        JsonReportOutcome, LocalBatch, LocalEvalState, NativeSearchPolicy, OutputDisposition,
+        ReadyBytesArg, ReadyConvBaseArg, ReadyDecimalArg, ReadyIeee754Arg, ReadyIntArg,
+        ReadySubstringI128, ReportedEvaluatedFailure, UncompressOutcome, WorkerStorage,
+        native_decimal_bridge_error, prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,
@@ -200,7 +200,8 @@ pub use self::{
 };
 pub(crate) use self::{
     batch::{
-        EvaluatedArgsRole, EvaluatedKernelKind, NativeLikeCallMetadata, NativeRegexpCallMetadata,
+        EvaluatedArgsRole, EvaluatedKernelKind, NativeDecimalDivisionCallMetadata,
+        NativeDecimalDivisionKind, NativeLikeCallMetadata, NativeRegexpCallMetadata,
         NativeRegexpKind,
     },
     diagnostic::FailureRecorder,
@@ -211,6 +212,7 @@ pub use crate::{
     FunctionRef,
     LiteralKind,
     LocalFunctionId,
+    impl_arithmetic::NativeDecimalDivisionDisposition,
     // Narrow compatibility exports for native tests; production compression
     // enters the closed workers and consumes their owned computed outcomes.
     impl_encryption::{InflateError, frame_compressed, inflate, native_go_flate::go_zlib_deflate},

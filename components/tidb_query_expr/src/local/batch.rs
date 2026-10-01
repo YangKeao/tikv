@@ -40,6 +40,7 @@ use crate::{
     NativeBinaryArithmeticError, NativeDecimalFastOutcome, NativeLikeInvocation, NativeLikeKind,
     NativeRegexpError, NativeRegexpInvocation, NativeUnaryMinusError, RpnExpressionNode,
     RpnStackNode, RpnStackNodeVectorValue,
+    impl_arithmetic::NativeDecimalDivisionDisposition,
     impl_string::{
         ConcatKind, FieldKind, PreparedCharArgs, PreparedConcatArgs, PreparedExportSetArgs,
         PreparedFieldArgs, PreparedFindInSetKeys, PreparedMakeSetArgs,
@@ -231,6 +232,126 @@ impl NativeLikeCallMetadata {
         self.known_cache_bytes.set(Some(0));
         self.known_cache_limit.set(0);
         drop(owned);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeDecimalDivisionKind {
+    Native,
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecimalDivisionCallState {
+    Unbound,
+    Bound(u32),
+    Entered,
+    Completed(Option<NativeDecimalDivisionDisposition>),
+    Consumed,
+    Invalid,
+}
+
+/// Fixed invocation state only: the official vector, never this metadata,
+/// owns the Decimal result. Invalid transitions remain sticky through cleanup.
+#[derive(Debug)]
+pub(crate) struct NativeDecimalDivisionCallMetadata {
+    kind: NativeDecimalDivisionKind,
+    state: Cell<DecimalDivisionCallState>,
+}
+
+impl NativeDecimalDivisionCallMetadata {
+    pub(crate) fn new(kind: NativeDecimalDivisionKind) -> Self {
+        Self {
+            kind,
+            state: Cell::new(DecimalDivisionCallState::Unbound),
+        }
+    }
+
+    fn refuse(&self) -> LocalError {
+        self.state.set(DecimalDivisionCallState::Invalid);
+        LocalError::InvalidSpec("Decimal division invocation state differs from its call".into())
+    }
+
+    fn is_unbound(&self) -> bool {
+        self.state.get() == DecimalDivisionCallState::Unbound
+    }
+
+    fn bind(&self, frac_increment: u32) -> LocalResult<()> {
+        if !self.is_unbound() {
+            return Err(self.refuse());
+        }
+        self.state
+            .set(DecimalDivisionCallState::Bound(frac_increment));
+        Ok(())
+    }
+
+    pub(crate) fn begin_kernel(&self, expected: NativeDecimalDivisionKind) -> LocalResult<u32> {
+        if self.kind != expected {
+            return Err(self.refuse());
+        }
+        match self.state.get() {
+            DecimalDivisionCallState::Bound(increment) => {
+                self.state.set(DecimalDivisionCallState::Entered);
+                Ok(increment)
+            }
+            _ => Err(self.refuse()),
+        }
+    }
+
+    pub(crate) fn record_disposition(
+        &self,
+        status: NativeDecimalDivisionDisposition,
+    ) -> LocalResult<()> {
+        self.record(Some(status))
+    }
+
+    pub(crate) fn record_error(&self) -> LocalResult<()> {
+        self.record(None)
+    }
+
+    fn record(&self, status: Option<NativeDecimalDivisionDisposition>) -> LocalResult<()> {
+        if self.state.get() != DecimalDivisionCallState::Entered {
+            return Err(self.refuse());
+        }
+        self.state.set(DecimalDivisionCallState::Completed(status));
+        Ok(())
+    }
+
+    fn consume(
+        &self,
+        calls: Option<u64>,
+        success: bool,
+    ) -> LocalResult<Option<NativeDecimalDivisionDisposition>> {
+        let status = match (calls, success, self.state.get()) {
+            (Some(1), true, DecimalDivisionCallState::Completed(Some(status))) => Some(status),
+            // A driver/output budget error can follow an actual successful body.
+            (Some(1), false, DecimalDivisionCallState::Completed(_))
+            | (Some(0), false, DecimalDivisionCallState::Bound(_)) => None,
+            _ => return Err(self.refuse()),
+        };
+        self.state.set(DecimalDivisionCallState::Consumed);
+        Ok(status)
+    }
+
+    fn finish(&self, calls: Option<u64>, success: bool) -> LocalResult<()> {
+        if self.state.get() == DecimalDivisionCallState::Consumed
+            && (calls == Some(1) || (!success && calls == Some(0)))
+        {
+            return Ok(());
+        }
+        // Accounting can refuse before eval_ready reaches the official driver.
+        if !success && calls == Some(0) {
+            return self.consume(calls, false).map(|_| ());
+        }
+        Err(self.refuse())
+    }
+
+    fn unbind(&self) -> LocalResult<()> {
+        if self.state.get() == DecimalDivisionCallState::Invalid {
+            return Err(self.refuse());
+        }
+        self.state.set(DecimalDivisionCallState::Unbound);
         Ok(())
     }
 }
@@ -1260,6 +1381,10 @@ pub enum EvaluatedBytesOp {
     ModRealNative,
     ModRealLegacy,
     ModDecimalNative,
+    DivRealNative,
+    DivRealLegacy,
+    DivDecimalNative,
+    DivDecimalLegacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1276,6 +1401,7 @@ pub(crate) enum EvaluatedKernelKind {
 pub(crate) enum EvaluatedArgsRole {
     Values,
     DecimalBinary,
+    DecimalDivision,
     Int1282,
     Like,
     NativeRegexpLike,
@@ -2428,6 +2554,22 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::ModDecimalNative,
                 );
             }
+            Self::DivRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::DivRealNative);
+            }
+            Self::DivRealLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::DivRealLegacy);
+            }
+            Self::DivDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DivDecimalNative,
+                );
+            }
+            Self::DivDecimalLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DivDecimalLegacy,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -2458,7 +2600,30 @@ impl EvaluatedBytesOp {
         }
     }
 
+    pub(crate) fn decimal_division_kind(self) -> Option<NativeDecimalDivisionKind> {
+        match self {
+            Self::DivDecimalNative => Some(NativeDecimalDivisionKind::Native),
+            Self::DivDecimalLegacy => Some(NativeDecimalDivisionKind::Legacy),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_division_value(self) -> bool {
+        matches!(
+            self,
+            Self::DivRealNative
+                | Self::DivRealLegacy
+                | Self::DivDecimalNative
+                | Self::DivDecimalLegacy
+        )
+    }
+
     pub(crate) fn metadata_matches(self, metadata: &(dyn std::any::Any + Send)) -> bool {
+        if let Some(kind) = self.decimal_division_kind() {
+            return metadata
+                .downcast_ref::<NativeDecimalDivisionCallMetadata>()
+                .is_some_and(|payload| payload.kind == kind);
+        }
         if let Some(kind) = self.like_kind() {
             return metadata
                 .downcast_ref::<NativeLikeCallMetadata>()
@@ -2476,6 +2641,7 @@ impl EvaluatedBytesOp {
         // A private identity does not determine its carrier or packet policy.
         // In particular, value-only FROM_BASE64 keeps the ordinary Bytes role.
         match self {
+            Self::DivDecimalNative | Self::DivDecimalLegacy => EvaluatedArgsRole::DecimalDivision,
             Self::AddDecimalNative
             | Self::SubDecimalNative
             | Self::MulDecimalNative
@@ -2497,7 +2663,9 @@ impl EvaluatedBytesOp {
             | Self::MulInt128SignedLegacy
             | Self::ModInt128Legacy
             | Self::MulInt128UnsignedLegacy => EvaluatedArgsRole::Int1282,
-            Self::AddRealNative
+            Self::DivRealNative
+            | Self::DivRealLegacy
+            | Self::AddRealNative
             | Self::SubRealNative
             | Self::MulRealNative
             | Self::ModRealNative
@@ -2719,6 +2887,7 @@ impl EvaluatedBytesOp {
             Self::SubRealNative => (Subtract, FloatOverflow),
             Self::MulRealNative => (Multiply, FloatOverflow),
             Self::ModRealNative => (BinaryArithmeticOperation::Modulo, FloatOverflow),
+            Self::DivRealNative => (BinaryArithmeticOperation::Divide, FloatOverflow),
             Self::AddDecimalNative => (Add, DecimalOverflow),
             Self::SubDecimalNative => (Subtract, DecimalOverflow),
             Self::MulDecimalNative => (Multiply, DecimalOverflow),
@@ -2814,7 +2983,9 @@ impl EvaluatedBytesOp {
     fn returns_ieee754_bits(self) -> bool {
         matches!(
             self,
-            Self::AddRealNative
+            Self::DivRealNative
+                | Self::DivRealLegacy
+                | Self::AddRealNative
                 | Self::SubRealNative
                 | Self::MulRealNative
                 | Self::ModRealNative
@@ -2950,6 +3121,10 @@ impl EvaluatedBytesOp {
             Self::ModRealNative => crate::impl_arithmetic::mod_real_native_fn_meta(),
             Self::ModRealLegacy => crate::impl_arithmetic::mod_real_legacy_fn_meta(),
             Self::ModDecimalNative => crate::impl_arithmetic::mod_decimal_native_fn_meta(),
+            Self::DivRealNative => crate::impl_arithmetic::div_real_native_fn_meta(),
+            Self::DivRealLegacy => crate::impl_arithmetic::div_real_legacy_fn_meta(),
+            Self::DivDecimalNative => crate::impl_arithmetic::div_decimal_native_fn_meta(),
+            Self::DivDecimalLegacy => crate::impl_arithmetic::div_decimal_legacy_fn_meta(),
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
             Self::UnaryPlusBitsNative => crate::impl_op::unary_plus_bits_native_fn_meta(),
             Self::UnaryPlusDecimalNative => crate::impl_op::unary_plus_decimal_native_fn_meta(),
@@ -3259,6 +3434,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::DivDecimalNative | Self::DivDecimalLegacy => EvalType::Decimal,
             Self::AddIntSsNative
             | Self::AddIntSuNative
             | Self::AddIntUsNative
@@ -3285,7 +3461,9 @@ impl EvaluatedBytesOp {
             | Self::AddDecimalLegacy
             | Self::SubDecimalLegacy
             | Self::MulDecimalLegacy => EvalType::Decimal,
-            Self::AddRealNative
+            Self::DivRealNative
+            | Self::DivRealLegacy
+            | Self::AddRealNative
             | Self::SubRealNative
             | Self::MulRealNative
             | Self::ModRealNative
@@ -3579,6 +3757,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::DivDecimalNative | Self::DivDecimalLegacy => {
+                &[EvalType::Decimal, EvalType::Decimal, EvalType::Int]
+            }
             Self::AddIntSsNative
             | Self::AddIntSuNative
             | Self::AddIntUsNative
@@ -3596,7 +3777,9 @@ impl EvaluatedBytesOp {
             | Self::ModIntUsNative
             | Self::ModIntUuNative
             | Self::MulIntUnsignedNative => &[EvalType::Int, EvalType::Int],
-            Self::AddRealNative
+            Self::DivRealNative
+            | Self::DivRealLegacy
+            | Self::AddRealNative
             | Self::SubRealNative
             | Self::MulRealNative
             | Self::ModRealNative
@@ -4076,6 +4259,13 @@ impl NativeSearchPolicy {
 /// NULL.
 #[derive(Debug)]
 pub enum EvaluatedArgs {
+    /// Actual value operands plus an invocation-bound precision increment.
+    /// NULL/missing uses the existing terminal recipes, not this carrier.
+    DecimalDivision {
+        left: Option<Decimal>,
+        right: Option<Decimal>,
+        frac_increment: u32,
+    },
     /// Two actual Decimal owners; the facade derives their finite shared
     /// budget.
     Decimal2 {
@@ -4273,6 +4463,7 @@ impl EvaluatedArgs {
     fn role(&self) -> EvaluatedArgsRole {
         match self {
             Self::Decimal2 { .. } => EvaluatedArgsRole::DecimalBinary,
+            Self::DecimalDivision { .. } => EvaluatedArgsRole::DecimalDivision,
             Self::Int1282(..) => EvaluatedArgsRole::Int1282,
             Self::Decimal(_) => EvaluatedArgsRole::DecimalUnary,
             Self::DecimalIntReady { .. } => EvaluatedArgsRole::DecimalInt,
@@ -4332,7 +4523,9 @@ impl EvaluatedArgs {
             Self::NativeVector(_) => &[EvalType::VectorFloat32],
             Self::NativeVector2(..) => &[EvalType::VectorFloat32, EvalType::VectorFloat32],
             Self::NoArgs => &[],
-            Self::Decimal2 { .. } => &[EvalType::Decimal, EvalType::Decimal, EvalType::Int],
+            Self::Decimal2 { .. } | Self::DecimalDivision { .. } => {
+                &[EvalType::Decimal, EvalType::Decimal, EvalType::Int]
+            }
             Self::Int1282(..) => &[EvalType::Bytes, EvalType::Bytes],
             Self::Decimal(_) => &[EvalType::Decimal, EvalType::Int],
             Self::DecimalIntReady { .. } => &[EvalType::Decimal, EvalType::Int, EvalType::Int],
@@ -4393,6 +4586,19 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation.is_division_value() {
+            return matches!(
+                self,
+                Self::DecimalDivision {
+                    left: Some(_),
+                    right: Some(_),
+                    ..
+                } | Self::Ieee754Bits2 {
+                    left: ReadyIeee754Arg::Value(Some(_)),
+                    right: ReadyIeee754Arg::Value(Some(_)),
+                }
+            );
+        }
         if operation.is_modulo_value() {
             return match self {
                 Self::Int2(Some(_), Some(_)) | Self::Int1282(Some(_), Some(_)) => true,
@@ -4841,7 +5047,7 @@ impl EvaluatedArgs {
                 Self::native_vector_values([left, right], 2, available)?
             }
             Self::NoArgs => ([Int(None), Int(None), Int(None), Int(None)], 0),
-            Self::Decimal2 { left, right } => {
+            Self::Decimal2 { left, right } | Self::DecimalDivision { left, right, .. } => {
                 // Both actual owners remain live through conversion and kernel
                 // execution. Subtract each spill before exposing one budget.
                 let available = available
@@ -5585,6 +5791,36 @@ impl ComputedDecimal {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputedDecimalDivisionMetadata {
+    OwnDecimalDivision,
+}
+
+/// The budgeted owned official Decimal and this call's actual division status.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ComputedDecimalDivision {
+    value: Option<Decimal>,
+    disposition: NativeDecimalDivisionDisposition,
+}
+
+impl ComputedDecimalDivision {
+    pub fn value(&self) -> Option<&Decimal> {
+        self.value.as_ref()
+    }
+
+    pub fn disposition(&self) -> NativeDecimalDivisionDisposition {
+        self.disposition
+    }
+
+    pub fn into_parts(self) -> (Option<Decimal>, NativeDecimalDivisionDisposition) {
+        (self.value, self.disposition)
+    }
+
+    pub fn metadata(&self) -> ComputedDecimalDivisionMetadata {
+        ComputedDecimalDivisionMetadata::OwnDecimalDivision
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComputedDecimalFastMetadata {
     OwnDecimalFast,
 }
@@ -5934,6 +6170,7 @@ pub enum ComputedValue {
     JsonReport(ComputedJsonReport),
     Ieee754Bits(ComputedIeee754Bits),
     Decimal(ComputedDecimal),
+    DecimalDivision(ComputedDecimalDivision),
     DecimalFast(ComputedDecimalFast),
     Int128(ComputedInt128),
 }
@@ -6176,6 +6413,7 @@ impl EvaluatedAsciiWorker {
             | ComputedValue::Ieee754Bits(_)
             | ComputedValue::Decimal(_)
             | ComputedValue::DecimalFast(_)
+            | ComputedValue::DecimalDivision(_)
             | ComputedValue::Int128(_)
             | ComputedValue::NativeVector(_) => {
                 self.inner.poisoned = true;
@@ -6224,7 +6462,42 @@ impl Drop for LikeBindingGuard<'_> {
     }
 }
 
+struct DecimalDivisionBindingGuard<'a> {
+    worker: &'a mut EvaluatedBytesWorker,
+}
+
+impl Drop for DecimalDivisionBindingGuard<'_> {
+    fn drop(&mut self) {
+        if self
+            .worker
+            .decimal_division_metadata()
+            .and_then(NativeDecimalDivisionCallMetadata::unbind)
+            .is_err()
+        {
+            self.worker.poisoned = true;
+        }
+    }
+}
+
 impl EvaluatedBytesWorker {
+    fn decimal_division_metadata(&self) -> LocalResult<&NativeDecimalDivisionCallMetadata> {
+        let kind = self.operation.decimal_division_kind().ok_or_else(|| {
+            LocalError::InvalidSpec("only Decimal division may bind its precision/report".into())
+        })?;
+        let nodes: &[RpnExpressionNode] = self.program.expression.as_ref();
+        match nodes.get(self.operation.input_types().len()) {
+            Some(RpnExpressionNode::FnCall { metadata, .. }) => metadata
+                .downcast_ref::<NativeDecimalDivisionCallMetadata>()
+                .filter(|payload| payload.kind == kind)
+                .ok_or_else(|| {
+                    LocalError::InvalidSpec("Decimal division metadata kind changed".into())
+                }),
+            _ => Err(LocalError::InvalidSpec(
+                "Decimal division call is absent".into(),
+            )),
+        }
+    }
+
     fn like_metadata(&self) -> LocalResult<&NativeLikeCallMetadata> {
         let kind = self.operation.like_kind().ok_or_else(|| {
             LocalError::InvalidSpec("only a LIKE recipe may bind LIKE metadata".into())
@@ -6337,6 +6610,14 @@ impl EvaluatedBytesWorker {
                 ));
             }
             mem::size_of::<NativeLikeCallMetadata>()
+        } else if self.operation.decimal_division_kind().is_some() {
+            let payload = self.decimal_division_metadata()?;
+            if !payload.is_unbound() {
+                return Err(LocalError::InvalidSpec(
+                    "Decimal division worker retains invocation state".into(),
+                ));
+            }
+            mem::size_of::<NativeDecimalDivisionCallMetadata>()
         } else {
             0
         };
@@ -6421,6 +6702,7 @@ impl EvaluatedBytesWorker {
                 args.role(),
                 EvaluatedArgsRole::DecimalUnary
                     | EvaluatedArgsRole::DecimalBinary
+                    | EvaluatedArgsRole::DecimalDivision
                     | EvaluatedArgsRole::DecimalInt
                     | EvaluatedArgsRole::NativeVector
                     | EvaluatedArgsRole::NativeVector2
@@ -6442,8 +6724,26 @@ impl EvaluatedBytesWorker {
                 EvaluatedArgs::Like { invocation, .. } => Some(invocation.clone()),
                 _ => None,
             };
+            let division_increment = match &args {
+                EvaluatedArgs::DecimalDivision { frac_increment, .. } => Some(*frac_increment),
+                _ => None,
+            };
             let (ready, arity, invocation) = args.into_values(materialization_available)?;
-            if let Some(invocation) = invocation {
+            if let Some(increment) = division_increment {
+                let guard = DecimalDivisionBindingGuard { worker: self };
+                guard.worker.decimal_division_metadata()?.bind(increment)?;
+                let before = guard.worker.witness.invocations();
+                let result = guard.worker.eval_ready(ready, arity, &mut sql_failure);
+                let checked = guard.worker.decimal_division_metadata()?.finish(
+                    guard.worker.witness.invocations().checked_sub(before),
+                    result.is_ok(),
+                );
+                match result {
+                    Err(primary) => Err(primary),
+                    Ok(value) => checked.map(|_| value),
+                }
+                // The guard clears u32/status state before worker postflight.
+            } else if let Some(invocation) = invocation {
                 let input_bytes = ready[..arity]
                     .iter()
                     .try_fold(0usize, |sum, value| {
@@ -6560,6 +6860,22 @@ impl EvaluatedBytesWorker {
             &mut self.witness,
             &mut budget,
         );
+        let division_status = if self.operation.decimal_division_kind().is_some() {
+            match self.decimal_division_metadata()?.consume(
+                self.witness.invocations().checked_sub(calls_before),
+                result.is_ok(),
+            ) {
+                Ok(status) => status,
+                Err(contract) => {
+                    return Err(match result {
+                        Err(primary) => primary,
+                        Ok(_) => contract,
+                    });
+                }
+            }
+        } else {
+            None
+        };
         let input_bytes = if self.operation.regexp_kind().is_some() {
             let payload = self.regexp_metadata()?;
             let known = payload
@@ -6723,6 +7039,14 @@ impl EvaluatedBytesWorker {
             };
             return Err(LocalError::InvalidBatch(message.into()));
         }
+        if let Some(status) = division_status {
+            let ScalarValueRef::Decimal(value) = output.get_scalar_ref(0) else {
+                return Err(self.decimal_division_metadata()?.refuse());
+            };
+            if value.is_none() != (status == NativeDecimalDivisionDisposition::ZeroDivisor) {
+                return Err(self.decimal_division_metadata()?.refuse());
+            }
+        }
         // TaskGuard is gone, but the ready owner remains live. Bytes extraction
         // additionally holds the generated data/offset/bitmap buffers AND the
         // new owned Vec; precheck requested length, then check actual capacity.
@@ -6775,13 +7099,17 @@ impl EvaluatedBytesWorker {
                     }
                 };
                 let retained = value.as_ref().map_or(0, Decimal::spill_capacity_bytes);
-                (
-                    ComputedValue::Decimal(ComputedDecimal {
+                let value = match division_status {
+                    Some(disposition) => ComputedValue::DecimalDivision(ComputedDecimalDivision {
+                        value,
+                        disposition,
+                    }),
+                    None => ComputedValue::Decimal(ComputedDecimal {
                         value,
                         checked_i64_view,
                     }),
-                    retained,
-                )
+                };
+                (value, retained)
             }
             ScalarValueRef::Bytes(value) if self.operation.returns_decimal_fast() => {
                 let outcome = crate::impl_arithmetic::decode_native_decimal_fast_outcome(value)
@@ -6971,6 +7299,408 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn division_dispatch_profiles_nonnull_roles_and_real_receipts() {
+        let cases = [
+            (
+                EvaluatedBytesOp::DivRealNative,
+                crate::impl_arithmetic::div_real_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::DivRealLegacy,
+                crate::impl_arithmetic::div_real_legacy_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::DivDecimalNative,
+                crate::impl_arithmetic::div_decimal_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::DivDecimalLegacy,
+                crate::impl_arithmetic::div_decimal_legacy_fn_meta(),
+            ),
+        ];
+        for (operation, getter) in cases {
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            let decimal = operation.decimal_division_kind().is_some();
+            assert_eq!(
+                operation.input_role(),
+                if decimal {
+                    EvaluatedArgsRole::DecimalDivision
+                } else {
+                    EvaluatedArgsRole::Ieee754Bits2
+                }
+            );
+            assert_eq!(
+                operation.input_types(),
+                if decimal {
+                    &[EvalType::Decimal, EvalType::Decimal, EvalType::Int][..]
+                } else {
+                    &[EvalType::Bytes, EvalType::Bytes][..]
+                }
+            );
+            assert_eq!(
+                operation.eval_type(),
+                if decimal {
+                    EvalType::Decimal
+                } else {
+                    EvalType::Bytes
+                }
+            );
+            assert_eq!(operation.call_count(), 1);
+            assert_eq!(program.expression.len(), operation.input_types().len() + 1);
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[operation.input_types().len()]
+            else {
+                panic!("missing DIV wrapper")
+            };
+            assert_eq!(*args_len, operation.input_types().len());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(operation.metadata_matches(metadata.as_ref()));
+            if let Some(kind) = operation.decimal_division_kind() {
+                let payload = metadata
+                    .downcast_ref::<NativeDecimalDivisionCallMetadata>()
+                    .unwrap();
+                assert_eq!(payload.kind, kind);
+                assert!(payload.is_unbound());
+            } else {
+                assert!(metadata.is::<()>());
+            }
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            for (left, right) in [(None, Some(2i64)), (Some(6), None), (None, None)] {
+                let args = if decimal {
+                    EvaluatedArgs::DecimalDivision {
+                        left: left.map(Decimal::from),
+                        right: right.map(Decimal::from),
+                        frac_increment: 4,
+                    }
+                } else {
+                    EvaluatedArgs::Ieee754Bits2 {
+                        left: ReadyIeee754Arg::Value(left.map(|v| (v as f64).to_bits())),
+                        right: ReadyIeee754Arg::Value(right.map(|v| (v as f64).to_bits())),
+                    }
+                };
+                assert!(matches!(
+                    worker.eval_args(args),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            for invalid in [
+                EvaluatedArgs::Decimal2 {
+                    left: Some(Decimal::from(6i64)),
+                    right: Some(Decimal::from(2i64)),
+                },
+                EvaluatedArgs::Bytes2(Some(vec![0; 8]), Some(vec![0; 8])),
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::Ieee754Bits2 {
+                    left: ReadyIeee754Arg::Undemanded,
+                    right: ReadyIeee754Arg::Value(Some(0)),
+                },
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            // Raw ready transport must independently retain strict non-NULL admission.
+            let ready = if decimal {
+                vec![
+                    ScalarValue::Decimal(None),
+                    ScalarValue::Decimal(Some(Decimal::from(2i64))),
+                    ScalarValue::Int(Some(4096)),
+                ]
+            } else {
+                vec![
+                    ScalarValue::Bytes(None),
+                    ScalarValue::Bytes(Some(2f64.to_bits().to_le_bytes().to_vec())),
+                ]
+            };
+            let mut ctx = EvalContext::default();
+            let mut witness = EvaluatedAsciiWitness::default();
+            let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+            assert!(
+                program
+                    .expression
+                    .eval_with_ready_args(
+                        operation,
+                        &mut ctx,
+                        &program.schema,
+                        &ready,
+                        operation.input_role(),
+                        &[0],
+                        &mut witness,
+                        &mut budget
+                    )
+                    .is_err()
+            );
+            assert_eq!(witness.invocations(), 0);
+        }
+        let real = |left: f64, right: f64| EvaluatedArgs::Ieee754Bits2 {
+            left: ReadyIeee754Arg::Value(Some(left.to_bits())),
+            right: ReadyIeee754Arg::Value(Some(right.to_bits())),
+        };
+        for operation in [
+            EvaluatedBytesOp::DivRealNative,
+            EvaluatedBytesOp::DivRealLegacy,
+        ] {
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            for (left, right, expected) in [
+                (6.0, 2.0, Some(3f64.to_bits())),
+                (-0.0, 2.0, Some((-0f64).to_bits())),
+                (f64::NAN, -0.0, None),
+            ] {
+                let ComputedValue::Ieee754Bits(value) =
+                    worker.eval_args(real(left, right)).unwrap()
+                else {
+                    panic!("DIV real lost IEEE result")
+                };
+                assert_eq!(value.into_option(), expected);
+            }
+            if operation == EvaluatedBytesOp::DivRealNative {
+                let mut failure = worker.eval_args_reported(real(f64::MAX, 0.5)).unwrap_err();
+                assert_eq!(
+                    failure.native_binary_arithmetic_error(),
+                    Some(&NativeBinaryArithmeticError {
+                        operation: BinaryArithmeticOperation::Divide,
+                        kind: BinaryArithmeticErrorKind::FloatOverflow,
+                    })
+                );
+                for wrong in [
+                    EvaluatedBytesOp::ModRealNative,
+                    EvaluatedBytesOp::DivRealLegacy,
+                    EvaluatedBytesOp::DivDecimalNative,
+                    EvaluatedBytesOp::DivDecimalLegacy,
+                ] {
+                    failure.operation = Some(wrong);
+                    assert!(failure.native_binary_arithmetic_error().is_none());
+                }
+            } else {
+                let ComputedValue::Ieee754Bits(value) =
+                    worker.eval_args(real(f64::MAX, 0.5)).unwrap()
+                else {
+                    panic!("legacy DIV lost raw infinity")
+                };
+                assert_eq!(value.into_option(), Some(f64::INFINITY.to_bits()));
+            }
+            assert!(worker.eval_args(real(6.0, 2.0)).is_ok());
+            assert_eq!(worker.kernel_invocations(), 5);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+
+    #[test]
+    fn division_decimal_reports_binding_cleanup_budget_and_reuse() {
+        use NativeDecimalDivisionDisposition::{Ok as Exact, Overflow, Truncated, ZeroDivisor};
+        use NativeDecimalDivisionKind::{Legacy, Native};
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        let input = |left, right, frac_increment| EvaluatedArgs::DecimalDivision {
+            left: Some(left),
+            right: Some(right),
+            frac_increment,
+        };
+        let lhs = || Decimal::try_from_native_digits(false, b"10", 1, 1, 4096).unwrap();
+        for operation in [
+            EvaluatedBytesOp::DivDecimalNative,
+            EvaluatedBytesOp::DivDecimalLegacy,
+        ] {
+            let mut worker = prepare(operation);
+            let storage = worker.retained_storage().unwrap();
+            let mut retained = None;
+            for (increment, divisor, status, scale) in [
+                (4, 3i64, Exact, Some(5)),
+                (0, 3, Exact, Some(1)),
+                (100, 3, Truncated, None),
+                (u32::MAX, 0, ZeroDivisor, None),
+                (4, 3, Exact, Some(5)),
+            ] {
+                let ComputedValue::DecimalDivision(value) = worker
+                    .eval_args(input(lhs(), Decimal::from(divisor), increment))
+                    .unwrap()
+                else {
+                    panic!("DIV Decimal lost its report carrier")
+                };
+                assert_eq!(
+                    value.metadata(),
+                    ComputedDecimalDivisionMetadata::OwnDecimalDivision
+                );
+                assert_eq!(value.disposition(), status);
+                assert_eq!(value.value().is_none(), status == ZeroDivisor);
+                if let Some(scale) = scale {
+                    assert_eq!(value.value().unwrap().result_scale(), scale);
+                }
+                let (value, actual) = value.into_parts();
+                assert_eq!(actual, status);
+                retained = value;
+                assert!(worker.decimal_division_metadata().unwrap().is_unbound());
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            let wide = Decimal::try_from_native_digits(true, &[b'9'; 82], 0, 0, 4096).unwrap();
+            let ComputedValue::DecimalDivision(value) = worker
+                .eval_args(input(wide, Decimal::from(1i64), 0))
+                .unwrap()
+            else {
+                panic!("DIV overflow is a successful report, not SQL error")
+            };
+            assert_eq!(value.disposition(), Overflow);
+            assert!(value.value().is_some());
+            let calls = worker.kernel_invocations();
+            let limits = worker.state.limits;
+            worker.state.limits.max_steps = 0;
+            let failure = worker
+                .eval_args_reported(input(lhs(), Decimal::from(3i64), 4))
+                .unwrap_err();
+            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+            assert_eq!(failure.sql_failure(), None);
+            assert_eq!(worker.kernel_invocations(), calls);
+            assert!(worker.decimal_division_metadata().unwrap().is_unbound());
+            assert!(worker.is_healthy());
+            worker.state.limits = limits;
+            // The real third slot receives zero after accounting for the worker.
+            worker.state.limits.max_retained_bytes = storage.total_bytes();
+            let failure = worker
+                .eval_args_reported(input(lhs(), Decimal::from(3i64), 4))
+                .unwrap_err();
+            assert!(matches!(failure.error(), LocalError::Evaluation(_)));
+            assert_eq!(failure.operation(), None);
+            assert_eq!(failure.sql_failure(), None);
+            assert!(failure.native_binary_arithmetic_error().is_none());
+            assert_eq!(worker.kernel_invocations(), calls + 1);
+            assert!(worker.decimal_division_metadata().unwrap().is_unbound());
+            assert!(worker.is_healthy());
+            worker.state.limits = limits;
+            assert!(
+                worker
+                    .eval_args(input(lhs(), Decimal::from(3i64), 4))
+                    .is_ok()
+            );
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            drop(worker);
+            assert_eq!(retained.unwrap().result_scale(), 5);
+        }
+        let wide = || Decimal::try_from_native_digits(false, &[b'9'; 90], 0, 0, 4096).unwrap();
+        let (left, right) = (wide(), wide());
+        let live = left.spill_capacity_bytes() + right.spill_capacity_bytes();
+        let (ready, arity, _) = input(left, right, 7).into_values(live + 64).unwrap();
+        assert_eq!(arity, 3);
+        assert_eq!(ready[2], ScalarValue::Int(Some(64)));
+        for bad in 0..5 {
+            let metadata = NativeDecimalDivisionCallMetadata::new(Native);
+            metadata.bind(7).unwrap();
+            match bad {
+                0 => assert!(metadata.begin_kernel(Legacy).is_err()),
+                1 => {
+                    metadata.begin_kernel(Native).unwrap();
+                    assert!(metadata.begin_kernel(Native).is_err());
+                }
+                2 => {
+                    metadata.begin_kernel(Native).unwrap();
+                    metadata.record_disposition(Exact).unwrap();
+                    assert!(metadata.record_error().is_err());
+                }
+                3 => assert!(metadata.consume(Some(1), true).is_err()),
+                _ => {
+                    metadata.begin_kernel(Native).unwrap();
+                    metadata.record_disposition(Exact).unwrap();
+                    assert!(metadata.consume(Some(0), true).is_err());
+                }
+            }
+            assert!(
+                metadata.unbind().is_err(),
+                "invalid report must not silently become reusable"
+            );
+        }
+        let metadata = NativeDecimalDivisionCallMetadata::new(Native);
+        metadata.bind(9).unwrap();
+        assert_eq!(metadata.begin_kernel(Native).unwrap(), 9);
+        metadata.record_error().unwrap();
+        assert_eq!(metadata.consume(Some(1), false).unwrap(), None);
+        metadata.finish(Some(1), false).unwrap();
+        metadata.unbind().unwrap();
+        assert!(metadata.is_unbound());
+        let mut worker = prepare(EvaluatedBytesOp::DivDecimalNative);
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            worker.begin_invocation().unwrap();
+            let guard = DecimalDivisionBindingGuard {
+                worker: &mut worker,
+            };
+            guard
+                .worker
+                .decimal_division_metadata()
+                .unwrap()
+                .bind(4)
+                .unwrap();
+            guard
+                .worker
+                .decimal_division_metadata()
+                .unwrap()
+                .begin_kernel(Native)
+                .unwrap();
+            panic!("simulated kernel unwind");
+        }));
+        assert!(panic.is_err());
+        assert!(worker.decimal_division_metadata().unwrap().is_unbound());
+        assert!(
+            !worker.is_healthy(),
+            "unwind cleanup must not clear worker poison"
+        );
+    }
 
     #[test]
     fn modulo_value_dispatch_nonnull_zero_nonfinite_and_reuse() {
