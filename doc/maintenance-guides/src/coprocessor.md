@@ -293,6 +293,14 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  EXP/LOG10 add two closed nullable raw-IEEE unary recipes backed by the
+  relocated `impl_math/native_go_exp_log.rs` compatibility core. The existing
+  FMA and logarithm arithmetic is preserved, not substituted with libm. Wire
+  EXP/LOG10 are unchanged. The frontend records EXP's coerced input only for
+  error formatting after a computed non-finite result; LOG10 retains its 3020
+  warning before admission, sends the actual input bits, then consumes the
+  computed result before applying its original domain policy. No new role,
+  cause, pure-function export, PB/legacy admission or execution driver is added.
   SIN/COS/TAN/COT/ATAN and the ATAN2 alias add eleven closed raw-IEEE
   unary/binary recipes: six native-Go forms and five existing legacy-libm forms.
   `impl_math/native_go_trig.rs` is the single Go-compatible production owner;

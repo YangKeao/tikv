@@ -216,6 +216,8 @@ pub enum LocalFunctionId {
     CotLibmLegacy,
     AtanLibmLegacy,
     Atan2LibmLegacy,
+    ExpGoNative,
+    Log10GoNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

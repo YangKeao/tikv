@@ -5865,3 +5865,71 @@ fn local_evaluated_args_atan2_preserves_demand_order_orientation_and_raw_bits() 
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
 }
+
+#[test]
+fn local_evaluated_args_exp_log10_go_keep_nullable_and_nonfinite_bits() {
+    let negative_zero = (-0.0_f64).to_bits();
+    let infinity = f64::INFINITY.to_bits();
+    let nan = 0x7ff8_0000_0000_0456_u64;
+    for (operation, zero_result) in [
+        (EvaluatedBytesOp::ExpGoNative, 1.0_f64.to_bits()),
+        (EvaluatedBytesOp::Log10GoNative, f64::NEG_INFINITY.to_bits()),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Bytes(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        for (index, (input, expected)) in [
+            (None, None),
+            (Some(negative_zero), Some(zero_result)),
+            (Some(infinity), Some(infinity)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ComputedValue::Ieee754Bits(value) =
+                worker.eval_args(EvaluatedArgs::Ieee754Bits(input)).unwrap()
+            else {
+                panic!("Go EXP/LOG10 returned a non-IEEE754 value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(
+                value.metadata(),
+                ComputedIeee754BitsMetadata::OwnIeee754Bits
+            );
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let ComputedValue::Ieee754Bits(value) = worker
+            .eval_args(EvaluatedArgs::Ieee754Bits(Some(nan)))
+            .unwrap()
+        else {
+            panic!("NaN Go EXP/LOG10 returned a non-IEEE754 value");
+        };
+        let actual = value.value();
+        assert!(actual.is_some_and(|bits| f64::from_bits(bits).is_nan()));
+        assert_eq!(
+            value.metadata(),
+            ComputedIeee754BitsMetadata::OwnIeee754Bits
+        );
+        assert_eq!(value.into_option(), actual);
+        assert_eq!(worker.kernel_invocations(), 4);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}

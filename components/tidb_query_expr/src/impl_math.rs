@@ -23,6 +23,7 @@ use tidb_query_datatype::{
 };
 use tikv_util::time::get_time;
 
+mod native_go_exp_log;
 pub(crate) mod native_go_trig;
 
 const MAX_RAND_VALUE: u32 = 0x3FFFFFFF;
@@ -391,6 +392,22 @@ fn radians(arg: &Real) -> Result<Option<Real>> {
 #[rpn_fn(nullable)]
 fn radians_raw(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
     Ok(decode_raw_f64(arg)?.map(radians_f64).map(encode_raw_f64))
+}
+
+// Private native paths encode computed IEEE bits; frontend domain/diagnostic
+// policies and the existing wire math remain independent.
+#[rpn_fn(nullable)]
+fn exp_go_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?
+        .map(native_go_exp_log::go_exp)
+        .map(encode_raw_f64))
+}
+
+#[rpn_fn(nullable)]
+fn log10_go_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?
+        .map(native_go_exp_log::go_log10)
+        .map(encode_raw_f64))
 }
 
 #[inline]
@@ -1460,6 +1477,46 @@ mod tests {
 
     use super::*;
     use crate::types::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_exp_go_native_raw_golden_and_specials() {
+        let arg = encode_raw_f64(1.5);
+        assert_eq!(
+            exp_go_native(Some(&arg)).unwrap(),
+            Some(encode_raw_f64(4.481689070338065_f64))
+        );
+        assert_eq!(exp_go_native(None).unwrap(), None);
+        for (value, expected) in [(f64::INFINITY, f64::INFINITY), (f64::NEG_INFINITY, 0.0)] {
+            let arg = encode_raw_f64(value);
+            assert_eq!(
+                exp_go_native(Some(&arg)).unwrap(),
+                Some(encode_raw_f64(expected))
+            );
+        }
+        let arg = encode_raw_f64(f64::NAN);
+        let result = exp_go_native(Some(&arg)).unwrap().unwrap();
+        assert!(decode_raw_f64(Some(&result)).unwrap().unwrap().is_nan());
+    }
+
+    #[test]
+    fn test_log10_go_native_raw_golden_and_specials() {
+        let arg = encode_raw_f64(100.0);
+        assert_eq!(
+            log10_go_native(Some(&arg)).unwrap(),
+            Some(encode_raw_f64(2.0))
+        );
+        assert_eq!(log10_go_native(None).unwrap(), None);
+        let arg = encode_raw_f64(f64::INFINITY);
+        assert_eq!(
+            log10_go_native(Some(&arg)).unwrap(),
+            Some(encode_raw_f64(f64::INFINITY))
+        );
+        for value in [f64::NAN, f64::NEG_INFINITY] {
+            let arg = encode_raw_f64(value);
+            let result = log10_go_native(Some(&arg)).unwrap().unwrap();
+            assert!(decode_raw_f64(Some(&result)).unwrap().unwrap().is_nan());
+        }
+    }
 
     #[test]
     fn test_trig_native_go_and_libm_keep_distinct_computed_bits() {

@@ -902,6 +902,8 @@ pub enum EvaluatedBytesOp {
     CotLibmLegacy,
     AtanLibmLegacy,
     Atan2LibmLegacy,
+    ExpGoNative,
+    Log10GoNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1367,6 +1369,12 @@ impl EvaluatedBytesOp {
             Self::Atan2LibmLegacy => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Atan2LibmLegacy);
             }
+            Self::ExpGoNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ExpGoNative);
+            }
+            Self::Log10GoNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Log10GoNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1447,7 +1455,9 @@ impl EvaluatedBytesOp {
             | Self::SinLibmLegacy
             | Self::CosLibmLegacy
             | Self::CotLibmLegacy
-            | Self::AtanLibmLegacy => EvaluatedArgsRole::Ieee754Bits,
+            | Self::AtanLibmLegacy
+            | Self::ExpGoNative
+            | Self::Log10GoNative => EvaluatedArgsRole::Ieee754Bits,
             _ => EvaluatedArgsRole::Values,
         }
     }
@@ -1554,6 +1564,8 @@ impl EvaluatedBytesOp {
                 | Self::CotLibmLegacy
                 | Self::AtanLibmLegacy
                 | Self::Atan2LibmLegacy
+                | Self::ExpGoNative
+                | Self::Log10GoNative
         )
     }
 
@@ -1629,6 +1641,8 @@ impl EvaluatedBytesOp {
             Self::CotLibmLegacy => crate::impl_math::cot_libm_legacy_fn_meta(),
             Self::AtanLibmLegacy => crate::impl_math::atan_libm_legacy_fn_meta(),
             Self::Atan2LibmLegacy => crate::impl_math::atan2_libm_legacy_fn_meta(),
+            Self::ExpGoNative => crate::impl_math::exp_go_native_fn_meta(),
+            Self::Log10GoNative => crate::impl_math::log10_go_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1883,7 +1897,9 @@ impl EvaluatedBytesOp {
             | Self::CosLibmLegacy
             | Self::CotLibmLegacy
             | Self::AtanLibmLegacy
-            | Self::Atan2LibmLegacy => EvalType::Bytes,
+            | Self::Atan2LibmLegacy
+            | Self::ExpGoNative
+            | Self::Log10GoNative => EvalType::Bytes,
         }
     }
 
@@ -1920,7 +1936,9 @@ impl EvaluatedBytesOp {
             | Self::SinLibmLegacy
             | Self::CosLibmLegacy
             | Self::CotLibmLegacy
-            | Self::AtanLibmLegacy => &[EvalType::Bytes],
+            | Self::AtanLibmLegacy
+            | Self::ExpGoNative
+            | Self::Log10GoNative => &[EvalType::Bytes],
             Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative

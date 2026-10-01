@@ -166,7 +166,9 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::CosLibmLegacy
         | LocalFunctionId::CotLibmLegacy
         | LocalFunctionId::AtanLibmLegacy
-        | LocalFunctionId::Atan2LibmLegacy => Err(other_err!(
+        | LocalFunctionId::Atan2LibmLegacy
+        | LocalFunctionId::ExpGoNative
+        | LocalFunctionId::Log10GoNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),
