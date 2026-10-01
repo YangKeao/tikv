@@ -410,7 +410,9 @@ fn evaluated_ready_args_match(
             EvaluatedArgsRole::NullWitness => {
                 matches!(
                     operation,
-                    EvaluatedBytesOp::MathNullWitnessNative | EvaluatedBytesOp::DateDiffNullNative
+                    EvaluatedBytesOp::MathNullWitnessNative
+                        | EvaluatedBytesOp::DateDiffNullNative
+                        | EvaluatedBytesOp::WeekNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,

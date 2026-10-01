@@ -1,0 +1,10 @@
+[package]
+name = "tidb_query_crypto"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "Shared pure SQL password and digest policies"
+
+[dependencies]
+sha1 = "0.10"

@@ -255,6 +255,14 @@ pub enum LocalFunctionId {
     ToDaysTextNative,
     ToSecondsTextNative,
     TsoLogicalNative,
+    WeekDateTextNative,
+    WeekTextNative,
+    YearWeekTextNative,
+    WeekOfYearTextNative,
+    WeekNullNative,
+    WeekCoreNative,
+    PasswordNative,
+    Sm3Native,
 }
 
 /// Source provenance, not a deduction from the value's collation.

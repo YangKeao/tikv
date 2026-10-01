@@ -277,6 +277,81 @@ fn date_diff_core_native(left: Option<BytesRef>, right: Option<BytesRef>) -> Res
     ) as Int))
 }
 
+// This demand probe returns the original owned text, not a date/validity
+// marker.
+#[rpn_fn(nullable)]
+fn week_date_text_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(|_| bytes.to_vec()))
+    })
+}
+
+#[rpn_fn(nullable)]
+fn week_text_native(arg: Option<BytesRef>, mode: Option<&Int>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(
+            Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(
+                |(year, month, day)| {
+                    // Native explicit NULL mode is zero; wire WEEK keeps its own policy.
+                    Time::native_week_of_year(year, month, day, mode.copied().unwrap_or(0), false).1
+                },
+            ),
+        )
+    })
+}
+
+#[rpn_fn(nullable)]
+fn year_week_text_native(arg: Option<BytesRef>, mode: Option<&Int>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(
+            Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(
+                |(year, month, day)| {
+                    let (year, number) = Time::native_week_of_year(
+                        year,
+                        month,
+                        day,
+                        mode.copied().unwrap_or(0),
+                        true,
+                    );
+                    let result = year * 100 + number;
+                    if result < 0 {
+                        i64::from(u32::MAX)
+                    } else {
+                        result
+                    }
+                },
+            ),
+        )
+    })
+}
+
+#[rpn_fn(nullable)]
+fn week_of_year_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(Time::parse_native_date_ymd(decode_native_time_text(bytes)?)
+            .map(|(year, month, day)| Time::native_week_of_year(year, month, day, 3, false).1))
+    })
+}
+
+#[rpn_fn(nullable)]
+fn week_null_native(arg: Option<&Int>) -> Result<Option<Int>> {
+    match arg {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Native WEEK NULL witness must be an actual NULL"
+        )),
+    }
+}
+
+#[rpn_fn(nullable)]
+fn week_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(Some(
+            Time::native_core_week(decode_time_core_native(bytes)?, 0) as Int,
+        ))
+    })
+}
+
 #[rpn_fn(nullable)]
 fn to_days_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
     arg.map_or(Ok(None), |bytes| {
@@ -2159,6 +2234,118 @@ mod tests {
 
     use super::*;
     use crate::{RpnExpressionBuilder, types::test_util::RpnFnScalarEvaluator};
+
+    #[test]
+    fn test_native_week_text_literal_oracles() {
+        // Pinned time_fn/tests.rs and calendar.rs boundary fixtures; expected
+        // values are literals, never recomputed through the shared provider.
+        for (text, mode, expected) in [
+            ("2008-02-20", Some(0), 7),
+            ("2008-02-20", Some(1), 8),
+            ("2008-12-31", Some(1), 53),
+            ("2023-01-01", None, 1),
+            ("2000-12-31", Some(0), 53),
+            ("2000-12-31", Some(6), 1),
+            ("2005-12-3", Some(6), 48),
+            ("2016-01-01", Some(0), 0),
+            ("2016-01-01", Some(3), 53),
+        ] {
+            assert_eq!(
+                week_text_native(Some(text.as_bytes()), mode.as_ref()).unwrap(),
+                Some(expected),
+                "{text} {mode:?}"
+            );
+        }
+        for (text, mode, expected) in [
+            ("2000-01-01", Some(0), 199_952),
+            ("2000-01-01", None, 199_952),
+            ("2020-01-01", Some(3), 202_001),
+            ("2016-01-01", Some(3), 201_553),
+            ("0000-01-01", Some(3), 4_294_967_295),
+        ] {
+            assert_eq!(
+                year_week_text_native(Some(text.as_bytes()), mode.as_ref()).unwrap(),
+                Some(expected),
+                "{text} {mode:?}"
+            );
+        }
+        for (text, expected) in [
+            ("2024-03-15", 11),
+            ("2024-01-01", 1),
+            ("2020-12-31", 53),
+            ("0000-01-01", 52),
+            ("0000-01-01 99:99:99.bad", 52),
+        ] {
+            assert_eq!(
+                week_of_year_text_native(Some(text.as_bytes())).unwrap(),
+                Some(expected),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_native_week_probe_null_and_raw_core() {
+        for text in [
+            " 2008/02/20 99:99:99.bad ",
+            "0000-02-29",
+            "4294967295-12-31",
+        ] {
+            let mut input = text.as_bytes().to_vec();
+            let owned = week_date_text_native(Some(&input)).unwrap().unwrap();
+            input.fill(b'x');
+            assert_eq!(owned, text.as_bytes());
+        }
+        assert_eq!(week_date_text_native(None).unwrap(), None);
+        assert_eq!(week_text_native(None, Some(&3)).unwrap(), None);
+        assert_eq!(year_week_text_native(None, Some(&3)).unwrap(), None);
+        assert_eq!(week_of_year_text_native(None).unwrap(), None);
+        for text in [
+            "",
+            "0000-00-00",
+            "2008-13-01",
+            "2008-01-00",
+            "2023-02-29",
+            "2024-02-30",
+            "4294967296-12-31",
+        ] {
+            let input = Some(text.as_bytes());
+            assert_eq!(week_date_text_native(input).unwrap(), None, "{text}");
+            assert_eq!(week_text_native(input, None).unwrap(), None, "{text}");
+            assert_eq!(year_week_text_native(input, None).unwrap(), None, "{text}");
+            assert_eq!(week_of_year_text_native(input).unwrap(), None, "{text}");
+        }
+        assert!(week_date_text_native(Some(b"\xff")).is_err());
+        assert!(week_text_native(Some(b"\xff"), None).is_err());
+        assert!(year_week_text_native(Some(b"\xff"), None).is_err());
+        assert!(week_of_year_text_native(Some(b"\xff")).is_err());
+        assert_eq!(week_null_native(None).unwrap(), None);
+        assert!(week_null_native(Some(&0)).is_err());
+        assert!(week_null_native(Some(&1)).is_err());
+
+        // Original CoreTime::week returns zero for zero month/day, including
+        // clock-only raw values, without calendar construction or validation.
+        let clock = (1_u64 << 41) - 1;
+        let date = (2008_u64 << 50) | (2_u64 << 46) | (20_u64 << 41);
+        for (raw, expected) in [
+            (0, 0),
+            (clock, 0),
+            ((2008_u64 << 50) | (1_u64 << 41) | clock, 0),
+            ((2008_u64 << 50) | (1_u64 << 46) | clock, 0),
+            (date, 7),
+            (date | clock, 7),
+        ] {
+            assert_eq!(
+                week_core_native(Some(&raw.to_le_bytes())).unwrap(),
+                Some(expected),
+                "{raw:#x}"
+            );
+        }
+        assert_eq!(week_core_native(None).unwrap(), None);
+        for malformed in [b"".as_slice(), &[0; 7], &[0; 9]] {
+            assert!(week_core_native(Some(malformed)).is_err());
+        }
+    }
 
     #[test]
     fn test_native_date_diff_day_counts_and_tso_literals() {

@@ -11,10 +11,9 @@ bitflags::bitflags! {
 impl WeekMode {
     #[must_use]
     pub fn to_normalized(self) -> WeekMode {
-        let mut mode = self;
-        if !mode.contains(WeekMode::BEHAVIOR_MONDAY_FIRST) {
-            mode ^= WeekMode::BEHAVIOR_FIRST_WEEKDAY;
-        }
-        mode
+        let normalized = super::Time::normalize_week_mode_bits(self.bits());
+        // XOR only the changed known bits, preserving the original bitflags
+        // representation even if it carries otherwise unknown high bits.
+        self ^ WeekMode::from_bits_truncate(self.bits() ^ normalized)
     }
 }

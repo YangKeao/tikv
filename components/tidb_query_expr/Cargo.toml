@@ -31,6 +31,7 @@ serde_json = "1.0"
 static_assertions = { version = "1.0", features = ["nightly"] }
 tidb_query_codegen = { workspace = true }
 tidb_query_common = { workspace = true }
+tidb_query_crypto = { workspace = true }
 tidb_query_datatype = { workspace = true }
 tikv_util = { workspace = true }
 time = { workspace = true }

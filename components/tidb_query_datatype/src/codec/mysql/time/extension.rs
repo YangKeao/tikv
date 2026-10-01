@@ -60,41 +60,17 @@ impl DateTimeExtension for Time {
     fn calc_year_week(
         &self,
         monday_first: bool,
-        mut week_year: bool,
+        week_year: bool,
         first_weekday: bool,
     ) -> (i32, i32) {
-        let mut year = self.year() as i32;
-        let daynr = calc_day_number(year, self.month() as i32, self.day() as i32);
-        let mut first_daynr = calc_day_number(year, 1, 1);
-        let mut weekday = calc_weekday(first_daynr, !monday_first);
-        let mut days: i32;
-
-        if self.month() == 1 && (self.day() as i32) <= 7 - weekday {
-            if !week_year && ((first_weekday && weekday != 0) || (!first_weekday && weekday >= 4)) {
-                return (year, 0);
-            }
-            week_year = true;
-            year -= 1;
-            days = calc_days_in_year(year);
-            first_daynr -= days;
-            weekday = (weekday + 53 * 7 - days) % 7;
-        }
-
-        if (first_weekday && weekday != 0) || (!first_weekday && weekday >= 4) {
-            days = daynr - (first_daynr + 7 - weekday);
-        } else {
-            days = daynr - (first_daynr - weekday);
-        }
-
-        if week_year && days >= 52 * 7 {
-            weekday = (weekday + calc_days_in_year(year)) % 7;
-            if (!first_weekday && weekday < 4) || (first_weekday && weekday == 0) {
-                year += 1;
-                return (year, 1);
-            }
-        }
-        let week: i32 = days / 7 + 1;
-        (year, week)
+        Time::native_calc_week_i32(
+            self.year() as i32,
+            self.month() as i32,
+            self.day() as i32,
+            monday_first,
+            week_year,
+            first_weekday,
+        )
     }
 
     /// returns the week of year according to week mode. should not be called
@@ -151,21 +127,4 @@ impl DateTimeExtension for Time {
 // calculates days since 0000-00-00.
 fn calc_day_number(year: i32, month: i32, day: i32) -> i32 {
     Time::native_calc_daynr_i32(year, month, day)
-}
-
-/// calculates days in one year, it works with 0 <= year <= 99.
-fn calc_days_in_year(year: i32) -> i32 {
-    if (year & 3) == 0 && (year % 100 != 0 || (year % 400 == 0 && (year != 0))) {
-        return 366;
-    }
-    365
-}
-
-/// calculates weekday from daynr, returns 0 for Monday, 1 for Tuesday ...
-fn calc_weekday(mut daynr: i32, sunday_first_day: bool) -> i32 {
-    daynr += 5;
-    if sunday_first_day {
-        daynr += 1;
-    }
-    daynr % 7
 }

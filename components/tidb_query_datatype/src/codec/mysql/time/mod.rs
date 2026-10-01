@@ -54,6 +54,77 @@ macro_rules! native_daynr_arithmetic {
     }};
 }
 
+// Week arithmetic has the same control flow at both original widths. Keep
+// the year-zero non-leap rule separate from Gregorian calendar validation.
+macro_rules! native_week_days_in_year {
+    ($year:expr) => {{
+        let year = $year;
+        if year & 3 == 0 && (year % 100 != 0 || (year % 400 == 0 && year != 0)) {
+            366
+        } else {
+            365
+        }
+    }};
+}
+
+macro_rules! native_weekday_arithmetic {
+    ($daynr:expr, $sunday_first:expr) => {{
+        let mut daynr = $daynr;
+        daynr += 5;
+        if $sunday_first {
+            daynr += 1;
+        }
+        daynr % 7
+    }};
+}
+
+macro_rules! native_calc_week_arithmetic {
+    (
+        $year:expr,
+        $month:expr,
+        $day:expr,
+        $monday_first:expr,
+        $week_year:expr,
+        $first_weekday:expr,
+        $calc_daynr:path,
+        $day_type:ty
+    ) => {{
+        let mut year = $year;
+        let month = $month;
+        let day = $day;
+        let monday_first = $monday_first;
+        let mut week_year = $week_year;
+        let first_weekday = $first_weekday;
+        let daynr = $calc_daynr(year, month, day);
+        let mut first_daynr = $calc_daynr(year, 1, 1);
+        let mut weekday = native_weekday_arithmetic!(first_daynr, !monday_first);
+        // Native text keeps its u32 comparison cast; packed/wire fields keep
+        // the original signed i32 comparison. Neither is widened into the other.
+        if month == 1 && day <= (7 - weekday) as $day_type {
+            if !week_year && ((first_weekday && weekday != 0) || (!first_weekday && weekday >= 4)) {
+                return (year, 0);
+            }
+            week_year = true;
+            year -= 1;
+            let days = native_week_days_in_year!(year);
+            first_daynr -= days;
+            weekday = (weekday + 53 * 7 - days) % 7;
+        }
+        let days = if (first_weekday && weekday != 0) || (!first_weekday && weekday >= 4) {
+            daynr - (first_daynr + 7 - weekday)
+        } else {
+            daynr - (first_daynr - weekday)
+        };
+        if week_year && days >= 52 * 7 {
+            weekday = (weekday + native_week_days_in_year!(year)) % 7;
+            if (!first_weekday && weekday < 4) || (first_weekday && weekday == 0) {
+                return (year + 1, 1);
+            }
+        }
+        (year, days / 7 + 1)
+    }};
+}
+
 const MIN_TIMESTAMP: i64 = 0;
 pub const MAX_TIMESTAMP: i64 = (1 << 31) - 1;
 const MICRO_WIDTH: usize = 6;
@@ -263,6 +334,91 @@ impl From<TimeType> for FieldTypeTp {
 
 // The common set of methods for `date/time`
 impl Time {
+    /// Normalizes MySQL week-mode bits without discarding unknown high bits.
+    /// Native callers mask to three bits before calling; wire WeekMode retains
+    /// its existing representation policy.
+    pub const fn normalize_week_mode_bits(mode: u32) -> u32 {
+        if mode & 1 == 0 { mode ^ 4 } else { mode }
+    }
+
+    /// Week-calendar year length: unlike Gregorian validation, year zero has
+    /// 365 days. Ordinary arithmetic retains each caller's original width.
+    pub const fn native_calc_days_in_year_i32(year: i32) -> i32 {
+        native_week_days_in_year!(year)
+    }
+
+    /// Signed day-number weekday, retaining remainder rather than rem_euclid.
+    pub const fn native_calc_weekday_i32(daynr: i32, sunday_first: bool) -> i32 {
+        native_weekday_arithmetic!(daynr, sunday_first)
+    }
+
+    /// Shared packed/wire week arithmetic with already-normalized mode flags.
+    /// It intentionally does not reject zero or invalid calendar components.
+    pub const fn native_calc_week_i32(
+        year: i32,
+        month: i32,
+        day: i32,
+        monday_first: bool,
+        week_year: bool,
+        first_weekday: bool,
+    ) -> (i32, i32) {
+        native_calc_week_arithmetic!(
+            year,
+            month,
+            day,
+            monday_first,
+            week_year,
+            first_weekday,
+            Self::native_calc_daynr_i32,
+            i32
+        )
+    }
+
+    /// Wide native calendar week arithmetic, retaining the original u32 day
+    /// comparison and i64 intermediates rather than constructing a packed Time.
+    pub fn native_week_of_year(
+        year: i64,
+        month: u32,
+        day: u32,
+        mode: i64,
+        with_year: bool,
+    ) -> (i64, i64) {
+        let mut behavior = Self::normalize_week_mode_bits(((mode as u8) & 7) as u32);
+        if with_year {
+            behavior |= 2;
+        }
+        native_calc_week_arithmetic!(
+            year,
+            month,
+            day,
+            behavior & 1 != 0,
+            behavior & 2 != 0,
+            behavior & 4 != 0,
+            Self::native_time_diff_daynr,
+            u32
+        )
+    }
+
+    /// Native CoreTime::week policy, including its zero-month/day early zero.
+    /// YEARWEEK must call the arithmetic helper without applying this guard.
+    pub const fn native_core_week(raw: u64, mode: u8) -> i32 {
+        let month = Self::month_from_core_bits(raw) as i32;
+        let day = Self::day_from_core_bits(raw) as i32;
+        if month == 0 || day == 0 {
+            return 0;
+        }
+        let behavior = Self::normalize_week_mode_bits((mode & 7) as u32);
+        Self::native_calc_week_i32(
+            Self::year_from_core_bits(raw) as i32,
+            month,
+            day,
+            behavior & 1 != 0,
+            behavior & 2 != 0,
+            behavior & 4 != 0,
+        )
+        .1
+    }
+
     /// Original native clock parser: exactly three components, with no
     /// duration-hour clamping or datetime construction.
     pub fn parse_native_clock_hms(s: &str) -> Option<(u32, u32, u32)> {
@@ -3440,6 +3596,73 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn test_native_week_shared_source_vectors() {
+        // Existing native week/yearweek source fixtures, not provider oracles.
+        for (year, month, day, mode, with_year, expected) in [
+            (2008, 2, 20, 0, false, (2008, 7)),
+            (2008, 2, 20, 1, false, (2008, 8)),
+            (2020, 1, 1, 3, true, (2020, 1)),
+            (2000, 1, 1, 0, true, (1999, 52)),
+            (1987, 1, 1, 0, true, (1986, 52)),
+            (2024, 3, 15, 3, false, (2024, 11)),
+            (2020, 12, 31, 3, false, (2020, 53)),
+        ] {
+            assert_eq!(
+                Time::native_week_of_year(year, month, day, mode, with_year),
+                expected
+            );
+            let mut behavior = Time::normalize_week_mode_bits(((mode as u8) & 7) as u32);
+            if with_year {
+                behavior |= 2;
+            }
+            assert_eq!(
+                Time::native_calc_week_i32(
+                    year as i32,
+                    month as i32,
+                    day as i32,
+                    behavior & 1 != 0,
+                    behavior & 2 != 0,
+                    behavior & 4 != 0,
+                ),
+                (expected.0 as i32, expected.1 as i32)
+            );
+        }
+        const RAW: u64 = (2008_u64 << 50) | (2_u64 << 46) | (20_u64 << 41);
+        const WEEK: i32 = Time::native_core_week(RAW, 0);
+        assert_eq!(WEEK, 7);
+        assert_eq!(Time::native_core_week(RAW | ((1_u64 << 41) - 1), 0), 7);
+        assert_eq!(
+            Time::native_core_week((2008_u64 << 50) | (20_u64 << 41), 0),
+            0
+        );
+    }
+
+    #[test]
+    fn test_native_week_zero_and_mode_policy() {
+        const YEAR_ZERO_DAYS: i32 = Time::native_calc_days_in_year_i32(0);
+        const NEGATIVE_WEEKDAY: i32 = Time::native_calc_weekday_i32(-7, false);
+        const ZERO_CORE_WEEK: i32 = Time::native_core_week(0, 0);
+        const ZERO_YEAR_WEEK: (i32, i32) = Time::native_calc_week_i32(0, 0, 0, false, true, true);
+        assert_eq!(YEAR_ZERO_DAYS, 365);
+        assert_eq!(Time::native_calc_days_in_year_i32(2000), 366);
+        assert_eq!(NEGATIVE_WEEKDAY, -2);
+        assert_eq!(ZERO_CORE_WEEK, 0);
+        assert_eq!(ZERO_YEAR_WEEK, (0, 1));
+        // The negative year is intentionally not converted to the SQL sentinel
+        // here: DATE_FORMAT/YEARWEEK wrappers retain that presentation policy.
+        assert_eq!(Time::native_week_of_year(0, 1, 1, 3, true), (-1, 52));
+        assert_eq!(Time::native_week_of_year(0, 1, 1, 2, true), (0, 1));
+        assert_eq!(Time::normalize_week_mode_bits(0x100), 0x104);
+        assert_eq!(Time::normalize_week_mode_bits(0x101), 0x101);
+        assert_eq!(
+            Time::native_week_of_year(2008, 2, 20, 0x101, false),
+            (2008, 8)
+        );
+        assert_eq!(WeekMode::from_bits_truncate(0).to_normalized().bits(), 4);
+        assert_eq!(WeekMode::from_bits_truncate(1).to_normalized().bits(), 1);
+    }
 
     #[test]
     fn test_native_daynr_widths_and_core_difference() {

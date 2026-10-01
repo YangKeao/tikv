@@ -293,6 +293,24 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  WEEK/WEEKOFYEAR/YEARWEEK share one width-preserving week calculation
+  with native const and wire helpers, retaining the non-leap week-year zero
+  rule, mode normalization and distinct zero-date policies. WEEK/YEARWEEK
+  perform two sequential driver calls: a worker validates date text and returns
+  that original owned text, then the frontend demands mode coercion before the
+  second worker computes the result. No callback recursively enters the driver.
+  Invalid dates skip mode coercion; first admission can reject before an as-yet
+  undemanded mode error. Repeated parsing and the second lease are explicit
+  costs, not performance improvements. Existing PB WeekWithoutMode observed
+  NULL uses a real NULL witness without prefix coercion, suffix demand or the
+  default-mode getter; legacy uses actual nullable unary raw core bits, mode 0.
+  No new argument role or PB signature is introduced. PASSWORD/SM3 private
+  recipes delegate to the pure `components/tidb_query_crypto` leaf, also used
+  by native parser-auth facades. It owns raw-SHA1 password encoding and the
+  previously native incremental SM3 implementation, including Sum's state
+  mutation. This is separate from the FIPS shim in `components/crypto`.
+  Existing wire PASSWORD's double-hex/lowercase policy is not silently changed;
+  native deprecation warnings and coercion remain before worker admission.
   DATEDIFF/TO_DAYS/TO_SECONDS/TIDB_PARSE_TSO_LOGICAL add six private
   Int-result recipes. DATEDIFF keeps separate SQL/PB text and legacy raw-core
   policies. PB's observed NULL uses the existing NullWitness role without

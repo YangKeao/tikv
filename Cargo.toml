@@ -353,6 +353,7 @@ test_util = { path = "components/test_util" }
 tidb_query_aggr = { path = "components/tidb_query_aggr" }
 tidb_query_codegen = { path = "components/tidb_query_codegen" }
 tidb_query_common = { path = "components/tidb_query_common" }
+tidb_query_crypto = { path = "components/tidb_query_crypto" }
 tidb_query_datatype = { path = "components/tidb_query_datatype" }
 tidb_query_executors = { path = "components/tidb_query_executors" }
 tidb_query_expr = { path = "components/tidb_query_expr" }

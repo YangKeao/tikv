@@ -7166,3 +7166,273 @@ fn local_evaluated_args_date_text_and_tso_preserve_sql_values_and_null_witness()
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
 }
+
+#[test]
+fn local_evaluated_args_week_core_and_null_witness_keep_roles() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::WeekCoreNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::WeekCoreNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::Bytes(None),
+        EvaluatedArgs::Ieee754Bits(None),
+        EvaluatedArgs::Int(Some(0)),
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    for (index, (input, expected)) in [(None, None), (Some(0), Some(0))].into_iter().enumerate() {
+        let ComputedValue::Int(value) = worker
+            .eval_args(EvaluatedArgs::TimeCoreBits(input))
+            .unwrap()
+        else {
+            panic!("WEEK core returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::WeekNullNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::WeekNullNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::NullWitness(Some(0)),
+        EvaluatedArgs::Int(None),
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let ComputedValue::Int(value) = worker.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+    else {
+        panic!("WEEK NULL witness returned a non-Int value");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+}
+
+#[test]
+fn local_evaluated_args_week_probe_owns_text_before_nullable_mode_calls() {
+    for (operation, input, expected) in [
+        (
+            EvaluatedBytesOp::WeekTextNative,
+            b"2008-02-20".as_slice(),
+            7_i64,
+        ),
+        (
+            EvaluatedBytesOp::YearWeekTextNative,
+            b"2000-01-01".as_slice(),
+            199_952_i64,
+        ),
+    ] {
+        let text = {
+            let mut probe = prepare_evaluated_bytes(
+                EvaluatedBytesOp::WeekDateTextNative,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            assert_eq!(probe.operation(), EvaluatedBytesOp::WeekDateTextNative);
+            assert_eq!(probe.kernel_invocations(), 0);
+            let storage = probe.retained_storage().unwrap();
+            assert!(matches!(
+                probe.eval_args(EvaluatedArgs::Int(Some(0))),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(probe.kernel_invocations(), 0);
+            assert!(probe.is_healthy());
+            assert_eq!(probe.retained_storage().unwrap(), storage);
+            for (index, input) in [None, Some(b"0000-00-00".to_vec())].into_iter().enumerate() {
+                let ComputedValue::Bytes(value) =
+                    probe.eval_args(EvaluatedArgs::Bytes(input)).unwrap()
+                else {
+                    panic!("WEEK date probe returned a non-Bytes value");
+                };
+                assert_eq!(value.value(), None);
+                assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+                assert_eq!(value.into_option(), None);
+                assert_eq!(probe.kernel_invocations(), index as u64 + 1);
+                assert!(probe.is_healthy());
+                assert_eq!(probe.retained_storage().unwrap(), storage);
+            }
+            let ComputedValue::Bytes(value) = probe
+                .eval_args(EvaluatedArgs::Bytes(Some(input.to_vec())))
+                .unwrap()
+            else {
+                panic!("successful WEEK date probe returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), Some(input));
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            let text = value.into_option().unwrap();
+            assert_eq!(text.as_slice(), input);
+            assert_eq!(probe.kernel_invocations(), 3);
+            assert!(probe.is_healthy());
+            assert_eq!(probe.retained_storage().unwrap(), storage);
+            text
+        };
+        assert_eq!(text.as_slice(), input);
+        // Only the owned original text crosses into the independent mode stage.
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Bytes(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let ComputedValue::Int(value) = worker
+            .eval_args(EvaluatedArgs::BytesInt(None, None))
+            .unwrap()
+        else {
+            panic!("nullable WEEK mode stage returned a non-Int value");
+        };
+        assert_eq!(value.value(), None);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), None);
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        for (index, mode) in [None, Some(0)].into_iter().enumerate() {
+            let ComputedValue::Int(value) = worker
+                .eval_args(EvaluatedArgs::BytesInt(Some(text.clone()), mode))
+                .unwrap()
+            else {
+                panic!("WEEK mode stage returned a non-Int value");
+            };
+            assert_eq!(value.value(), Some(expected));
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), Some(expected));
+            assert_eq!(worker.kernel_invocations(), index as u64 + 2);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::WeekOfYearTextNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::WeekOfYearTextNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::BytesInt(None, None)),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases: [(Option<&[u8]>, Option<i64>); 2] = [(None, None), (Some(b"2024-03-15"), Some(11))];
+    for (index, (input, expected)) in cases.into_iter().enumerate() {
+        let ComputedValue::Int(value) = worker
+            .eval_args(EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec())))
+            .unwrap()
+        else {
+            panic!("WEEKOFYEAR returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
+fn local_evaluated_args_password_and_sm3_own_original_digest_bytes() {
+    for (operation, digest) in [
+        (
+            EvaluatedBytesOp::PasswordNative,
+            b"*0D3CED9BEC10A777AEC23CCC353A8C08A633045E".as_slice(),
+        ),
+        (
+            EvaluatedBytesOp::Sm3Native,
+            b"66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0".as_slice(),
+        ),
+    ] {
+        let retained = {
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            assert_eq!(worker.operation(), operation);
+            assert_eq!(worker.kernel_invocations(), 0);
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Int(Some(0))),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let mut cases: Vec<(Option<&[u8]>, Option<&[u8]>)> = vec![(None, None)];
+            if operation == EvaluatedBytesOp::PasswordNative {
+                cases.push((Some(b""), Some(b"")));
+            }
+            cases.push((Some(b"abc"), Some(digest)));
+            let mut retained = None;
+            for (index, (input, expected)) in cases.into_iter().enumerate() {
+                let ComputedValue::Bytes(value) = worker
+                    .eval_args(EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec())))
+                    .unwrap()
+                else {
+                    panic!("native crypto returned a non-Bytes value");
+                };
+                assert_eq!(value.value(), expected);
+                assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+                retained = value.into_option();
+                assert_eq!(retained.as_deref(), expected);
+                assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            retained
+        };
+        assert_eq!(retained.as_deref(), Some(digest));
+    }
+}

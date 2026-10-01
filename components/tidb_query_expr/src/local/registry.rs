@@ -205,7 +205,15 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::DateDiffCoreNative
         | LocalFunctionId::ToDaysTextNative
         | LocalFunctionId::ToSecondsTextNative
-        | LocalFunctionId::TsoLogicalNative => Err(other_err!(
+        | LocalFunctionId::TsoLogicalNative
+        | LocalFunctionId::WeekDateTextNative
+        | LocalFunctionId::WeekTextNative
+        | LocalFunctionId::YearWeekTextNative
+        | LocalFunctionId::WeekOfYearTextNative
+        | LocalFunctionId::WeekNullNative
+        | LocalFunctionId::WeekCoreNative
+        | LocalFunctionId::PasswordNative
+        | LocalFunctionId::Sm3Native => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

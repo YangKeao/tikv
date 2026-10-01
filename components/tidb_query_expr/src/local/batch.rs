@@ -941,6 +941,14 @@ pub enum EvaluatedBytesOp {
     ToDaysTextNative,
     ToSecondsTextNative,
     TsoLogicalNative,
+    WeekDateTextNative,
+    WeekTextNative,
+    YearWeekTextNative,
+    WeekOfYearTextNative,
+    WeekNullNative,
+    WeekCoreNative,
+    PasswordNative,
+    Sm3Native,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1584,6 +1592,36 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::TsoLogicalNative,
                 );
             }
+            Self::WeekDateTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::WeekDateTextNative,
+                );
+            }
+            Self::WeekTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::WeekTextNative);
+            }
+            Self::YearWeekTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::YearWeekTextNative,
+                );
+            }
+            Self::WeekOfYearTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::WeekOfYearTextNative,
+                );
+            }
+            Self::WeekNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::WeekNullNative);
+            }
+            Self::WeekCoreNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::WeekCoreNative);
+            }
+            Self::PasswordNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::PasswordNative);
+            }
+            Self::Sm3Native => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Sm3Native);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1613,7 +1651,7 @@ impl EvaluatedBytesOp {
             Self::RoundDecimalNative | Self::TruncateDecimalNative => EvaluatedArgsRole::DecimalInt,
             Self::RoundRealNative | Self::TruncateRealNative => EvaluatedArgsRole::Ieee754Int,
             Self::RoundInt128Legacy => EvaluatedArgsRole::Int128,
-            Self::MathNullWitnessNative | Self::DateDiffNullNative => {
+            Self::MathNullWitnessNative | Self::DateDiffNullNative | Self::WeekNullNative => {
                 EvaluatedArgsRole::NullWitness
             }
             Self::DateDiffCoreNative => EvaluatedArgsRole::TimeCoreBits2,
@@ -1623,7 +1661,8 @@ impl EvaluatedBytesOp {
             Self::YearCoreNative
             | Self::MonthCoreNative
             | Self::DayOfMonthCoreNative
-            | Self::QuarterCoreNative => EvaluatedArgsRole::TimeCoreBits,
+            | Self::QuarterCoreNative
+            | Self::WeekCoreNative => EvaluatedArgsRole::TimeCoreBits,
             Self::AbsRealNative
             | Self::CeilRealNative
             | Self::FloorRealNative
@@ -1907,6 +1946,14 @@ impl EvaluatedBytesOp {
             Self::ToDaysTextNative => crate::impl_time::to_days_text_native_fn_meta(),
             Self::ToSecondsTextNative => crate::impl_time::to_seconds_text_native_fn_meta(),
             Self::TsoLogicalNative => crate::impl_time::tso_logical_native_fn_meta(),
+            Self::WeekDateTextNative => crate::impl_time::week_date_text_native_fn_meta(),
+            Self::WeekTextNative => crate::impl_time::week_text_native_fn_meta(),
+            Self::YearWeekTextNative => crate::impl_time::year_week_text_native_fn_meta(),
+            Self::WeekOfYearTextNative => crate::impl_time::week_of_year_text_native_fn_meta(),
+            Self::WeekNullNative => crate::impl_time::week_null_native_fn_meta(),
+            Self::WeekCoreNative => crate::impl_time::week_core_native_fn_meta(),
+            Self::PasswordNative => crate::impl_encryption::password_native_fn_meta(),
+            Self::Sm3Native => crate::impl_encryption::sm3_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -2091,7 +2138,12 @@ impl EvaluatedBytesOp {
             | Self::DateDiffCoreNative
             | Self::ToDaysTextNative
             | Self::ToSecondsTextNative
-            | Self::TsoLogicalNative => EvalType::Int,
+            | Self::TsoLogicalNative
+            | Self::WeekTextNative
+            | Self::YearWeekTextNative
+            | Self::WeekOfYearTextNative
+            | Self::WeekNullNative
+            | Self::WeekCoreNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -2200,7 +2252,10 @@ impl EvaluatedBytesOp {
             | Self::MonthNameTextNative
             | Self::GetFormatNative
             | Self::GetFormatNullNative
-            | Self::DayNameTextNative => EvalType::Bytes,
+            | Self::DayNameTextNative
+            | Self::WeekDateTextNative
+            | Self::PasswordNative
+            | Self::Sm3Native => EvalType::Bytes,
         }
     }
 
@@ -2216,7 +2271,10 @@ impl EvaluatedBytesOp {
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
             Self::PiRaw | Self::JsonValidOtherNative => &[],
-            Self::DateDiffNullNative | Self::TsoLogicalNative => &[EvalType::Int],
+            Self::DateDiffNullNative | Self::TsoLogicalNative | Self::WeekNullNative => {
+                &[EvalType::Int]
+            }
+            Self::WeekTextNative | Self::YearWeekTextNative => &[EvalType::Bytes, EvalType::Int],
             Self::PeriodAddNative | Self::PeriodDiffNative => &[EvalType::Int, EvalType::Int],
             Self::GetFormatNative | Self::DateDiffTextNative | Self::DateDiffCoreNative => {
                 &[EvalType::Bytes, EvalType::Bytes]
@@ -2273,7 +2331,12 @@ impl EvaluatedBytesOp {
             | Self::DayOfYearTextNative
             | Self::DayNameTextNative
             | Self::ToDaysTextNative
-            | Self::ToSecondsTextNative => &[EvalType::Bytes],
+            | Self::ToSecondsTextNative
+            | Self::WeekDateTextNative
+            | Self::WeekOfYearTextNative
+            | Self::WeekCoreNative
+            | Self::PasswordNative
+            | Self::Sm3Native => &[EvalType::Bytes],
             Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative
@@ -2806,7 +2869,9 @@ impl EvaluatedArgs {
             Self::NullWitness(value) => {
                 matches!(
                     operation,
-                    EvaluatedBytesOp::MathNullWitnessNative | EvaluatedBytesOp::DateDiffNullNative
+                    EvaluatedBytesOp::MathNullWitnessNative
+                        | EvaluatedBytesOp::DateDiffNullNative
+                        | EvaluatedBytesOp::WeekNullNative
                 ) && value.is_none()
             }
             Self::ConvReady {

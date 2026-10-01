@@ -268,6 +268,16 @@ pub fn uncompress(
     }
 }
 
+#[rpn_fn(nullable)]
+fn password_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(input.map(|bytes| tidb_query_crypto::encode_password_bytes(bytes).into_bytes()))
+}
+
+#[rpn_fn(nullable)]
+fn sm3_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(input.map(|bytes| hex::encode(tidb_query_crypto::sm3_hash(bytes)).into_bytes()))
+}
+
 // https://dev.mysql.com/doc/refman/5.7/en/password-hashing.html
 #[rpn_fn(nullable, capture = [ctx])]
 #[inline]
@@ -351,6 +361,38 @@ mod tests {
 
     use super::*;
     use crate::types::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_password_sm3_native_source_literals() {
+        assert_eq!(password_native(None).unwrap(), None);
+        assert_eq!(sm3_native(None).unwrap(), None);
+        for (input, expected) in [
+            (b"".as_slice(), ""),
+            (b"abc", "*0D3CED9BEC10A777AEC23CCC353A8C08A633045E"),
+            (b"\xff\x00a", "*F5A241511384DB827F22D2A2188A456E87F7D4F2"),
+        ] {
+            assert_eq!(
+                password_native(Some(input)).unwrap(),
+                Some(expected.as_bytes().to_vec())
+            );
+        }
+        // Fixed original parser-auth Go vectors, not the provider's own output.
+        for (input, expected) in [
+            (
+                b"abc".as_slice(),
+                "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0",
+            ),
+            (
+                b"abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+                "debe9ff92275b8a138604889c18e5a4d6fdb70e5387e5765293dcba39c0c5732",
+            ),
+        ] {
+            assert_eq!(
+                sm3_native(Some(input)).unwrap(),
+                Some(expected.as_bytes().to_vec())
+            );
+        }
+    }
 
     #[test]
     fn test_compress_go_native_nullable_and_frame() {
