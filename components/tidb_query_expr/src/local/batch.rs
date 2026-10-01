@@ -1252,6 +1252,14 @@ pub enum EvaluatedBytesOp {
     AddDecimalFastNative,
     SubDecimalFastNative,
     MulDecimalFastNative,
+    ModIntSsNative,
+    ModIntSuNative,
+    ModIntUsNative,
+    ModIntUuNative,
+    ModInt128Legacy,
+    ModRealNative,
+    ModRealLegacy,
+    ModDecimalNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -2394,6 +2402,32 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::MulDecimalFastNative,
                 );
             }
+            Self::ModIntSsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ModIntSsNative);
+            }
+            Self::ModIntSuNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ModIntSuNative);
+            }
+            Self::ModIntUsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ModIntUsNative);
+            }
+            Self::ModIntUuNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ModIntUuNative);
+            }
+            Self::ModInt128Legacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ModInt128Legacy);
+            }
+            Self::ModRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ModRealNative);
+            }
+            Self::ModRealLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ModRealLegacy);
+            }
+            Self::ModDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ModDecimalNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -2445,6 +2479,7 @@ impl EvaluatedBytesOp {
             Self::AddDecimalNative
             | Self::SubDecimalNative
             | Self::MulDecimalNative
+            | Self::ModDecimalNative
             | Self::AddDecimalLegacy
             | Self::SubDecimalLegacy
             | Self::MulDecimalLegacy
@@ -2460,10 +2495,13 @@ impl EvaluatedBytesOp {
             | Self::SubInt128RejectLeftLegacy
             | Self::SubInt128RejectRightLegacy
             | Self::MulInt128SignedLegacy
+            | Self::ModInt128Legacy
             | Self::MulInt128UnsignedLegacy => EvaluatedArgsRole::Int1282,
             Self::AddRealNative
             | Self::SubRealNative
             | Self::MulRealNative
+            | Self::ModRealNative
+            | Self::ModRealLegacy
             | Self::AddRealLegacy
             | Self::SubRealLegacy
             | Self::MulRealLegacy => EvaluatedArgsRole::Ieee754Bits2,
@@ -2680,6 +2718,7 @@ impl EvaluatedBytesOp {
             Self::AddRealNative => (Add, FloatOverflow),
             Self::SubRealNative => (Subtract, FloatOverflow),
             Self::MulRealNative => (Multiply, FloatOverflow),
+            Self::ModRealNative => (BinaryArithmeticOperation::Modulo, FloatOverflow),
             Self::AddDecimalNative => (Add, DecimalOverflow),
             Self::SubDecimalNative => (Subtract, DecimalOverflow),
             Self::MulDecimalNative => (Multiply, DecimalOverflow),
@@ -2704,12 +2743,30 @@ impl EvaluatedBytesOp {
         })
     }
 
+    /// Value-only MOD recipes reserve a successful NULL result for zero
+    /// divisors. Other arithmetic retains its existing nullable operand
+    /// domain.
+    pub(crate) fn is_modulo_value(self) -> bool {
+        matches!(
+            self,
+            Self::ModIntSsNative
+                | Self::ModIntSuNative
+                | Self::ModIntUsNative
+                | Self::ModIntUuNative
+                | Self::ModInt128Legacy
+                | Self::ModRealNative
+                | Self::ModRealLegacy
+                | Self::ModDecimalNative
+        )
+    }
+
     pub(crate) fn is_binary_decimal(self) -> bool {
         matches!(
             self,
             Self::AddDecimalNative
                 | Self::SubDecimalNative
                 | Self::MulDecimalNative
+                | Self::ModDecimalNative
                 | Self::AddDecimalLegacy
                 | Self::SubDecimalLegacy
                 | Self::MulDecimalLegacy
@@ -2731,6 +2788,7 @@ impl EvaluatedBytesOp {
                 | Self::SubInt128RejectLeftLegacy
                 | Self::SubInt128RejectRightLegacy
                 | Self::MulInt128SignedLegacy
+                | Self::ModInt128Legacy
                 | Self::MulInt128UnsignedLegacy
         )
     }
@@ -2759,6 +2817,8 @@ impl EvaluatedBytesOp {
             Self::AddRealNative
                 | Self::SubRealNative
                 | Self::MulRealNative
+                | Self::ModRealNative
+                | Self::ModRealLegacy
                 | Self::AddRealLegacy
                 | Self::SubRealLegacy
                 | Self::MulRealLegacy
@@ -2882,6 +2942,14 @@ impl EvaluatedBytesOp {
             Self::AddDecimalFastNative => crate::impl_arithmetic::add_decimal_fast_native_fn_meta(),
             Self::SubDecimalFastNative => crate::impl_arithmetic::sub_decimal_fast_native_fn_meta(),
             Self::MulDecimalFastNative => crate::impl_arithmetic::mul_decimal_fast_native_fn_meta(),
+            Self::ModIntSsNative => crate::impl_arithmetic::mod_int_ss_native_fn_meta(),
+            Self::ModIntSuNative => crate::impl_arithmetic::mod_int_su_native_fn_meta(),
+            Self::ModIntUsNative => crate::impl_arithmetic::mod_int_us_native_fn_meta(),
+            Self::ModIntUuNative => crate::impl_arithmetic::mod_int_uu_native_fn_meta(),
+            Self::ModInt128Legacy => crate::impl_arithmetic::mod_int128_legacy_fn_meta(),
+            Self::ModRealNative => crate::impl_arithmetic::mod_real_native_fn_meta(),
+            Self::ModRealLegacy => crate::impl_arithmetic::mod_real_legacy_fn_meta(),
+            Self::ModDecimalNative => crate::impl_arithmetic::mod_decimal_native_fn_meta(),
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
             Self::UnaryPlusBitsNative => crate::impl_op::unary_plus_bits_native_fn_meta(),
             Self::UnaryPlusDecimalNative => crate::impl_op::unary_plus_decimal_native_fn_meta(),
@@ -3203,18 +3271,25 @@ impl EvaluatedBytesOp {
             | Self::SubIntUsForcedNative
             | Self::SubIntUuForcedNative
             | Self::MulIntSignedNative
+            | Self::ModIntSsNative
+            | Self::ModIntSuNative
+            | Self::ModIntUsNative
+            | Self::ModIntUuNative
             | Self::MulIntUnsignedNative
             | Self::BinaryArithmeticNullNative
             | Self::BinaryArithmeticMissingLegacy => EvalType::Int,
             Self::AddDecimalNative
             | Self::SubDecimalNative
             | Self::MulDecimalNative
+            | Self::ModDecimalNative
             | Self::AddDecimalLegacy
             | Self::SubDecimalLegacy
             | Self::MulDecimalLegacy => EvalType::Decimal,
             Self::AddRealNative
             | Self::SubRealNative
             | Self::MulRealNative
+            | Self::ModRealNative
+            | Self::ModRealLegacy
             | Self::AddRealLegacy
             | Self::SubRealLegacy
             | Self::MulRealLegacy
@@ -3230,6 +3305,7 @@ impl EvaluatedBytesOp {
             | Self::SubInt128RejectLeftLegacy
             | Self::SubInt128RejectRightLegacy
             | Self::MulInt128SignedLegacy
+            | Self::ModInt128Legacy
             | Self::MulInt128UnsignedLegacy
             | Self::AddDecimalFastNative
             | Self::SubDecimalFastNative
@@ -3515,10 +3591,16 @@ impl EvaluatedBytesOp {
             | Self::SubIntUsForcedNative
             | Self::SubIntUuForcedNative
             | Self::MulIntSignedNative
+            | Self::ModIntSsNative
+            | Self::ModIntSuNative
+            | Self::ModIntUsNative
+            | Self::ModIntUuNative
             | Self::MulIntUnsignedNative => &[EvalType::Int, EvalType::Int],
             Self::AddRealNative
             | Self::SubRealNative
             | Self::MulRealNative
+            | Self::ModRealNative
+            | Self::ModRealLegacy
             | Self::AddRealLegacy
             | Self::SubRealLegacy
             | Self::MulRealLegacy
@@ -3531,10 +3613,12 @@ impl EvaluatedBytesOp {
             | Self::SubInt128RejectLeftLegacy
             | Self::SubInt128RejectRightLegacy
             | Self::MulInt128SignedLegacy
+            | Self::ModInt128Legacy
             | Self::MulInt128UnsignedLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AddDecimalNative
             | Self::SubDecimalNative
             | Self::MulDecimalNative
+            | Self::ModDecimalNative
             | Self::AddDecimalLegacy
             | Self::SubDecimalLegacy
             | Self::MulDecimalLegacy
@@ -4309,6 +4393,20 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation.is_modulo_value() {
+            return match self {
+                Self::Int2(Some(_), Some(_)) | Self::Int1282(Some(_), Some(_)) => true,
+                Self::Ieee754Bits2 {
+                    left: ReadyIeee754Arg::Value(Some(_)),
+                    right: ReadyIeee754Arg::Value(Some(_)),
+                } => true,
+                Self::Decimal2 {
+                    left: Some(_),
+                    right: Some(_),
+                } => true,
+                _ => false,
+            };
+        }
         match self {
             Self::Like {
                 invocation,
@@ -6873,6 +6971,262 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn modulo_value_dispatch_nonnull_zero_nonfinite_and_reuse() {
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        let args = |operation, left: Option<i64>, right: Option<i64>| match operation {
+            EvaluatedBytesOp::ModInt128Legacy => {
+                EvaluatedArgs::Int1282(left.map(i128::from), right.map(i128::from))
+            }
+            EvaluatedBytesOp::ModRealNative | EvaluatedBytesOp::ModRealLegacy => {
+                EvaluatedArgs::Ieee754Bits2 {
+                    left: ReadyIeee754Arg::Value(left.map(|value| (value as f64).to_bits())),
+                    right: ReadyIeee754Arg::Value(right.map(|value| (value as f64).to_bits())),
+                }
+            }
+            EvaluatedBytesOp::ModDecimalNative => EvaluatedArgs::Decimal2 {
+                left: left.map(Decimal::from),
+                right: right.map(Decimal::from),
+            },
+            _ => EvaluatedArgs::Int2(left, right),
+        };
+        let operations = [
+            EvaluatedBytesOp::ModIntSsNative,
+            EvaluatedBytesOp::ModIntSuNative,
+            EvaluatedBytesOp::ModIntUsNative,
+            EvaluatedBytesOp::ModIntUuNative,
+            EvaluatedBytesOp::ModInt128Legacy,
+            EvaluatedBytesOp::ModRealNative,
+            EvaluatedBytesOp::ModRealLegacy,
+            EvaluatedBytesOp::ModDecimalNative,
+        ];
+        for operation in operations {
+            let mut worker = prepare(operation);
+            let storage = worker.retained_storage().unwrap();
+            for (left, right) in [(None, Some(5)), (Some(17), None), (None, None)] {
+                let failure = worker
+                    .eval_args_reported(args(operation, left, right))
+                    .unwrap_err();
+                assert!(matches!(failure.error(), LocalError::InvalidBatch(_)));
+                assert_eq!(failure.sql_failure(), None);
+                // The official driver's readiness check independently rejects
+                // forged nullable transport, not merely the public facade.
+                let (ready, arity, _) = args(operation, left, right).into_values(4096).unwrap();
+                let mut sql_failure = None;
+                assert!(matches!(
+                    worker.eval_ready(ready, arity, &mut sql_failure),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(sql_failure, None);
+                assert_eq!(worker.kernel_invocations(), 0);
+            }
+            for invalid in [
+                EvaluatedArgs::Bytes2(Some(vec![0; 8]), Some(vec![0; 8])),
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::Ieee754Bits2 {
+                    left: ReadyIeee754Arg::Undemanded,
+                    right: ReadyIeee754Arg::Value(Some(0)),
+                },
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+            }
+            for (right, expected) in [(5, Some(2)), (0, None), (5, Some(2))] {
+                match worker
+                    .eval_args(args(operation, Some(17), Some(right)))
+                    .unwrap()
+                {
+                    ComputedValue::Int(value) => {
+                        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+                        assert_eq!(value.into_option(), expected);
+                    }
+                    ComputedValue::Int128(value) => {
+                        assert_eq!(value.metadata(), ComputedInt128Metadata::OwnInt128);
+                        assert_eq!(value.into_option(), expected.map(i128::from));
+                    }
+                    ComputedValue::Ieee754Bits(value) => {
+                        assert_eq!(
+                            value.metadata(),
+                            ComputedIeee754BitsMetadata::OwnIeee754Bits
+                        );
+                        assert_eq!(
+                            value.into_option(),
+                            expected.map(|value| (value as f64).to_bits())
+                        );
+                    }
+                    ComputedValue::Decimal(value) => {
+                        assert_eq!(value.metadata(), ComputedDecimalMetadata::OwnDecimal);
+                        assert_eq!(value.into_option(), expected.map(Decimal::from));
+                    }
+                    _ => panic!("MOD changed its exact result carrier"),
+                }
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            assert_eq!(worker.kernel_invocations(), 3);
+            let mut zero = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+                usize::MAX,
+            )
+            .unwrap();
+            let failure = zero
+                .eval_args_reported(args(operation, Some(17), Some(5)))
+                .unwrap_err();
+            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+            assert_eq!(failure.sql_failure(), None);
+            assert!(failure.native_binary_arithmetic_error().is_none());
+            assert!(failure.legacy_binary_arithmetic_error().is_none());
+            assert_eq!(zero.kernel_invocations(), 0);
+            assert!(zero.is_healthy());
+        }
+        let real = |left: f64, right: f64| EvaluatedArgs::Ieee754Bits2 {
+            left: ReadyIeee754Arg::Value(Some(left.to_bits())),
+            right: ReadyIeee754Arg::Value(Some(right.to_bits())),
+        };
+        let mut native = prepare(EvaluatedBytesOp::ModRealNative);
+        let mut legacy = prepare(EvaluatedBytesOp::ModRealLegacy);
+        for nonfinite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut failure = native.eval_args_reported(real(nonfinite, 2.0)).unwrap_err();
+            assert_eq!(failure.operation(), Some(EvaluatedBytesOp::ModRealNative));
+            assert_eq!(
+                failure.sql_failure(),
+                Some(EvaluatedSqlFailureKind::BinaryArithmeticNative)
+            );
+            assert_eq!(
+                failure.native_binary_arithmetic_error(),
+                Some(&NativeBinaryArithmeticError {
+                    operation: BinaryArithmeticOperation::Modulo,
+                    kind: BinaryArithmeticErrorKind::FloatOverflow,
+                })
+            );
+            assert!(failure.legacy_binary_arithmetic_error().is_none());
+            for wrong in [
+                EvaluatedBytesOp::AddRealNative,
+                EvaluatedBytesOp::ModRealLegacy,
+                EvaluatedBytesOp::ModIntSsNative,
+                EvaluatedBytesOp::ModDecimalNative,
+            ] {
+                failure.operation = Some(wrong);
+                assert!(failure.native_binary_arithmetic_error().is_none());
+            }
+            let ComputedValue::Ieee754Bits(value) = legacy.eval_args(real(nonfinite, 2.0)).unwrap()
+            else {
+                panic!("legacy MOD must retain IEEE NaN");
+            };
+            assert!(f64::from_bits(value.into_option().unwrap()).is_nan());
+            for worker in [&mut native, &mut legacy] {
+                let ComputedValue::Ieee754Bits(value) =
+                    worker.eval_args(real(nonfinite, -0.0)).unwrap()
+                else {
+                    panic!("zero divisor must own absent IEEE bits");
+                };
+                assert_eq!(value.into_option(), None);
+                assert!(worker.is_healthy());
+            }
+        }
+        for (left, right, expected) in [(2.0, f64::INFINITY, 2.0_f64), (-0.0, 2.0, -0.0)] {
+            for worker in [&mut native, &mut legacy] {
+                let ComputedValue::Ieee754Bits(value) =
+                    worker.eval_args(real(left, right)).unwrap()
+                else {
+                    panic!("MOD must own IEEE bits");
+                };
+                assert_eq!(value.into_option(), Some(expected.to_bits()));
+            }
+        }
+        let mut decimal = prepare(EvaluatedBytesOp::ModDecimalNative);
+        let (mut ready, arity, _) = args(EvaluatedBytesOp::ModDecimalNative, Some(17), Some(5))
+            .into_values(4096)
+            .unwrap();
+        ready[2] = ScalarValue::Int(Some(0));
+        let mut sql_failure = None;
+        assert!(matches!(
+            decimal.eval_ready(ready, arity, &mut sql_failure),
+            Err(LocalError::Evaluation(_))
+        ));
+        assert_eq!(
+            sql_failure, None,
+            "Decimal resource errors are not SQL overflow"
+        );
+        assert_eq!(decimal.kernel_invocations(), 1);
+        assert!(
+            decimal
+                .eval_args(args(EvaluatedBytesOp::ModDecimalNative, Some(17), Some(5)))
+                .is_ok()
+        );
+        assert!(decimal.is_healthy());
+        let wide = || Decimal::try_from_native_digits(false, &[b'9'; 90], 0, 0, 4096).unwrap();
+        let (left, right) = (wide(), wide());
+        let live = left.spill_capacity_bytes() + right.spill_capacity_bytes();
+        let (ready, arity, _) = EvaluatedArgs::Decimal2 {
+            left: Some(left),
+            right: Some(right),
+        }
+        .into_values(live + 64)
+        .unwrap();
+        assert_eq!(arity, 3);
+        assert_eq!(ready[2], ScalarValue::Int(Some(64)));
+        for (operation, input) in [
+            (
+                EvaluatedBytesOp::BinaryArithmeticNullNative,
+                EvaluatedArgs::NullWitness(None),
+            ),
+            (
+                EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
+                EvaluatedArgs::NoArgs,
+            ),
+        ] {
+            let ComputedValue::Int(value) = prepare(operation).eval_args(input).unwrap() else {
+                panic!("existing NULL/missing witnesses retain Int carrier");
+            };
+            assert_eq!(value.into_option(), None);
+        }
+        // Adding value-only MOD does not narrow old nullable arithmetic recipes.
+        for (operation, input) in [
+            (
+                EvaluatedBytesOp::AddIntSsNative,
+                EvaluatedArgs::Int2(None, Some(1)),
+            ),
+            (
+                EvaluatedBytesOp::AddInt128SignedLegacy,
+                EvaluatedArgs::Int1282(None, Some(1)),
+            ),
+            (
+                EvaluatedBytesOp::AddRealNative,
+                EvaluatedArgs::Ieee754Bits2 {
+                    left: ReadyIeee754Arg::Value(None),
+                    right: ReadyIeee754Arg::Value(Some(0)),
+                },
+            ),
+            (
+                EvaluatedBytesOp::AddDecimalNative,
+                EvaluatedArgs::Decimal2 {
+                    left: None,
+                    right: Some(Decimal::from(1i64)),
+                },
+            ),
+        ] {
+            assert!(prepare(operation).eval_args(input).is_ok());
+        }
+    }
 
     #[test]
     fn binary_arithmetic_dispatch_typed_failures_int128_and_budget() {

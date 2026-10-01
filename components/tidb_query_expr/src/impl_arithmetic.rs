@@ -28,6 +28,7 @@ pub enum BinaryArithmeticOperation {
     Add,
     Subtract,
     Multiply,
+    Modulo,
 }
 
 impl BinaryArithmeticOperation {
@@ -36,6 +37,7 @@ impl BinaryArithmeticOperation {
             Self::Add => "ADD",
             Self::Subtract => "SUBTRACT",
             Self::Multiply => "MULTIPLY",
+            Self::Modulo => "MOD",
         }
     }
 
@@ -44,6 +46,7 @@ impl BinaryArithmeticOperation {
             Self::Add => NativeDecimalBinaryOp::Add,
             Self::Subtract => NativeDecimalBinaryOp::Subtract,
             Self::Multiply => NativeDecimalBinaryOp::Multiply,
+            Self::Modulo => unreachable!("MOD requires its dedicated remainder recipe"),
         }
     }
 }
@@ -264,6 +267,9 @@ where
         BinaryArithmeticOperation::Add => lhs + rhs,
         BinaryArithmeticOperation::Subtract => lhs - rhs,
         BinaryArithmeticOperation::Multiply => lhs * rhs,
+        BinaryArithmeticOperation::Modulo => {
+            unreachable!("MOD requires its dedicated remainder recipe")
+        }
     }
 }
 
@@ -287,6 +293,9 @@ fn native_integer_binary(
         // Native unsigned multiply always reads BOTH original u64 bit patterns.
         BinaryArithmeticOperation::Multiply => {
             checked_multiply_integer(lhs, rhs, lhs_unsigned || rhs_unsigned)
+        }
+        BinaryArithmeticOperation::Modulo => {
+            return Err(other_err!("MOD requires its dedicated remainder recipe"));
         }
     };
     value.map(Some).ok_or_else(|| {
@@ -478,6 +487,9 @@ fn legacy_integer_binary(
         BinaryArithmeticOperation::Add => lhs.checked_add(rhs),
         BinaryArithmeticOperation::Subtract => lhs.checked_sub(rhs),
         BinaryArithmeticOperation::Multiply => lhs.checked_mul(rhs),
+        BinaryArithmeticOperation::Modulo => {
+            return Err(other_err!("MOD requires its dedicated remainder recipe"));
+        }
     };
     let negative = match reject {
         LegacyNegativeOperand::Neither => false,
@@ -527,6 +539,89 @@ legacy_integer_binary_recipe!(sub_int128_reject_left_legacy, Subtract, true, Lef
 legacy_integer_binary_recipe!(sub_int128_reject_right_legacy, Subtract, true, Right);
 legacy_integer_binary_recipe!(mul_int128_signed_legacy, Multiply, false, Neither);
 legacy_integer_binary_recipe!(mul_int128_unsigned_legacy, Multiply, true, Neither);
+
+// Closed MOD value recipes accept non-NULL operands. The frontend owns NULL
+// witnesses, result signedness, and warnings after a successful zero divisor.
+#[rpn_fn]
+fn mod_int_ss_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    if *rhs == 0 {
+        return Ok(None);
+    }
+    Ok(Some(lhs.wrapping_rem(*rhs)))
+}
+
+#[rpn_fn]
+fn mod_int_su_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    if *rhs == 0 {
+        return Ok(None);
+    }
+    let value = if *lhs < 0 {
+        // Preserve the original native negation, including its overflow quirk.
+        -((lhs.unsigned_abs() % (*rhs as u64)) as i64)
+    } else {
+        ((*lhs as u64) % (*rhs as u64)) as i64
+    };
+    Ok(Some(value))
+}
+
+#[rpn_fn]
+fn mod_int_us_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    if *rhs == 0 {
+        return Ok(None);
+    }
+    Ok(Some(((*lhs as u64) % rhs.unsigned_abs()) as i64))
+}
+
+#[rpn_fn]
+fn mod_int_uu_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    if *rhs == 0 {
+        return Ok(None);
+    }
+    Ok(Some(((*lhs as u64) % (*rhs as u64)) as i64))
+}
+
+#[rpn_fn]
+fn mod_int128_legacy(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
+    let lhs = binary_raw_i128(lhs)?;
+    let rhs = binary_raw_i128(rhs)?;
+    if rhs == 0 {
+        return Ok(None);
+    }
+    // Deliberately retain full-width legacy %, including MIN % -1 panic.
+    Ok(Some((lhs % rhs).to_le_bytes().to_vec()))
+}
+
+fn real_modulo(lhs: BytesRef, rhs: BytesRef, native: bool) -> Result<Option<Bytes>> {
+    let lhs = binary_raw_f64(Some(lhs))?.expect("non-NULL MOD operand");
+    let rhs = binary_raw_f64(Some(rhs))?.expect("non-NULL MOD operand");
+    if rhs == 0.0 {
+        return Ok(None);
+    }
+    let value = lhs % rhs;
+    if native && !value.is_finite() {
+        return Err(native_binary_arithmetic_error(
+            BinaryArithmeticOperation::Modulo,
+            BinaryArithmeticErrorKind::FloatOverflow,
+        ));
+    }
+    Ok(Some(value.to_bits().to_le_bytes().to_vec()))
+}
+
+#[rpn_fn]
+fn mod_real_native(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
+    real_modulo(lhs, rhs, true)
+}
+
+#[rpn_fn]
+fn mod_real_legacy(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
+    real_modulo(lhs, rhs, false)
+}
+
+#[rpn_fn]
+fn mod_decimal_native(lhs: &Decimal, rhs: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
+    lhs.try_native_rem(rhs, native_decimal_budget(budget)?)
+        .map_err(native_decimal_failure)
+}
 
 #[rpn_fn(nullable)]
 fn binary_arithmetic_null_native(witness: Option<&Int>) -> Result<Option<Int>> {
@@ -1050,6 +1145,94 @@ impl ArithmeticOpWithCtx for RealDivide {
                 Some(result)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod native_modulo_tests {
+    use tidb_query_common::error::ErrorInner;
+
+    use super::*;
+
+    #[test]
+    fn modulo_integer_profiles_zero_and_full_width() {
+        assert_eq!(mod_int_ss_native(&i64::MIN, &-1).unwrap(), Some(0));
+        assert_eq!(mod_int_ss_native(&-13, &5).unwrap(), Some(-3));
+        assert_eq!(mod_int_su_native(&-13, &5).unwrap(), Some(-3));
+        assert_eq!(mod_int_su_native(&i64::MIN, &3).unwrap(), Some(-2));
+        assert_eq!(mod_int_us_native(&-1, &i64::MIN).unwrap(), Some(i64::MAX));
+        assert_eq!(mod_int_uu_native(&-2, &-1).unwrap(), Some(-2));
+        for recipe in [
+            mod_int_ss_native,
+            mod_int_su_native,
+            mod_int_us_native,
+            mod_int_uu_native,
+        ] {
+            assert_eq!(recipe(&i64::MIN, &0).unwrap(), None);
+        }
+        let lhs = (1_i128 << 100) + 7;
+        let rhs = (1_i128 << 99) + 1;
+        let result = mod_int128_legacy(&lhs.to_le_bytes(), &rhs.to_le_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(binary_raw_i128(&result).unwrap(), 5);
+        assert_eq!(
+            mod_int128_legacy(&lhs.to_le_bytes(), &0_i128.to_le_bytes()).unwrap(),
+            None
+        );
+        assert!(mod_int128_legacy(b"short", &0_i128.to_le_bytes()).is_err());
+        assert!(
+            std::panic::catch_unwind(|| {
+                mod_int128_legacy(&i128::MIN.to_le_bytes(), &(-1_i128).to_le_bytes())
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn modulo_real_raw_bits_errors_and_decimal_zero() {
+        let bits = |value: f64| value.to_bits().to_le_bytes();
+        let negative_zero = bits(-0.0);
+        let two = bits(2.0);
+        for recipe in [mod_real_native, mod_real_legacy] {
+            assert_eq!(
+                recipe(&negative_zero, &two).unwrap(),
+                Some(negative_zero.to_vec())
+            );
+            assert_eq!(recipe(&two, &negative_zero).unwrap(), None);
+            assert!(recipe(b"short", &negative_zero).is_err());
+            assert!(recipe(&two, b"short").is_err());
+        }
+        for value in [f64::INFINITY, f64::from_bits(0x7ff8_0000_0000_0042)] {
+            let error = mod_real_native(&bits(value), &two).unwrap_err();
+            match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::Caused(cause)) => assert_eq!(
+                    cause.downcast_ref::<NativeBinaryArithmeticError>(),
+                    Some(&NativeBinaryArithmeticError {
+                        operation: BinaryArithmeticOperation::Modulo,
+                        kind: BinaryArithmeticErrorKind::FloatOverflow,
+                    })
+                ),
+                _ => panic!("lost typed MOD error: {error:?}"),
+            }
+            let legacy = mod_real_legacy(&bits(value), &two).unwrap().unwrap();
+            assert!(binary_raw_f64(Some(&legacy)).unwrap().unwrap().is_nan());
+        }
+        assert_eq!(
+            mod_real_native(&two, &bits(f64::INFINITY)).unwrap(),
+            Some(two.to_vec())
+        );
+        let lhs = Decimal::from(-13_i64);
+        let rhs = Decimal::from(5_i64);
+        assert_eq!(
+            mod_decimal_native(&lhs, &rhs, &4096).unwrap(),
+            Some(Decimal::from(-3_i64))
+        );
+        assert_eq!(
+            mod_decimal_native(&lhs, &Decimal::from(0_i64), &4096).unwrap(),
+            None
+        );
+        assert!(mod_decimal_native(&lhs, &rhs, &-1).is_err());
     }
 }
 

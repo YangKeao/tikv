@@ -344,6 +344,23 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  MOD adds eight unit-metadata value recipes in `impl_arithmetic.rs`: four
+  native integer signedness profiles, one full-i128 legacy profile, native/legacy
+  raw-real profiles and a shared exact Decimal profile. Only these new recipes
+  require two actual non-NULL inputs at both admission layers. Existing genuine
+  NULL/missing recipes remain separate: a successful value-recipe NULL means
+  zero divisor, so native callers apply their original handler after consuming
+  the computed result; legacy callers keep their silent NULL. No host divisor
+  test or shared-context warning is introduced. Native real nonfinite results
+  alone authenticate the exact Modulo/FloatOverflow cause; legacy IEEE results
+  and original signed remainder quirks remain distinct. Datatype
+  `Decimal::try_native_rem` validates native inputs and reuses the private Grow
+  remainder loop, preflighting live scratch/output words before allocation.
+  This known-word budget is not whole-heap/allocator accounting. The native
+  public remainder becomes a thin bridge; DIV/IntDIV, wire behavior and old
+  three-operation fast kernels remain unchanged. Existing Decimal2's third
+  infrastructure budget slot suffices; no new role, result kind, typed binding
+  or driver is added.
   LIKE/ILIKE add five closed recipes in `impl_like.rs`; `native_like.rs` owns
   compiled native patterns, ASCII ILIKE policy and live-cache invocations over
   the existing datatype wildcard engine. The three non-NULL recipes have three

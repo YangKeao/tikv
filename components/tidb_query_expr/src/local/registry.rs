@@ -317,7 +317,15 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::BinaryArithmeticMissingLegacy
         | LocalFunctionId::AddDecimalFastNative
         | LocalFunctionId::SubDecimalFastNative
-        | LocalFunctionId::MulDecimalFastNative => Err(other_err!(
+        | LocalFunctionId::MulDecimalFastNative
+        | LocalFunctionId::ModIntSsNative
+        | LocalFunctionId::ModIntSuNative
+        | LocalFunctionId::ModIntUsNative
+        | LocalFunctionId::ModIntUuNative
+        | LocalFunctionId::ModInt128Legacy
+        | LocalFunctionId::ModRealNative
+        | LocalFunctionId::ModRealLegacy
+        | LocalFunctionId::ModDecimalNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

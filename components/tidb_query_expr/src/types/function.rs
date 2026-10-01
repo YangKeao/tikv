@@ -367,6 +367,14 @@ pub enum LocalFunctionId {
     AddDecimalFastNative,
     SubDecimalFastNative,
     MulDecimalFastNative,
+    ModIntSsNative,
+    ModIntSuNative,
+    ModIntUsNative,
+    ModIntUuNative,
+    ModInt128Legacy,
+    ModRealNative,
+    ModRealLegacy,
+    ModDecimalNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

@@ -7895,6 +7895,132 @@ fn local_evaluated_args_date_format_core_keeps_roles_and_missing_distinct() {
 }
 
 #[test]
+fn modulo_dispatch_exact_getters_roles_and_private_shapes() {
+    use EvalType::{Bytes, Decimal, Int};
+    use EvaluatedArgsRole::{DecimalBinary, Ieee754Bits2, Int1282, Values};
+
+    use super::compile::{ProgramEntry, compile_evaluated_bytes};
+    use crate::RpnExpressionNode;
+
+    let cases: &[(
+        EvaluatedBytesOp,
+        crate::RpnFnMeta,
+        EvaluatedArgsRole,
+        &[EvalType],
+        EvalType,
+    )] = &[
+        (
+            EvaluatedBytesOp::ModIntSsNative,
+            crate::impl_arithmetic::mod_int_ss_native_fn_meta(),
+            Values,
+            &[Int, Int],
+            Int,
+        ),
+        (
+            EvaluatedBytesOp::ModIntSuNative,
+            crate::impl_arithmetic::mod_int_su_native_fn_meta(),
+            Values,
+            &[Int, Int],
+            Int,
+        ),
+        (
+            EvaluatedBytesOp::ModIntUsNative,
+            crate::impl_arithmetic::mod_int_us_native_fn_meta(),
+            Values,
+            &[Int, Int],
+            Int,
+        ),
+        (
+            EvaluatedBytesOp::ModIntUuNative,
+            crate::impl_arithmetic::mod_int_uu_native_fn_meta(),
+            Values,
+            &[Int, Int],
+            Int,
+        ),
+        (
+            EvaluatedBytesOp::ModInt128Legacy,
+            crate::impl_arithmetic::mod_int128_legacy_fn_meta(),
+            Int1282,
+            &[Bytes, Bytes],
+            Bytes,
+        ),
+        (
+            EvaluatedBytesOp::ModRealNative,
+            crate::impl_arithmetic::mod_real_native_fn_meta(),
+            Ieee754Bits2,
+            &[Bytes, Bytes],
+            Bytes,
+        ),
+        (
+            EvaluatedBytesOp::ModRealLegacy,
+            crate::impl_arithmetic::mod_real_legacy_fn_meta(),
+            Ieee754Bits2,
+            &[Bytes, Bytes],
+            Bytes,
+        ),
+        (
+            EvaluatedBytesOp::ModDecimalNative,
+            crate::impl_arithmetic::mod_decimal_native_fn_meta(),
+            DecimalBinary,
+            &[Decimal, Decimal, Int],
+            Decimal,
+        ),
+    ];
+    for (operation, getter, role, inputs, output) in cases {
+        assert_eq!(operation.input_role(), *role);
+        assert_eq!(operation.input_types(), *inputs);
+        assert_eq!(operation.eval_type(), *output);
+        assert_eq!(operation.call_count(), 1);
+        assert!(operation.is_modulo_value());
+        assert!(matches!(
+            operation.kernel_kind(),
+            EvaluatedKernelKind::ClosedPrivate(_)
+        ));
+        let program = compile_evaluated_bytes(*operation, LocalCompileContext::default()).unwrap();
+        assert!(program.check_entry(ProgramEntry::EvaluatedBytes).is_ok());
+        assert!(program.check_entry(ProgramEntry::Row).is_err());
+        assert_eq!(program.expression.len(), inputs.len() + 1);
+        let RpnExpressionNode::FnCall {
+            func_meta,
+            args_len,
+            metadata,
+            ..
+        } = &program.expression[inputs.len()]
+        else {
+            panic!("MOD must dispatch its canonical generated wrapper");
+        };
+        assert_eq!(*args_len, inputs.len());
+        assert!(metadata.is::<()>());
+        assert_eq!(func_meta.name, getter.name);
+        assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.validator_ptr,
+            getter.validator_ptr
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.metadata_ptr,
+            getter.metadata_ptr
+        ));
+        let spec = LocalExpr::Call {
+            function: operation.function_ref(),
+            args: program
+                .schema
+                .iter()
+                .enumerate()
+                .map(|(slot, field_type)| LocalExpr::InputSlot {
+                    slot,
+                    field_type: field_type.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            return_type: operation.return_type(),
+            metadata: crate::CallMetadata::None,
+        };
+        assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+    }
+}
+
+#[test]
 fn binary_arithmetic_dispatch_exact_getters_roles_and_unit_shapes() {
     use EvalType::{Bytes, Decimal, Int, VectorFloat32};
     use EvaluatedArgsRole::{

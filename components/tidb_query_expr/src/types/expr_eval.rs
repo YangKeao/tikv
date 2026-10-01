@@ -377,6 +377,15 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (!operation.is_modulo_value()
+            || values.iter().take(2).all(|value| {
+                matches!(
+                    value,
+                    ScalarValue::Int(Some(_))
+                        | ScalarValue::Bytes(Some(_))
+                        | ScalarValue::Decimal(Some(_))
+                )
+            }))
         && values.iter().zip(types).all(|(value, eval_type)| {
             matches!(
                 (value, *eval_type),
@@ -674,6 +683,8 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::AddRealLegacy
                         | EvaluatedBytesOp::SubRealLegacy
                         | EvaluatedBytesOp::MulRealLegacy
+                        | EvaluatedBytesOp::ModRealNative
+                        | EvaluatedBytesOp::ModRealLegacy
                 ) && values.len() == 2
                     && values.iter().all(|value| match value {
                         ScalarValue::Bytes(None) => true,

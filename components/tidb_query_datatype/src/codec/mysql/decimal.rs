@@ -1061,6 +1061,26 @@ fn divide_with_limit(
     limit: WordLimit,
     result_frac_cnt: Option<usize>,
 ) -> Result<Option<DivisionOutput>> {
+    divide_with_limit_and_budget(lhs, rhs, request, limit, result_frac_cnt, None)
+}
+
+// Only native MOD supplies a live scratch/output allowance. Existing wire and
+// private quotient callers retain their original allocation/count behavior.
+fn divide_with_limit_and_budget(
+    lhs: &Decimal,
+    rhs: &Decimal,
+    request: DivisionRequest,
+    limit: WordLimit,
+    result_frac_cnt: Option<usize>,
+    remainder_budget: Option<usize>,
+) -> Result<Option<DivisionOutput>> {
+    if remainder_budget.is_some()
+        && (request != DivisionRequest::Remainder || limit != WordLimit::Grow)
+    {
+        return Err(Error::InvalidDataType(
+            "native remainder budget requires remainder-only Grow".to_owned(),
+        ));
+    }
     if request == DivisionRequest::IntegerPair && limit != WordLimit::Grow {
         return Err(Error::InvalidDataType(
             "full integer pair requires Grow capacity".to_owned(),
@@ -1106,6 +1126,10 @@ fn divide_with_limit(
         DivisionRequest::Remainder | DivisionRequest::IntegerPair => 0,
     };
     if l_prec == 0 {
+        if let Some(budget) = remainder_budget {
+            native_decimal_word_budget(remainder_scale.div_ceil(DIGITS_PER_WORD), budget)
+                .map_err(|_| decimal_resource_error("native remainder output exceeds limit"))?;
+        }
         // Legacy zero uses the requested visible scale; AVG and exact
         // remainder instead retain their independently planned storage scale.
         let quotient = if request.quotient() {
@@ -1228,6 +1252,19 @@ fn divide_with_limit(
         0
     };
     let scratch_words = 3.max(lhs_words).max(loop_words).max(remainder_stop);
+    if let Some(budget) = remainder_budget {
+        // The output's integer extent can only shrink as l_idx advances. A
+        // fractional gap occupies output cells even when no scratch is copied.
+        // Charge both simultaneously live buffers, including inline output
+        // cells, before either allocation. Borrowed inputs are not charged
+        // again; exact finishing canonicalizes this output in place.
+        let output_words = WORD_BUF_LEN.max(remainder_stop).max(remainder_words);
+        let live_words = scratch_words
+            .checked_add(output_words)
+            .ok_or_else(|| decimal_resource_error("native remainder live extent overflow"))?;
+        native_decimal_word_budget(live_words, budget)
+            .map_err(|_| decimal_resource_error("native remainder live buffers exceed limit"))?;
+    }
     let mut buf = try_zeroed_words(scratch_words)?;
     let l_stop = l_start
         .checked_add(lhs_words)
@@ -2132,6 +2169,37 @@ impl Decimal {
         value
             .try_native_math(NativeDecimalOp::Truncate(kept), limit)
             .map(Res::Truncated)
+    }
+
+    /// Exact native MOD: retain the maximum storage and visible scales, with
+    /// the dividend's sign except for normalized zero. None means an actual
+    /// zero divisor; shape/count/resource refusals are errors, not SQL
+    /// statuses. In addition to input admission, `limit` bounds the
+    /// simultaneously live division scratch and output word bytes
+    /// (including inline output cells), not borrowed inputs, allocator
+    /// capacity, or a SQL precision limit.
+    pub fn try_native_rem(&self, rhs: &Self, limit: usize) -> NativeDecimalResult<Option<Self>> {
+        self.check_native_math_value(limit)?;
+        rhs.check_native_math_value(limit)?;
+        let visible = self.result_frac_cnt.max(rhs.result_frac_cnt);
+        let Some(output) = divide_with_limit_and_budget(
+            self,
+            rhs,
+            DivisionRequest::Remainder,
+            WordLimit::Grow,
+            Some(visible),
+            Some(limit),
+        )
+        .map_err(NativeDecimalError::Core)?
+        else {
+            return Ok(None);
+        };
+        let remainder = output.remainder.ok_or_else(|| {
+            NativeDecimalError::Core(decimal_resource_error("missing requested native remainder"))
+        })?;
+        Self::try_finish_exact(remainder, visible)
+            .map(Some)
+            .map_err(NativeDecimalError::Core)
     }
 
     fn native_positive_maximum(limit: usize) -> NativeDecimalResult<Self> {
@@ -4919,6 +4987,72 @@ impl Hash for Decimal {
         // -0 should be not negative.
         let negative = self.negative && (start as isize <= end);
         negative.hash(state);
+    }
+}
+
+#[cfg(test)]
+mod native_remainder_tests {
+    use super::*;
+
+    #[test]
+    fn native_remainder_preflights_live_buffers_and_keeps_errors_distinct() {
+        let left = Decimal::try_from_native_digits(true, b"23", 0, 0, 256).unwrap();
+        let right = Decimal::try_from_native_digits(false, b"7", 0, 0, 256).unwrap();
+        // Both operands and the output individually fit 36 bytes. The shared
+        // division still needs three scratch words live beside nine output cells.
+        assert!(matches!(
+            left.try_native_rem(&right, 47),
+            Err(NativeDecimalError::Core(_))
+        ));
+        assert_eq!(
+            left.try_native_rem(&right, 48)
+                .unwrap()
+                .unwrap()
+                .to_string_value(),
+            "-2"
+        );
+        let tiny = Decimal::try_from_native_digits(
+            true,
+            format!("{}1", "0".repeat(89)).as_bytes(),
+            90,
+            31,
+            256,
+        )
+        .unwrap();
+        // The fractional gap belongs to the ten-word output, not the short
+        // scratch tail. No nine-word cap or visible-scale rounding is allowed.
+        assert!(matches!(
+            tiny.try_native_rem(&right, 51),
+            Err(NativeDecimalError::Core(_))
+        ));
+        let remainder = tiny.try_native_rem(&right, 52).unwrap().unwrap();
+        assert_eq!(
+            (remainder.storage_scale(), remainder.result_scale()),
+            (90, 31)
+        );
+        assert_eq!(
+            remainder.to_string_value(),
+            format!("-0.{}1", "0".repeat(89))
+        );
+        assert!(remainder.words().words.len() > WORD_BUF_LEN);
+        let zero = Decimal::try_from_native_digits(true, b"000", 3, 2, 256).unwrap();
+        let remainder = zero.try_native_rem(&right, 36).unwrap().unwrap();
+        assert!(remainder.is_zero() && !remainder.is_negative());
+        assert_eq!(
+            (remainder.storage_scale(), remainder.result_scale()),
+            (3, 2)
+        );
+        assert!(left.try_native_rem(&zero, 36).unwrap().is_none());
+        assert!(matches!(
+            left.try_native_rem(&zero, 35),
+            Err(NativeDecimalError::Resource(_))
+        ));
+        let mut invalid = right;
+        invalid.result_frac_cnt = 1;
+        assert!(matches!(
+            left.try_native_rem(&invalid, 256),
+            Err(NativeDecimalError::InvalidInput(_))
+        ));
     }
 }
 
