@@ -1,6 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{convert::TryFrom, io::Read};
+use std::{convert::TryFrom, fmt, io::Read};
 
 use byteorder::{ByteOrder, LittleEndian};
 use crypto::rand;
@@ -25,6 +25,181 @@ const SHA384: i64 = 384;
 const SHA512: i64 = 512;
 
 const MAX_RAND_BYTES_LENGTH: i64 = 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeAesOperation {
+    Encrypt,
+    Decrypt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeAesProfile {
+    Aes128Ecb,
+    Aes192Ecb,
+    Aes256Ecb,
+    Aes128Cbc,
+    Aes192Cbc,
+    Aes256Cbc,
+    Aes128Ofb,
+    Aes192Ofb,
+    Aes256Ofb,
+    Aes128Cfb,
+    Aes192Cfb,
+    Aes256Cfb,
+}
+
+impl NativeAesProfile {
+    fn key_size(self) -> usize {
+        match self {
+            Self::Aes128Ecb | Self::Aes128Cbc | Self::Aes128Ofb | Self::Aes128Cfb => 16,
+            Self::Aes192Ecb | Self::Aes192Cbc | Self::Aes192Ofb | Self::Aes192Cfb => 24,
+            Self::Aes256Ecb | Self::Aes256Cbc | Self::Aes256Ofb | Self::Aes256Cfb => 32,
+        }
+    }
+
+    fn iv_required(self) -> bool {
+        !matches!(self, Self::Aes128Ecb | Self::Aes192Ecb | Self::Aes256Ecb)
+    }
+}
+
+/// Only an actual short IV produces this SQL cause. Admission and transport
+/// failures stay infrastructure errors; the receipt authenticates both fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeAesError {
+    operation: NativeAesOperation,
+    profile: NativeAesProfile,
+}
+
+impl NativeAesError {
+    pub fn operation(&self) -> NativeAesOperation {
+        self.operation
+    }
+
+    pub fn profile(&self) -> NativeAesProfile {
+        self.profile
+    }
+}
+
+impl fmt::Display for NativeAesError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let function = match self.operation {
+            NativeAesOperation::Encrypt => "aes_encrypt",
+            NativeAesOperation::Decrypt => "aes_decrypt",
+        };
+        write!(
+            formatter,
+            "The initialization vector supplied to {function} is too short. Must be at least 16 bytes long"
+        )
+    }
+}
+
+impl std::error::Error for NativeAesError {}
+
+fn native_aes(
+    operation: NativeAesOperation,
+    profile: NativeAesProfile,
+    input: BytesRef,
+    password: BytesRef,
+    iv: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    use NativeAesOperation::{Decrypt, Encrypt};
+    use NativeAesProfile::*;
+    use tidb_query_crypto::aes;
+
+    let iv = if profile.iv_required() {
+        let iv = iv.ok_or_else(|| other_err!("Native AES IV recipe requires its IV operand"))?;
+        if iv.len() < 16 {
+            return Err(
+                EvaluateError::Caused(Box::new(NativeAesError { operation, profile })).into(),
+            );
+        }
+        &iv[..16]
+    } else {
+        if iv.is_some() {
+            return Err(other_err!(
+                "Native AES ECB recipe must not receive an IV operand"
+            ));
+        }
+        &[]
+    };
+    let key = aes::derive_key_mysql(password, profile.key_size());
+    let result: std::result::Result<Bytes, aes::EncryptError> = match (operation, profile) {
+        (Encrypt, Aes128Ecb | Aes192Ecb | Aes256Ecb) => aes::aes_encrypt_with_ecb(input, &key),
+        (Decrypt, Aes128Ecb | Aes192Ecb | Aes256Ecb) => aes::aes_decrypt_with_ecb(input, &key),
+        (Encrypt, Aes128Cbc | Aes192Cbc | Aes256Cbc) => aes::aes_encrypt_with_cbc(input, &key, iv),
+        (Decrypt, Aes128Cbc | Aes192Cbc | Aes256Cbc) => aes::aes_decrypt_with_cbc(input, &key, iv),
+        (Encrypt, Aes128Ofb | Aes192Ofb | Aes256Ofb) => aes::aes_encrypt_with_ofb(input, &key, iv),
+        (Decrypt, Aes128Ofb | Aes192Ofb | Aes256Ofb) => aes::aes_decrypt_with_ofb(input, &key, iv),
+        (Encrypt, Aes128Cfb | Aes192Cfb | Aes256Cfb) => aes::aes_encrypt_with_cfb(input, &key, iv),
+        (Decrypt, Aes128Cfb | Aes192Cfb | Aes256Cfb) => aes::aes_decrypt_with_cfb(input, &key, iv),
+    };
+    // Only the shared cipher's source-compatible EncryptError becomes SQL NULL.
+    // Do not apply this conversion to admission, allocation, or transport errors.
+    Ok(result.ok())
+}
+
+macro_rules! native_aes_ecb_recipe {
+    ($name:ident, $operation:ident, $profile:ident) => {
+        #[rpn_fn]
+        fn $name(input: BytesRef, password: BytesRef) -> Result<Option<Bytes>> {
+            native_aes(
+                NativeAesOperation::$operation,
+                NativeAesProfile::$profile,
+                input,
+                password,
+                None,
+            )
+        }
+    };
+}
+
+macro_rules! native_aes_iv_recipe {
+    ($name:ident, $operation:ident, $profile:ident) => {
+        #[rpn_fn]
+        fn $name(input: BytesRef, password: BytesRef, iv: BytesRef) -> Result<Option<Bytes>> {
+            native_aes(
+                NativeAesOperation::$operation,
+                NativeAesProfile::$profile,
+                input,
+                password,
+                Some(iv),
+            )
+        }
+    };
+}
+
+native_aes_ecb_recipe!(aes_encrypt_128_ecb_native, Encrypt, Aes128Ecb);
+native_aes_ecb_recipe!(aes_encrypt_192_ecb_native, Encrypt, Aes192Ecb);
+native_aes_ecb_recipe!(aes_encrypt_256_ecb_native, Encrypt, Aes256Ecb);
+native_aes_ecb_recipe!(aes_decrypt_128_ecb_native, Decrypt, Aes128Ecb);
+native_aes_ecb_recipe!(aes_decrypt_192_ecb_native, Decrypt, Aes192Ecb);
+native_aes_ecb_recipe!(aes_decrypt_256_ecb_native, Decrypt, Aes256Ecb);
+native_aes_iv_recipe!(aes_encrypt_128_cbc_native, Encrypt, Aes128Cbc);
+native_aes_iv_recipe!(aes_encrypt_192_cbc_native, Encrypt, Aes192Cbc);
+native_aes_iv_recipe!(aes_encrypt_256_cbc_native, Encrypt, Aes256Cbc);
+native_aes_iv_recipe!(aes_decrypt_128_cbc_native, Decrypt, Aes128Cbc);
+native_aes_iv_recipe!(aes_decrypt_192_cbc_native, Decrypt, Aes192Cbc);
+native_aes_iv_recipe!(aes_decrypt_256_cbc_native, Decrypt, Aes256Cbc);
+native_aes_iv_recipe!(aes_encrypt_128_ofb_native, Encrypt, Aes128Ofb);
+native_aes_iv_recipe!(aes_encrypt_192_ofb_native, Encrypt, Aes192Ofb);
+native_aes_iv_recipe!(aes_encrypt_256_ofb_native, Encrypt, Aes256Ofb);
+native_aes_iv_recipe!(aes_decrypt_128_ofb_native, Decrypt, Aes128Ofb);
+native_aes_iv_recipe!(aes_decrypt_192_ofb_native, Decrypt, Aes192Ofb);
+native_aes_iv_recipe!(aes_decrypt_256_ofb_native, Decrypt, Aes256Ofb);
+native_aes_iv_recipe!(aes_encrypt_128_cfb_native, Encrypt, Aes128Cfb);
+native_aes_iv_recipe!(aes_encrypt_192_cfb_native, Encrypt, Aes192Cfb);
+native_aes_iv_recipe!(aes_encrypt_256_cfb_native, Encrypt, Aes256Cfb);
+native_aes_iv_recipe!(aes_decrypt_128_cfb_native, Decrypt, Aes128Cfb);
+native_aes_iv_recipe!(aes_decrypt_192_cfb_native, Decrypt, Aes192Cfb);
+native_aes_iv_recipe!(aes_decrypt_256_cfb_native, Decrypt, Aes256Cfb);
+
+#[rpn_fn(nullable)]
+fn aes_null_native(witness: Option<&Int>) -> Result<Option<Bytes>> {
+    match witness {
+        None => Ok(None),
+        Some(_) => Err(other_err!("Native AES NULL witness must be an actual NULL")),
+    }
+}
 
 #[rpn_fn(nullable)]
 #[inline]
@@ -372,6 +547,247 @@ pub fn random_bytes(_ctx: &mut EvalContext, arg: Option<&Int>) -> Result<Option<
             Ok(Some(rand_bytes))
         }
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod native_aes_tests {
+    use tidb_query_common::error::ErrorInner;
+
+    use super::*;
+
+    type EcbRecipe = fn(&[u8], &[u8]) -> Result<Option<Bytes>>;
+    type IvRecipe = fn(&[u8], &[u8], &[u8]) -> Result<Option<Bytes>>;
+    const KEY128: &str = "2b7e151628aed2a6abf7158809cf4f3c";
+    const KEY192: &str = "8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b";
+    const KEY256: &str = "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4";
+
+    // NIST SP 800-38A two-block vectors distinguish OFB from CFB. MySQL
+    // ECB/CBC append PKCS#7; the stream modes preserve the input length.
+    const ECB: [(EcbRecipe, EcbRecipe, &str, &str); 3] = [
+        (
+            aes_encrypt_128_ecb_native,
+            aes_decrypt_128_ecb_native,
+            KEY128,
+            concat!(
+                "3ad77bb40d7a3660a89ecaf32466ef97",
+                "f5d3d58503b9699de785895a96fdbaaf"
+            ),
+        ),
+        (
+            aes_encrypt_192_ecb_native,
+            aes_decrypt_192_ecb_native,
+            KEY192,
+            concat!(
+                "bd334f1d6e45f25ff712a214571fa5cc",
+                "974104846d0ad3ad7734ecb3ecee4eef"
+            ),
+        ),
+        (
+            aes_encrypt_256_ecb_native,
+            aes_decrypt_256_ecb_native,
+            KEY256,
+            concat!(
+                "f3eed1bdb5d2a03c064b5a7e3db181f8",
+                "591ccb10d410ed26dc5ba74a31362870"
+            ),
+        ),
+    ];
+    const IV: [(NativeAesProfile, IvRecipe, IvRecipe, &str, &str); 9] = [
+        (
+            NativeAesProfile::Aes128Cbc,
+            aes_encrypt_128_cbc_native,
+            aes_decrypt_128_cbc_native,
+            KEY128,
+            concat!(
+                "7649abac8119b246cee98e9b12e9197d",
+                "5086cb9b507219ee95db113a917678b2"
+            ),
+        ),
+        (
+            NativeAesProfile::Aes192Cbc,
+            aes_encrypt_192_cbc_native,
+            aes_decrypt_192_cbc_native,
+            KEY192,
+            concat!(
+                "4f021db243bc633d7178183a9fa071e8",
+                "b4d9ada9ad7dedf4e5e738763f69145a"
+            ),
+        ),
+        (
+            NativeAesProfile::Aes256Cbc,
+            aes_encrypt_256_cbc_native,
+            aes_decrypt_256_cbc_native,
+            KEY256,
+            concat!(
+                "f58c4c04d6e5f1ba779eabfb5f7bfbd6",
+                "9cfc4e967edb808d679f777bc6702c7d"
+            ),
+        ),
+        (
+            NativeAesProfile::Aes128Ofb,
+            aes_encrypt_128_ofb_native,
+            aes_decrypt_128_ofb_native,
+            KEY128,
+            concat!(
+                "3b3fd92eb72dad20333449f8e83cfb4a",
+                "7789508d16918f03f53c52dac54ed825"
+            ),
+        ),
+        (
+            NativeAesProfile::Aes192Ofb,
+            aes_encrypt_192_ofb_native,
+            aes_decrypt_192_ofb_native,
+            KEY192,
+            concat!(
+                "cdc80d6fddf18cab34c25909c99a4174",
+                "fcc28b8d4c63837c09e81700c1100401"
+            ),
+        ),
+        (
+            NativeAesProfile::Aes256Ofb,
+            aes_encrypt_256_ofb_native,
+            aes_decrypt_256_ofb_native,
+            KEY256,
+            concat!(
+                "dc7e84bfda79164b7ecd8486985d3860",
+                "4febdc6740d20b3ac88f6ad82a4fb08d"
+            ),
+        ),
+        (
+            NativeAesProfile::Aes128Cfb,
+            aes_encrypt_128_cfb_native,
+            aes_decrypt_128_cfb_native,
+            KEY128,
+            concat!(
+                "3b3fd92eb72dad20333449f8e83cfb4a",
+                "c8a64537a0b3a93fcde3cdad9f1ce58b"
+            ),
+        ),
+        (
+            NativeAesProfile::Aes192Cfb,
+            aes_encrypt_192_cfb_native,
+            aes_decrypt_192_cfb_native,
+            KEY192,
+            concat!(
+                "cdc80d6fddf18cab34c25909c99a4174",
+                "67ce7f7f81173621961a2b70171d3d7a"
+            ),
+        ),
+        (
+            NativeAesProfile::Aes256Cfb,
+            aes_encrypt_256_cfb_native,
+            aes_decrypt_256_cfb_native,
+            KEY256,
+            concat!(
+                "dc7e84bfda79164b7ecd8486985d3860",
+                "39ffed143b28b1c832113c6331e5407b"
+            ),
+        ),
+    ];
+
+    #[test]
+    fn native_aes_static_nist_and_go_ciphertexts() {
+        let plaintext = hex::decode(concat!(
+            "6bc1bee22e409f96e93d7e117393172a",
+            "ae2d8a571e03ac9c9eb76fac45af8e51"
+        ))
+        .unwrap();
+        let iv = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
+        for (encrypt, decrypt, key, ciphertext) in ECB {
+            let key = hex::decode(key).unwrap();
+            let expected = hex::decode(ciphertext).unwrap();
+            let actual = encrypt(&plaintext, &key).unwrap().unwrap();
+            assert_eq!(actual.len(), 48);
+            assert_eq!(&actual[..32], expected);
+            // This fixed raw NIST plaintext has no PKCS#7 padding.
+            assert_eq!(decrypt(&expected, &key).unwrap(), None);
+        }
+        for (profile, encrypt, decrypt, key, ciphertext) in IV {
+            let key = hex::decode(key).unwrap();
+            let expected = hex::decode(ciphertext).unwrap();
+            let actual = encrypt(&plaintext, &key, &iv).unwrap().unwrap();
+            assert_eq!(&actual[..32], expected);
+            if matches!(
+                profile,
+                NativeAesProfile::Aes128Cbc
+                    | NativeAesProfile::Aes192Cbc
+                    | NativeAesProfile::Aes256Cbc
+            ) {
+                assert_eq!(actual.len(), 48);
+                assert_eq!(decrypt(&expected, &key, &iv).unwrap(), None);
+            } else {
+                assert_eq!(actual.len(), 32);
+                assert_eq!(
+                    decrypt(&expected, &key, &iv).unwrap(),
+                    Some(plaintext.clone())
+                );
+            }
+        }
+        // Original Go vectors include complete PKCS#7 ciphertext, not just
+        // raw blocks, and exercise valid ECB/CBC decryption independently.
+        let key = b"1234567890123456";
+        let ecb = hex::decode("697BFE9B3F8C2F289DD82C88C7BC95C4").unwrap();
+        let cbc = hex::decode("2ECA0077C5EA5768A0485AA522774792").unwrap();
+        assert_eq!(
+            aes_encrypt_128_ecb_native(b"pingcap", key).unwrap(),
+            Some(ecb.clone())
+        );
+        assert_eq!(
+            aes_decrypt_128_ecb_native(&ecb, key).unwrap(),
+            Some(b"pingcap".to_vec())
+        );
+        assert_eq!(
+            aes_encrypt_128_cbc_native(b"pingcap", key, key).unwrap(),
+            Some(cbc.clone())
+        );
+        assert_eq!(
+            aes_decrypt_128_cbc_native(&cbc, key, key).unwrap(),
+            Some(b"pingcap".to_vec())
+        );
+    }
+
+    #[test]
+    fn native_aes_exact_error_profiles_iv_truncation_and_null() {
+        for (profile, encrypt, decrypt, ..) in IV {
+            for (operation, recipe, function) in [
+                (NativeAesOperation::Encrypt, encrypt, "aes_encrypt"),
+                (NativeAesOperation::Decrypt, decrypt, "aes_decrypt"),
+            ] {
+                // Even empty ciphertext must validate the IV before cipher errors.
+                let error = recipe(b"", b"password", &[0; 15]).unwrap_err();
+                match error.0.as_ref() {
+                    ErrorInner::Evaluate(EvaluateError::Caused(cause)) => {
+                        let cause = cause.downcast_ref::<NativeAesError>().unwrap();
+                        assert_eq!(cause.operation(), operation);
+                        assert_eq!(cause.profile(), profile);
+                        assert_eq!(
+                            cause.to_string(),
+                            format!(
+                                "The initialization vector supplied to {function} is too short. Must be at least 16 bytes long"
+                            )
+                        );
+                    }
+                    _ => panic!("lost native AES typed cause: {error:?}"),
+                }
+            }
+        }
+        let expected = hex::decode("2ECA0077C5EA5768A0485AA522774792").unwrap();
+        assert_eq!(
+            aes_encrypt_128_cbc_native(b"pingcap", b"1234567890123456", b"1234567890123456ignored")
+                .unwrap(),
+            Some(expected)
+        );
+        assert_eq!(
+            aes_decrypt_128_ecb_native(b"short", b"password").unwrap(),
+            None
+        );
+        assert_eq!(
+            aes_decrypt_128_cbc_native(b"short", b"password", &[0; 16]).unwrap(),
+            None
+        );
+        assert_eq!(aes_null_native(None).unwrap(), None);
+        assert!(aes_null_native(Some(&0)).is_err());
     }
 }
 

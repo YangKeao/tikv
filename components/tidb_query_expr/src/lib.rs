@@ -88,6 +88,7 @@ pub use self::{
         BinaryArithmeticErrorKind, BinaryArithmeticOperation, LegacyBinaryArithmeticError,
         NativeBinaryArithmeticError, NativeDecimalFastOutcome, NativeDecimalFastValue,
     },
+    impl_encryption::{NativeAesError, NativeAesOperation, NativeAesProfile},
     impl_miscellaneous::{NATIVE_UUID_EPOCH_100NS, format_uuid_native},
     impl_op::NativeUnaryMinusError,
     types::*,

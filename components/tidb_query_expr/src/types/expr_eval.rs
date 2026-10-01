@@ -377,6 +377,10 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation.aes_profile().is_none()
+            || values
+                .iter()
+                .all(|value| matches!(value, ScalarValue::Bytes(Some(_)))))
         && (!(operation.is_modulo_value() || operation.is_division_value())
             || values.iter().take(2).all(|value| {
                 matches!(
@@ -558,6 +562,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::DateFormatNullNative
                         | EvaluatedBytesOp::TranslateNullNative
                         | EvaluatedBytesOp::SqlCryptNullNative
+                        | EvaluatedBytesOp::AesNullNative
                         | EvaluatedBytesOp::VecRealNullNative
                         | EvaluatedBytesOp::LikeNullIntNative
                         | EvaluatedBytesOp::RegexpNullIntNative

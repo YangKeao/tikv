@@ -344,6 +344,22 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  AES adds 24 unit-metadata value profiles (two directions, three key widths,
+  four SQL modes) and one genuine NULL witness. ECB uses the existing two Bytes
+  inputs; CBC/OFB/CFB use three, with full passwords and IVs retained until the
+  actual wrapper. Only these value profiles require nonnull operands at both
+  admission layers. The shared `tidb_query_crypto::aes` module owns the original
+  mode loops, padding, key folding and public CTR compatibility closure, backed
+  by the already-used RustCrypto AES 0.9.1 primitive. Its opaque block interface
+  keeps the native random-access I/O layer separate without exposing cipher
+  variants; the unrelated native GCM primitive dependency remains unchanged.
+  The actual wrapper checks/slices IVs before deriving keys. Exact operation and
+  mode/key profile plus this-call dispatch witness authenticate short-IV causes
+  only for the 18 IV profiles; ECB/NULL cannot manufacture that SQL diagnostic.
+  Cipher-domain errors yield successful optional Bytes, never infrastructure
+  errors disguised as NULL. Frontends retain original lazy demand and ignored-IV
+  warning order. No new carrier, computed kind, metadata binding, ordinary PB
+  admission or driver is needed; full heap/peak/OOM and FIPS remain unclaimed.
   True division adds four closed value profiles, native/legacy real and
   native/legacy Decimal. Real uses existing IEEE-bit transport; Decimal uses
   two official Decimal inputs and the existing third infrastructure budget slot.

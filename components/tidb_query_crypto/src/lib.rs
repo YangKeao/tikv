@@ -4,6 +4,7 @@
 //! Pure source-compatible password, digest and legacy SQL compatibility leaves.
 //! This is not a general cryptographic framework or a FIPS provider.
 
+pub mod aes;
 mod mysql_rng;
 mod sql_crypt;
 mod vitess;

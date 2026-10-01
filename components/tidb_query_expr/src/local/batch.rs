@@ -37,9 +37,10 @@ use super::{
 };
 use crate::{
     BinaryArithmeticErrorKind, BinaryArithmeticOperation, LegacyBinaryArithmeticError,
-    NativeBinaryArithmeticError, NativeDecimalFastOutcome, NativeLikeInvocation, NativeLikeKind,
-    NativeRegexpError, NativeRegexpInvocation, NativeUnaryMinusError, RpnExpressionNode,
-    RpnStackNode, RpnStackNodeVectorValue,
+    NativeAesError, NativeAesOperation, NativeAesProfile, NativeBinaryArithmeticError,
+    NativeDecimalFastOutcome, NativeLikeInvocation, NativeLikeKind, NativeRegexpError,
+    NativeRegexpInvocation, NativeUnaryMinusError, RpnExpressionNode, RpnStackNode,
+    RpnStackNodeVectorValue,
     impl_arithmetic::NativeDecimalDivisionDisposition,
     impl_string::{
         ConcatKind, FieldKind, PreparedCharArgs, PreparedConcatArgs, PreparedExportSetArgs,
@@ -1385,6 +1386,31 @@ pub enum EvaluatedBytesOp {
     DivRealLegacy,
     DivDecimalNative,
     DivDecimalLegacy,
+    AesEncrypt128EcbNative,
+    AesEncrypt192EcbNative,
+    AesEncrypt256EcbNative,
+    AesDecrypt128EcbNative,
+    AesDecrypt192EcbNative,
+    AesDecrypt256EcbNative,
+    AesEncrypt128CbcNative,
+    AesEncrypt192CbcNative,
+    AesEncrypt256CbcNative,
+    AesDecrypt128CbcNative,
+    AesDecrypt192CbcNative,
+    AesDecrypt256CbcNative,
+    AesEncrypt128OfbNative,
+    AesEncrypt192OfbNative,
+    AesEncrypt256OfbNative,
+    AesDecrypt128OfbNative,
+    AesDecrypt192OfbNative,
+    AesDecrypt256OfbNative,
+    AesEncrypt128CfbNative,
+    AesEncrypt192CfbNative,
+    AesEncrypt256CfbNative,
+    AesDecrypt128CfbNative,
+    AesDecrypt192CfbNative,
+    AesDecrypt256CfbNative,
+    AesNullNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -2570,6 +2596,129 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::DivDecimalLegacy,
                 );
             }
+            Self::AesEncrypt128EcbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt128EcbNative,
+                );
+            }
+            Self::AesEncrypt192EcbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt192EcbNative,
+                );
+            }
+            Self::AesEncrypt256EcbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt256EcbNative,
+                );
+            }
+            Self::AesDecrypt128EcbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt128EcbNative,
+                );
+            }
+            Self::AesDecrypt192EcbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt192EcbNative,
+                );
+            }
+            Self::AesDecrypt256EcbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt256EcbNative,
+                );
+            }
+            Self::AesEncrypt128CbcNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt128CbcNative,
+                );
+            }
+            Self::AesEncrypt192CbcNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt192CbcNative,
+                );
+            }
+            Self::AesEncrypt256CbcNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt256CbcNative,
+                );
+            }
+            Self::AesDecrypt128CbcNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt128CbcNative,
+                );
+            }
+            Self::AesDecrypt192CbcNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt192CbcNative,
+                );
+            }
+            Self::AesDecrypt256CbcNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt256CbcNative,
+                );
+            }
+            Self::AesEncrypt128OfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt128OfbNative,
+                );
+            }
+            Self::AesEncrypt192OfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt192OfbNative,
+                );
+            }
+            Self::AesEncrypt256OfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt256OfbNative,
+                );
+            }
+            Self::AesDecrypt128OfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt128OfbNative,
+                );
+            }
+            Self::AesDecrypt192OfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt192OfbNative,
+                );
+            }
+            Self::AesDecrypt256OfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt256OfbNative,
+                );
+            }
+            Self::AesEncrypt128CfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt128CfbNative,
+                );
+            }
+            Self::AesEncrypt192CfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt192CfbNative,
+                );
+            }
+            Self::AesEncrypt256CfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesEncrypt256CfbNative,
+                );
+            }
+            Self::AesDecrypt128CfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt128CfbNative,
+                );
+            }
+            Self::AesDecrypt192CfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt192CfbNative,
+                );
+            }
+            Self::AesDecrypt256CfbNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AesDecrypt256CfbNative,
+                );
+            }
+            Self::AesNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AesNullNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -2598,6 +2747,49 @@ impl EvaluatedBytesOp {
             Self::LikeLegacyNative => Some(NativeLikeKind::Legacy),
             _ => None,
         }
+    }
+
+    pub(crate) fn aes_profile(self) -> Option<(NativeAesOperation, NativeAesProfile)> {
+        use NativeAesOperation::{Decrypt, Encrypt};
+        use NativeAesProfile::*;
+        Some(match self {
+            Self::AesEncrypt128EcbNative => (Encrypt, Aes128Ecb),
+            Self::AesEncrypt192EcbNative => (Encrypt, Aes192Ecb),
+            Self::AesEncrypt256EcbNative => (Encrypt, Aes256Ecb),
+            Self::AesDecrypt128EcbNative => (Decrypt, Aes128Ecb),
+            Self::AesDecrypt192EcbNative => (Decrypt, Aes192Ecb),
+            Self::AesDecrypt256EcbNative => (Decrypt, Aes256Ecb),
+            Self::AesEncrypt128CbcNative => (Encrypt, Aes128Cbc),
+            Self::AesEncrypt192CbcNative => (Encrypt, Aes192Cbc),
+            Self::AesEncrypt256CbcNative => (Encrypt, Aes256Cbc),
+            Self::AesDecrypt128CbcNative => (Decrypt, Aes128Cbc),
+            Self::AesDecrypt192CbcNative => (Decrypt, Aes192Cbc),
+            Self::AesDecrypt256CbcNative => (Decrypt, Aes256Cbc),
+            Self::AesEncrypt128OfbNative => (Encrypt, Aes128Ofb),
+            Self::AesEncrypt192OfbNative => (Encrypt, Aes192Ofb),
+            Self::AesEncrypt256OfbNative => (Encrypt, Aes256Ofb),
+            Self::AesDecrypt128OfbNative => (Decrypt, Aes128Ofb),
+            Self::AesDecrypt192OfbNative => (Decrypt, Aes192Ofb),
+            Self::AesDecrypt256OfbNative => (Decrypt, Aes256Ofb),
+            Self::AesEncrypt128CfbNative => (Encrypt, Aes128Cfb),
+            Self::AesEncrypt192CfbNative => (Encrypt, Aes192Cfb),
+            Self::AesEncrypt256CfbNative => (Encrypt, Aes256Cfb),
+            Self::AesDecrypt128CfbNative => (Decrypt, Aes128Cfb),
+            Self::AesDecrypt192CfbNative => (Decrypt, Aes192Cfb),
+            Self::AesDecrypt256CfbNative => (Decrypt, Aes256Cfb),
+            _ => return None,
+        })
+    }
+
+    fn aes_error_profile(self) -> Option<(NativeAesOperation, NativeAesProfile)> {
+        self.aes_profile().filter(|(_, profile)| {
+            !matches!(
+                profile,
+                NativeAesProfile::Aes128Ecb
+                    | NativeAesProfile::Aes192Ecb
+                    | NativeAesProfile::Aes256Ecb
+            )
+        })
     }
 
     pub(crate) fn decimal_division_kind(self) -> Option<NativeDecimalDivisionKind> {
@@ -2641,6 +2833,7 @@ impl EvaluatedBytesOp {
         // A private identity does not determine its carrier or packet policy.
         // In particular, value-only FROM_BASE64 keeps the ordinary Bytes role.
         match self {
+            Self::AesNullNative => EvaluatedArgsRole::NullWitness,
             Self::DivDecimalNative | Self::DivDecimalLegacy => EvaluatedArgsRole::DecimalDivision,
             Self::AddDecimalNative
             | Self::SubDecimalNative
@@ -3125,6 +3318,79 @@ impl EvaluatedBytesOp {
             Self::DivRealLegacy => crate::impl_arithmetic::div_real_legacy_fn_meta(),
             Self::DivDecimalNative => crate::impl_arithmetic::div_decimal_native_fn_meta(),
             Self::DivDecimalLegacy => crate::impl_arithmetic::div_decimal_legacy_fn_meta(),
+            Self::AesEncrypt128EcbNative => {
+                crate::impl_encryption::aes_encrypt_128_ecb_native_fn_meta()
+            }
+            Self::AesEncrypt192EcbNative => {
+                crate::impl_encryption::aes_encrypt_192_ecb_native_fn_meta()
+            }
+            Self::AesEncrypt256EcbNative => {
+                crate::impl_encryption::aes_encrypt_256_ecb_native_fn_meta()
+            }
+            Self::AesDecrypt128EcbNative => {
+                crate::impl_encryption::aes_decrypt_128_ecb_native_fn_meta()
+            }
+            Self::AesDecrypt192EcbNative => {
+                crate::impl_encryption::aes_decrypt_192_ecb_native_fn_meta()
+            }
+            Self::AesDecrypt256EcbNative => {
+                crate::impl_encryption::aes_decrypt_256_ecb_native_fn_meta()
+            }
+            Self::AesEncrypt128CbcNative => {
+                crate::impl_encryption::aes_encrypt_128_cbc_native_fn_meta()
+            }
+            Self::AesEncrypt192CbcNative => {
+                crate::impl_encryption::aes_encrypt_192_cbc_native_fn_meta()
+            }
+            Self::AesEncrypt256CbcNative => {
+                crate::impl_encryption::aes_encrypt_256_cbc_native_fn_meta()
+            }
+            Self::AesDecrypt128CbcNative => {
+                crate::impl_encryption::aes_decrypt_128_cbc_native_fn_meta()
+            }
+            Self::AesDecrypt192CbcNative => {
+                crate::impl_encryption::aes_decrypt_192_cbc_native_fn_meta()
+            }
+            Self::AesDecrypt256CbcNative => {
+                crate::impl_encryption::aes_decrypt_256_cbc_native_fn_meta()
+            }
+            Self::AesEncrypt128OfbNative => {
+                crate::impl_encryption::aes_encrypt_128_ofb_native_fn_meta()
+            }
+            Self::AesEncrypt192OfbNative => {
+                crate::impl_encryption::aes_encrypt_192_ofb_native_fn_meta()
+            }
+            Self::AesEncrypt256OfbNative => {
+                crate::impl_encryption::aes_encrypt_256_ofb_native_fn_meta()
+            }
+            Self::AesDecrypt128OfbNative => {
+                crate::impl_encryption::aes_decrypt_128_ofb_native_fn_meta()
+            }
+            Self::AesDecrypt192OfbNative => {
+                crate::impl_encryption::aes_decrypt_192_ofb_native_fn_meta()
+            }
+            Self::AesDecrypt256OfbNative => {
+                crate::impl_encryption::aes_decrypt_256_ofb_native_fn_meta()
+            }
+            Self::AesEncrypt128CfbNative => {
+                crate::impl_encryption::aes_encrypt_128_cfb_native_fn_meta()
+            }
+            Self::AesEncrypt192CfbNative => {
+                crate::impl_encryption::aes_encrypt_192_cfb_native_fn_meta()
+            }
+            Self::AesEncrypt256CfbNative => {
+                crate::impl_encryption::aes_encrypt_256_cfb_native_fn_meta()
+            }
+            Self::AesDecrypt128CfbNative => {
+                crate::impl_encryption::aes_decrypt_128_cfb_native_fn_meta()
+            }
+            Self::AesDecrypt192CfbNative => {
+                crate::impl_encryption::aes_decrypt_192_cfb_native_fn_meta()
+            }
+            Self::AesDecrypt256CfbNative => {
+                crate::impl_encryption::aes_decrypt_256_cfb_native_fn_meta()
+            }
+            Self::AesNullNative => crate::impl_encryption::aes_null_native_fn_meta(),
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
             Self::UnaryPlusBitsNative => crate::impl_op::unary_plus_bits_native_fn_meta(),
             Self::UnaryPlusDecimalNative => crate::impl_op::unary_plus_decimal_native_fn_meta(),
@@ -3434,6 +3700,31 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::AesEncrypt128EcbNative
+            | Self::AesEncrypt192EcbNative
+            | Self::AesEncrypt256EcbNative
+            | Self::AesDecrypt128EcbNative
+            | Self::AesDecrypt192EcbNative
+            | Self::AesDecrypt256EcbNative
+            | Self::AesEncrypt128CbcNative
+            | Self::AesEncrypt192CbcNative
+            | Self::AesEncrypt256CbcNative
+            | Self::AesDecrypt128CbcNative
+            | Self::AesDecrypt192CbcNative
+            | Self::AesDecrypt256CbcNative
+            | Self::AesEncrypt128OfbNative
+            | Self::AesEncrypt192OfbNative
+            | Self::AesEncrypt256OfbNative
+            | Self::AesDecrypt128OfbNative
+            | Self::AesDecrypt192OfbNative
+            | Self::AesDecrypt256OfbNative
+            | Self::AesEncrypt128CfbNative
+            | Self::AesEncrypt192CfbNative
+            | Self::AesEncrypt256CfbNative
+            | Self::AesDecrypt128CfbNative
+            | Self::AesDecrypt192CfbNative
+            | Self::AesDecrypt256CfbNative
+            | Self::AesNullNative => EvalType::Bytes,
             Self::DivDecimalNative | Self::DivDecimalLegacy => EvalType::Decimal,
             Self::AddIntSsNative
             | Self::AddIntSuNative
@@ -3757,6 +4048,31 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::AesEncrypt128EcbNative
+            | Self::AesEncrypt192EcbNative
+            | Self::AesEncrypt256EcbNative
+            | Self::AesDecrypt128EcbNative
+            | Self::AesDecrypt192EcbNative
+            | Self::AesDecrypt256EcbNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::AesEncrypt128CbcNative
+            | Self::AesEncrypt192CbcNative
+            | Self::AesEncrypt256CbcNative
+            | Self::AesDecrypt128CbcNative
+            | Self::AesDecrypt192CbcNative
+            | Self::AesDecrypt256CbcNative
+            | Self::AesEncrypt128OfbNative
+            | Self::AesEncrypt192OfbNative
+            | Self::AesEncrypt256OfbNative
+            | Self::AesDecrypt128OfbNative
+            | Self::AesDecrypt192OfbNative
+            | Self::AesDecrypt256OfbNative
+            | Self::AesEncrypt128CfbNative
+            | Self::AesEncrypt192CfbNative
+            | Self::AesEncrypt256CfbNative
+            | Self::AesDecrypt128CfbNative
+            | Self::AesDecrypt192CfbNative
+            | Self::AesDecrypt256CfbNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
+            Self::AesNullNative => &[EvalType::Int],
             Self::DivDecimalNative | Self::DivDecimalLegacy => {
                 &[EvalType::Decimal, EvalType::Decimal, EvalType::Int]
             }
@@ -4586,6 +4902,12 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation.aes_profile().is_some() {
+            return matches!(
+                self,
+                Self::Bytes2(Some(_), Some(_)) | Self::Bytes3([Some(_), Some(_), Some(_)])
+            );
+        }
         if operation.is_division_value() {
             return matches!(
                 self,
@@ -4662,6 +4984,7 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::DateFormatNullNative
                         | EvaluatedBytesOp::TranslateNullNative
                         | EvaluatedBytesOp::SqlCryptNullNative
+                        | EvaluatedBytesOp::AesNullNative
                         | EvaluatedBytesOp::VecRealNullNative
                         | EvaluatedBytesOp::LikeNullIntNative
                         | EvaluatedBytesOp::RegexpNullIntNative
@@ -5970,6 +6293,7 @@ pub enum EvaluatedSqlFailureKind {
     UnaryMinusNative,
     BinaryArithmeticNative,
     BinaryArithmeticLegacy,
+    AesNative,
 }
 
 /// Fresh owned failure-only observation for one ready-value invocation.
@@ -6030,6 +6354,24 @@ impl ReportedEvaluatedFailure {
                 ErrorInner::Evaluate(EvaluateError::Caused(source)) => source
                     .downcast_ref::<LegacyBinaryArithmeticError>()
                     .filter(|cause| (cause.operation, cause.unsigned) == profile),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Only this invocation's exact IV-mode recipe authenticates a short IV.
+    /// ECB, SQL NULL, cipher rejection, and infrastructure errors do not.
+    pub fn native_aes_error(&self) -> Option<&NativeAesError> {
+        if self.sql_failure != Some(EvaluatedSqlFailureKind::AesNative) {
+            return None;
+        }
+        let profile = self.operation?.aes_error_profile()?;
+        match &self.error {
+            LocalError::Evaluation(error) => match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::Caused(source)) => source
+                    .downcast_ref::<NativeAesError>()
+                    .filter(|cause| (cause.operation(), cause.profile()) == profile),
                 _ => None,
             },
             _ => None,
@@ -6921,6 +7263,16 @@ impl EvaluatedBytesWorker {
                     *sql_failure = match (self.operation, cause.0.as_ref()) {
                         (operation, ErrorInner::Evaluate(EvaluateError::Caused(source)))
                             if source
+                                .downcast_ref::<NativeAesError>()
+                                .is_some_and(|cause| {
+                                    operation.aes_error_profile()
+                                        == Some((cause.operation(), cause.profile()))
+                                }) =>
+                        {
+                            Some(EvaluatedSqlFailureKind::AesNative)
+                        }
+                        (operation, ErrorInner::Evaluate(EvaluateError::Caused(source)))
+                            if source
                                 .downcast_ref::<NativeBinaryArithmeticError>()
                                 .is_some_and(|cause| {
                                     operation.native_binary_error_profile()
@@ -7299,6 +7651,452 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn aes_dispatch_all_private_unit_profiles_and_nonnull_roles() {
+        use crate::impl_encryption::*;
+        let cases = [
+            (
+                EvaluatedBytesOp::AesEncrypt128EcbNative,
+                aes_encrypt_128_ecb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt192EcbNative,
+                aes_encrypt_192_ecb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt256EcbNative,
+                aes_encrypt_256_ecb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt128EcbNative,
+                aes_decrypt_128_ecb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt192EcbNative,
+                aes_decrypt_192_ecb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt256EcbNative,
+                aes_decrypt_256_ecb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt128CbcNative,
+                aes_encrypt_128_cbc_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt192CbcNative,
+                aes_encrypt_192_cbc_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt256CbcNative,
+                aes_encrypt_256_cbc_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt128CbcNative,
+                aes_decrypt_128_cbc_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt192CbcNative,
+                aes_decrypt_192_cbc_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt256CbcNative,
+                aes_decrypt_256_cbc_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt128OfbNative,
+                aes_encrypt_128_ofb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt192OfbNative,
+                aes_encrypt_192_ofb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt256OfbNative,
+                aes_encrypt_256_ofb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt128OfbNative,
+                aes_decrypt_128_ofb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt192OfbNative,
+                aes_decrypt_192_ofb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt256OfbNative,
+                aes_decrypt_256_ofb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt128CfbNative,
+                aes_encrypt_128_cfb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt192CfbNative,
+                aes_encrypt_192_cfb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt256CfbNative,
+                aes_encrypt_256_cfb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt128CfbNative,
+                aes_decrypt_128_cfb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt192CfbNative,
+                aes_decrypt_192_cfb_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt256CfbNative,
+                aes_decrypt_256_cfb_native_fn_meta(),
+            ),
+            (EvaluatedBytesOp::AesNullNative, aes_null_native_fn_meta()),
+        ];
+        for (operation, getter) in cases {
+            let terminal = operation == EvaluatedBytesOp::AesNullNative;
+            let arity = operation.input_types().len();
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(operation.call_count(), 1);
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            assert_eq!(
+                operation.input_role(),
+                if terminal {
+                    EvaluatedArgsRole::NullWitness
+                } else {
+                    EvaluatedArgsRole::Values
+                }
+            );
+            assert_eq!(
+                arity,
+                if terminal {
+                    1
+                } else if operation.aes_error_profile().is_some() {
+                    3
+                } else {
+                    2
+                }
+            );
+            assert_eq!(program.expression.len(), arity + 1);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!("missing AES generated wrapper")
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            if terminal {
+                for invalid in [
+                    EvaluatedArgs::NullWitness(Some(0)),
+                    EvaluatedArgs::Int(None),
+                    EvaluatedArgs::NoArgs,
+                ] {
+                    assert!(matches!(
+                        worker.eval_args(invalid),
+                        Err(LocalError::InvalidBatch(_))
+                    ));
+                }
+            } else {
+                for null_slot in 0..arity {
+                    let mut values = [Some(Vec::new()), Some(Vec::new()), Some(vec![0; 16])];
+                    values[null_slot] = None;
+                    let args = if arity == 2 {
+                        EvaluatedArgs::Bytes2(values[0].take(), values[1].take())
+                    } else {
+                        EvaluatedArgs::Bytes3(values)
+                    };
+                    assert!(matches!(
+                        worker.eval_args(args),
+                        Err(LocalError::InvalidBatch(_))
+                    ));
+                    let mut ready = [
+                        ScalarValue::Bytes(Some(Vec::new())),
+                        ScalarValue::Bytes(Some(Vec::new())),
+                        ScalarValue::Bytes(Some(vec![0; 16])),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                    ];
+                    ready[null_slot] = ScalarValue::Bytes(None);
+                    let mut reported = None;
+                    assert!(matches!(
+                        worker.eval_ready(ready, arity, &mut reported),
+                        Err(LocalError::InvalidSpec(_))
+                    ));
+                    assert_eq!(reported, None);
+                }
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Ieee754Bits2 {
+                        left: ReadyIeee754Arg::Value(Some(0)),
+                        right: ReadyIeee754Arg::Value(Some(0)),
+                    }),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::NullWitness(None)),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let wrong_arity = if arity == 2 {
+                    EvaluatedArgs::Bytes3([Some(Vec::new()), Some(Vec::new()), Some(vec![0; 16])])
+                } else {
+                    EvaluatedArgs::Bytes2(Some(Vec::new()), Some(Vec::new()))
+                };
+                assert!(matches!(
+                    worker.eval_args(wrong_arity),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            let args = if terminal {
+                EvaluatedArgs::NullWitness(None)
+            } else if arity == 2 {
+                EvaluatedArgs::Bytes2(Some(Vec::new()), Some(Vec::new()))
+            } else {
+                EvaluatedArgs::Bytes3([Some(Vec::new()), Some(Vec::new()), Some(vec![0; 16])])
+            };
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("AES lost owned Bytes")
+            };
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            if terminal {
+                assert_eq!(value.into_option(), None);
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        // Ordinary nullable Bytes pairs are not narrowed by AES value admission.
+        let mut nullable = prepare_evaluated_bytes(
+            EvaluatedBytesOp::SqlEncodeNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert!(
+            nullable
+                .eval_args(EvaluatedArgs::Bytes2(None, Some(Vec::new())))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn aes_actual_iv_receipts_budget_reuse_and_fixed_ciphertexts() {
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        let operations = [
+            EvaluatedBytesOp::AesEncrypt128CbcNative,
+            EvaluatedBytesOp::AesEncrypt192CbcNative,
+            EvaluatedBytesOp::AesEncrypt256CbcNative,
+            EvaluatedBytesOp::AesDecrypt128CbcNative,
+            EvaluatedBytesOp::AesDecrypt192CbcNative,
+            EvaluatedBytesOp::AesDecrypt256CbcNative,
+            EvaluatedBytesOp::AesEncrypt128OfbNative,
+            EvaluatedBytesOp::AesEncrypt192OfbNative,
+            EvaluatedBytesOp::AesEncrypt256OfbNative,
+            EvaluatedBytesOp::AesDecrypt128OfbNative,
+            EvaluatedBytesOp::AesDecrypt192OfbNative,
+            EvaluatedBytesOp::AesDecrypt256OfbNative,
+            EvaluatedBytesOp::AesEncrypt128CfbNative,
+            EvaluatedBytesOp::AesEncrypt192CfbNative,
+            EvaluatedBytesOp::AesEncrypt256CfbNative,
+            EvaluatedBytesOp::AesDecrypt128CfbNative,
+            EvaluatedBytesOp::AesDecrypt192CfbNative,
+            EvaluatedBytesOp::AesDecrypt256CfbNative,
+        ];
+        let iv_args = |len| {
+            EvaluatedArgs::Bytes3([
+                Some(Vec::new()),
+                Some(b"password".to_vec()),
+                Some(vec![0; len]),
+            ])
+        };
+        for operation in operations {
+            let mut worker = prepare(operation);
+            let storage = worker.retained_storage().unwrap();
+            let mut failure = worker.eval_args_reported(iv_args(15)).unwrap_err();
+            assert_eq!(failure.operation(), Some(operation));
+            assert_eq!(
+                failure.sql_failure(),
+                Some(EvaluatedSqlFailureKind::AesNative)
+            );
+            let cause = failure.native_aes_error().unwrap();
+            assert_eq!(
+                Some((cause.operation(), cause.profile())),
+                operation.aes_profile()
+            );
+            for wrong in operations.into_iter().chain([
+                EvaluatedBytesOp::AesEncrypt128EcbNative,
+                EvaluatedBytesOp::AesDecrypt256EcbNative,
+                EvaluatedBytesOp::AesNullNative,
+                EvaluatedBytesOp::ModRealNative,
+            ]) {
+                if wrong != operation {
+                    failure.operation = Some(wrong);
+                    assert!(failure.native_aes_error().is_none());
+                }
+            }
+            failure.operation = Some(operation);
+            assert!(failure.native_aes_error().is_some());
+            let unreported = ReportedEvaluatedFailure::unreported(failure.into_error());
+            assert!(unreported.native_aes_error().is_none());
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.eval_args(iv_args(16)).is_ok());
+            assert_eq!(worker.kernel_invocations(), 2);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let mut zero = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+                usize::MAX,
+            )
+            .unwrap();
+            let failure = zero.eval_args_reported(iv_args(0)).unwrap_err();
+            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+            assert_eq!(failure.sql_failure(), None);
+            assert!(failure.native_aes_error().is_none());
+            assert_eq!(zero.kernel_invocations(), 0);
+            assert!(zero.is_healthy());
+        }
+        // Complete original Go ciphertexts, never a provider-derived oracle.
+        let key = b"1234567890123456";
+        for (encrypt, decrypt, ciphertext) in [
+            (
+                EvaluatedBytesOp::AesEncrypt128EcbNative,
+                EvaluatedBytesOp::AesDecrypt128EcbNative,
+                "697BFE9B3F8C2F289DD82C88C7BC95C4",
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt128CbcNative,
+                EvaluatedBytesOp::AesDecrypt128CbcNative,
+                "2ECA0077C5EA5768A0485AA522774792",
+            ),
+        ] {
+            let expected = hex::decode(ciphertext).unwrap();
+            let args = |data: Vec<u8>| {
+                if encrypt.input_types().len() == 2 {
+                    EvaluatedArgs::Bytes2(Some(data), Some(key.to_vec()))
+                } else {
+                    EvaluatedArgs::Bytes3([
+                        Some(data),
+                        Some(key.to_vec()),
+                        Some(b"1234567890123456ignored".to_vec()),
+                    ])
+                }
+            };
+            let mut worker = prepare(encrypt);
+            let ComputedValue::Bytes(value) = worker.eval_args(args(b"pingcap".to_vec())).unwrap()
+            else {
+                panic!("AES encrypt lost owned Bytes")
+            };
+            assert_eq!(value.value(), Some(expected.as_slice()));
+            drop(worker);
+            assert_eq!(value.into_option(), Some(expected.clone()));
+            let mut worker = prepare(decrypt);
+            let ComputedValue::Bytes(value) = worker.eval_args(args(expected)).unwrap() else {
+                panic!("AES decrypt lost owned Bytes")
+            };
+            assert_eq!(value.into_option(), Some(b"pingcap".to_vec()));
+            let ComputedValue::Bytes(value) =
+                worker.eval_args_reported(args(b"short".to_vec())).unwrap()
+            else {
+                panic!("cipher rejection must remain successful Bytes NULL")
+            };
+            assert_eq!(value.into_option(), None);
+            assert!(worker.is_healthy());
+        }
+        // NIST SP 800-38A first block is identical for OFB/CFB with this IV.
+        let plaintext = hex::decode("6bc1bee22e409f96e93d7e117393172a").unwrap();
+        let ciphertext = hex::decode("3b3fd92eb72dad20333449f8e83cfb4a").unwrap();
+        let key = hex::decode("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
+        let iv = hex::decode("000102030405060708090a0b0c0d0e0f").unwrap();
+        for (operation, input, expected) in [
+            (
+                EvaluatedBytesOp::AesEncrypt128OfbNative,
+                &plaintext,
+                &ciphertext,
+            ),
+            (
+                EvaluatedBytesOp::AesEncrypt128CfbNative,
+                &plaintext,
+                &ciphertext,
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt128OfbNative,
+                &ciphertext,
+                &plaintext,
+            ),
+            (
+                EvaluatedBytesOp::AesDecrypt128CfbNative,
+                &ciphertext,
+                &plaintext,
+            ),
+        ] {
+            let ComputedValue::Bytes(value) = prepare(operation)
+                .eval_args(EvaluatedArgs::Bytes3([
+                    Some(input.clone()),
+                    Some(key.clone()),
+                    Some(iv.clone()),
+                ]))
+                .unwrap()
+            else {
+                panic!("AES stream mode lost Bytes")
+            };
+            assert_eq!(value.value(), Some(expected.as_slice()));
+        }
+    }
 
     #[test]
     fn division_dispatch_profiles_nonnull_roles_and_real_receipts() {

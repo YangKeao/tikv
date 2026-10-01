@@ -329,7 +329,32 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::DivRealNative
         | LocalFunctionId::DivRealLegacy
         | LocalFunctionId::DivDecimalNative
-        | LocalFunctionId::DivDecimalLegacy => Err(other_err!(
+        | LocalFunctionId::DivDecimalLegacy
+        | LocalFunctionId::AesEncrypt128EcbNative
+        | LocalFunctionId::AesEncrypt192EcbNative
+        | LocalFunctionId::AesEncrypt256EcbNative
+        | LocalFunctionId::AesDecrypt128EcbNative
+        | LocalFunctionId::AesDecrypt192EcbNative
+        | LocalFunctionId::AesDecrypt256EcbNative
+        | LocalFunctionId::AesEncrypt128CbcNative
+        | LocalFunctionId::AesEncrypt192CbcNative
+        | LocalFunctionId::AesEncrypt256CbcNative
+        | LocalFunctionId::AesDecrypt128CbcNative
+        | LocalFunctionId::AesDecrypt192CbcNative
+        | LocalFunctionId::AesDecrypt256CbcNative
+        | LocalFunctionId::AesEncrypt128OfbNative
+        | LocalFunctionId::AesEncrypt192OfbNative
+        | LocalFunctionId::AesEncrypt256OfbNative
+        | LocalFunctionId::AesDecrypt128OfbNative
+        | LocalFunctionId::AesDecrypt192OfbNative
+        | LocalFunctionId::AesDecrypt256OfbNative
+        | LocalFunctionId::AesEncrypt128CfbNative
+        | LocalFunctionId::AesEncrypt192CfbNative
+        | LocalFunctionId::AesEncrypt256CfbNative
+        | LocalFunctionId::AesDecrypt128CfbNative
+        | LocalFunctionId::AesDecrypt192CfbNative
+        | LocalFunctionId::AesDecrypt256CfbNative
+        | LocalFunctionId::AesNullNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

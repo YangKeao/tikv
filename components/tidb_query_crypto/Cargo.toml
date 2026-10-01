@@ -7,5 +7,7 @@ license = "Apache-2.0"
 description = "Shared pure SQL cryptographic compatibility policies"
 
 [dependencies]
+# Keep the existing native AES primitive version while sharing its mode policies.
+aes = "=0.9.1"
 des = "=0.9.0"
 sha1 = "0.10"
