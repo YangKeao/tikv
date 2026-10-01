@@ -443,6 +443,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::WeekNullNative
                         | EvaluatedBytesOp::DateFormatNullNative
                         | EvaluatedBytesOp::TranslateNullNative
+                        | EvaluatedBytesOp::SqlCryptNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,

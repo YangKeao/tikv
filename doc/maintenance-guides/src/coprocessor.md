@@ -293,6 +293,21 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  ENCODE/DECODE, TIDB_SHARD/VITESS_HASH and FORMAT_BYTES/FORMAT_NANO_TIME
+  use seven private recipes with existing roles and owned results. The pure
+  `tidb_query_crypto` leaf owns the normalized MySQL RNG state, historical
+  SQLCrypt permutation and original RustCrypto DES Vitess hash. Native utility
+  facades and the existing TiKV MySqlRng facade delegate to those leaves;
+  clock/seed policy and public utility callers remain intact. Native mathutil's
+  mutex and raw seed setters/getters use the same wrapping step without silently
+  normalizing their wider state domain. DES is an explicit
+  shared dependency, not an OpenSSL/FIPS provider substitution. Crypt preparation
+  occurs before capability/guard discovery, preserves data-first NULL demand and
+  selects a real NULL witness rather than fabricating password data. Hashing and
+  shard modulo execute in the worker; the signed C result retains all unsigned
+  SQL bits. Scaled formatting keeps its original unit tables, fixed/scientific
+  thresholds and nonfinite behavior, consuming actual IEEE754 bits. No new
+  public input/result/report/driver shape or native PB/cop admission is required.
   UUID inspection/conversion and TRANSLATE use nine closed private recipes with
   existing Bytes, BytesInt, Bytes3 and actual-NULL witness roles. Native UUID
   parsing retains its 32/36/45/38-byte spellings and distinct trim/UTF-8 policies;

@@ -268,6 +268,26 @@ pub fn uncompress(
     }
 }
 
+#[rpn_fn]
+fn get_native_sql_encode(data: BytesRef, password: BytesRef) -> Result<Option<Bytes>> {
+    Ok(Some(tidb_query_crypto::sql_encode(data, password)))
+}
+
+#[rpn_fn]
+fn get_native_sql_decode(data: BytesRef, password: BytesRef) -> Result<Option<Bytes>> {
+    Ok(Some(tidb_query_crypto::sql_decode(data, password)))
+}
+
+#[rpn_fn(nullable)]
+fn get_native_sql_crypt_null(arg: Option<&Int>) -> Result<Option<Bytes>> {
+    match arg {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Native SQLCrypt NULL witness must be an actual NULL"
+        )),
+    }
+}
+
 #[rpn_fn(nullable)]
 fn password_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
     Ok(input.map(|bytes| tidb_query_crypto::encode_password_bytes(bytes).into_bytes()))
@@ -361,6 +381,57 @@ mod tests {
 
     use super::*;
     use crate::types::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_native_sql_crypt_source_literals() {
+        // Original builtin_ext/crypto.rs vectors deliberately DECODE plaintext
+        // to the fixed hex and ENCODE that cryptogram back; do not swap names.
+        for (origin, password, encoded_hex) in [
+            ("", "", ""),
+            ("pingcap", "1234567890123456", "2C35B5A4ADF391"),
+            ("pingcap", "asdfjasfwefjfjkj", "351CC412605905"),
+            (
+                "pingcap123",
+                "123456789012345678901234",
+                "7698723DC6DFE7724221",
+            ),
+            ("pingcap#%$%^", "*^%YTu1234567", "8634B9C55FF55E5B6328F449"),
+            ("pingcap", "", "4A77B524BD2C5C"),
+            (
+                "分布式データベース",
+                "pass1234@#$%%^^&",
+                "80CADC8D328B3026D04FB285F36FED04BBCA0CC685BF78B1E687CE",
+            ),
+            (
+                "分布式データベース",
+                "分布式7782734adgwy1242",
+                "0E24CFEF272EE32B6E0BFBDB89F29FB43B4B30DAA95C3F914444BC",
+            ),
+            ("pingcap", "密匙", "CE5C02A5010010"),
+            (
+                "pingcap数据库",
+                "数据库passwd12345667",
+                "36D5F90D3834E30E396BE3226E3B4ED3",
+            ),
+            ("数据库5667", "123.435", "B22196D0569386237AE12F8AAB"),
+        ] {
+            let cryptogram = hex::decode(encoded_hex).unwrap();
+            assert_eq!(
+                get_native_sql_decode(origin.as_bytes(), password.as_bytes()).unwrap(),
+                Some(cryptogram.clone())
+            );
+            assert_eq!(
+                get_native_sql_encode(&cryptogram, password.as_bytes()).unwrap(),
+                Some(origin.as_bytes().to_vec())
+            );
+        }
+    }
+
+    #[test]
+    fn test_native_sql_crypt_null_witness() {
+        assert_eq!(get_native_sql_crypt_null(None).unwrap(), None);
+        assert!(get_native_sql_crypt_null(Some(&0)).is_err());
+    }
 
     #[test]
     fn test_password_sm3_native_source_literals() {

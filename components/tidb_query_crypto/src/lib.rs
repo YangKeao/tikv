@@ -1,12 +1,19 @@
 // Copyright 2026 TiKV Project Authors. Licensed under Apache-2.0.
 // Copyright 2026 PingCAP, Inc. (relocated parser-auth implementation).
 
-//! Pure source-compatible password and SM3 primitives shared by query and auth.
+//! Pure source-compatible password, digest and legacy SQL compatibility leaves.
 //! This is not a general cryptographic framework or a FIPS provider.
+
+mod mysql_rng;
+mod sql_crypt;
+mod vitess;
 
 use std::fmt;
 
+pub use mysql_rng::{MySqlRand, mysql_rand_step};
 use sha1::{Digest, Sha1};
+pub use sql_crypt::{sql_decode, sql_encode};
+pub use vitess::hash_uint64;
 
 /// Calculates SHA-1 using the same byte contract as Go's helper.
 pub fn sha1_hash(input: &[u8]) -> [u8; 20] {

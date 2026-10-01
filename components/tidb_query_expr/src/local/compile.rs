@@ -1395,6 +1395,216 @@ mod evaluated_ascii_compile_tests {
     }
 
     #[test]
+    fn crypt_hash_format_dispatch_getters_shapes_and_private_admission() {
+        use tidb_query_datatype::{EvalType, expr::EvalContext};
+
+        use crate::{
+            local::{ExecutionLimits, runtime::EvalBudget},
+            types::expr_eval::EvaluatedAsciiWitness,
+        };
+
+        let cases: [(
+            EvaluatedBytesOp,
+            crate::RpnFnMeta,
+            &[EvalType],
+            EvalType,
+            EvaluatedArgsRole,
+        ); 7] = [
+            (
+                EvaluatedBytesOp::SqlEncodeNative,
+                crate::impl_encryption::get_native_sql_encode_fn_meta(),
+                &[EvalType::Bytes, EvalType::Bytes],
+                EvalType::Bytes,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::SqlDecodeNative,
+                crate::impl_encryption::get_native_sql_decode_fn_meta(),
+                &[EvalType::Bytes, EvalType::Bytes],
+                EvalType::Bytes,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::SqlCryptNullNative,
+                crate::impl_encryption::get_native_sql_crypt_null_fn_meta(),
+                &[EvalType::Int],
+                EvalType::Bytes,
+                EvaluatedArgsRole::NullWitness,
+            ),
+            (
+                EvaluatedBytesOp::TidbShardNative,
+                crate::impl_miscellaneous::get_native_tidb_shard_fn_meta(),
+                &[EvalType::Int],
+                EvalType::Int,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::VitessHashNative,
+                crate::impl_miscellaneous::get_native_vitess_hash_fn_meta(),
+                &[EvalType::Int],
+                EvalType::Int,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::FormatBytesNative,
+                crate::impl_miscellaneous::get_native_format_bytes_fn_meta(),
+                &[EvalType::Bytes],
+                EvalType::Bytes,
+                EvaluatedArgsRole::Ieee754Bits,
+            ),
+            (
+                EvaluatedBytesOp::FormatNanoTimeNative,
+                crate::impl_miscellaneous::get_native_format_nano_time_fn_meta(),
+                &[EvalType::Bytes],
+                EvalType::Bytes,
+                EvaluatedArgsRole::Ieee754Bits,
+            ),
+        ];
+        for (operation, official, inputs, output, role) in cases {
+            assert_eq!(operation.input_types(), inputs);
+            assert_eq!(operation.input_role(), role);
+            assert_eq!(operation.eval_type(), output);
+            assert_eq!(operation.call_count(), 1);
+            let EvaluatedKernelKind::ClosedPrivate(id) = operation.kernel_kind() else {
+                panic!("crypt/hash/format must retain private identities");
+            };
+            assert_eq!(operation.function_ref(), FunctionRef::Local(id));
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert!(program.check_entry(ProgramEntry::EvaluatedBytes).is_ok());
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            assert_eq!(program.schema.len(), inputs.len());
+            assert_eq!(program.expression.len(), inputs.len() + 1);
+            for (slot, field_type) in program.schema.iter().enumerate() {
+                assert_eq!(Some(field_type), operation.input_field_type(slot).as_ref());
+                assert!(
+                    matches!(program.expression[slot], RpnExpressionNode::ColumnRef { offset } if offset == slot)
+                );
+            }
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                args_len,
+                field_type,
+                metadata,
+            } = &program.expression[inputs.len()]
+            else {
+                panic!("expected the generated singleton call");
+            };
+            assert_eq!(*args_len, inputs.len());
+            assert_eq!(field_type, &operation.return_type());
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, official.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                official.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                official.metadata_ptr
+            ));
+            check_evaluated_bytes_kernel(operation, 0, &program.expression[inputs.len()]).unwrap();
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(matches!(
+                compile_local(&spec, &program.schema, LocalCompileContext::default()),
+                Err(LocalError::InvalidSpec(_))
+            ));
+            let mut raw_call = CallBuild::local(
+                CallShape::new(
+                    operation.function_ref(),
+                    operation.return_type(),
+                    program
+                        .schema
+                        .iter()
+                        .cloned()
+                        .map(CallArg::dynamic)
+                        .collect(),
+                ),
+                crate::CallMetadata::None,
+            );
+            assert!(prepare_call(&mut raw_call).is_err());
+        }
+
+        // Both formatting recipes keep the old nullable, exactly-eight-byte
+        // IEEE transport. These are admission probes, not new SQL value goldens.
+        for operation in [
+            EvaluatedBytesOp::FormatBytesNative,
+            EvaluatedBytesOp::FormatNanoTimeNative,
+        ] {
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            let mut ctx = EvalContext::default();
+            let mut witness = EvaluatedAsciiWitness::default();
+            for width in [7, 9] {
+                let ready = [ScalarValue::Bytes(Some(vec![0; width]))];
+                let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+                assert!(matches!(
+                    program.expression.eval_with_ready_args(
+                        operation,
+                        &mut ctx,
+                        &program.schema,
+                        &ready,
+                        EvaluatedArgsRole::Ieee754Bits,
+                        &[0],
+                        &mut witness,
+                        &mut budget
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(witness.invocations(), 0);
+            }
+            for (index, value) in [
+                None,
+                Some(f64::NAN.to_bits()),
+                Some(f64::INFINITY.to_bits()),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let ready = [ScalarValue::Bytes(
+                    value.map(|bits| bits.to_le_bytes().to_vec()),
+                )];
+                let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+                let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    program.expression.eval_with_ready_args(
+                        operation,
+                        &mut ctx,
+                        &program.schema,
+                        &ready,
+                        EvaluatedArgsRole::Ieee754Bits,
+                        &[0],
+                        &mut witness,
+                        &mut budget,
+                    )
+                }));
+                if value == Some(f64::INFINITY.to_bits()) {
+                    // Admission accepts infinity, but the original scientific
+                    // formatter expects an exponent and therefore panics.
+                    // This direct call has no outer worker panic boundary.
+                    assert!(evaluated.is_err());
+                } else {
+                    assert!(evaluated.unwrap().is_ok());
+                }
+                assert_eq!(witness.invocations(), index as u64 + 1);
+            }
+        }
+    }
+
+    #[test]
     fn uuid_translate_dispatch_shapes_getters_and_private_compile() {
         use tidb_query_datatype::{EvalType, expr::EvalContext};
 

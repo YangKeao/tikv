@@ -969,6 +969,13 @@ pub enum EvaluatedBytesOp {
     TranslateUtf8Native,
     TranslateBinaryNative,
     TranslateNullNative,
+    SqlEncodeNative,
+    SqlDecodeNative,
+    SqlCryptNullNative,
+    TidbShardNative,
+    VitessHashNative,
+    FormatBytesNative,
+    FormatNanoTimeNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1734,6 +1741,35 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::TranslateNullNative,
                 );
             }
+            Self::SqlEncodeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SqlEncodeNative);
+            }
+            Self::SqlDecodeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SqlDecodeNative);
+            }
+            Self::SqlCryptNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SqlCryptNullNative,
+                );
+            }
+            Self::TidbShardNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::TidbShardNative);
+            }
+            Self::VitessHashNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::VitessHashNative,
+                );
+            }
+            Self::FormatBytesNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FormatBytesNative,
+                );
+            }
+            Self::FormatNanoTimeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FormatNanoTimeNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1770,7 +1806,8 @@ impl EvaluatedBytesOp {
             | Self::DateDiffNullNative
             | Self::WeekNullNative
             | Self::DateFormatNullNative
-            | Self::TranslateNullNative => EvaluatedArgsRole::NullWitness,
+            | Self::TranslateNullNative
+            | Self::SqlCryptNullNative => EvaluatedArgsRole::NullWitness,
             Self::DateDiffCoreNative => EvaluatedArgsRole::TimeCoreBits2,
             Self::DateFormatCoreNative => EvaluatedArgsRole::TimeCoreBitsBytes,
             Self::CharNative => EvaluatedArgsRole::CharReady,
@@ -1784,7 +1821,9 @@ impl EvaluatedBytesOp {
             Self::AbsRealNative
             | Self::CeilRealNative
             | Self::FloorRealNative
-            | Self::RoundRealLegacy => EvaluatedArgsRole::Ieee754Bits,
+            | Self::RoundRealLegacy
+            | Self::FormatBytesNative
+            | Self::FormatNanoTimeNative => EvaluatedArgsRole::Ieee754Bits,
             Self::StrcmpNative | Self::FindInSetNative => EvaluatedArgsRole::CollatedBytes2,
             Self::Locate2Native | Self::Locate3Native => EvaluatedArgsRole::NativeSearch,
             Self::FindInSetPreparedNative => EvaluatedArgsRole::FindInSetPrepared,
@@ -2103,6 +2142,15 @@ impl EvaluatedBytesOp {
                 crate::impl_string::get_native_translate_binary_fn_meta()
             }
             Self::TranslateNullNative => crate::impl_string::get_native_translate_null_fn_meta(),
+            Self::SqlEncodeNative => crate::impl_encryption::get_native_sql_encode_fn_meta(),
+            Self::SqlDecodeNative => crate::impl_encryption::get_native_sql_decode_fn_meta(),
+            Self::SqlCryptNullNative => crate::impl_encryption::get_native_sql_crypt_null_fn_meta(),
+            Self::TidbShardNative => crate::impl_miscellaneous::get_native_tidb_shard_fn_meta(),
+            Self::VitessHashNative => crate::impl_miscellaneous::get_native_vitess_hash_fn_meta(),
+            Self::FormatBytesNative => crate::impl_miscellaneous::get_native_format_bytes_fn_meta(),
+            Self::FormatNanoTimeNative => {
+                crate::impl_miscellaneous::get_native_format_nano_time_fn_meta()
+            }
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -2295,7 +2343,9 @@ impl EvaluatedBytesOp {
             | Self::WeekCoreNative
             | Self::DateFormatMissingNative
             | Self::IsUuidNative
-            | Self::UuidVersionNative => EvalType::Int,
+            | Self::UuidVersionNative
+            | Self::TidbShardNative
+            | Self::VitessHashNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -2424,7 +2474,12 @@ impl EvaluatedBytesOp {
             | Self::BinToUuidNative
             | Self::TranslateUtf8Native
             | Self::TranslateBinaryNative
-            | Self::TranslateNullNative => EvalType::Bytes,
+            | Self::TranslateNullNative
+            | Self::SqlEncodeNative
+            | Self::SqlDecodeNative
+            | Self::SqlCryptNullNative
+            | Self::FormatBytesNative
+            | Self::FormatNanoTimeNative => EvalType::Bytes,
         }
     }
 
@@ -2439,6 +2494,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::SqlEncodeNative | Self::SqlDecodeNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::SqlCryptNullNative | Self::TidbShardNative | Self::VitessHashNative => {
+                &[EvalType::Int]
+            }
+            Self::FormatBytesNative | Self::FormatNanoTimeNative => &[EvalType::Bytes],
             Self::IsUuidNative
             | Self::UuidVersionNative
             | Self::UuidTimestampNative
@@ -3094,6 +3154,7 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::WeekNullNative
                         | EvaluatedBytesOp::DateFormatNullNative
                         | EvaluatedBytesOp::TranslateNullNative
+                        | EvaluatedBytesOp::SqlCryptNullNative
                 ) && value.is_none()
             }
             Self::ConvReady {

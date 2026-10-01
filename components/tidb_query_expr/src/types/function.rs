@@ -283,6 +283,13 @@ pub enum LocalFunctionId {
     TranslateUtf8Native,
     TranslateBinaryNative,
     TranslateNullNative,
+    SqlEncodeNative,
+    SqlDecodeNative,
+    SqlCryptNullNative,
+    TidbShardNative,
+    VitessHashNative,
+    FormatBytesNative,
+    FormatNanoTimeNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

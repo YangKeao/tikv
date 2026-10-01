@@ -172,6 +172,110 @@ pub(crate) fn get_native_bin_to_uuid_fn_meta() -> crate::RpnFnMeta {
     bin_to_uuid_native_fn_meta()
 }
 
+#[rpn_fn(nullable)]
+fn get_native_tidb_shard(input: Option<&Int>) -> Result<Option<Int>> {
+    Ok(input.map(|key| (tidb_query_crypto::hash_uint64(*key as u64) % 256) as i64))
+}
+
+#[rpn_fn(nullable)]
+fn get_native_vitess_hash(input: Option<&Int>) -> Result<Option<Int>> {
+    Ok(input.map(|key| tidb_query_crypto::hash_uint64(*key as u64) as i64))
+}
+
+// Factory-only IEEE754 binary64 transport, not SQL bytes or a finite-only Real.
+fn decode_format_real_native(input: Option<BytesRef>) -> Result<Option<f64>> {
+    let bytes = match input {
+        Some(bytes) => bytes,
+        None => return Ok(None),
+    };
+    let bits = <[u8; 8]>::try_from(bytes).map_err(|_| {
+        other_err!(
+            "Internal raw f64 transport requires exactly 8 bytes, received {}",
+            bytes.len()
+        )
+    })?;
+    Ok(Some(f64::from_bits(u64::from_le_bytes(bits))))
+}
+
+#[rpn_fn(nullable)]
+fn get_native_format_bytes(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_format_real_native(input)?.map(|value| {
+        format_scaled(
+            value,
+            &[
+                (1_u64 << 60, "EiB"),
+                (1_u64 << 50, "PiB"),
+                (1_u64 << 40, "TiB"),
+                (1_u64 << 30, "GiB"),
+                (1_u64 << 20, "MiB"),
+                (1_u64 << 10, "KiB"),
+            ],
+            "bytes",
+        )
+        .into_bytes()
+    }))
+}
+
+#[rpn_fn(nullable)]
+fn get_native_format_nano_time(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(decode_format_real_native(input)?.map(|value| {
+        format_scaled(
+            value,
+            &[
+                (86_400_000_000_000, "d"),
+                (3_600_000_000_000, "h"),
+                (60_000_000_000, "min"),
+                (1_000_000_000, "s"),
+                (1_000_000, "ms"),
+                (1_000, "us"),
+            ],
+            "ns",
+        )
+        .into_bytes()
+    }))
+}
+
+/// Shared structural port of `GetFormatBytes` and `GetFormatNanoTime`.
+fn format_scaled(value: f64, scales: &[(u64, &str)], base_unit: &str) -> String {
+    let magnitude = value.abs();
+    let Some(&(divisor, unit)) = scales
+        .iter()
+        .find(|(divisor, _)| magnitude >= *divisor as f64)
+    else {
+        return format!("{} {base_unit}", fixed(value, 0));
+    };
+    let scaled = value / divisor as f64;
+    let number = if scaled.abs() >= 100_000.0 {
+        scientific(scaled)
+    } else {
+        fixed(scaled, 2)
+    };
+    format!("{number} {unit}")
+}
+
+/// Go's `strconv.FormatFloat(value, 'f', precision, 64)` uses positive zero
+/// for `-0`, as confirmed with `FORMAT_BYTES(-0.0)` and
+/// `FORMAT_NANO_TIME(-0.0)` through `goeval`.
+fn fixed(value: f64, precision: usize) -> String {
+    let value = if value == 0.0 { 0.0 } else { value };
+    format!("{value:.precision$}")
+}
+
+/// Go's `strconv.FormatFloat(value, 'e', 2, 64)` always emits an exponent
+/// sign and pads its absolute exponent to at least two digits (`e+08`). Rust
+/// supplies the correctly rounded mantissa, then this normalizes only that
+/// spelling difference.
+fn scientific(value: f64) -> String {
+    let rendered = format!("{value:.2e}");
+    let (mantissa, exponent) = rendered
+        .split_once('e')
+        .expect("Rust scientific format always contains an exponent");
+    let exponent = exponent
+        .parse::<i32>()
+        .expect("Rust scientific exponent is a signed integer");
+    format!("{mantissa}e{exponent:+03}")
+}
+
 const IPV4_LENGTH: usize = 4;
 const IPV6_LENGTH: usize = 16;
 const PREFIX_COMPAT: [u8; 12] = [0x00; 12];
@@ -439,6 +543,109 @@ mod tests {
 
     use super::*;
     use crate::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_native_shard_vitess_source_literals() {
+        // Original tidb-util vitess.rs five fixed hexadecimal digests.
+        for (key, expected) in [
+            (30_375_298_039_i64, "031265661E5F1133"),
+            (1123, "031B565D41BDF8CA"),
+            (30_573_721_600, "1EFD6439F2050FFD"),
+            (116, "1E1788FF0FDE093C"),
+            (-1, "355550B2150E2451"),
+        ] {
+            let digest = get_native_vitess_hash(Some(&key)).unwrap().unwrap() as u64;
+            assert_eq!(format!("{digest:016X}"), expected);
+        }
+        // Original builtin_ext/misc.rs fixtures, including a high-bit output.
+        assert_eq!(
+            get_native_vitess_hash(Some(&0)).unwrap().unwrap() as u64,
+            10_134_873_677_816_210_343_u64
+        );
+        for (key, expected) in [(-1, 81), (0, 167), (1, 214), (9_999_999_999_999_999, 63)] {
+            assert_eq!(get_native_tidb_shard(Some(&key)).unwrap(), Some(expected));
+        }
+        assert_eq!(get_native_tidb_shard(None).unwrap(), None);
+        assert_eq!(get_native_vitess_hash(None).unwrap(), None);
+    }
+
+    #[test]
+    fn test_native_format_bytes_source_literals_and_transport() {
+        // Original builtin_ext/info.rs finite vectors and negative-zero case.
+        for (value, expected) in [
+            (0.0_f64, "0 bytes"),
+            (2048.0, "2.00 KiB"),
+            (75_295_729.0, "71.81 MiB"),
+            (5_287_242_702.0, "4.92 GiB"),
+            (5_039_757_204_245.0, "4.58 TiB"),
+            (890_250_274_520_475_525.0, "790.70 PiB"),
+            (18_446_644_073_709_551_615.0, "16.00 EiB"),
+            (287_952_852_482_075_252_752_429_875.0, "2.50e+08 EiB"),
+            (-18_446_644_073_709_551_615.0, "-16.00 EiB"),
+            (-0.0, "0 bytes"),
+        ] {
+            let input = value.to_bits().to_le_bytes();
+            assert_eq!(
+                get_native_format_bytes(Some(&input)).unwrap(),
+                Some(expected.as_bytes().to_vec())
+            );
+        }
+        assert_eq!(get_native_format_bytes(None).unwrap(), None);
+        assert!(get_native_format_bytes(Some(&[0; 7])).is_err());
+        // Source-derived ready-value/transport checks, not old SQL rows:
+        // overflow coercion supplies MAX; raw NaN survives; raw infinity still
+        // reaches the original scientific().expect panic, not a finite filter.
+        for (value, expected) in [(f64::MAX, "1.56e+290 EiB"), (f64::NAN, "NaN bytes")] {
+            let input = value.to_bits().to_le_bytes();
+            assert_eq!(
+                get_native_format_bytes(Some(&input)).unwrap(),
+                Some(expected.as_bytes().to_vec())
+            );
+        }
+        for value in [f64::INFINITY, f64::NEG_INFINITY] {
+            let input = value.to_bits().to_le_bytes();
+            assert!(std::panic::catch_unwind(|| get_native_format_bytes(Some(&input))).is_err());
+        }
+    }
+
+    #[test]
+    fn test_native_format_nano_time_source_literals_and_transport() {
+        // Original builtin_ext/info.rs finite vectors and negative-zero case.
+        for (value, expected) in [
+            (0.0_f64, "0 ns"),
+            (2000.0, "2.00 us"),
+            (898_787_877.0, "898.79 ms"),
+            (9_999_999_991.0, "10.00 s"),
+            (898_787_877_424.0, "14.98 min"),
+            (5_827_527_520_021.0, "1.62 h"),
+            (42_566_623_663_736_353.0, "492.67 d"),
+            (4_827_524_825_702_572_425_242_552.0, "5.59e+10 d"),
+            (-9_999_999_991.0, "-10.00 s"),
+            (-0.0, "0 ns"),
+        ] {
+            let input = value.to_bits().to_le_bytes();
+            assert_eq!(
+                get_native_format_nano_time(Some(&input)).unwrap(),
+                Some(expected.as_bytes().to_vec())
+            );
+        }
+        assert_eq!(get_native_format_nano_time(None).unwrap(), None);
+        assert!(get_native_format_nano_time(Some(&[0; 9])).is_err());
+        // Source-derived ready-value/transport checks, not old SQL rows.
+        for (value, expected) in [(f64::MAX, "2.08e+294 d"), (f64::NAN, "NaN ns")] {
+            let input = value.to_bits().to_le_bytes();
+            assert_eq!(
+                get_native_format_nano_time(Some(&input)).unwrap(),
+                Some(expected.as_bytes().to_vec())
+            );
+        }
+        for value in [f64::INFINITY, f64::NEG_INFINITY] {
+            let input = value.to_bits().to_le_bytes();
+            assert!(
+                std::panic::catch_unwind(|| get_native_format_nano_time(Some(&input))).is_err()
+            );
+        }
+    }
 
     #[test]
     fn test_uuid_native_parse_policy_and_null() {

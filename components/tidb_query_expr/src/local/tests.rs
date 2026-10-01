@@ -7893,6 +7893,219 @@ fn local_evaluated_args_date_format_core_keeps_roles_and_missing_distinct() {
 }
 
 #[test]
+fn crypt_hash_format_dispatch_values_null_resources_and_owned_results() {
+    let prepare = |operation| {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap()
+    };
+    // Exact crypto.rs SQLDecode/SQLEncode row: retain the original direction
+    // and arbitrary bytes, rather than using a round trip as the sole oracle.
+    let plain = b"pingcap".as_slice();
+    let cipher = [0x2c, 0x35, 0xb5, 0xa4, 0xad, 0xf3, 0x91];
+    let password = b"1234567890123456";
+    for (operation, input, expected) in [
+        (EvaluatedBytesOp::SqlDecodeNative, plain, cipher.as_slice()),
+        (EvaluatedBytesOp::SqlEncodeNative, cipher.as_slice(), plain),
+    ] {
+        let mut worker = prepare(operation);
+        let storage = worker.retained_storage().unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let ComputedValue::Bytes(null) = worker
+            .eval_args(EvaluatedArgs::Bytes2(None, Some(password.to_vec())))
+            .unwrap()
+        else {
+            panic!("nullable SQL crypt must retain its Bytes result domain");
+        };
+        assert_eq!(null.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(null.into_option(), None);
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::Bytes2(
+                Some(input.to_vec()),
+                Some(password.to_vec()),
+            ))
+            .unwrap()
+        else {
+            panic!("SQL crypt must own its Bytes result");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        let owned = value.into_option().unwrap();
+        assert_eq!(owned.as_slice(), expected);
+        assert_eq!(worker.kernel_invocations(), 2);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        drop(worker);
+        assert_eq!(owned.as_slice(), expected);
+    }
+    let mut null = prepare(EvaluatedBytesOp::SqlCryptNullNative);
+    let storage = null.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::NullWitness(Some(0)),
+        EvaluatedArgs::Int(None),
+        EvaluatedArgs::Bytes2(None, None),
+    ] {
+        assert!(matches!(
+            null.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(null.kernel_invocations(), 0);
+        assert!(null.is_healthy());
+    }
+    let ComputedValue::Bytes(value) = null.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+    else {
+        panic!("an observed SQL crypt NULL must own its Bytes result");
+    };
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(null.kernel_invocations(), 1);
+    assert!(null.is_healthy());
+    assert_eq!(null.retained_storage().unwrap(), storage);
+
+    // Existing misc.rs fixed DES vectors, including the high-bit result for
+    // zero and the unsigned-max input transported as signed -1. No hash oracle.
+    for (operation, expected_zero, expected_max) in [
+        (EvaluatedBytesOp::TidbShardNative, 167_u64, 81_u64),
+        (
+            EvaluatedBytesOp::VitessHashNative,
+            10_134_873_677_816_210_343_u64,
+            3_843_066_582_818_235_473_u64,
+        ),
+    ] {
+        let mut worker = prepare(operation);
+        let storage = worker.retained_storage().unwrap();
+        let mut owned = None;
+        for (index, (input, expected)) in [
+            (None, None),
+            (Some(0), Some(expected_zero)),
+            (Some(-1), Some(expected_max)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ComputedValue::Int(value) = worker.eval_args(EvaluatedArgs::Int(input)).unwrap()
+            else {
+                panic!("hash must retain its signed integer bit carrier");
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.value().map(|bits| bits as u64), expected);
+            if operation == EvaluatedBytesOp::VitessHashNative && input == Some(0) {
+                assert!(
+                    value.value().unwrap() < 0,
+                    "high result bits are not an overflow"
+                );
+            }
+            owned = value.into_option();
+            assert_eq!(owned.map(|bits| bits as u64), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        drop(worker);
+        assert_eq!(owned.map(|bits| bits as u64), Some(expected_max));
+    }
+
+    // Exact info.rs finite/negative-zero vectors. Schema admission for NaN and
+    // infinity is tested separately without inventing additional SQL goldens.
+    for (operation, input, expected, zero) in [
+        (
+            EvaluatedBytesOp::FormatBytesNative,
+            2048.0_f64,
+            b"2.00 KiB".as_slice(),
+            b"0 bytes".as_slice(),
+        ),
+        (
+            EvaluatedBytesOp::FormatNanoTimeNative,
+            2000.0_f64,
+            b"2.00 us".as_slice(),
+            b"0 ns".as_slice(),
+        ),
+    ] {
+        let mut worker = prepare(operation);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Bytes(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        let mut owned = None;
+        for (index, (bits, expected)) in [
+            (None, None),
+            (Some(input.to_bits()), Some(expected)),
+            (Some((-0.0_f64).to_bits()), Some(zero)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ComputedValue::Bytes(value) =
+                worker.eval_args(EvaluatedArgs::Ieee754Bits(bits)).unwrap()
+            else {
+                panic!("formatting returns owned Bytes, not IEEE754 result bits");
+            };
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.value(), expected);
+            owned = value.into_option();
+            assert_eq!(owned.as_deref(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        drop(worker);
+        assert_eq!(owned.as_deref(), Some(zero));
+    }
+
+    // NULL remains real ready input for the selected wrapper; none of these
+    // recipes may bypass the existing step budget by returning it in the facade.
+    for (operation, args) in [
+        (
+            EvaluatedBytesOp::SqlEncodeNative,
+            EvaluatedArgs::Bytes2(None, None),
+        ),
+        (
+            EvaluatedBytesOp::SqlDecodeNative,
+            EvaluatedArgs::Bytes2(None, None),
+        ),
+        (
+            EvaluatedBytesOp::SqlCryptNullNative,
+            EvaluatedArgs::NullWitness(None),
+        ),
+        (EvaluatedBytesOp::TidbShardNative, EvaluatedArgs::Int(None)),
+        (EvaluatedBytesOp::VitessHashNative, EvaluatedArgs::Int(None)),
+        (
+            EvaluatedBytesOp::FormatBytesNative,
+            EvaluatedArgs::Ieee754Bits(None),
+        ),
+        (
+            EvaluatedBytesOp::FormatNanoTimeNative,
+            EvaluatedArgs::Ieee754Bits(None),
+        ),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_steps: 0,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(args),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}
+
+#[test]
 fn uuid_translate_dispatch_owned_values_and_exact_admission() {
     let prepare = |operation| {
         prepare_evaluated_bytes(
