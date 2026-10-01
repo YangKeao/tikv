@@ -91,6 +91,10 @@ pub(crate) fn evaluated_ascii_decimal_type() -> FieldType {
     FieldType::from(tidb_query_datatype::FieldTypeTp::NewDecimal)
 }
 
+pub(super) fn evaluated_native_vector_type() -> FieldType {
+    FieldType::from(tidb_query_datatype::FieldTypeTp::TiDbVectorFloat32)
+}
+
 fn invalid(error: tidb_query_common::Error) -> LocalError {
     LocalError::InvalidSpec(error.to_string())
 }

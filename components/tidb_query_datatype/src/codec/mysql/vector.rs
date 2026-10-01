@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 
 use codec::prelude::*;
 
+use super::vector_native::{NativeVectorError, format_f32_fixed_shortest};
 use crate::codec::Result;
 
 const F32_SIZE: usize = std::mem::size_of::<f32>();
@@ -130,14 +131,9 @@ impl<'a> VectorFloat32Ref<'a> {
             return Err(box_err!("Vector length error. Please check the input."));
         }
         let check_vec = VectorFloat32Ref { value };
-        for i in 0..check_vec.len() {
-            if check_vec.index(i).is_nan() {
-                return Err(box_err!("NaN not allowed in vector"));
-            }
-            if check_vec.index(i).is_infinite() {
-                return Err(box_err!("infinite value not allowed in vector"));
-            }
-        }
+        check_vec
+            .validate_native_elements()
+            .map_err(|error| -> crate::codec::Error { box_err!("{}", error) })?;
         Ok(check_vec)
     }
 
@@ -164,15 +160,59 @@ impl<'a> VectorFloat32Ref<'a> {
         self.len() == 0
     }
 
-    fn check_dims(&self, b: VectorFloat32Ref<'a>) -> Result<()> {
+    // Actual aligned native storage viewed as native-endian bytes. No copy,
+    // finite check or dimension check: mutation/raw decode are separate policies.
+    pub(crate) fn from_raw_f32(value: &'a [f32]) -> Self {
+        Self {
+            value: bytemuck::cast_slice(value),
+        }
+    }
+
+    pub(crate) fn validate_native_elements(&self) -> std::result::Result<(), NativeVectorError> {
+        for i in 0..self.len() {
+            if self.index(i).is_nan() {
+                return Err(NativeVectorError::new("NaN not allowed in vector"));
+            }
+            if self.index(i).is_infinite() {
+                return Err(NativeVectorError::new(
+                    "infinite value not allowed in vector",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_native_dims(
+        &self,
+        b: VectorFloat32Ref<'_>,
+    ) -> std::result::Result<(), NativeVectorError> {
         if self.len() != b.len() {
-            return Err(box_err!(
+            return Err(NativeVectorError::new(format!(
                 "vectors have different dimensions: {} and {}",
                 self.len(),
                 b.len()
-            ));
+            )));
         }
         Ok(())
+    }
+
+    pub(crate) fn fmt_native(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str("[")?;
+        for i in 0..self.len() {
+            if i != 0 {
+                f.write_str(",")?;
+            }
+            f.write_str(&format_f32_fixed_shortest(self.index(i)))?;
+        }
+        f.write_str("]")
+    }
+
+    /// Formats the native fixed-shortest policy without validating raw bits.
+    pub fn to_native_string(&self) -> String {
+        let mut output = String::new();
+        self.fmt_native(&mut output)
+            .expect("formatting vector into String cannot fail");
+        output
     }
 
     fn index(&self, idx: usize) -> f32 {
@@ -210,7 +250,15 @@ impl<'a> VectorFloat32Ref<'a> {
     }
 
     pub fn l2_squared_distance(&self, b: VectorFloat32Ref<'a>) -> Result<f64> {
-        self.check_dims(b)?;
+        self.native_l2_squared_distance(b)
+            .map_err(|error| box_err!("{}", error))
+    }
+
+    pub(crate) fn native_l2_squared_distance(
+        &self,
+        b: VectorFloat32Ref<'_>,
+    ) -> std::result::Result<f64, NativeVectorError> {
+        self.check_native_dims(b)?;
         let mut distance: f32 = 0.0;
 
         for i in 0..self.len() {
@@ -222,11 +270,27 @@ impl<'a> VectorFloat32Ref<'a> {
     }
 
     pub fn l2_distance(&self, b: VectorFloat32Ref<'a>) -> Result<f64> {
-        Ok(self.l2_squared_distance(b)?.sqrt())
+        self.native_l2_distance(b)
+            .map_err(|error| box_err!("{}", error))
+    }
+
+    pub fn native_l2_distance(
+        &self,
+        b: VectorFloat32Ref<'_>,
+    ) -> std::result::Result<f64, NativeVectorError> {
+        Ok(self.native_l2_squared_distance(b)?.sqrt())
     }
 
     pub fn inner_product(&self, b: VectorFloat32Ref<'a>) -> Result<f64> {
-        self.check_dims(b)?;
+        self.native_inner_product(b)
+            .map_err(|error| box_err!("{}", error))
+    }
+
+    pub fn native_inner_product(
+        &self,
+        b: VectorFloat32Ref<'_>,
+    ) -> std::result::Result<f64, NativeVectorError> {
+        self.check_native_dims(b)?;
         let mut distance: f32 = 0.0;
         for i in 0..self.len() {
             distance += unsafe { self.index_unchecked(i) * b.index_unchecked(i) };
@@ -236,7 +300,15 @@ impl<'a> VectorFloat32Ref<'a> {
     }
 
     pub fn cosine_distance(&self, b: VectorFloat32Ref<'a>) -> Result<f64> {
-        self.check_dims(b)?;
+        self.native_cosine_distance(b)
+            .map_err(|error| box_err!("{}", error))
+    }
+
+    pub fn native_cosine_distance(
+        &self,
+        b: VectorFloat32Ref<'_>,
+    ) -> std::result::Result<f64, NativeVectorError> {
+        self.check_native_dims(b)?;
         let mut distance: f32 = 0.0;
         let mut norma: f32 = 0.0;
         let mut normb: f32 = 0.0;
@@ -258,7 +330,15 @@ impl<'a> VectorFloat32Ref<'a> {
     }
 
     pub fn l1_distance(&self, b: VectorFloat32Ref<'a>) -> Result<f64> {
-        self.check_dims(b)?;
+        self.native_l1_distance(b)
+            .map_err(|error| box_err!("{}", error))
+    }
+
+    pub fn native_l1_distance(
+        &self,
+        b: VectorFloat32Ref<'_>,
+    ) -> std::result::Result<f64, NativeVectorError> {
+        self.check_native_dims(b)?;
         let mut distance: f32 = 0.0;
         for i in 0..self.len() {
             let diff = unsafe { self.index_unchecked(i) - b.index_unchecked(i) };
@@ -269,14 +349,22 @@ impl<'a> VectorFloat32Ref<'a> {
     }
 
     pub fn l2_norm(&self) -> f64 {
-        // Note: We align the impl with pgvector: Only l2_norm use double
-        // precision during calculation.
+        self.norm_with_square(|v| v * v)
+    }
+
+    /// Native source preserves powi(2), while wire norm preserves
+    /// multiplication.
+    pub fn native_l2_norm(&self) -> f64 {
+        self.norm_with_square(|v| v.powi(2))
+    }
+
+    fn norm_with_square(&self, square: impl Fn(f64) -> f64) -> f64 {
+        // Both policies intentionally accumulate in float64, in source order.
         let mut norm: f64 = 0.0;
         for i in 0..self.len() {
             let v = unsafe { self.index_unchecked(i) as f64 };
-            norm += v * v;
+            norm += square(v);
         }
-
         norm.sqrt()
     }
 }

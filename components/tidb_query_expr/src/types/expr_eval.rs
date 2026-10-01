@@ -298,6 +298,7 @@ impl EvalInput<'_, '_> {
                 total.checked_add(match value {
                     ScalarValue::Bytes(Some(bytes)) => bytes.capacity(),
                     ScalarValue::Decimal(Some(value)) => value.spill_capacity_bytes(),
+                    ScalarValue::VectorFloat32(Some(value)) => value.value.capacity(),
                     _ => 0,
                 })
             }),
@@ -355,6 +356,10 @@ fn evaluated_ready_args_match(
                         ScalarValue::Decimal(_),
                         tidb_query_datatype::EvalType::Decimal
                     )
+                    | (
+                        ScalarValue::VectorFloat32(_),
+                        tidb_query_datatype::EvalType::VectorFloat32
+                    )
             )
         })
         && match values {
@@ -363,6 +368,36 @@ fn evaluated_ready_args_match(
         }
         && match role {
             EvaluatedArgsRole::NoArgs => values.is_empty(),
+            EvaluatedArgsRole::NativeVector | EvaluatedArgsRole::NativeVector2 => {
+                let selected = match role {
+                    EvaluatedArgsRole::NativeVector => {
+                        matches!(
+                            operation,
+                            EvaluatedBytesOp::VecAsTextNative
+                                | EvaluatedBytesOp::VecDimsNative
+                                | EvaluatedBytesOp::VecL2NormNative
+                        ) && values.len() == 1
+                    }
+                    EvaluatedArgsRole::NativeVector2 => {
+                        matches!(
+                            operation,
+                            EvaluatedBytesOp::VecL1DistanceNative
+                                | EvaluatedBytesOp::VecL2DistanceNative
+                                | EvaluatedBytesOp::VecNegativeInnerProductNative
+                                | EvaluatedBytesOp::VecCosineDistanceNative
+                        ) && values.len() == 2
+                    }
+                    _ => unreachable!(),
+                };
+                selected
+                    && values.iter().all(|value| match value {
+                        ScalarValue::VectorFloat32(None) => true,
+                        ScalarValue::VectorFloat32(Some(value)) => {
+                            value.value.len() % std::mem::size_of::<f32>() == 0
+                        }
+                        _ => false,
+                    })
+            }
             EvaluatedArgsRole::Values => {
                 operation != EvaluatedBytesOp::UuidToBinSwapNative
                     || matches!(values, [ScalarValue::Bytes(Some(bytes)), ScalarValue::Int(Some(_))]
@@ -444,6 +479,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::DateFormatNullNative
                         | EvaluatedBytesOp::TranslateNullNative
                         | EvaluatedBytesOp::SqlCryptNullNative
+                        | EvaluatedBytesOp::VecRealNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,

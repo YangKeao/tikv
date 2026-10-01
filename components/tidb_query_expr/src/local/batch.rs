@@ -12,7 +12,11 @@ use tidb_query_datatype::{
         batch::LazyBatchColumnVec,
         collation::native::NativeCollation,
         data_type::{BATCH_MAX_SIZE, ChunkedVecBytes, ScalarValue, ScalarValueRef, VectorValue},
-        mysql::{DEFAULT_DIV_FRAC_INCR, Decimal, Tz, decimal::NativeDecimalError},
+        mysql::{
+            DEFAULT_DIV_FRAC_INCR, Decimal, NativeVectorError, NativeVectorFloat32, Tz,
+            decimal::NativeDecimalError, deserialize_native_vector_float32,
+            peek_native_vector_float32,
+        },
     },
     expr::{EvalConfig, EvalContext},
 };
@@ -24,6 +28,7 @@ use super::{
     compile::{
         LocalNumericBatchProgram, ProgramEntry, compile_evaluated_bytes,
         evaluated_ascii_bytes_type, evaluated_ascii_decimal_type, evaluated_ascii_int_type,
+        evaluated_native_vector_type,
     },
     runtime::{EvalBudget, bytes_min_storage_bytes, int_min_storage_bytes, vector_storage_bytes},
 };
@@ -976,6 +981,15 @@ pub enum EvaluatedBytesOp {
     VitessHashNative,
     FormatBytesNative,
     FormatNanoTimeNative,
+    VecAsTextNative,
+    VecDimsNative,
+    VecL1DistanceNative,
+    VecL2DistanceNative,
+    VecNegativeInnerProductNative,
+    VecCosineDistanceNative,
+    VecL2NormNative,
+    VecFromTextNative,
+    VecRealNullNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -991,6 +1005,8 @@ pub(crate) enum EvaluatedKernelKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EvaluatedArgsRole {
     Values,
+    NativeVector,
+    NativeVector2,
     Ieee754Bits,
     TimeCoreBits,
     TimeCoreBits2,
@@ -1770,6 +1786,45 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::FormatNanoTimeNative,
                 );
             }
+            Self::VecAsTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::VecAsTextNative);
+            }
+            Self::VecDimsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::VecDimsNative);
+            }
+            Self::VecL1DistanceNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::VecL1DistanceNative,
+                );
+            }
+            Self::VecL2DistanceNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::VecL2DistanceNative,
+                );
+            }
+            Self::VecNegativeInnerProductNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::VecNegativeInnerProductNative,
+                );
+            }
+            Self::VecCosineDistanceNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::VecCosineDistanceNative,
+                );
+            }
+            Self::VecL2NormNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::VecL2NormNative);
+            }
+            Self::VecFromTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::VecFromTextNative,
+                );
+            }
+            Self::VecRealNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::VecRealNullNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1785,6 +1840,13 @@ impl EvaluatedBytesOp {
         // A private identity does not determine its carrier or packet policy.
         // In particular, value-only FROM_BASE64 keeps the ordinary Bytes role.
         match self {
+            Self::VecAsTextNative | Self::VecDimsNative | Self::VecL2NormNative => {
+                EvaluatedArgsRole::NativeVector
+            }
+            Self::VecL1DistanceNative
+            | Self::VecL2DistanceNative
+            | Self::VecNegativeInnerProductNative
+            | Self::VecCosineDistanceNative => EvaluatedArgsRole::NativeVector2,
             Self::ConcatNative | Self::ConcatWsNative => EvaluatedArgsRole::ConcatPacked,
             Self::EltNative => EvaluatedArgsRole::EltReady,
             Self::FieldBytesNative | Self::FieldIntNative | Self::FieldRealNative => {
@@ -1807,7 +1869,8 @@ impl EvaluatedBytesOp {
             | Self::WeekNullNative
             | Self::DateFormatNullNative
             | Self::TranslateNullNative
-            | Self::SqlCryptNullNative => EvaluatedArgsRole::NullWitness,
+            | Self::SqlCryptNullNative
+            | Self::VecRealNullNative => EvaluatedArgsRole::NullWitness,
             Self::DateDiffCoreNative => EvaluatedArgsRole::TimeCoreBits2,
             Self::DateFormatCoreNative => EvaluatedArgsRole::TimeCoreBitsBytes,
             Self::CharNative => EvaluatedArgsRole::CharReady,
@@ -1992,6 +2055,12 @@ impl EvaluatedBytesOp {
                 | Self::ExpGoNative
                 | Self::Log10GoNative
                 | Self::MakeTimePartsNative
+                | Self::VecL1DistanceNative
+                | Self::VecL2DistanceNative
+                | Self::VecNegativeInnerProductNative
+                | Self::VecCosineDistanceNative
+                | Self::VecL2NormNative
+                | Self::VecRealNullNative
         )
     }
 
@@ -2000,6 +2069,19 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::VecAsTextNative => crate::impl_vec::get_native_vec_as_text_fn_meta(),
+            Self::VecDimsNative => crate::impl_vec::get_native_vec_dims_fn_meta(),
+            Self::VecL1DistanceNative => crate::impl_vec::get_native_vec_l1_distance_fn_meta(),
+            Self::VecL2DistanceNative => crate::impl_vec::get_native_vec_l2_distance_fn_meta(),
+            Self::VecNegativeInnerProductNative => {
+                crate::impl_vec::get_native_vec_negative_inner_product_fn_meta()
+            }
+            Self::VecCosineDistanceNative => {
+                crate::impl_vec::get_native_vec_cosine_distance_fn_meta()
+            }
+            Self::VecL2NormNative => crate::impl_vec::get_native_vec_l2_norm_fn_meta(),
+            Self::VecFromTextNative => crate::impl_vec::get_native_vec_from_text_fn_meta(),
+            Self::VecRealNullNative => crate::impl_vec::get_native_vec_real_null_fn_meta(),
             Self::Ascii => crate::impl_string::ascii_fn_meta(),
             Self::Length => crate::impl_string::length_fn_meta(),
             Self::BitLength => crate::impl_string::bit_length_fn_meta(),
@@ -2345,7 +2427,8 @@ impl EvaluatedBytesOp {
             | Self::IsUuidNative
             | Self::UuidVersionNative
             | Self::TidbShardNative
-            | Self::VitessHashNative => EvalType::Int,
+            | Self::VitessHashNative
+            | Self::VecDimsNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -2479,7 +2562,15 @@ impl EvaluatedBytesOp {
             | Self::SqlDecodeNative
             | Self::SqlCryptNullNative
             | Self::FormatBytesNative
-            | Self::FormatNanoTimeNative => EvalType::Bytes,
+            | Self::FormatNanoTimeNative
+            | Self::VecAsTextNative
+            | Self::VecL1DistanceNative
+            | Self::VecL2DistanceNative
+            | Self::VecNegativeInnerProductNative
+            | Self::VecCosineDistanceNative
+            | Self::VecL2NormNative
+            | Self::VecFromTextNative
+            | Self::VecRealNullNative => EvalType::Bytes,
         }
     }
 
@@ -2494,6 +2585,15 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::VecAsTextNative | Self::VecDimsNative | Self::VecL2NormNative => {
+                &[EvalType::VectorFloat32]
+            }
+            Self::VecL1DistanceNative
+            | Self::VecL2DistanceNative
+            | Self::VecNegativeInnerProductNative
+            | Self::VecCosineDistanceNative => &[EvalType::VectorFloat32, EvalType::VectorFloat32],
+            Self::VecFromTextNative => &[EvalType::Bytes],
+            Self::VecRealNullNative => &[EvalType::Int],
             Self::SqlEncodeNative | Self::SqlDecodeNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::SqlCryptNullNative | Self::TidbShardNative | Self::VitessHashNative => {
                 &[EvalType::Int]
@@ -2756,7 +2856,8 @@ impl EvaluatedBytesOp {
             EvalType::Int => evaluated_ascii_int_type(),
             EvalType::Bytes => evaluated_ascii_bytes_type(),
             EvalType::Decimal => evaluated_ascii_decimal_type(),
-            _ => unreachable!("the operation has only Int/Bytes/Decimal inputs"),
+            EvalType::VectorFloat32 => evaluated_native_vector_type(),
+            _ => unreachable!("the operation has only Int/Bytes/Decimal/VectorFloat32 inputs"),
         })
     }
 
@@ -2881,6 +2982,9 @@ impl NativeSearchPolicy {
 /// NULL.
 #[derive(Debug)]
 pub enum EvaluatedArgs {
+    /// Actual aligned vectors, never ordinary Bytes or serialized controls.
+    NativeVector(Option<NativeVectorFloat32>),
+    NativeVector2(Option<NativeVectorFloat32>, Option<NativeVectorFloat32>),
     /// A genuine zero-operand invocation, not a nullable dummy argument.
     NoArgs,
     Decimal(Option<Decimal>),
@@ -3046,6 +3150,8 @@ impl EvaluatedArgs {
             }
             Self::FindInSetPreparedReady { .. } => EvaluatedArgsRole::FindInSetPrepared,
             Self::NoArgs => EvaluatedArgsRole::NoArgs,
+            Self::NativeVector(_) => EvaluatedArgsRole::NativeVector,
+            Self::NativeVector2(..) => EvaluatedArgsRole::NativeVector2,
             Self::Ieee754Bits(_) => EvaluatedArgsRole::Ieee754Bits,
             Self::TimeCoreBits(_) => EvaluatedArgsRole::TimeCoreBits,
             Self::TimeCoreBits2(..) => EvaluatedArgsRole::TimeCoreBits2,
@@ -3069,6 +3175,8 @@ impl EvaluatedArgs {
 
     fn input_types(&self) -> &'static [EvalType] {
         match self {
+            Self::NativeVector(_) => &[EvalType::VectorFloat32],
+            Self::NativeVector2(..) => &[EvalType::VectorFloat32, EvalType::VectorFloat32],
             Self::NoArgs => &[],
             Self::Decimal(_) => &[EvalType::Decimal, EvalType::Int],
             Self::DecimalIntReady { .. } => &[EvalType::Decimal, EvalType::Int, EvalType::Int],
@@ -3155,6 +3263,7 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::DateFormatNullNative
                         | EvaluatedBytesOp::TranslateNullNative
                         | EvaluatedBytesOp::SqlCryptNullNative
+                        | EvaluatedBytesOp::VecRealNullNative
                 ) && value.is_none()
             }
             Self::ConvReady {
@@ -3365,16 +3474,85 @@ impl EvaluatedArgs {
         Ok(bits as i64)
     }
 
-    fn into_values(self, decimal_available: usize) -> LocalResult<([ScalarValue; 4], usize)> {
+    fn native_vector_values(
+        values: [Option<NativeVectorFloat32>; 2],
+        arity: usize,
+        available: usize,
+    ) -> LocalResult<([ScalarValue; 4], usize)> {
+        let mut live = values
+            .iter()
+            .try_fold(0usize, |total, value| {
+                total.checked_add(
+                    value
+                        .as_ref()
+                        .map_or(0, NativeVectorFloat32::elements_capacity)
+                        .checked_mul(mem::size_of::<f32>())?,
+                )
+            })
+            .ok_or_else(evaluated_ascii_storage_overflow)?;
+        let check = |bytes: usize| {
+            if bytes > available {
+                Err(LocalError::ResourceLimit(
+                    "native vector input conversion exceeds retained storage".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        check(live)?;
+        let mut ready = [
+            ScalarValue::Int(None),
+            ScalarValue::Int(None),
+            ScalarValue::Int(None),
+            ScalarValue::Int(None),
+        ];
+        for (slot, value) in values.into_iter().take(arity).enumerate() {
+            let value = match value {
+                None => None,
+                Some(source) => {
+                    let source_bytes = source
+                        .elements_capacity()
+                        .checked_mul(mem::size_of::<f32>())
+                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    let requested = source
+                        .len()
+                        .checked_mul(mem::size_of::<f32>())
+                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    check(
+                        live.checked_add(requested)
+                            .ok_or_else(evaluated_ascii_storage_overflow)?,
+                    )?;
+                    // No wire constructor/decoder: preserve the native-endian bits,
+                    // including mutable NaN/Inf and dimensions above the text cap.
+                    let wire = source.into_wire_raw();
+                    let overlap = live
+                        .checked_add(wire.value.capacity())
+                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    check(overlap)?;
+                    live = overlap
+                        .checked_sub(source_bytes)
+                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    Some(wire)
+                }
+            };
+            ready[slot] = ScalarValue::VectorFloat32(value);
+        }
+        Ok((ready, arity))
+    }
+
+    fn into_values(self, available: usize) -> LocalResult<([ScalarValue; 4], usize)> {
         // The fixed owner stays inline. Only four PAD, two INSERT and native
         // LOCATE3 recipes publish all slots; unused slots never enter the driver.
         // IEEE754's physical Byte8 allocation is charged like any Bytes owner.
         use ScalarValue::{Bytes, Int};
         Ok(match self {
+            Self::NativeVector(value) => Self::native_vector_values([value, None], 1, available)?,
+            Self::NativeVector2(left, right) => {
+                Self::native_vector_values([left, right], 2, available)?
+            }
             Self::NoArgs => ([Int(None), Int(None), Int(None), Int(None)], 0),
             Self::Decimal(value) => {
-                let limit =
-                    Self::decimal_materialization_budget(value.as_ref(), decimal_available)?;
+                let limit = Self::decimal_materialization_budget(value.as_ref(), available)?;
                 (
                     [
                         ScalarValue::Decimal(value),
@@ -3390,8 +3568,7 @@ impl EvaluatedArgs {
                     ReadyDecimalArg::Value(value) => value,
                     ReadyDecimalArg::Undemanded => Some(Decimal::zero()),
                 };
-                let limit =
-                    Self::decimal_materialization_budget(value.as_ref(), decimal_available)?;
+                let limit = Self::decimal_materialization_budget(value.as_ref(), available)?;
                 (
                     [
                         ScalarValue::Decimal(value),
@@ -4106,6 +4283,92 @@ impl ComputedInt128 {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputedNativeVectorMetadata {
+    OwnNativeVector,
+}
+
+/// Owns the aligned result. Equality is transport-bit equality, deliberately
+/// separate from the shared native vector's unchanged floating-point PartialEq.
+#[derive(Debug)]
+pub struct ComputedNativeVector {
+    value: Option<NativeVectorFloat32>,
+}
+
+impl ComputedNativeVector {
+    pub fn value(&self) -> Option<&NativeVectorFloat32> {
+        self.value.as_ref()
+    }
+    pub fn into_value(self) -> Option<NativeVectorFloat32> {
+        self.value
+    }
+    pub fn metadata(&self) -> ComputedNativeVectorMetadata {
+        ComputedNativeVectorMetadata::OwnNativeVector
+    }
+}
+
+impl PartialEq for ComputedNativeVector {
+    fn eq(&self, other: &Self) -> bool {
+        self.metadata() == other.metadata()
+            && match (&self.value, &other.value) {
+                (None, None) => true,
+                (Some(left), Some(right)) => {
+                    left.len() == right.len()
+                        && left
+                            .elements()
+                            .iter()
+                            .zip(right.elements())
+                            .all(|(left, right)| left.to_bits() == right.to_bits())
+                }
+                _ => false,
+            }
+    }
+}
+impl Eq for ComputedNativeVector {}
+
+fn materialize_native_vector(
+    source: &[u8],
+    physical_bytes: usize,
+    input_bytes: usize,
+    budget: &EvalBudget,
+) -> LocalResult<NativeVectorFloat32> {
+    let invalid = |error: NativeVectorError| {
+        LocalError::InvalidBatch(format!(
+            "native vector result has invalid serialized layout: {error}"
+        ))
+    };
+    let encoded = peek_native_vector_float32(source).map_err(invalid)?;
+    if encoded != source.len() {
+        return Err(LocalError::InvalidBatch(
+            "native vector result has a trailing suffix".into(),
+        ));
+    }
+    let requested = encoded
+        .checked_sub(mem::size_of::<u32>())
+        .ok_or_else(evaluated_ascii_storage_overflow)?;
+    let overlap = physical_bytes
+        .checked_add(requested)
+        .ok_or_else(evaluated_ascii_storage_overflow)?;
+    budget.check_output(overlap, input_bytes)?;
+    // This is the actual computed vector's standard LE image. Decode layout
+    // only; do not re-run the text parser, finite checks or dimension policy.
+    let (owned, suffix) = deserialize_native_vector_float32(source).map_err(invalid)?;
+    if !suffix.is_empty() {
+        return Err(LocalError::InvalidBatch(
+            "native vector result has a trailing suffix".into(),
+        ));
+    }
+    let retained = owned
+        .elements_capacity()
+        .checked_mul(mem::size_of::<f32>())
+        .ok_or_else(evaluated_ascii_storage_overflow)?;
+    let overlap = physical_bytes
+        .checked_add(retained)
+        .ok_or_else(evaluated_ascii_storage_overflow)?;
+    budget.check_output(overlap, input_bytes)?;
+    Ok(owned)
+}
+
 /// Only a semantic cause returned by the matching sealed invocation can
 /// authorize this view. Neither numeric error codes nor messages classify it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4119,6 +4382,7 @@ pub enum EvaluatedSqlFailureKind {
     UuidVersionInvalid,
     UuidTimestampInvalid,
     BinToUuidInvalidLength,
+    VectorNative,
 }
 
 /// Fresh owned failure-only observation for one ready-value invocation.
@@ -4150,6 +4414,33 @@ impl ReportedEvaluatedFailure {
     pub fn sql_failure(&self) -> Option<EvaluatedSqlFailureKind> {
         self.sql_failure
     }
+    /// Borrows only the matching invocation's actual typed native vector cause.
+    pub fn native_vector_error(&self) -> Option<&NativeVectorError> {
+        if self.sql_failure != Some(EvaluatedSqlFailureKind::VectorNative)
+            || !matches!(
+                self.operation,
+                Some(
+                    EvaluatedBytesOp::VecFromTextNative
+                        | EvaluatedBytesOp::VecL1DistanceNative
+                        | EvaluatedBytesOp::VecL2DistanceNative
+                        | EvaluatedBytesOp::VecNegativeInnerProductNative
+                        | EvaluatedBytesOp::VecCosineDistanceNative
+                )
+            )
+        {
+            return None;
+        }
+        match &self.error {
+            LocalError::Evaluation(error) => match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::Caused(source)) => {
+                    source.downcast_ref::<NativeVectorError>()
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Borrow only the authenticated BIN_TO_UUID cause's original bytes.
     /// Neither the caller's input nor an error message supplies this payload.
     pub fn bin_to_uuid_input(&self) -> Option<&[u8]> {
@@ -4204,6 +4495,7 @@ impl std::error::Error for ReportedEvaluatedFailure {
 /// owns its computed result, including NULL; none borrows the input/worker.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ComputedValue {
+    NativeVector(ComputedNativeVector),
     Int(ComputedInt),
     Bytes(ComputedBytes),
     Uncompress(ComputedUncompress),
@@ -4446,7 +4738,8 @@ impl EvaluatedAsciiWorker {
             | ComputedValue::JsonReport(_)
             | ComputedValue::Ieee754Bits(_)
             | ComputedValue::Decimal(_)
-            | ComputedValue::Int128(_) => {
+            | ComputedValue::Int128(_)
+            | ComputedValue::NativeVector(_) => {
                 self.inner.poisoned = true;
                 Err(LocalError::InvalidBatch(
                     "evaluated ASCII requires an owned canonical Int result".into(),
@@ -4598,12 +4891,15 @@ impl EvaluatedBytesWorker {
             .map_err(ReportedEvaluatedFailure::unreported)?;
         let mut sql_failure = None;
         let result = (|| {
-            let decimal_available = if matches!(
+            let materialization_available = if matches!(
                 args.role(),
-                EvaluatedArgsRole::DecimalUnary | EvaluatedArgsRole::DecimalInt
+                EvaluatedArgsRole::DecimalUnary
+                    | EvaluatedArgsRole::DecimalInt
+                    | EvaluatedArgsRole::NativeVector
+                    | EvaluatedArgsRole::NativeVector2
             ) {
                 // A real retained owner is already present even for inline or
-                // NULL Decimal input. Subtract it, not a guessed packet/scale
+                // NULL Decimal/vector input. Subtract it, not a guessed packet/scale
                 // cap; a caller's usize::MAX limit still leaves finite room.
                 self.state
                     .limits
@@ -4613,7 +4909,7 @@ impl EvaluatedBytesWorker {
             } else {
                 0
             };
-            let (ready, arity) = args.into_values(decimal_available)?;
+            let (ready, arity) = args.into_values(materialization_available)?;
             self.eval_ready(ready, arity, &mut sql_failure)
         })();
         self.finish_invocation(result)
@@ -4665,6 +4961,7 @@ impl EvaluatedBytesWorker {
             let bytes = match value {
                 ScalarValue::Bytes(Some(bytes)) => bytes.capacity(),
                 ScalarValue::Decimal(Some(value)) => value.spill_capacity_bytes(),
+                ScalarValue::VectorFloat32(Some(value)) => value.value.capacity(),
                 _ => 0,
             };
             total
@@ -4694,6 +4991,16 @@ impl EvaluatedBytesWorker {
                 if calls_before.checked_add(1) == Some(self.witness.invocations()) {
                     if let LocalError::Evaluation(cause) = &error {
                         *sql_failure = match (self.operation, cause.0.as_ref()) {
+                            (
+                                EvaluatedBytesOp::VecFromTextNative
+                                | EvaluatedBytesOp::VecL1DistanceNative
+                                | EvaluatedBytesOp::VecL2DistanceNative
+                                | EvaluatedBytesOp::VecNegativeInnerProductNative
+                                | EvaluatedBytesOp::VecCosineDistanceNative,
+                                ErrorInner::Evaluate(EvaluateError::Caused(source)),
+                            ) if source.downcast_ref::<NativeVectorError>().is_some() => {
+                                Some(EvaluatedSqlFailureKind::VectorNative)
+                            }
                             (
                                 EvaluatedBytesOp::AbsIntNative,
                                 ErrorInner::Evaluate(EvaluateError::AbsSignedOverflow { .. }),
@@ -4837,6 +5144,24 @@ impl EvaluatedBytesWorker {
                     .transpose()?;
                 (ComputedValue::Int128(ComputedInt128 { value }), 0)
             }
+            ScalarValueRef::Bytes(value)
+                if self.operation == EvaluatedBytesOp::VecFromTextNative =>
+            {
+                let value = value
+                    .map(|source| {
+                        materialize_native_vector(source, output_bytes, input_bytes, &budget)
+                    })
+                    .transpose()?;
+                let retained = value
+                    .as_ref()
+                    .map_or(0, NativeVectorFloat32::elements_capacity)
+                    .checked_mul(mem::size_of::<f32>())
+                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                (
+                    ComputedValue::NativeVector(ComputedNativeVector { value }),
+                    retained,
+                )
+            }
             ScalarValueRef::Bytes(value) if self.operation.returns_ieee754_bits() => {
                 // The physical vector and input remain charged above while we
                 // copy an inline bit owner. No Bytes/SQL-Int result escapes.
@@ -4971,6 +5296,315 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn vector_dispatch_owned_values_typed_failures_and_storage() {
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        let vector = |values: &[f32]| NativeVectorFloat32::must_create(values.to_vec());
+        // Fixed native builtin_ext/vec.rs scalar rows, not provider-generated goldens.
+        let mut parser = prepare(EvaluatedBytesOp::VecFromTextNative);
+        let storage = parser.retained_storage().unwrap();
+        let ComputedValue::NativeVector(null) =
+            parser.eval_args(EvaluatedArgs::Bytes(None)).unwrap()
+        else {
+            panic!("FROM_TEXT NULL lost its vector result domain");
+        };
+        assert_eq!(
+            null.metadata(),
+            ComputedNativeVectorMetadata::OwnNativeVector
+        );
+        assert!(null.value().is_none());
+        assert!(null.into_value().is_none());
+        let ComputedValue::NativeVector(value) = parser
+            .eval_args(EvaluatedArgs::Bytes(Some(b"[1,2]".to_vec())))
+            .unwrap()
+        else {
+            panic!("FROM_TEXT must own a native vector");
+        };
+        assert_eq!(
+            value.metadata(),
+            ComputedNativeVectorMetadata::OwnNativeVector
+        );
+        assert_eq!(value.value().unwrap().elements(), &[1.0, 2.0]);
+        let pointer = value.value().unwrap().elements().as_ptr();
+        let owned = value.into_value().unwrap();
+        assert_eq!(owned.elements().as_ptr(), pointer);
+        let failure = parser
+            .eval_args_reported(EvaluatedArgs::Bytes(Some(b"not vector".to_vec())))
+            .unwrap_err();
+        assert_eq!(
+            failure.operation(),
+            Some(EvaluatedBytesOp::VecFromTextNative)
+        );
+        assert_eq!(
+            failure.sql_failure(),
+            Some(EvaluatedSqlFailureKind::VectorNative)
+        );
+        assert!(failure.native_vector_error().is_some());
+        assert_eq!(parser.kernel_invocations(), 3);
+        assert!(parser.is_healthy());
+        assert_eq!(parser.retained_storage().unwrap(), storage);
+        drop(parser);
+        assert_eq!(owned.elements(), &[1.0, 2.0]);
+
+        let mut text = prepare(EvaluatedBytesOp::VecAsTextNative);
+        let ComputedValue::Bytes(value) = text
+            .eval_args(EvaluatedArgs::NativeVector(Some(owned)))
+            .unwrap()
+        else {
+            panic!("AS_TEXT must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        let owned = value.into_option().unwrap();
+        assert_eq!(owned, b"[1,2]");
+        assert_eq!(text.kernel_invocations(), 1);
+        assert!(text.is_healthy());
+        drop(text);
+        assert_eq!(owned, b"[1,2]");
+        let mut dims = prepare(EvaluatedBytesOp::VecDimsNative);
+        assert!(matches!(
+            dims.eval_args(EvaluatedArgs::Bytes(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(dims.kernel_invocations(), 0);
+        for (index, (value, expected)) in [(None, None), (Some(vector(&[1.0, 2.0])), Some(2))]
+            .into_iter()
+            .enumerate()
+        {
+            let ComputedValue::Int(value) =
+                dims.eval_args(EvaluatedArgs::NativeVector(value)).unwrap()
+            else {
+                panic!("DIMS must own Int");
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(dims.kernel_invocations(), index as u64 + 1);
+            assert!(dims.is_healthy());
+        }
+        let metrics: [(EvaluatedBytesOp, &[f32], &[f32], Option<f64>); 4] = [
+            (
+                EvaluatedBytesOp::VecL1DistanceNative,
+                &[1.0, 2.0],
+                &[3.0, 5.0],
+                Some(5.0),
+            ),
+            (
+                EvaluatedBytesOp::VecL2DistanceNative,
+                &[0.0, 0.0],
+                &[3.0, 4.0],
+                Some(5.0),
+            ),
+            (
+                EvaluatedBytesOp::VecNegativeInnerProductNative,
+                &[1.0, 2.0],
+                &[3.0, 4.0],
+                Some(-11.0),
+            ),
+            (
+                EvaluatedBytesOp::VecCosineDistanceNative,
+                &[0.0],
+                &[1.0],
+                None,
+            ),
+        ];
+        for (operation, left, right, expected) in metrics {
+            let mut worker = prepare(operation);
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes2(None, None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            let ComputedValue::Ieee754Bits(value) = worker
+                .eval_args(EvaluatedArgs::NativeVector2(
+                    Some(vector(left)),
+                    Some(vector(right)),
+                ))
+                .unwrap()
+            else {
+                panic!("vector metric must own IEEE754 bits");
+            };
+            assert_eq!(
+                value.metadata(),
+                ComputedIeee754BitsMetadata::OwnIeee754Bits
+            );
+            assert_eq!(value.into_option(), expected.map(f64::to_bits));
+            let mut failure = worker
+                .eval_args_reported(EvaluatedArgs::NativeVector2(
+                    Some(vector(&[1.0])),
+                    Some(vector(&[1.0, 2.0])),
+                ))
+                .unwrap_err();
+            assert_eq!(failure.operation(), Some(operation));
+            assert_eq!(
+                failure.sql_failure(),
+                Some(EvaluatedSqlFailureKind::VectorNative)
+            );
+            let cause = failure.native_vector_error().unwrap();
+            assert_eq!(
+                cause.to_string(),
+                "vectors have different dimensions: 1 and 2"
+            );
+            let LocalError::Evaluation(error) = failure.error() else {
+                panic!("lost actual evaluation cause");
+            };
+            let ErrorInner::Evaluate(EvaluateError::Caused(source)) = error.0.as_ref() else {
+                panic!("lost typed source");
+            };
+            assert!(std::ptr::eq(
+                cause,
+                source.downcast_ref::<NativeVectorError>().unwrap()
+            ));
+            assert_eq!(worker.kernel_invocations(), 2);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            // Private negative receipts only: no production forging constructor.
+            failure.operation = Some(EvaluatedBytesOp::VecDimsNative);
+            assert!(failure.native_vector_error().is_none());
+            failure.operation = Some(operation);
+            failure.sql_failure = None;
+            assert!(failure.native_vector_error().is_none());
+            failure.sql_failure = Some(EvaluatedSqlFailureKind::VectorNative);
+            failure.error = LocalError::Evaluation(
+                EvaluateError::Other("vectors have different dimensions: 1 and 2".into()).into(),
+            );
+            assert!(failure.native_vector_error().is_none());
+        }
+        let mut norm = prepare(EvaluatedBytesOp::VecL2NormNative);
+        let mut nan = NativeVectorFloat32::init(1);
+        nan.elements_mut()[0] = f32::from_bits(0x7fc0_0042);
+        let mut inf = NativeVectorFloat32::init(1);
+        inf.elements_mut()[0] = f32::INFINITY;
+        // The finite row is original; the mutable raw rows probe the locked bit domain.
+        for (index, (input, expected)) in [
+            (Some(vector(&[3.0, 4.0])), Some(5.0_f64.to_bits())),
+            (Some(nan), None),
+            (Some(inf), Some(f64::INFINITY.to_bits())),
+            (None, None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ComputedValue::Ieee754Bits(value) =
+                norm.eval_args(EvaluatedArgs::NativeVector(input)).unwrap()
+            else {
+                panic!("norm must retain its IEEE754 result");
+            };
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(norm.kernel_invocations(), index as u64 + 1);
+            assert!(norm.is_healthy());
+        }
+        let mut null = prepare(EvaluatedBytesOp::VecRealNullNative);
+        for invalid in [
+            EvaluatedArgs::NullWitness(Some(0)),
+            EvaluatedArgs::NativeVector2(None, None),
+            EvaluatedArgs::Int(None),
+        ] {
+            assert!(matches!(
+                null.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(null.kernel_invocations(), 0);
+        }
+        let ComputedValue::Ieee754Bits(value) =
+            null.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+        else {
+            panic!("real NULL witness must retain IEEE754 result metadata");
+        };
+        assert_eq!(
+            value.metadata(),
+            ComputedIeee754BitsMetadata::OwnIeee754Bits
+        );
+        assert_eq!(value.into_option(), None);
+        assert_eq!(null.kernel_invocations(), 1);
+        assert!(null.is_healthy());
+        let mut bounded = prepare_evaluated_bytes(
+            EvaluatedBytesOp::VecRealNullNative,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_steps: 0,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        let failure = bounded
+            .eval_args_reported(EvaluatedArgs::NullWitness(None))
+            .unwrap_err();
+        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+        assert_eq!(bounded.kernel_invocations(), 0);
+        assert_eq!(failure.sql_failure(), None);
+        assert!(failure.native_vector_error().is_none());
+        assert!(bounded.is_healthy());
+
+        // Charge source capacity, not just the one live f32, before conversion.
+        let mut elements = Vec::with_capacity(2048);
+        elements.push(1.0);
+        let source = NativeVectorFloat32::must_create(elements);
+        let source_bytes = source.elements_capacity() * mem::size_of::<f32>();
+        let base = dims.retained_storage().unwrap().total_bytes();
+        let mut bounded = prepare_evaluated_bytes(
+            EvaluatedBytesOp::VecDimsNative,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_retained_bytes: base + source_bytes - 1,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        assert!(matches!(
+            bounded.eval_args(EvaluatedArgs::NativeVector(Some(source))),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(bounded.kernel_invocations(), 0);
+        assert!(bounded.is_healthy());
+        // Layout-only materialization keeps raw bits; transport Eq must not
+        // change the underlying vector's NaN/zero floating-point PartialEq.
+        let mut raw = NativeVectorFloat32::init(2);
+        raw.elements_mut()
+            .copy_from_slice(&[f32::from_bits(0x7fc0_0042), -0.0]);
+        assert_ne!(raw, raw);
+        let image = raw.serialize();
+        let budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+        let result = ComputedNativeVector {
+            value: Some(materialize_native_vector(&image, image.capacity(), 0, &budget).unwrap()),
+        };
+        let same = ComputedNativeVector {
+            value: Some(raw.clone()),
+        };
+        assert_eq!(result, same);
+        assert_eq!(result, result);
+        raw.elements_mut()[1] = 0.0;
+        assert_ne!(result, ComputedNativeVector { value: Some(raw) });
+        let mut suffix = image.clone();
+        suffix.push(0);
+        assert!(matches!(
+            materialize_native_vector(&suffix, suffix.capacity(), 0, &budget),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert!(matches!(
+            materialize_native_vector(&[], 0, 0, &budget),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        let bounded = EvalBudget::exact(ExecutionLimits {
+            max_retained_bytes: image.capacity() + 2 * mem::size_of::<f32>() - 1,
+            ..ExecutionLimits::default()
+        })
+        .unwrap();
+        assert!(matches!(
+            materialize_native_vector(&image, image.capacity(), 0, &bounded),
+            Err(LocalError::ResourceLimit(_))
+        ));
+    }
 
     #[test]
     fn uuid_translate_dispatch_authenticates_five_causes_and_payload() {

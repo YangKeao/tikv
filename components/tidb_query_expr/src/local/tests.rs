@@ -2116,7 +2116,8 @@ fn local_evaluated_args_packet_roles_reject_plain_carriers() {
             | ComputedValue::Decimal(_)
             | ComputedValue::Int128(_)
             | ComputedValue::Uncompress(_)
-            | ComputedValue::JsonReport(_) => {
+            | ComputedValue::JsonReport(_)
+            | ComputedValue::NativeVector(_) => {
                 panic!("packet role check returned an unexpected output type")
             }
         }
@@ -7890,6 +7891,224 @@ fn local_evaluated_args_date_format_core_keeps_roles_and_missing_distinct() {
     assert_eq!(worker.kernel_invocations(), 1);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
+}
+
+#[test]
+fn vector_dispatch_getters_shapes_roles_and_private_compile() {
+    use tidb_query_datatype::codec::{
+        data_type::ScalarValueRef,
+        mysql::{NATIVE_MAX_VECTOR_DIMENSION, NativeVectorFloat32, VectorFloat32},
+    };
+
+    use super::{
+        compile::{ProgramEntry, compile_evaluated_bytes},
+        runtime::EvalBudget,
+    };
+    use crate::{
+        RpnExpressionNode,
+        types::{
+            expr_eval::EvaluatedAsciiWitness,
+            function::{CallArg, CallShape},
+        },
+    };
+
+    let cases: [(
+        EvaluatedBytesOp,
+        crate::RpnFnMeta,
+        &[EvalType],
+        EvalType,
+        EvaluatedArgsRole,
+    ); 9] = [
+        (
+            EvaluatedBytesOp::VecAsTextNative,
+            crate::impl_vec::get_native_vec_as_text_fn_meta(),
+            &[EvalType::VectorFloat32],
+            EvalType::Bytes,
+            EvaluatedArgsRole::NativeVector,
+        ),
+        (
+            EvaluatedBytesOp::VecDimsNative,
+            crate::impl_vec::get_native_vec_dims_fn_meta(),
+            &[EvalType::VectorFloat32],
+            EvalType::Int,
+            EvaluatedArgsRole::NativeVector,
+        ),
+        (
+            EvaluatedBytesOp::VecL1DistanceNative,
+            crate::impl_vec::get_native_vec_l1_distance_fn_meta(),
+            &[EvalType::VectorFloat32, EvalType::VectorFloat32],
+            EvalType::Bytes,
+            EvaluatedArgsRole::NativeVector2,
+        ),
+        (
+            EvaluatedBytesOp::VecL2DistanceNative,
+            crate::impl_vec::get_native_vec_l2_distance_fn_meta(),
+            &[EvalType::VectorFloat32, EvalType::VectorFloat32],
+            EvalType::Bytes,
+            EvaluatedArgsRole::NativeVector2,
+        ),
+        (
+            EvaluatedBytesOp::VecNegativeInnerProductNative,
+            crate::impl_vec::get_native_vec_negative_inner_product_fn_meta(),
+            &[EvalType::VectorFloat32, EvalType::VectorFloat32],
+            EvalType::Bytes,
+            EvaluatedArgsRole::NativeVector2,
+        ),
+        (
+            EvaluatedBytesOp::VecCosineDistanceNative,
+            crate::impl_vec::get_native_vec_cosine_distance_fn_meta(),
+            &[EvalType::VectorFloat32, EvalType::VectorFloat32],
+            EvalType::Bytes,
+            EvaluatedArgsRole::NativeVector2,
+        ),
+        (
+            EvaluatedBytesOp::VecL2NormNative,
+            crate::impl_vec::get_native_vec_l2_norm_fn_meta(),
+            &[EvalType::VectorFloat32],
+            EvalType::Bytes,
+            EvaluatedArgsRole::NativeVector,
+        ),
+        (
+            EvaluatedBytesOp::VecFromTextNative,
+            crate::impl_vec::get_native_vec_from_text_fn_meta(),
+            &[EvalType::Bytes],
+            EvalType::Bytes,
+            EvaluatedArgsRole::Values,
+        ),
+        (
+            EvaluatedBytesOp::VecRealNullNative,
+            crate::impl_vec::get_native_vec_real_null_fn_meta(),
+            &[EvalType::Int],
+            EvalType::Bytes,
+            EvaluatedArgsRole::NullWitness,
+        ),
+    ];
+    for (operation, getter, inputs, output, role) in cases {
+        assert_eq!(operation.input_types(), inputs);
+        assert_eq!(operation.input_role(), role);
+        assert_eq!(operation.eval_type(), output);
+        assert_eq!(operation.call_count(), 1);
+        let EvaluatedKernelKind::ClosedPrivate(id) = operation.kernel_kind() else {
+            panic!("native vector recipe must stay private");
+        };
+        assert_eq!(operation.function_ref(), FunctionRef::Local(id));
+        let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+        assert!(program.check_entry(ProgramEntry::EvaluatedBytes).is_ok());
+        assert!(program.check_entry(ProgramEntry::Row).is_err());
+        assert_eq!(program.expression.len(), inputs.len() + 1);
+        for (slot, field_type) in program.schema.iter().enumerate() {
+            assert_eq!(Some(field_type), operation.input_field_type(slot).as_ref());
+            if inputs[slot] == EvalType::VectorFloat32 {
+                assert_eq!(field_type, &FieldType::from(FieldTypeTp::TiDbVectorFloat32));
+            }
+            assert!(
+                matches!(program.expression[slot], RpnExpressionNode::ColumnRef { offset } if offset == slot)
+            );
+        }
+        let RpnExpressionNode::FnCall {
+            func_meta,
+            args_len,
+            field_type,
+            metadata,
+        } = &program.expression[inputs.len()]
+        else {
+            panic!("expected the exact generated call");
+        };
+        assert_eq!(*args_len, inputs.len());
+        assert_eq!(field_type, &operation.return_type());
+        assert!(metadata.is::<()>());
+        assert_eq!(func_meta.name, getter.name);
+        assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.validator_ptr,
+            getter.validator_ptr
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.metadata_ptr,
+            getter.metadata_ptr
+        ));
+        let spec = LocalExpr::Call {
+            function: operation.function_ref(),
+            args: program
+                .schema
+                .iter()
+                .enumerate()
+                .map(|(slot, field_type)| LocalExpr::InputSlot {
+                    slot,
+                    field_type: field_type.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            return_type: operation.return_type(),
+            metadata: crate::CallMetadata::None,
+        };
+        assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+        let mut raw = CallBuild::local(
+            CallShape::new(
+                operation.function_ref(),
+                operation.return_type(),
+                program
+                    .schema
+                    .iter()
+                    .cloned()
+                    .map(CallArg::dynamic)
+                    .collect(),
+            ),
+            crate::CallMetadata::None,
+        );
+        assert!(prepare_call(&mut raw).is_err());
+    }
+    let operation = EvaluatedBytesOp::VecDimsNative;
+    let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+    let mut ctx = EvalContext::default();
+    let mut witness = EvaluatedAsciiWitness::default();
+    for (value, role) in [
+        (ScalarValue::Bytes(None), EvaluatedArgsRole::NativeVector),
+        (ScalarValue::VectorFloat32(None), EvaluatedArgsRole::Values),
+        (
+            ScalarValue::VectorFloat32(Some(VectorFloat32 { value: vec![0; 3] })),
+            EvaluatedArgsRole::NativeVector,
+        ),
+    ] {
+        let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+        assert!(matches!(
+            program.expression.eval_with_ready_args(
+                operation,
+                &mut ctx,
+                &program.schema,
+                &[value],
+                role,
+                &[0],
+                &mut witness,
+                &mut budget
+            ),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        assert_eq!(witness.invocations(), 0);
+    }
+    // New admission probe: native mutable/raw vectors are not text-parser input.
+    let mut raw = NativeVectorFloat32::init(NATIVE_MAX_VECTOR_DIMENSION + 1);
+    raw.elements_mut()[0] = f32::from_bits(0x7fc0_0042);
+    raw.elements_mut()[1] = f32::INFINITY;
+    let ready = [ScalarValue::VectorFloat32(Some(raw.into_wire_raw()))];
+    let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+    let result = program
+        .expression
+        .eval_with_ready_args(
+            operation,
+            &mut ctx,
+            &program.schema,
+            &ready,
+            EvaluatedArgsRole::NativeVector,
+            &[0],
+            &mut witness,
+            &mut budget,
+        )
+        .unwrap();
+    assert!(
+        matches!(result.get_logical_scalar_ref(0), ScalarValueRef::Int(Some(value)) if *value == (NATIVE_MAX_VECTOR_DIMENSION + 1) as i64)
+    );
+    assert_eq!(witness.invocations(), 1);
 }
 
 #[test]

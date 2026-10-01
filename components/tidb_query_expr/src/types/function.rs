@@ -290,6 +290,15 @@ pub enum LocalFunctionId {
     VitessHashNative,
     FormatBytesNative,
     FormatNanoTimeNative,
+    VecAsTextNative,
+    VecDimsNative,
+    VecL1DistanceNative,
+    VecL2DistanceNative,
+    VecNegativeInnerProductNative,
+    VecCosineDistanceNative,
+    VecL2NormNative,
+    VecFromTextNative,
+    VecRealNullNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

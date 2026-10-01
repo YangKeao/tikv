@@ -293,6 +293,22 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  Eight native VECTOR functions use nine private `impl_vec.rs` recipes. The
+  aligned native-policy type and complete public helpers live in datatype
+  `codec/mysql/vector_native.rs`; the older packed wire type retains its own
+  validation, codec and equality contracts. Both views share ordered f32 metric
+  loops, with explicit native powi-versus-wire multiplication in one norm loop.
+  NativeVector/NativeVector2 roles carry actual VectorFloat32 scalar inputs,
+  including raw mutable nonfinite bits, without constructor revalidation.
+  FROM_TEXT owns strict UTF-8 and parsing; its actual LE serialized vector result
+  is decoded only for layout into ComputedNativeVector, not used as a control
+  payload. The result wrapper has bitwise transport Eq while the aligned public
+  type keeps its original float PartialEq. Checked retained charges cover layout
+  conversion coexistence, not measured allocator peaks or zero-copy performance.
+  Exact operation/cause matching authorizes shared VectorError diagnostics for
+  FROM_TEXT and the four binary metrics. Frontend conversions remain guarded,
+  binary NULL demand remains left-first, and the worker retains NaN-to-NULL and
+  infinity policy. No ordinary wire decoder or native PB admission is widened.
   ENCODE/DECODE, TIDB_SHARD/VITESS_HASH and FORMAT_BYTES/FORMAT_NANO_TIME
   use seven private recipes with existing roles and owned results. The pure
   `tidb_query_crypto` leaf owns the normalized MySQL RNG state, historical

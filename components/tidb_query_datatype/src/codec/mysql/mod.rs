@@ -34,6 +34,7 @@ pub mod json;
 pub mod set;
 pub mod time;
 pub mod vector;
+mod vector_native;
 
 pub use self::{
     decimal::{
@@ -49,4 +50,9 @@ pub use self::{
     set::{Set, SetRef},
     time::{Time, TimeDecoder, TimeEncoder, TimeType, Tz},
     vector::{VectorFloat32, VectorFloat32Decoder, VectorFloat32Encoder, VectorFloat32Ref},
+    vector_native::{
+        NATIVE_MAX_VECTOR_DIMENSION, NativeVectorError, NativeVectorFloat32,
+        check_native_vector_dim_valid, deserialize_native_vector_float32,
+        peek_native_vector_float32,
+    },
 };
