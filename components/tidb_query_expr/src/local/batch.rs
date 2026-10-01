@@ -953,6 +953,13 @@ pub enum EvaluatedBytesOp {
     FromDaysNative,
     MakeTimePartsNative,
     SecToTimeNative,
+    DateFormatTextNative,
+    DateFormatCoreNative,
+    DateFormatNullNative,
+    DateFormatMissingNative,
+    DurationTextProbeNative,
+    TimeFormatTextNative,
+    LastDayTextNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -971,6 +978,7 @@ pub(crate) enum EvaluatedArgsRole {
     Ieee754Bits,
     TimeCoreBits,
     TimeCoreBits2,
+    TimeCoreBitsBytes,
     Ieee754Bits2,
     NoArgs,
     Packet,
@@ -1641,6 +1649,41 @@ impl EvaluatedBytesOp {
             Self::SecToTimeNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SecToTimeNative);
             }
+            Self::DateFormatTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DateFormatTextNative,
+                );
+            }
+            Self::DateFormatCoreNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DateFormatCoreNative,
+                );
+            }
+            Self::DateFormatNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DateFormatNullNative,
+                );
+            }
+            Self::DateFormatMissingNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DateFormatMissingNative,
+                );
+            }
+            Self::DurationTextProbeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DurationTextProbeNative,
+                );
+            }
+            Self::TimeFormatTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TimeFormatTextNative,
+                );
+            }
+            Self::LastDayTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::LastDayTextNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1673,10 +1716,12 @@ impl EvaluatedBytesOp {
             }
             Self::MakeTimePartsNative => EvaluatedArgsRole::MakeTimeParts,
             Self::RoundInt128Legacy => EvaluatedArgsRole::Int128,
-            Self::MathNullWitnessNative | Self::DateDiffNullNative | Self::WeekNullNative => {
-                EvaluatedArgsRole::NullWitness
-            }
+            Self::MathNullWitnessNative
+            | Self::DateDiffNullNative
+            | Self::WeekNullNative
+            | Self::DateFormatNullNative => EvaluatedArgsRole::NullWitness,
             Self::DateDiffCoreNative => EvaluatedArgsRole::TimeCoreBits2,
+            Self::DateFormatCoreNative => EvaluatedArgsRole::TimeCoreBitsBytes,
             Self::CharNative => EvaluatedArgsRole::CharReady,
             Self::ConvNative | Self::ConvBinaryLiteralNative => EvaluatedArgsRole::ConvNative,
             Self::ConvLegacy => EvaluatedArgsRole::ConvLegacy,
@@ -1692,7 +1737,9 @@ impl EvaluatedBytesOp {
             Self::StrcmpNative | Self::FindInSetNative => EvaluatedArgsRole::CollatedBytes2,
             Self::Locate2Native | Self::Locate3Native => EvaluatedArgsRole::NativeSearch,
             Self::FindInSetPreparedNative => EvaluatedArgsRole::FindInSetPrepared,
-            Self::PiRaw | Self::JsonValidOtherNative => EvaluatedArgsRole::NoArgs,
+            Self::PiRaw | Self::JsonValidOtherNative | Self::DateFormatMissingNative => {
+                EvaluatedArgsRole::NoArgs
+            }
             Self::Sha2Native => EvaluatedArgsRole::ReadyBytesInt,
             Self::LogNative | Self::PowNative | Self::Atan2GoNative | Self::Atan2LibmLegacy => {
                 EvaluatedArgsRole::Ieee754Bits2
@@ -1981,6 +2028,13 @@ impl EvaluatedBytesOp {
             Self::FromDaysNative => crate::impl_time::from_days_native_fn_meta(),
             Self::MakeTimePartsNative => crate::impl_time::make_time_parts_native_fn_meta(),
             Self::SecToTimeNative => crate::impl_time::sec_to_time_native_fn_meta(),
+            Self::DateFormatTextNative => crate::impl_time::date_format_text_native_fn_meta(),
+            Self::DateFormatCoreNative => crate::impl_time::date_format_core_native_fn_meta(),
+            Self::DateFormatNullNative => crate::impl_time::date_format_null_native_fn_meta(),
+            Self::DateFormatMissingNative => crate::impl_time::date_format_missing_native_fn_meta(),
+            Self::DurationTextProbeNative => crate::impl_time::duration_text_probe_native_fn_meta(),
+            Self::TimeFormatTextNative => crate::impl_time::time_format_text_native_fn_meta(),
+            Self::LastDayTextNative => crate::impl_time::last_day_text_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -2170,7 +2224,8 @@ impl EvaluatedBytesOp {
             | Self::YearWeekTextNative
             | Self::WeekOfYearTextNative
             | Self::WeekNullNative
-            | Self::WeekCoreNative => EvalType::Int,
+            | Self::WeekCoreNative
+            | Self::DateFormatMissingNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -2286,7 +2341,13 @@ impl EvaluatedBytesOp {
             | Self::MakeDateNative
             | Self::FromDaysNative
             | Self::MakeTimePartsNative
-            | Self::SecToTimeNative => EvalType::Bytes,
+            | Self::SecToTimeNative
+            | Self::DateFormatTextNative
+            | Self::DateFormatCoreNative
+            | Self::DateFormatNullNative
+            | Self::DurationTextProbeNative
+            | Self::TimeFormatTextNative
+            | Self::LastDayTextNative => EvalType::Bytes,
         }
     }
 
@@ -2301,7 +2362,12 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
-            Self::PiRaw | Self::JsonValidOtherNative => &[],
+            Self::PiRaw | Self::JsonValidOtherNative | Self::DateFormatMissingNative => &[],
+            Self::DateFormatTextNative
+            | Self::DateFormatCoreNative
+            | Self::TimeFormatTextNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::DateFormatNullNative => &[EvalType::Int],
+            Self::DurationTextProbeNative | Self::LastDayTextNative => &[EvalType::Bytes],
             Self::MakeDateNative => &[EvalType::Int, EvalType::Int],
             Self::FromDaysNative => &[EvalType::Int],
             Self::MakeTimePartsNative => &[EvalType::Bytes, EvalType::Int, EvalType::Bytes],
@@ -2750,6 +2816,12 @@ pub enum EvaluatedArgs {
     /// Two actually evaluated raw core-time values, in independent nullable
     /// LE8 columns. No second operand, date field, or clock policy is inferred.
     TimeCoreBits2(Option<u64>, Option<u64>),
+    /// A non-NULL raw core and an actually evaluated nullable layout. A NULL
+    /// core uses the dedicated NULL-witness recipe instead of inventing layout.
+    TimeCoreBitsBytes {
+        core: u64,
+        bytes: Option<Vec<u8>>,
+    },
     Ieee754Bits2 {
         left: ReadyIeee754Arg,
         right: ReadyIeee754Arg,
@@ -2831,6 +2903,7 @@ impl EvaluatedArgs {
             Self::Ieee754Bits(_) => EvaluatedArgsRole::Ieee754Bits,
             Self::TimeCoreBits(_) => EvaluatedArgsRole::TimeCoreBits,
             Self::TimeCoreBits2(..) => EvaluatedArgsRole::TimeCoreBits2,
+            Self::TimeCoreBitsBytes { .. } => EvaluatedArgsRole::TimeCoreBitsBytes,
             Self::Ieee754Bits2 { .. } => EvaluatedArgsRole::Ieee754Bits2,
             Self::BytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesInt,
             Self::BytesBytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesBytesInt,
@@ -2876,9 +2949,10 @@ impl EvaluatedArgs {
                 EvalType::Int,
             ],
             Self::Bytes(_) | Self::Ieee754Bits(_) | Self::TimeCoreBits(_) => &[EvalType::Bytes],
-            Self::Bytes2(..) | Self::Ieee754Bits2 { .. } | Self::TimeCoreBits2(..) => {
-                &[EvalType::Bytes, EvalType::Bytes]
-            }
+            Self::Bytes2(..)
+            | Self::Ieee754Bits2 { .. }
+            | Self::TimeCoreBits2(..)
+            | Self::TimeCoreBitsBytes { .. } => &[EvalType::Bytes, EvalType::Bytes],
             Self::BytesIntIntBytes(..) => &[
                 EvalType::Bytes,
                 EvalType::Int,
@@ -2927,6 +3001,7 @@ impl EvaluatedArgs {
                     EvaluatedBytesOp::MathNullWitnessNative
                         | EvaluatedBytesOp::DateDiffNullNative
                         | EvaluatedBytesOp::WeekNullNative
+                        | EvaluatedBytesOp::DateFormatNullNative
                 ) && value.is_none()
             }
             Self::ConvReady {
@@ -3490,6 +3565,15 @@ impl EvaluatedArgs {
                 [
                     Self::raw_u64_value(left, "time core bits input allocation failed")?,
                     Self::raw_u64_value(right, "time core bits input allocation failed")?,
+                    Int(None),
+                    Int(None),
+                ],
+                2,
+            ),
+            Self::TimeCoreBitsBytes { core, bytes } => (
+                [
+                    Self::raw_u64_value(Some(core), "time core bits input allocation failed")?,
+                    Bytes(bytes),
                     Int(None),
                     Int(None),
                 ],

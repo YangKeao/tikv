@@ -339,6 +339,12 @@ impl Duration {
         (nanos.unsigned_abs() / NANOS_PER_SEC as u64 % SECS_PER_MINUTE as u64) as u32
     }
 
+    /// Projects the absolute microsecond component without observing FSP.
+    #[inline]
+    pub const fn micro_secs_from_nanos(nanos: i64) -> u32 {
+        (nanos.unsigned_abs() / 1_000 % 1_000_000) as u32
+    }
+
     #[inline]
     pub fn hours(self) -> u32 {
         Self::hours_from_nanos(self.nanos)

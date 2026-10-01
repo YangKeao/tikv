@@ -125,6 +125,297 @@ macro_rules! native_calc_week_arithmetic {
     }};
 }
 
+// The scanner and specifier dispatch are shared, not the distinct input
+// validation, raw-field, error, or trailing-percent policies of these callers.
+enum TemporalFormatView<'a> {
+    Text {
+        date: (i64, u32, u32),
+        clock: (u64, u64, u64),
+        fraction: &'a str,
+        weekday: u32,
+        ordinal: i64,
+    },
+    Core(u64),
+    Wire(Time),
+    Clock {
+        seconds: i64,
+        fraction: &'a str,
+    },
+    RawDuration(i64),
+}
+
+enum TemporalFormatError {
+    InvalidDate,
+    InvalidTimeFormat,
+}
+
+impl TemporalFormatView<'_> {
+    fn date(&self) -> Option<(i64, u32, u32)> {
+        match *self {
+            Self::Text { date, .. } => Some(date),
+            Self::Core(raw) => Some((
+                i64::from(Time::year_from_core_bits(raw)),
+                Time::month_from_core_bits(raw),
+                Time::day_from_core_bits(raw),
+            )),
+            Self::Wire(time) => Some((i64::from(time.year()), time.month(), time.day())),
+            Self::Clock { .. } | Self::RawDuration(_) => None,
+        }
+    }
+
+    fn clock(&self) -> (u64, u64, u64) {
+        match *self {
+            Self::Text { clock, .. } => clock,
+            Self::Core(raw) => {
+                let time = Time(raw);
+                (
+                    u64::from(time.hour()),
+                    u64::from(time.minute()),
+                    u64::from(time.second()),
+                )
+            }
+            Self::Wire(time) => (
+                u64::from(time.hour()),
+                u64::from(time.minute()),
+                u64::from(time.second()),
+            ),
+            Self::Clock { seconds, .. } => {
+                let total = seconds.unsigned_abs();
+                (total / 3600, total / 60 % 60, total % 60)
+            }
+            Self::RawDuration(nanos) => (
+                u64::from(Duration::hours_from_nanos(nanos)),
+                u64::from(Duration::minutes_from_nanos(nanos)),
+                u64::from(Duration::secs_from_nanos(nanos)),
+            ),
+        }
+    }
+
+    fn weekday(&self) -> u32 {
+        match *self {
+            Self::Text { weekday, .. } => weekday,
+            Self::Core(raw) => Time::native_core_weekday_sunday_index(raw),
+            Self::Wire(time) => time.weekday().num_days_from_sunday(),
+            _ => unreachable!("date specifier requires a date view"),
+        }
+    }
+
+    fn ordinal(&self) -> i64 {
+        match *self {
+            Self::Text { ordinal, .. } => ordinal,
+            Self::Core(raw) => i64::from(Time::native_core_year_day(raw)),
+            Self::Wire(time) => i64::from(time.days()),
+            _ => unreachable!("date specifier requires a date view"),
+        }
+    }
+
+    fn week(&self, mode: u8, with_year: bool) -> (i64, i64) {
+        match *self {
+            Self::Text {
+                date: (y, m, d), ..
+            } => Time::native_week_of_year(y, m, d, i64::from(mode), with_year),
+            Self::Core(raw) => {
+                if !with_year {
+                    return (
+                        i64::from(Time::year_from_core_bits(raw)),
+                        i64::from(Time::native_core_week(raw, mode)),
+                    );
+                }
+                let behavior = Time::normalize_week_mode_bits(u32::from(mode & 7)) | 2;
+                let (year, week) = Time::native_calc_week_i32(
+                    Time::year_from_core_bits(raw) as i32,
+                    Time::month_from_core_bits(raw) as i32,
+                    Time::day_from_core_bits(raw) as i32,
+                    behavior & 1 != 0,
+                    behavior & 2 != 0,
+                    behavior & 4 != 0,
+                );
+                (i64::from(year), i64::from(week))
+            }
+            Self::Wire(time) => {
+                let mode = WeekMode::from_bits_truncate(u32::from(mode));
+                if with_year {
+                    let (year, week) = time.year_week(mode);
+                    (i64::from(year), i64::from(week))
+                } else {
+                    (i64::from(time.year()), i64::from(time.week(mode)))
+                }
+            }
+            _ => unreachable!("date specifier requires a date view"),
+        }
+    }
+
+    fn render(&self, layout: &str) -> std::result::Result<String, TemporalFormatError> {
+        let raw = matches!(self, Self::Core(_) | Self::RawDuration(_));
+        let wire = matches!(self, Self::Wire(_));
+        let keep_tail = matches!(self, Self::Text { .. } | Self::Clock { .. });
+        let mut output = if raw {
+            String::with_capacity(layout.len())
+        } else {
+            String::new()
+        };
+        let date = self.date();
+        let (hour, minute, second) = self.clock();
+        let sign = if matches!(self, Self::Clock { seconds, .. } if *seconds < 0) {
+            "-"
+        } else {
+            ""
+        };
+        let hour12 = if wire {
+            if hour == 0 || hour == 12 {
+                12
+            } else {
+                hour % 12
+            }
+        } else if raw {
+            if hour % 12 == 0 { 12 } else { hour % 12 }
+        } else {
+            (hour + 11) % 12 + 1
+        };
+        let mut chars = layout.chars();
+        while let Some(character) = chars.next() {
+            if character != '%' {
+                output.push(character);
+                continue;
+            }
+            let Some(conversion) = chars.next() else {
+                if keep_tail {
+                    output.push('%');
+                }
+                break;
+            };
+            match conversion {
+                'H' => output.push_str(&format!("{sign}{hour:02}")),
+                'k' => output.push_str(&format!("{sign}{hour}")),
+                'h' | 'I' => output.push_str(&format!("{hour12:02}")),
+                'l' => output.push_str(&hour12.to_string()),
+                'i' => output.push_str(&format!("{minute:02}")),
+                'S' | 's' => output.push_str(&format!("{second:02}")),
+                'p' => output.push_str(
+                    if if raw || wire {
+                        hour / 12 % 2 == 0
+                    } else {
+                        hour < 12
+                    } {
+                        "AM"
+                    } else {
+                        "PM"
+                    },
+                ),
+                'r' => {
+                    let (twelve_hour, morning) = if raw {
+                        let normalized = hour % 24;
+                        (
+                            match normalized {
+                                0 | 12 => 12,
+                                1..=11 => normalized,
+                                _ => normalized - 12,
+                            },
+                            normalized < 12,
+                        )
+                    } else if wire {
+                        (
+                            if hour == 0 || hour == 12 {
+                                12
+                            } else if hour < 12 {
+                                hour
+                            } else {
+                                hour - 12
+                            },
+                            hour < 12,
+                        )
+                    } else {
+                        (hour12, hour < 12)
+                    };
+                    output.push_str(&format!(
+                        "{twelve_hour:02}:{minute:02}:{second:02} {}",
+                        if morning { "AM" } else { "PM" }
+                    ));
+                }
+                'T' => output.push_str(&format!("{sign}{hour:02}:{minute:02}:{second:02}")),
+                'f' => match *self {
+                    Self::Text { fraction, .. } | Self::Clock { fraction, .. } => {
+                        output.push_str(&format!("{fraction:0<6}"))
+                    }
+                    Self::Core(bits) => output.push_str(&format!("{:06}", Time(bits).micro())),
+                    Self::Wire(time) => write!(output, "{:06}", time.micro()).unwrap(),
+                    Self::RawDuration(nanos) => {
+                        output.push_str(&format!("{:06}", Duration::micro_secs_from_nanos(nanos)))
+                    }
+                },
+                'b' | 'M' if date.is_some() => {
+                    let (_, month, _) = date.unwrap();
+                    if wire && month == 0 {
+                        return Err(TemporalFormatError::InvalidTimeFormat);
+                    }
+                    if matches!(self, Self::Core(_)) && !(1..=12).contains(&month) {
+                        return Err(TemporalFormatError::InvalidDate);
+                    }
+                    if wire && conversion == 'b' {
+                        output.push_str(MONTH_NAMES_ABBR[(month - 1) as usize]);
+                    } else {
+                        let name = MONTH_NAMES[(month - 1) as usize];
+                        output.push_str(if conversion == 'b' { &name[..3] } else { name });
+                    }
+                }
+                'm' if date.is_some() => output.push_str(&format!("{:02}", date.unwrap().1)),
+                'c' if date.is_some() => output.push_str(&date.unwrap().1.to_string()),
+                'd' if date.is_some() => output.push_str(&format!("{:02}", date.unwrap().2)),
+                'e' if date.is_some() => output.push_str(&date.unwrap().2.to_string()),
+                'D' if date.is_some() => {
+                    let day = date.unwrap().2;
+                    let suffix = match day {
+                        1 | 21 | 31 => "st",
+                        2 | 22 => "nd",
+                        3 | 23 => "rd",
+                        _ => "th",
+                    };
+                    output.push_str(&format!("{day}{suffix}"));
+                }
+                'j' if date.is_some() => output.push_str(&format!("{:03}", self.ordinal())),
+                'a' | 'W' | 'w' if date.is_some() => {
+                    let weekday = self.weekday();
+                    if conversion == 'w' {
+                        output.push_str(&weekday.to_string());
+                    } else {
+                        let name = Time::weekday_name_from_sunday_index(weekday);
+                        output.push_str(if conversion == 'a' { &name[..3] } else { name });
+                    }
+                }
+                'U' | 'u' | 'V' | 'v' if date.is_some() => {
+                    let mode = match conversion {
+                        'U' => 0,
+                        'u' => 1,
+                        'V' => 2,
+                        _ => 3,
+                    };
+                    let with_year = conversion == 'v' && !matches!(self, Self::Text { .. });
+                    output.push_str(&format!("{:02}", self.week(mode, with_year).1));
+                }
+                'X' | 'x' if date.is_some() => {
+                    let year = self.week(if conversion == 'X' { 2 } else { 3 }, true).0;
+                    if year < 0 {
+                        output.push_str(&u32::MAX.to_string());
+                    } else {
+                        output.push_str(&format!("{year:04}"));
+                    }
+                }
+                'Y' if date.is_some() => output.push_str(&format!("{:04}", date.unwrap().0)),
+                'y' if date.is_some() => {
+                    let year = date.unwrap().0;
+                    if matches!(self, Self::Core(_)) {
+                        output.push_str(&format!("{year:04}")[2..]);
+                    } else {
+                        output.push_str(&format!("{:02}", year.rem_euclid(100)));
+                    }
+                }
+                _ => output.push(conversion),
+            }
+        }
+        Ok(output)
+    }
+}
+
 const MIN_TIMESTAMP: i64 = 0;
 pub const MAX_TIMESTAMP: i64 = (1 << 31) - 1;
 const MICRO_WIDTH: usize = 6;
@@ -334,6 +625,85 @@ impl From<TimeType> for FieldTypeTp {
 
 // The common set of methods for `date/time`
 impl Time {
+    /// Native public CoreTime weekday normalization, including incomplete or
+    /// invalid month/day fields; evaluated only when a caller needs a weekday.
+    pub fn native_core_weekday_sunday_index(raw: u64) -> u32 {
+        let month_offset = Self::month_from_core_bits(raw) as i32 - 1;
+        let year = Self::year_from_core_bits(raw) as i32 + month_offset.div_euclid(12);
+        let month = month_offset.rem_euclid(12) as u32 + 1;
+        let first = NaiveDate::from_ymd_opt(year, month, 1)
+            .expect("CoreTime's encoded year and month fit chrono");
+        let normalized =
+            first + chrono::Duration::days(i64::from(Self::day_from_core_bits(raw)) - 1);
+        normalized.weekday().num_days_from_sunday()
+    }
+
+    /// Native public CoreTime ordinal, retaining its zero-component guard and
+    /// i32 MySQL day-number arithmetic rather than the text civil-day policy.
+    pub const fn native_core_year_day(raw: u64) -> i32 {
+        let year = Self::year_from_core_bits(raw) as i32;
+        let month = Self::month_from_core_bits(raw) as i32;
+        let day = Self::day_from_core_bits(raw) as i32;
+        if month == 0 || day == 0 {
+            0
+        } else {
+            Self::native_calc_daynr_i32(year, month, day) - Self::native_calc_daynr_i32(year, 1, 1)
+                + 1
+        }
+    }
+
+    /// Native SQL DATE_FORMAT: full date validation, but a missing or malformed
+    /// ASCII-space clock suffix falls back to midnight. A trailing '%' stays.
+    pub fn native_text_date_format(input: &str, layout: &str) -> Option<String> {
+        let (date, clock) = match input.split_once(' ') {
+            Some((date, clock)) => (date, Some(clock)),
+            None => (input, None),
+        };
+        let (year, month, day) = Self::parse_native_date_ymd(date)?;
+        let (hour, minute, second, fraction) = clock
+            .and_then(Self::parse_native_clock_with_fraction)
+            .unwrap_or((0, 0, 0, String::new()));
+        TemporalFormatView::Text {
+            date: (year, month, day),
+            clock: (u64::from(hour), u64::from(minute), u64::from(second)),
+            fraction: &fraction,
+            weekday: Self::native_weekday_sunday_index(year, month, day),
+            ordinal: Self::native_day_of_year(year, month, day),
+        }
+        .render(layout)
+        .ok()
+    }
+
+    /// Native public Time formatter. None represents only its original
+    /// InvalidDate error, demanded by a month-name conversion with bad month.
+    pub fn native_core_date_format(raw: u64, layout: &str) -> Option<String> {
+        TemporalFormatView::Core(raw).render(layout).ok()
+    }
+
+    /// Native SQL TIME_FORMAT retains its wide elapsed-hour parser, written
+    /// fraction, empty-layout NULL, and sign only on H/k/T conversions.
+    pub fn native_time_format(input: &str, layout: &str) -> Option<String> {
+        let (seconds, fraction) = Self::parse_native_duration_text(input)?;
+        if layout.is_empty() {
+            return None;
+        }
+        TemporalFormatView::Clock {
+            seconds,
+            fraction: &fraction,
+        }
+        .render(layout)
+        .ok()
+    }
+
+    /// Public native duration formatting ignores sign and FSP, unlike the SQL
+    /// text formatter. Its hour fields are projected from the full raw nanos.
+    pub fn native_raw_duration_format(nanoseconds: i64, layout: &str) -> String {
+        match TemporalFormatView::RawDuration(nanoseconds).render(layout) {
+            Ok(output) => output,
+            Err(_) => unreachable!("duration conversions do not validate a calendar date"),
+        }
+    }
+
     /// Normalizes MySQL week-mode bits without discarding unknown high bits.
     /// Native callers mask to three bits before calling; wire WeekMode retains
     /// its existing representation policy.
@@ -3005,199 +3375,10 @@ impl Time {
         date.weekday()
     }
 
-    fn write_date_format_segment(self, b: char, output: &mut String) -> Result<()> {
-        match b {
-            'b' => {
-                let month = self.month();
-                if month == 0 {
-                    return Err(box_err!("invalid time format"));
-                } else {
-                    output.push_str(MONTH_NAMES_ABBR[(month - 1) as usize]);
-                }
-            }
-            'M' => {
-                let month = self.month();
-                if month == 0 {
-                    return Err(box_err!("invalid time format"));
-                } else {
-                    output.push_str(MONTH_NAMES[(month - 1) as usize]);
-                }
-            }
-            'm' => {
-                write!(output, "{:02}", self.month()).unwrap();
-            }
-            'c' => {
-                write!(output, "{}", self.month()).unwrap();
-            }
-            'D' => {
-                write!(output, "{}{}", self.day(), self.abbr_day_of_month()).unwrap();
-            }
-            'd' => {
-                write!(output, "{:02}", self.day()).unwrap();
-            }
-            'e' => {
-                write!(output, "{}", self.day()).unwrap();
-            }
-            'j' => {
-                write!(output, "{:03}", self.days()).unwrap();
-            }
-            'H' => {
-                write!(output, "{:02}", self.hour()).unwrap();
-            }
-            'k' => {
-                write!(output, "{}", self.hour()).unwrap();
-            }
-            'h' | 'I' => {
-                let t = self.hour();
-                if t == 0 || t == 12 {
-                    output.push_str("12");
-                } else {
-                    write!(output, "{:02}", t % 12).unwrap();
-                }
-            }
-            'l' => {
-                let t = self.hour();
-                if t == 0 || t == 12 {
-                    output.push_str("12");
-                } else {
-                    write!(output, "{}", t % 12).unwrap();
-                }
-            }
-            'i' => {
-                write!(output, "{:02}", self.minute()).unwrap();
-            }
-            'p' => {
-                let hour = self.hour();
-                if (hour / 12).is_multiple_of(2) {
-                    output.push_str("AM")
-                } else {
-                    output.push_str("PM")
-                }
-            }
-            'r' => {
-                let h = self.hour();
-                if h == 0 {
-                    write!(
-                        output,
-                        "{:02}:{:02}:{:02} AM",
-                        12,
-                        self.minute(),
-                        self.second()
-                    )
-                    .unwrap();
-                } else if h == 12 {
-                    write!(
-                        output,
-                        "{:02}:{:02}:{:02} PM",
-                        12,
-                        self.minute(),
-                        self.second()
-                    )
-                    .unwrap();
-                } else if h < 12 {
-                    write!(
-                        output,
-                        "{:02}:{:02}:{:02} AM",
-                        h,
-                        self.minute(),
-                        self.second()
-                    )
-                    .unwrap();
-                } else {
-                    write!(
-                        output,
-                        "{:02}:{:02}:{:02} PM",
-                        h - 12,
-                        self.minute(),
-                        self.second()
-                    )
-                    .unwrap();
-                }
-            }
-            'T' => {
-                write!(
-                    output,
-                    "{:02}:{:02}:{:02}",
-                    self.hour(),
-                    self.minute(),
-                    self.second()
-                )
-                .unwrap();
-            }
-            'S' | 's' => {
-                write!(output, "{:02}", self.second()).unwrap();
-            }
-            'f' => {
-                write!(output, "{:06}", self.micro()).unwrap();
-            }
-            'U' => {
-                let w = self.week(WeekMode::from_bits_truncate(0));
-                write!(output, "{:02}", w).unwrap();
-            }
-            'u' => {
-                let w = self.week(WeekMode::from_bits_truncate(1));
-                write!(output, "{:02}", w).unwrap();
-            }
-            'V' => {
-                let w = self.week(WeekMode::from_bits_truncate(2));
-                write!(output, "{:02}", w).unwrap();
-            }
-            'v' => {
-                let (_, w) = self.year_week(WeekMode::from_bits_truncate(3));
-                write!(output, "{:02}", w).unwrap();
-            }
-            'a' => {
-                output.push_str(self.weekday().name_abbr());
-            }
-            'W' => {
-                output.push_str(self.weekday().name());
-            }
-            'w' => {
-                write!(output, "{}", self.weekday().num_days_from_sunday()).unwrap();
-            }
-            'X' => {
-                let (year, _) = self.year_week(WeekMode::from_bits_truncate(2));
-                if year < 0 {
-                    write!(output, "{}", u32::MAX).unwrap();
-                } else {
-                    write!(output, "{:04}", year).unwrap();
-                }
-            }
-            'x' => {
-                let (year, _) = self.year_week(WeekMode::from_bits_truncate(3));
-                if year < 0 {
-                    write!(output, "{}", u32::MAX).unwrap();
-                } else {
-                    write!(output, "{:04}", year).unwrap();
-                }
-            }
-            'Y' => {
-                write!(output, "{:04}", self.year()).unwrap();
-            }
-            'y' => {
-                write!(output, "{:02}", self.year() % 100).unwrap();
-            }
-            _ => output.push(b),
-        }
-        Ok(())
-    }
-
     pub fn date_format(self, layout: &str) -> Result<String> {
-        let mut ret = String::new();
-        let mut pattern_match = false;
-        for b in layout.chars() {
-            if pattern_match {
-                self.write_date_format_segment(b, &mut ret)?;
-                pattern_match = false;
-                continue;
-            }
-            if b == '%' {
-                pattern_match = true;
-            } else {
-                ret.push(b);
-            }
-        }
-        Ok(ret)
+        TemporalFormatView::Wire(self)
+            .render(layout)
+            .map_err(|_| box_err!("invalid time format"))
     }
 
     /// Converts a `DateTime` to printable string representation
@@ -3746,6 +3927,84 @@ mod tests {
         ] {
             assert_eq!(Time::parse_native_datetime_components(text), expected);
         }
+    }
+
+    #[test]
+    fn test_shared_formatter_raw_and_elapsed_policies() {
+        // Independently hand-derived policy literals, not newly recorded
+        // provider output or claims about pre-existing fixture rows.
+        let core =
+            (10000_u64 << 50) | (1_u64 << 46) | (1_u64 << 41) | (24_u64 << 36) | (1048575_u64 << 4);
+        let layout = "%y %h %p %r %f end%";
+        assert_eq!(
+            Time::native_core_date_format(core, layout).as_deref(),
+            Some("000 12 AM 12:00:00 AM 1048575 end")
+        );
+        assert_eq!(
+            Time(core).date_format(layout).unwrap(),
+            "00 00 AM 12:00:00 PM 1048575 end"
+        );
+        let layout = "%H %h %p %r %f end%";
+        assert_eq!(
+            Time::native_raw_duration_format(-86_400_000_000_000, layout),
+            "24 12 AM 12:00:00 AM 000000 end"
+        );
+        assert_eq!(
+            Time::native_time_format("-24:00:00", layout).as_deref(),
+            Some("-24 12 PM 12:00:00 PM 000000 end%")
+        );
+        assert_eq!(Time::native_raw_duration_format(0, ""), "");
+        assert_eq!(Time::native_time_format("00:00:00", ""), None);
+        assert_eq!(Time::native_raw_duration_format(0, "%Y %Q"), "Y Q");
+    }
+
+    #[test]
+    fn test_shared_formatter_date_validation_is_policy_local() {
+        // Bad month is not an eager error for the public raw formatter.
+        let invalid_month = 13_u64 << 46;
+        assert_eq!(
+            Time::native_core_date_format(invalid_month, "literal%"),
+            Some("literal".into())
+        );
+        assert_eq!(Time::native_core_date_format(invalid_month, "%M"), None);
+        assert!(
+            Time(0)
+                .date_format("%M")
+                .unwrap_err()
+                .to_string()
+                .contains("invalid time format")
+        );
+        assert_eq!(
+            Time::native_core_date_format(0, "%j %U %v").as_deref(),
+            Some("000 00 01")
+        );
+        let march = (3_u64 << 46) | (1_u64 << 41);
+        assert_eq!(
+            Time::native_core_date_format(march, "%j").as_deref(),
+            Some("060")
+        );
+        assert_eq!(
+            Time::native_text_date_format("0000-03-01", "%j").as_deref(),
+            Some("061")
+        );
+        assert_eq!(
+            Time::native_text_date_format("2000-01-01 bad-clock", "%T %f end%").as_deref(),
+            Some("00:00:00 000000 end%")
+        );
+        assert_eq!(Time::native_text_date_format("2000-00-01", "literal"), None);
+    }
+
+    #[test]
+    fn test_shared_formatter_existing_week_year_fixture() {
+        // Existing native DATE_FORMAT fixture from the year-zero week tests.
+        assert_eq!(
+            Time::native_text_date_format("0000-01-01", "%X %x").as_deref(),
+            Some("0000 4294967295")
+        );
+        assert_eq!(
+            Time::native_text_date_format("2020-01-01", "%U %u %V %v %X %x").as_deref(),
+            Some("00 01 52 01 2019 2020")
+        );
     }
 
     #[test]

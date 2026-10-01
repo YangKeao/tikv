@@ -7652,3 +7652,318 @@ fn local_evaluated_args_date_constructors_own_normal_zero_and_null_results() {
         assert_eq!(retained.as_deref(), final_expected);
     }
 }
+
+#[test]
+fn local_evaluated_args_duration_probe_owns_text_before_format_stage() {
+    let text = {
+        let mut probe = prepare_evaluated_bytes(
+            EvaluatedBytesOp::DurationTextProbeNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(probe.operation(), EvaluatedBytesOp::DurationTextProbeNative);
+        assert_eq!(probe.kernel_invocations(), 0);
+        let storage = probe.retained_storage().unwrap();
+        assert!(matches!(
+            probe.eval_args(EvaluatedArgs::Int(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(probe.kernel_invocations(), 0);
+        assert!(probe.is_healthy());
+        assert_eq!(probe.retained_storage().unwrap(), storage);
+        let ComputedValue::Bytes(value) = probe.eval_args(EvaluatedArgs::Bytes(None)).unwrap()
+        else {
+            panic!("nullable duration probe returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), None);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), None);
+        assert_eq!(probe.kernel_invocations(), 1);
+        assert!(probe.is_healthy());
+        assert_eq!(probe.retained_storage().unwrap(), storage);
+        let ComputedValue::Bytes(value) = probe
+            .eval_args(EvaluatedArgs::Bytes(Some(b"1990-05-07 19:30:10".to_vec())))
+            .unwrap()
+        else {
+            panic!("duration probe returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), Some(b"1990-05-07 19:30:10".as_slice()));
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        let text = value.into_option().unwrap();
+        assert_eq!(text.as_slice(), b"1990-05-07 19:30:10");
+        assert_eq!(probe.kernel_invocations(), 2);
+        assert!(probe.is_healthy());
+        assert_eq!(probe.retained_storage().unwrap(), storage);
+        text
+    };
+    assert_eq!(text.as_slice(), b"1990-05-07 19:30:10");
+    // Only after the probe exits do we prepare the caller's format argument.
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::TimeFormatTextNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::TimeFormatTextNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::Bytes(None)),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases: [(EvaluatedArgs, Option<&[u8]>); 2] = [
+        (EvaluatedArgs::Bytes2(Some(text.clone()), None), None),
+        (
+            EvaluatedArgs::Bytes2(Some(text), Some(b"%H %i %s".to_vec())),
+            Some(b"19 30 10"),
+        ),
+    ];
+    let mut retained = None;
+    for (index, (args, expected)) in cases.into_iter().enumerate() {
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("TIME_FORMAT returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        retained = value.into_option();
+        assert_eq!(retained.as_deref(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    drop(worker);
+    assert_eq!(retained.as_deref(), Some(b"19 30 10".as_slice()));
+}
+
+#[test]
+fn local_evaluated_args_date_format_core_keeps_roles_and_missing_distinct() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::DateFormatCoreNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::DateFormatCoreNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::Bytes2(None, None),
+        EvaluatedArgs::TimeCoreBits2(None, None),
+        EvaluatedArgs::Ieee754Bits2 {
+            left: ReadyIeee754Arg::Value(None),
+            right: ReadyIeee754Arg::Value(None),
+        },
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    // Raw zero is not globally rejected: only the demanded month is invalid.
+    let cases: [(Option<&[u8]>, Option<&[u8]>); 3] = [
+        (None, None),
+        (Some(b"%M"), None),
+        (Some(b"literal%"), Some(b"literal")),
+    ];
+    let mut retained = None;
+    for (index, (layout, expected)) in cases.into_iter().enumerate() {
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::TimeCoreBitsBytes {
+                core: 0,
+                bytes: layout.map(|bytes| bytes.to_vec()),
+            })
+            .unwrap()
+        else {
+            panic!("DATE_FORMAT core returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        retained = value.into_option();
+        assert_eq!(retained.as_deref(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    // Defensive transport error, not a new SQL input fixture or InvalidDate.
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::TimeCoreBitsBytes {
+            core: 0,
+            bytes: Some(vec![0xff])
+        }),
+        Err(LocalError::Evaluation(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 4);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    drop(worker);
+    assert_eq!(retained.as_deref(), Some(b"literal".as_slice()));
+    let mut bounded = prepare_evaluated_bytes(
+        EvaluatedBytesOp::DateFormatCoreNative,
+        LocalCompileContext::default(),
+        ExecutionLimits {
+            max_retained_bytes: 0,
+            ..ExecutionLimits::default()
+        },
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(bounded.kernel_invocations(), 0);
+    let storage = bounded.retained_storage().unwrap();
+    assert!(matches!(
+        bounded.eval_args(EvaluatedArgs::TimeCoreBitsBytes {
+            core: 0,
+            bytes: None
+        }),
+        Err(LocalError::ResourceLimit(_))
+    ));
+    assert_eq!(bounded.kernel_invocations(), 0);
+    assert!(bounded.is_healthy());
+    assert_eq!(bounded.retained_storage().unwrap(), storage);
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::DateFormatNullNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::DateFormatNullNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::NullWitness(Some(0)),
+        EvaluatedArgs::Int(None),
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let ComputedValue::Bytes(value) = worker.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+    else {
+        panic!("DATE_FORMAT NULL witness returned a non-Bytes value");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::DateFormatMissingNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(
+        worker.operation(),
+        EvaluatedBytesOp::DateFormatMissingNative
+    );
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::NullWitness(None)),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let ComputedValue::Int(value) = worker.eval_args(EvaluatedArgs::NoArgs).unwrap() else {
+        panic!("DATE_FORMAT missing arguments returned a non-Int value");
+    };
+    assert_eq!(value.value(), Some(0));
+    assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+    assert_eq!(value.into_option(), Some(0));
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+}
+
+#[test]
+fn local_evaluated_args_date_format_and_last_day_keep_distinct_clock_policies() {
+    let cases: [(EvaluatedBytesOp, Vec<(EvaluatedArgs, Option<&[u8]>)>); 2] = [
+        (
+            EvaluatedBytesOp::DateFormatTextNative,
+            vec![
+                (
+                    EvaluatedArgs::Bytes2(Some(b"0000-01-01".to_vec()), None),
+                    None,
+                ),
+                // Untyped native clock fallback, not a typed SQL-cast fixture.
+                (
+                    EvaluatedArgs::Bytes2(
+                        Some(b"2007-10-07 23:59:61".to_vec()),
+                        Some(b"%T".to_vec()),
+                    ),
+                    Some(b"00:00:00"),
+                ),
+                (
+                    EvaluatedArgs::Bytes2(Some(b"0000-01-01".to_vec()), Some(b"%X %x".to_vec())),
+                    Some(b"0000 4294967295"),
+                ),
+            ],
+        ),
+        (
+            EvaluatedBytesOp::LastDayTextNative,
+            vec![
+                (EvaluatedArgs::Bytes(None), None),
+                (
+                    EvaluatedArgs::Bytes(Some(b"2007-10-07 23:59:61".to_vec())),
+                    None,
+                ),
+                (
+                    EvaluatedArgs::Bytes(Some(b"2004-02-05".to_vec())),
+                    Some(b"2004-02-29"),
+                ),
+            ],
+        ),
+    ];
+    for (operation, cases) in cases {
+        let final_expected = cases.last().unwrap().1;
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Int(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let mut retained = None;
+        for (index, (args, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("native date formatting returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            retained = value.into_option();
+            assert_eq!(retained.as_deref(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        drop(worker);
+        assert_eq!(retained.as_deref(), final_expected);
+    }
+}

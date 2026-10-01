@@ -293,6 +293,24 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  DATE_FORMAT/TIME_FORMAT use a shared Time scanner and specifier renderer,
+  retaining separate SQL-text, raw-core, wire, elapsed-text and raw-duration
+  policies. Trailing percent signs, invalid-month errors, raw large years,
+  fractional widths and hour normalization remain policy-specific. Native
+  public temporal formatters are thin delegates; weekday/ordinal and duration
+  microsecond projections also have one shared owner. The closed core/layout
+  role carries a non-NULL LE8 core and an actually nullable layout, not generic
+  Bytes2. Actual NULL times use a separate NULL witness without reading layout.
+  Legacy DATE_FORMAT boolean demand still examines only the first datum's
+  presence through the existing boolean bridge; a genuinely missing child uses
+  a private NoArgs integer recipe, without widening ordinary graph admission.
+  SQL DATE_FORMAT retains both original coercions. TIME_FORMAT completes a
+  duration-text probe before demanding layout in a second complete call;
+  repeated parsing and the second lease are explicit costs. LAST_DAY retains
+  its distinct strict date/clock parser, not DATE_FORMAT's bad-clock fallback
+  or the wire zero-date policy. Legacy formatter SQL errors remain NULL, but
+  resource failures are not folded into SQL NULL. No result kind, report or
+  PB signature is added by these recipes.
   MAKEDATE/FROM_DAYS share the native wide inverse civil-date helper in Time,
   not the wire bounded unsigned day-number domain. FROM_DAYS returns actual
   canonical date text; the consumer packs the computed zero-date value into

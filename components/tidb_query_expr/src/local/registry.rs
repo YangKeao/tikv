@@ -217,7 +217,14 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::MakeDateNative
         | LocalFunctionId::FromDaysNative
         | LocalFunctionId::MakeTimePartsNative
-        | LocalFunctionId::SecToTimeNative => Err(other_err!(
+        | LocalFunctionId::SecToTimeNative
+        | LocalFunctionId::DateFormatTextNative
+        | LocalFunctionId::DateFormatCoreNative
+        | LocalFunctionId::DateFormatNullNative
+        | LocalFunctionId::DateFormatMissingNative
+        | LocalFunctionId::DurationTextProbeNative
+        | LocalFunctionId::TimeFormatTextNative
+        | LocalFunctionId::LastDayTextNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

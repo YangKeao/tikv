@@ -267,6 +267,13 @@ pub enum LocalFunctionId {
     FromDaysNative,
     MakeTimePartsNative,
     SecToTimeNative,
+    DateFormatTextNative,
+    DateFormatCoreNative,
+    DateFormatNullNative,
+    DateFormatMissingNative,
+    DurationTextProbeNative,
+    TimeFormatTextNative,
+    LastDayTextNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

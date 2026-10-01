@@ -389,6 +389,108 @@ fn tso_logical_native(arg: Option<&Int>) -> Result<Option<Int>> {
     }))
 }
 
+#[rpn_fn(nullable)]
+fn date_format_text_native(
+    date: Option<BytesRef>,
+    layout: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    let (Some(date), Some(layout)) = (date, layout) else {
+        return Ok(None);
+    };
+    Ok(Time::native_text_date_format(
+        decode_native_time_text(date)?,
+        decode_native_time_text(layout)?,
+    )
+    .map(String::into_bytes))
+}
+
+#[rpn_fn(nullable)]
+fn date_format_core_native(
+    core: Option<BytesRef>,
+    layout: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    let Some(core) = core else {
+        return Err(other_err!(
+            "Native DATE_FORMAT raw transport requires a present value"
+        ));
+    };
+    // Preserve the full raw word. No Time construction, field projection, or
+    // low-bit normalization belongs to this transport boundary.
+    let core = decode_time_core_native(core)?;
+    let Some(layout) = layout else {
+        return Ok(None);
+    };
+    Ok(
+        Time::native_core_date_format(core, decode_native_time_text(layout)?)
+            .map(String::into_bytes),
+    )
+}
+
+#[rpn_fn(nullable)]
+fn date_format_null_native(arg: Option<&Int>) -> Result<Option<Bytes>> {
+    match arg {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Native DATE_FORMAT NULL witness must be an actual NULL"
+        )),
+    }
+}
+
+#[rpn_fn]
+fn date_format_missing_native() -> Result<Option<Int>> {
+    Ok(Some(0))
+}
+
+#[rpn_fn(nullable)]
+fn duration_text_probe_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(
+            Time::parse_native_duration_text(decode_native_time_text(bytes)?)
+                .map(|_| bytes.to_vec()),
+        )
+    })
+}
+
+#[rpn_fn(nullable)]
+fn time_format_text_native(
+    time: Option<BytesRef>,
+    layout: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    let (Some(time), Some(layout)) = (time, layout) else {
+        return Ok(None);
+    };
+    Ok(Time::native_time_format(
+        decode_native_time_text(time)?,
+        decode_native_time_text(layout)?,
+    )
+    .map(String::into_bytes))
+}
+
+#[rpn_fn(nullable)]
+fn last_day_text_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    arg.map_or(Ok(None), |bytes| {
+        let value = decode_native_time_text(bytes)?.trim();
+        let (date, time) = value
+            .split_once(char::is_whitespace)
+            .map_or((value, None), |(date, time)| (date, Some(time.trim())));
+        let Some((y, m, _)) = Time::parse_native_date_ymd(date) else {
+            return Ok(None);
+        };
+        if let Some(time) = time {
+            if Time::parse_native_clock_with_fraction(time).is_none() {
+                return Ok(None);
+            }
+        }
+        let next_month = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+        let (last_y, last_m, last_d) = Time::native_civil_from_days(
+            Time::native_days_from_civil(next_month.0, next_month.1, 1) - 1,
+        );
+        Ok(Some(
+            format!("{last_y:04}-{last_m:02}-{last_d:02}").into_bytes(),
+        ))
+    })
+}
+
 #[rpn_fn(nullable, capture = [ctx])]
 #[inline]
 pub fn date_format(
@@ -2395,6 +2497,108 @@ mod tests {
 
     use super::*;
     use crate::{RpnExpressionBuilder, types::test_util::RpnFnScalarEvaluator};
+
+    #[test]
+    fn test_native_date_format_source_literals_and_early_paths() {
+        // Identical preexisting native text/public-Time source fixture literals.
+        let layout =
+            b"%b %M %m %c %D %d %e %j %k %h %i %p %r %T %s %f %U %u %V %v %a %W %w %X %x %Y %y %%";
+        let expected = b"Jan January 01 1 7th 07 7 007 23 11 12 PM 11:12:34 PM 23:12:34 34 123450 01 01 01 01 Thu Thursday 4 2010 2010 2010 10 %";
+        assert_eq!(
+            date_format_text_native(Some(b"2010-01-07 23:12:34.12345"), Some(layout)).unwrap(),
+            Some(expected.to_vec())
+        );
+        let core = ((2010_u64 << 50)
+            | (1_u64 << 46)
+            | (7_u64 << 41)
+            | (23_u64 << 36)
+            | (12_u64 << 30)
+            | (34_u64 << 24)
+            | (123_450_u64 << 4))
+            .to_le_bytes();
+        assert_eq!(
+            date_format_core_native(Some(&core), Some(layout)).unwrap(),
+            Some(expected.to_vec())
+        );
+        assert_eq!(
+            date_format_text_native(Some(b"0000-01-01"), Some(b"%X %x")).unwrap(),
+            Some(b"0000 4294967295".to_vec())
+        );
+        // Original public-Time month-zero and trailing-percent fixtures.
+        let invalid_month = ((2010_u64 << 50) | (1_u64 << 41)).to_le_bytes();
+        assert_eq!(
+            date_format_core_native(Some(&invalid_month), Some(b"%M")).unwrap(),
+            None
+        );
+        assert_eq!(
+            date_format_core_native(Some(&invalid_month), Some(b"trailing%")).unwrap(),
+            Some(b"trailing".to_vec())
+        );
+        // Policy-derived literal: text DATE_FORMAT falls back to midnight for
+        // a bad clock, and unlike public-Time retains a trailing percent.
+        assert_eq!(
+            date_format_text_native(Some(b"2010-01-07 23:12:99"), Some(b"%T%")).unwrap(),
+            Some(b"00:00:00%".to_vec())
+        );
+        assert_eq!(date_format_text_native(None, Some(b"%Y")).unwrap(), None);
+        assert_eq!(date_format_core_native(Some(&core), None).unwrap(), None);
+        assert!(date_format_core_native(None, Some(b"%Y")).is_err());
+        assert_eq!(date_format_null_native(None).unwrap(), None);
+        assert!(date_format_null_native(Some(&0)).is_err());
+        assert_eq!(date_format_missing_native().unwrap(), Some(0));
+    }
+
+    #[test]
+    fn test_native_time_format_probe_and_source_literals() {
+        let source = b"1990-05-07 19:30:10";
+        assert_eq!(
+            duration_text_probe_native(Some(source)).unwrap(),
+            Some(source.to_vec())
+        );
+        assert_eq!(
+            time_format_text_native(Some(source), Some(b"%H %i %s")).unwrap(),
+            Some(b"19 30 10".to_vec())
+        );
+        assert_eq!(
+            time_format_text_native(Some(b"12:34:56"), Some(b"")).unwrap(),
+            None
+        );
+        // Policy-derived from the original duration parser/format branches:
+        // retain the actual untrimmed probe text; hour25 is PM, not modulo-AM.
+        let original = b"  -25:01:02.3  ";
+        assert_eq!(
+            duration_text_probe_native(Some(original)).unwrap(),
+            Some(original.to_vec())
+        );
+        assert_eq!(
+            time_format_text_native(Some(original), Some(b"%H|%h|%p|%T|%f|%M|%")).unwrap(),
+            Some(b"-25|01|PM|-25:01:02|300000|M|%".to_vec())
+        );
+        assert_eq!(duration_text_probe_native(Some(b"12:99:00")).unwrap(), None);
+        assert_eq!(duration_text_probe_native(None).unwrap(), None);
+        assert_eq!(time_format_text_native(Some(source), None).unwrap(), None);
+    }
+
+    #[test]
+    fn test_native_last_day_source_literals_and_suffix_policy() {
+        for (text, expected) in [
+            ("2003-02-05", Some("2003-02-28")),
+            ("2004-02-05", Some("2004-02-29")),
+            ("2004-01-01 01:01:01", Some("2004-01-31")),
+            ("2007-10-07 23:59:61", None),
+            ("0000-00-00", None),
+            // These two are explicit policy-derived literals: the old parser
+            // trims Unicode whitespace but does not accept a T separator.
+            (" 2004-01-01\u{2003}01:01:01 ", Some("2004-01-31")),
+            ("2004-01-01T01:01:01", None),
+        ] {
+            assert_eq!(
+                last_day_text_native(Some(text.as_bytes())).unwrap(),
+                expected.map(|text| text.as_bytes().to_vec())
+            );
+        }
+        assert_eq!(last_day_text_native(None).unwrap(), None);
+    }
 
     #[test]
     fn test_native_make_date_and_from_days_source_literals() {

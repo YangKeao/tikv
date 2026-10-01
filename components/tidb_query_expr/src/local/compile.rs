@@ -134,10 +134,17 @@ fn check_evaluated_bytes_source(
     };
     let arity_matches = match (operation, operation.input_role()) {
         (
-            EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative,
+            EvaluatedBytesOp::PiRaw
+            | EvaluatedBytesOp::JsonValidOtherNative
+            | EvaluatedBytesOp::DateFormatMissingNative,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
-        (EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative, _)
+        (
+            EvaluatedBytesOp::PiRaw
+            | EvaluatedBytesOp::JsonValidOtherNative
+            | EvaluatedBytesOp::DateFormatMissingNative,
+            _,
+        )
         | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
         (_, EvaluatedArgsRole::Values) if operation.is_insert() => arity == 4 && calls == 1,
@@ -1708,6 +1715,13 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::FromDaysNative,
             EvaluatedBytesOp::MakeTimePartsNative,
             EvaluatedBytesOp::SecToTimeNative,
+            EvaluatedBytesOp::DateFormatTextNative,
+            EvaluatedBytesOp::DateFormatCoreNative,
+            EvaluatedBytesOp::DateFormatNullNative,
+            EvaluatedBytesOp::DateFormatMissingNative,
+            EvaluatedBytesOp::DurationTextProbeNative,
+            EvaluatedBytesOp::TimeFormatTextNative,
+            EvaluatedBytesOp::LastDayTextNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
@@ -1758,7 +1772,9 @@ mod evaluated_ascii_compile_tests {
             }
             if matches!(
                 operation,
-                EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative
+                EvaluatedBytesOp::PiRaw
+                    | EvaluatedBytesOp::JsonValidOtherNative
+                    | EvaluatedBytesOp::DateFormatMissingNative
             ) {
                 assert_eq!(arity, 0);
                 assert_eq!(calls, 1);

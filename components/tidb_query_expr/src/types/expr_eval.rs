@@ -315,10 +315,17 @@ fn evaluated_ready_args_match(
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
         (
-            EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative,
+            EvaluatedBytesOp::PiRaw
+            | EvaluatedBytesOp::JsonValidOtherNative
+            | EvaluatedBytesOp::DateFormatMissingNative,
             EvaluatedArgsRole::NoArgs,
         ) => types.is_empty() && operation.call_count() == 1,
-        (EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative, _)
+        (
+            EvaluatedBytesOp::PiRaw
+            | EvaluatedBytesOp::JsonValidOtherNative
+            | EvaluatedBytesOp::DateFormatMissingNative,
+            _,
+        )
         | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => {
             operation.is_pad_native() && types.len() == 4 && operation.call_count() == 1
@@ -430,6 +437,7 @@ fn evaluated_ready_args_match(
                     EvaluatedBytesOp::MathNullWitnessNative
                         | EvaluatedBytesOp::DateDiffNullNative
                         | EvaluatedBytesOp::WeekNullNative
+                        | EvaluatedBytesOp::DateFormatNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
@@ -527,6 +535,11 @@ fn evaluated_ready_args_match(
                 [ScalarValue::Bytes(Some(bytes))] => bytes.len() == 8,
                 _ => false,
             },
+            EvaluatedArgsRole::TimeCoreBitsBytes => {
+                operation == EvaluatedBytesOp::DateFormatCoreNative
+                    && matches!(values, [ScalarValue::Bytes(Some(core)), ScalarValue::Bytes(_)]
+                        if core.len() == 8)
+            }
             EvaluatedArgsRole::TimeCoreBits2 => {
                 operation == EvaluatedBytesOp::DateDiffCoreNative
                     && values.len() == 2
@@ -682,10 +695,17 @@ pub(crate) fn evaluated_bytes_shape(
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
         (
-            EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative,
+            EvaluatedBytesOp::PiRaw
+            | EvaluatedBytesOp::JsonValidOtherNative
+            | EvaluatedBytesOp::DateFormatMissingNative,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
-        (EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative, _)
+        (
+            EvaluatedBytesOp::PiRaw
+            | EvaluatedBytesOp::JsonValidOtherNative
+            | EvaluatedBytesOp::DateFormatMissingNative,
+            _,
+        )
         | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
         (_, EvaluatedArgsRole::Values) if operation.is_insert() => arity == 4 && calls == 1,
@@ -2703,8 +2723,8 @@ impl RpnExpression {
 
     /// Fixed ready operands, borrowed from the facade until its result
     /// extraction completes. Only the selected closed recipe is admitted;
-    /// zero operands require PiRaw or JsonValidOtherNative with the NoArgs
-    /// role.
+    /// zero operands require PiRaw, JsonValidOtherNative or
+    /// DateFormatMissingNative with the NoArgs role.
     pub(crate) fn eval_with_ready_args<'a, 'data: 'a>(
         &'a self,
         operation: EvaluatedBytesOp,
