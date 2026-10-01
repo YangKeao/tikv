@@ -931,6 +931,10 @@ pub enum EvaluatedBytesOp {
     PeriodDiffNative,
     GetFormatNative,
     GetFormatNullNative,
+    DayOfWeekTextNative,
+    WeekdayTextNative,
+    DayOfYearTextNative,
+    DayNameTextNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1523,6 +1527,26 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::GetFormatNullNative,
                 );
             }
+            Self::DayOfWeekTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DayOfWeekTextNative,
+                );
+            }
+            Self::WeekdayTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::WeekdayTextNative,
+                );
+            }
+            Self::DayOfYearTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DayOfYearTextNative,
+                );
+            }
+            Self::DayNameTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DayNameTextNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1833,6 +1857,10 @@ impl EvaluatedBytesOp {
             Self::PeriodDiffNative => crate::impl_time::period_diff_native_fn_meta(),
             Self::GetFormatNative => crate::impl_time::get_format_native_fn_meta(),
             Self::GetFormatNullNative => crate::impl_time::get_format_null_native_fn_meta(),
+            Self::DayOfWeekTextNative => crate::impl_time::day_of_week_text_native_fn_meta(),
+            Self::WeekdayTextNative => crate::impl_time::weekday_text_native_fn_meta(),
+            Self::DayOfYearTextNative => crate::impl_time::day_of_year_text_native_fn_meta(),
+            Self::DayNameTextNative => crate::impl_time::day_name_text_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -2008,7 +2036,10 @@ impl EvaluatedBytesOp {
             | Self::SecondNanosNative
             | Self::TimeToSecTextNative
             | Self::PeriodAddNative
-            | Self::PeriodDiffNative => EvalType::Int,
+            | Self::PeriodDiffNative
+            | Self::DayOfWeekTextNative
+            | Self::WeekdayTextNative
+            | Self::DayOfYearTextNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -2116,7 +2147,8 @@ impl EvaluatedBytesOp {
             | Self::JsonQuoteNative
             | Self::MonthNameTextNative
             | Self::GetFormatNative
-            | Self::GetFormatNullNative => EvalType::Bytes,
+            | Self::GetFormatNullNative
+            | Self::DayNameTextNative => EvalType::Bytes,
         }
     }
 
@@ -2180,7 +2212,11 @@ impl EvaluatedBytesOp {
             | Self::SecondTextNative
             | Self::MonthNameTextNative
             | Self::TimeToSecTextNative
-            | Self::GetFormatNullNative => &[EvalType::Bytes],
+            | Self::GetFormatNullNative
+            | Self::DayOfWeekTextNative
+            | Self::WeekdayTextNative
+            | Self::DayOfYearTextNative
+            | Self::DayNameTextNative => &[EvalType::Bytes],
             Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative

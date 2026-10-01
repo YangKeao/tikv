@@ -1686,6 +1686,10 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::PeriodDiffNative,
             EvaluatedBytesOp::GetFormatNative,
             EvaluatedBytesOp::GetFormatNullNative,
+            EvaluatedBytesOp::DayOfWeekTextNative,
+            EvaluatedBytesOp::WeekdayTextNative,
+            EvaluatedBytesOp::DayOfYearTextNative,
+            EvaluatedBytesOp::DayNameTextNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

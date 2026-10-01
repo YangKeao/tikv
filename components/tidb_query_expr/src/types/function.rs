@@ -245,6 +245,10 @@ pub enum LocalFunctionId {
     PeriodDiffNative,
     GetFormatNative,
     GetFormatNullNative,
+    DayOfWeekTextNative,
+    WeekdayTextNative,
+    DayOfYearTextNative,
+    DayNameTextNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

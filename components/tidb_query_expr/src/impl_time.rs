@@ -187,6 +187,57 @@ fn get_format_null_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
     }
 }
 
+#[rpn_fn(nullable)]
+fn day_of_week_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(
+            Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(
+                |(year, month, day)| {
+                    (Time::native_weekday_sunday_index(year, month, day) + 1) as Int
+                },
+            ),
+        )
+    })
+}
+
+#[rpn_fn(nullable)]
+fn weekday_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(
+            Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(
+                |(year, month, day)| {
+                    ((Time::native_weekday_sunday_index(year, month, day) + 6) % 7) as Int
+                },
+            ),
+        )
+    })
+}
+
+#[rpn_fn(nullable)]
+fn day_of_year_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(Time::parse_native_date_ymd(decode_native_time_text(bytes)?)
+            .map(|(year, month, day)| Time::native_day_of_year(year, month, day)))
+    })
+}
+
+#[rpn_fn(nullable)]
+fn day_name_text_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(
+            Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(
+                |(year, month, day)| {
+                    Time::weekday_name_from_sunday_index(Time::native_weekday_sunday_index(
+                        year, month, day,
+                    ))
+                    .to_string()
+                    .into_bytes()
+                },
+            ),
+        )
+    })
+}
+
 #[rpn_fn(nullable, capture = [ctx])]
 #[inline]
 pub fn date_format(
@@ -2032,6 +2083,86 @@ mod tests {
 
     use super::*;
     use crate::{RpnExpressionBuilder, types::test_util::RpnFnScalarEvaluator};
+
+    #[test]
+    fn test_native_weekday_fields_literal_oracles() {
+        // Pinned native fixtures and independent old civil-formula literals;
+        // year zero and the full u32 year domain are not wire Time validation.
+        let cases: [(&str, Int, Int, Int, &str); 7] = [
+            ("2017-12-01", 6, 4, 335, "Friday"),
+            ("0000-01-01", 7, 5, 1, "Saturday"),
+            ("0000-12-01", 6, 4, 336, "Friday"),
+            ("2020-02-29", 7, 5, 60, "Saturday"),
+            ("2000-12-31", 1, 6, 366, "Sunday"),
+            ("1900-03-01", 5, 3, 60, "Thursday"),
+            ("4294967295-12-31", 7, 5, 365, "Saturday"),
+        ];
+        for (text, day_of_week, weekday, day_of_year, day_name) in cases {
+            let input = Some(text.as_bytes());
+            assert_eq!(
+                day_of_week_text_native(input).unwrap(),
+                Some(day_of_week),
+                "{text}"
+            );
+            assert_eq!(weekday_text_native(input).unwrap(), Some(weekday), "{text}");
+            assert_eq!(
+                day_of_year_text_native(input).unwrap(),
+                Some(day_of_year),
+                "{text}"
+            );
+            assert_eq!(
+                day_name_text_native(input).unwrap(),
+                Some(day_name.as_bytes().to_vec()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_native_weekday_fields_null_invalid_and_transport() {
+        let invalid = [
+            "",
+            "2017-00-01",
+            "2017-01-00",
+            "2008-13-01",
+            "2023-02-29",
+            "2024-02-30",
+            "0000-00-00",
+            "0000-00-00 00:00:11.000000",
+            "4294967296-12-31",
+        ];
+        let kernels: [fn(Option<BytesRef>) -> Result<Option<Int>>; 3] = [
+            day_of_week_text_native,
+            weekday_text_native,
+            day_of_year_text_native,
+        ];
+        for kernel in kernels {
+            assert_eq!(kernel(None).unwrap(), None);
+            for text in invalid {
+                assert_eq!(kernel(Some(text.as_bytes())).unwrap(), None, "{text}");
+            }
+        }
+        assert_eq!(day_name_text_native(None).unwrap(), None);
+        for text in invalid {
+            assert_eq!(
+                day_name_text_native(Some(text.as_bytes())).unwrap(),
+                None,
+                "{text}"
+            );
+        }
+        let errors = [
+            day_of_week_text_native(Some(b"\xff")).unwrap_err(),
+            weekday_text_native(Some(b"\xff")).unwrap_err(),
+            day_of_year_text_native(Some(b"\xff")).unwrap_err(),
+            day_name_text_native(Some(b"\xff")).unwrap_err(),
+        ];
+        for error in errors {
+            assert!(matches!(
+                error.0.as_ref(),
+                tidb_query_common::error::ErrorInner::Evaluate(EvaluateError::Other(_))
+            ));
+        }
+    }
 
     #[test]
     fn test_native_period_values_nulls_and_causes() {

@@ -6856,3 +6856,117 @@ fn local_evaluated_args_period_receipts_and_get_format_keep_nullable_boundaries(
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
 }
+
+#[test]
+fn local_evaluated_args_day_text_fields_keep_nullable_and_year_zero_values() {
+    for (operation, december, year_zero) in [
+        (EvaluatedBytesOp::DayOfWeekTextNative, 6_i64, 7_i64),
+        (EvaluatedBytesOp::WeekdayTextNative, 4_i64, 5_i64),
+        (EvaluatedBytesOp::DayOfYearTextNative, 335_i64, 1_i64),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_retained_bytes: 8 * 1024,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Int(Some(0))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let preceding = if operation == EvaluatedBytesOp::DayOfWeekTextNative {
+            let mut oversized = Vec::with_capacity(16 * 1024);
+            oversized.extend_from_slice(b"2017-02-30");
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes(Some(vec![0xff]))),
+                Err(LocalError::Evaluation(_))
+            ));
+            1_u64
+        } else {
+            0
+        };
+        assert_eq!(worker.kernel_invocations(), preceding);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let cases: [(Option<&[u8]>, Option<i64>); 4] = [
+            (None, None),
+            (Some(b"2017-02-30"), None),
+            (Some(b"2017-12-01"), Some(december)),
+            (Some(b"0000-01-01"), Some(year_zero)),
+        ];
+        for (index, (input, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Int(value) = worker
+                .eval_args(EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec())))
+                .unwrap()
+            else {
+                panic!("day text field returned a non-Int value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), preceding + index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+    let retained = {
+        let mut worker = prepare_evaluated_bytes(
+            EvaluatedBytesOp::DayNameTextNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), EvaluatedBytesOp::DayNameTextNative);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Int(Some(0))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let cases: [(Option<&[u8]>, Option<&[u8]>); 4] = [
+            (None, None),
+            (Some(b"2017-02-30"), None),
+            (Some(b"2017-12-01"), Some(b"Friday")),
+            (Some(b"0000-01-01"), Some(b"Saturday")),
+        ];
+        let mut retained = None;
+        for (index, (input, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Bytes(value) = worker
+                .eval_args(EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec())))
+                .unwrap()
+            else {
+                panic!("DAYNAME returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            retained = value.into_option();
+            assert_eq!(retained.as_deref(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        retained
+    };
+    assert_eq!(retained.as_deref(), Some(b"Saturday".as_slice()));
+}

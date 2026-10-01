@@ -53,6 +53,18 @@ pub const MONTH_NAMES: &[&str] = &[
     "December",
 ];
 
+// Full English names use the native Sunday-zero index. Abbreviations retain
+// their existing separate policies and callers.
+const WEEKDAY_NAMES: &[&str] = &[
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
 const MONTH_NAMES_ABBR: &[&str] = &[
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
@@ -228,6 +240,37 @@ impl From<TimeType> for FieldTypeTp {
 
 // The common set of methods for `date/time`
 impl Time {
+    /// Native Gregorian day count since 1970-01-01, retaining the original wide
+    /// signed arithmetic. This is Howard Hinnant's days_from_civil algorithm
+    /// (https://howardhinnant.github.io/date_algorithms.html), not get_daynr's
+    /// unsigned MySQL epoch or a validated Time constructor.
+    pub fn native_days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let mp = (i64::from(m) + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146097 + doe - 719468
+    }
+
+    /// Sunday-zero weekday for the native civil-day domain. Callers retain
+    /// their original date validation before applying this arithmetic.
+    pub fn native_weekday_sunday_index(y: i64, m: u32, d: u32) -> u32 {
+        (Self::native_days_from_civil(y, m, d) + 4).rem_euclid(7) as u32
+    }
+
+    /// Native one-based ordinal, without narrowing the year into Time bits.
+    pub fn native_day_of_year(y: i64, m: u32, d: u32) -> i64 {
+        Self::native_days_from_civil(y, m, d) - Self::native_days_from_civil(y, 1, 1) + 1
+    }
+
+    /// Full English weekday name for a Sunday-zero index. Invalid indexes
+    /// retain the original table lookup's panic rather than becoming NULL.
+    pub fn weekday_name_from_sunday_index(index: u32) -> &'static str {
+        WEEKDAY_NAMES[index as usize]
+    }
+
     /// Parses the native TIME_TO_SEC/TIME_FORMAT text domain, preserving its
     /// signed whole seconds and at most six fraction characters. This retains
     /// the original unchecked arithmetic and allocation paths; it is not the
@@ -3298,6 +3341,42 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn test_native_civil_day_and_weekday_names() {
+        for (y, m, d, civil, sunday_index, ordinal) in [
+            (0, 1, 1, -719528, 6, 1),
+            (1969, 12, 31, -1, 3, 365),
+            (1970, 1, 1, 0, 4, 1),
+            (2000, 1, 1, 10957, 6, 1),
+            (2000, 2, 29, 11016, 2, 60),
+            (2000, 3, 1, 11017, 3, 61),
+        ] {
+            assert_eq!(Time::native_days_from_civil(y, m, d), civil);
+            assert_eq!(Time::native_weekday_sunday_index(y, m, d), sunday_index);
+            assert_eq!(Time::native_day_of_year(y, m, d), ordinal);
+        }
+        // This year cannot be represented by Time's stored year bits or chrono.
+        assert_eq!(
+            Time::native_weekday_sunday_index(i64::from(u32::MAX), 1, 1),
+            6
+        );
+        assert_eq!(Time::native_day_of_year(i64::from(u32::MAX), 12, 31), 365);
+        for (index, expected) in [
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(Time::weekday_name_from_sunday_index(index as u32), expected);
+        }
+    }
 
     #[test]
     fn test_native_period_and_get_format_policies() {

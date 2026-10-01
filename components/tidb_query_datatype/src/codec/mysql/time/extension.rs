@@ -11,15 +11,7 @@ pub trait WeekdayExtension {
 
 impl WeekdayExtension for Weekday {
     fn name(&self) -> &'static str {
-        match *self {
-            Weekday::Mon => "Monday",
-            Weekday::Tue => "Tuesday",
-            Weekday::Wed => "Wednesday",
-            Weekday::Thu => "Thursday",
-            Weekday::Fri => "Friday",
-            Weekday::Sat => "Saturday",
-            Weekday::Sun => "Sunday",
-        }
+        Time::weekday_name_from_sunday_index(self.num_days_from_sunday())
     }
 
     fn name_abbr(&self) -> &'static str {

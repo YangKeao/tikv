@@ -293,6 +293,19 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  DAYOFWEEK/WEEKDAY/DAYOFYEAR/DAYNAME add four private nullable text
+  recipes in `impl_time.rs`: three ordinary Int results and one owned Bytes
+  result. Frontend casts and string preparation remain separate from the
+  worker's full native calendar validation. Year zero is valid when month/day
+  are valid; wide native years are not narrowed through packed Time or chrono.
+  Shared Time helpers own civil-day arithmetic, Sunday indexing, ordinal-day
+  differences and full weekday names. Native calendar helper/formatter leaves
+  and weekday Display/name methods delegate to them; CoreTime normalization,
+  wire zero-date/chrono policies, inverse civil conversion and abbreviation
+  methods remain unchanged. The calendar formatter's previously residual full
+  month table also delegates to MONTH_NAMES; this is leaf deduplication, not
+  DATE_FORMAT family credit. All four use existing Bytes input roles, with no
+  new diagnostic receipts, driver, metadata or native PB/legacy admission.
   PERIOD_ADD/PERIOD_DIFF and GET_FORMAT add four private recipes in
   `impl_time.rs`. The period pair uses existing Int2 inputs and signed Int
   results; both nullable values are prepared before worker validation. Shared
