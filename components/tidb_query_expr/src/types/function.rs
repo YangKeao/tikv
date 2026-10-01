@@ -205,6 +205,17 @@ pub enum LocalFunctionId {
     ConvNative,
     ConvBinaryLiteralNative,
     ConvLegacy,
+    SinGoNative,
+    CosGoNative,
+    TanGoNative,
+    CotGoNative,
+    AtanGoNative,
+    Atan2GoNative,
+    SinLibmLegacy,
+    CosLibmLegacy,
+    CotLibmLegacy,
+    AtanLibmLegacy,
+    Atan2LibmLegacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

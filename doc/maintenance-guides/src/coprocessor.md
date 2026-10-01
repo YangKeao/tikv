@@ -293,6 +293,18 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  SIN/COS/TAN/COT/ATAN and the ATAN2 alias add eleven closed raw-IEEE
+  unary/binary recipes: six native-Go forms and five existing legacy-libm forms.
+  `impl_math/native_go_trig.rs` is the single Go-compatible production owner;
+  native golden tests use narrow pure-function exports without retaining a
+  second algorithm. This is compatibility-core relocation, not a claim that
+  libm has identical Go bit patterns. Wire and legacy share libm primitives but
+  keep distinct result policies. Native computed-result finite checking remains
+  frontend packing, as for RADIANS/DEGREES; legacy preserves raw NaN/Inf and
+  wire retains its Real/error rules. Native ATAN2 prepares both operands even
+  when the first is NULL, while legacy left-NULL permits an undemanded right.
+  PB's existing first-NULL boundary uses the real NULL-witness recipe. No TAN
+  PB/legacy admission, new argument carrier, failure marker or driver is added.
   CHAR adds a distinct packed nullable-i64 list, including zero items, and a
   new single-owner compatibility byte generator (not a pre-existing wire kernel).
   Each integer follows the original signed shift loop for at most four bytes;

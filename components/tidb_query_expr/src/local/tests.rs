@@ -5662,3 +5662,206 @@ fn local_evaluated_args_conv_binary_literal_keeps_full_payload_and_first_stage()
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
 }
+
+#[test]
+fn local_evaluated_args_trig_unary_keeps_nullable_and_nonfinite_bit_carriers() {
+    let negative_zero = (-0.0_f64).to_bits();
+    let nan = 0x7ff8_0000_0000_0123_u64;
+    for (operation, zero_result) in [
+        (EvaluatedBytesOp::SinGoNative, negative_zero),
+        (EvaluatedBytesOp::CosGoNative, 1.0_f64.to_bits()),
+        (EvaluatedBytesOp::TanGoNative, negative_zero),
+        (EvaluatedBytesOp::CotGoNative, f64::NEG_INFINITY.to_bits()),
+        (EvaluatedBytesOp::AtanGoNative, negative_zero),
+        (EvaluatedBytesOp::SinLibmLegacy, negative_zero),
+        (EvaluatedBytesOp::CosLibmLegacy, 1.0_f64.to_bits()),
+        (EvaluatedBytesOp::CotLibmLegacy, f64::NEG_INFINITY.to_bits()),
+        (EvaluatedBytesOp::AtanLibmLegacy, negative_zero),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Bytes(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        for (index, (input, expected)) in [(None, None), (Some(negative_zero), Some(zero_result))]
+            .into_iter()
+            .enumerate()
+        {
+            let ComputedValue::Ieee754Bits(value) =
+                worker.eval_args(EvaluatedArgs::Ieee754Bits(input)).unwrap()
+            else {
+                panic!("unary trig returned a non-IEEE754 value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(
+                value.metadata(),
+                ComputedIeee754BitsMetadata::OwnIeee754Bits
+            );
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let ComputedValue::Ieee754Bits(value) = worker
+            .eval_args(EvaluatedArgs::Ieee754Bits(Some(nan)))
+            .unwrap()
+        else {
+            panic!("NaN trig returned a non-IEEE754 value");
+        };
+        let actual = value.value();
+        assert!(actual.is_some_and(|bits| f64::from_bits(bits).is_nan()));
+        assert_eq!(
+            value.metadata(),
+            ComputedIeee754BitsMetadata::OwnIeee754Bits
+        );
+        assert_eq!(value.into_option(), actual);
+        assert_eq!(worker.kernel_invocations(), 3);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        if operation == EvaluatedBytesOp::AtanGoNative {
+            let ComputedValue::Ieee754Bits(value) = worker
+                .eval_args(EvaluatedArgs::Ieee754Bits(Some(f64::INFINITY.to_bits())))
+                .unwrap()
+            else {
+                panic!("infinite-input ATAN returned a non-IEEE754 value");
+            };
+            let expected = Some(std::f64::consts::FRAC_PI_2.to_bits());
+            assert_eq!(value.value(), expected);
+            assert_eq!(
+                value.metadata(),
+                ComputedIeee754BitsMetadata::OwnIeee754Bits
+            );
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), 4);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}
+
+#[test]
+fn local_evaluated_args_atan2_preserves_demand_order_orientation_and_raw_bits() {
+    let negative_zero = (-0.0_f64).to_bits();
+    let one = 1.0_f64.to_bits();
+    let nan = 0x7ff8_0000_0000_0123_u64;
+    for (operation, legacy) in [
+        (EvaluatedBytesOp::Atan2GoNative, false),
+        (EvaluatedBytesOp::Atan2LibmLegacy, true),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Ieee754Bits2 {
+                left: ReadyIeee754Arg::Undemanded,
+                right: ReadyIeee754Arg::Value(None),
+            },
+            EvaluatedArgs::Ieee754Bits2 {
+                left: ReadyIeee754Arg::Undemanded,
+                right: ReadyIeee754Arg::Undemanded,
+            },
+        ] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let skipped_right = EvaluatedArgs::Ieee754Bits2 {
+            left: ReadyIeee754Arg::Value(None),
+            right: ReadyIeee754Arg::Undemanded,
+        };
+        let preceding = if legacy {
+            let ComputedValue::Ieee754Bits(value) = worker.eval_args(skipped_right).unwrap() else {
+                panic!("legacy ATAN2 NULL prefix returned a non-IEEE754 value");
+            };
+            assert_eq!(value.value(), None);
+            assert_eq!(
+                value.metadata(),
+                ComputedIeee754BitsMetadata::OwnIeee754Bits
+            );
+            assert_eq!(value.into_option(), None);
+            1_u64
+        } else {
+            assert!(matches!(
+                worker.eval_args(skipped_right),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            0
+        };
+        assert_eq!(worker.kernel_invocations(), preceding);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let cases = [
+            (None, Some(one), None),
+            (Some(one), None, None),
+            (
+                Some(one),
+                Some(0.0_f64.to_bits()),
+                Some(std::f64::consts::FRAC_PI_2.to_bits()),
+            ),
+            (Some(negative_zero), Some(one), Some(negative_zero)),
+        ];
+        for (index, (left, right, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Ieee754Bits(value) = worker
+                .eval_args(EvaluatedArgs::Ieee754Bits2 {
+                    left: ReadyIeee754Arg::Value(left),
+                    right: ReadyIeee754Arg::Value(right),
+                })
+                .unwrap()
+            else {
+                panic!("ATAN2 returned a non-IEEE754 value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(
+                value.metadata(),
+                ComputedIeee754BitsMetadata::OwnIeee754Bits
+            );
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), preceding + index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let ComputedValue::Ieee754Bits(value) = worker
+            .eval_args(EvaluatedArgs::Ieee754Bits2 {
+                left: ReadyIeee754Arg::Value(Some(nan)),
+                right: ReadyIeee754Arg::Value(Some(one)),
+            })
+            .unwrap()
+        else {
+            panic!("NaN ATAN2 returned a non-IEEE754 value");
+        };
+        let actual = value.value();
+        assert!(actual.is_some_and(|bits| f64::from_bits(bits).is_nan()));
+        assert_eq!(
+            value.metadata(),
+            ComputedIeee754BitsMetadata::OwnIeee754Bits
+        );
+        assert_eq!(value.into_option(), actual);
+        assert_eq!(worker.kernel_invocations(), preceding + 5);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}

@@ -202,7 +202,13 @@ pub(crate) use self::{
 };
 pub use crate::{
     CallMetadata, FunctionRef, LiteralKind, LocalFunctionId,
-    impl_math::{conv_valid_prefix_native, native_decimal_target_scale},
+    impl_math::{
+        conv_valid_prefix_native,
+        native_decimal_target_scale,
+        // Compatibility symbols for existing native test oracles only;
+        // production evaluated trig uses the closed workers, not these exports.
+        native_go_trig::{go_atan, go_atan2, go_cos, go_sin, go_tan, trig_reduce},
+    },
     impl_string::{
         ConcatKind, ConcatTerminal, FieldIntValue, FieldTerminal, PreparedCharArgs,
         PreparedConcatArgs, PreparedExportSetArgs, PreparedFieldArgs, PreparedFindInSetKeys,

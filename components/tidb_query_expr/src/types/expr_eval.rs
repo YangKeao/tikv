@@ -507,7 +507,10 @@ fn evaluated_ready_args_match(
             EvaluatedArgsRole::Ieee754Bits2 => {
                 matches!(
                     operation,
-                    EvaluatedBytesOp::LogNative | EvaluatedBytesOp::PowNative
+                    EvaluatedBytesOp::LogNative
+                        | EvaluatedBytesOp::PowNative
+                        | EvaluatedBytesOp::Atan2GoNative
+                        | EvaluatedBytesOp::Atan2LibmLegacy
                 ) && values.len() == 2
                     && values.iter().all(|value| match value {
                         ScalarValue::Bytes(None) => true,
@@ -3312,7 +3315,7 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..83 {
+        for mismatch in 0..87 {
             let operation = match mismatch {
                 3 | 5 | 45 | 53 | 56 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
@@ -3354,6 +3357,8 @@ mod tests {
                 78 => EvaluatedBytesOp::Substring3BytesNative,
                 80 | 82 => EvaluatedBytesOp::ConvLegacy,
                 81 => EvaluatedBytesOp::Replace,
+                83 | 85 => EvaluatedBytesOp::Atan2GoNative,
+                84 | 86 => EvaluatedBytesOp::Atan2LibmLegacy,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
@@ -3376,13 +3381,15 @@ mod tests {
                 | 62..=66
                 | 73
                 | 77
-                | 80 => EvaluatedArgsRole::Values,
+                | 80
+                | 83
+                | 84 => EvaluatedArgsRole::Values,
                 4 | 5 => EvaluatedArgsRole::NoArgs,
                 9..=12 | 17 => EvaluatedArgsRole::Packet,
                 14 => EvaluatedArgsRole::ReadyBytesInt,
                 18 | 19 | 21 => EvaluatedArgsRole::PadPacket,
                 20 => EvaluatedArgsRole::ReadyBytesBytesInt,
-                23..=25 => EvaluatedArgsRole::Ieee754Bits2,
+                23..=25 | 85 | 86 => EvaluatedArgsRole::Ieee754Bits2,
                 27 => EvaluatedArgsRole::SubstringNative,
                 29..=31 => EvaluatedArgsRole::SubstringLegacy,
                 33 | 36 | 38 => EvaluatedArgsRole::CollatedBytes2,
@@ -3520,7 +3527,7 @@ mod tests {
                 ready[1] = ScalarValue::Bytes(Some(i128::MAX.to_le_bytes().to_vec()));
                 ready[2] = ScalarValue::Bytes(Some(0i128.to_le_bytes().to_vec()));
             }
-            if matches!(mismatch, 13 | 14 | 16..=82) {
+            if matches!(mismatch, 13 | 14 | 16..=86) {
                 assert!(evaluated_ready_args_match(
                     operation,
                     &ready,
@@ -3594,6 +3601,10 @@ mod tests {
                 ));
             } else if mismatch == 82 {
                 ready[2] = ScalarValue::Bytes(Some(vec![0; 15]));
+            } else if mismatch == 85 {
+                ready[0] = ScalarValue::Bytes(Some(vec![0; 7]));
+            } else if mismatch == 86 {
+                ready[1] = ScalarValue::Bytes(Some(vec![0; 9]));
             }
             if mismatch == 15 {
                 let input = EvalInput::ReadyBytes {

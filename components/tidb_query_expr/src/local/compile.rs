@@ -1642,6 +1642,17 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::ConvNative,
             EvaluatedBytesOp::ConvBinaryLiteralNative,
             EvaluatedBytesOp::ConvLegacy,
+            EvaluatedBytesOp::SinGoNative,
+            EvaluatedBytesOp::CosGoNative,
+            EvaluatedBytesOp::TanGoNative,
+            EvaluatedBytesOp::CotGoNative,
+            EvaluatedBytesOp::AtanGoNative,
+            EvaluatedBytesOp::Atan2GoNative,
+            EvaluatedBytesOp::SinLibmLegacy,
+            EvaluatedBytesOp::CosLibmLegacy,
+            EvaluatedBytesOp::CotLibmLegacy,
+            EvaluatedBytesOp::AtanLibmLegacy,
+            EvaluatedBytesOp::Atan2LibmLegacy,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

@@ -891,6 +891,17 @@ pub enum EvaluatedBytesOp {
     ConvNative,
     ConvBinaryLiteralNative,
     ConvLegacy,
+    SinGoNative,
+    CosGoNative,
+    TanGoNative,
+    CotGoNative,
+    AtanGoNative,
+    Atan2GoNative,
+    SinLibmLegacy,
+    CosLibmLegacy,
+    CotLibmLegacy,
+    AtanLibmLegacy,
+    Atan2LibmLegacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1323,6 +1334,39 @@ impl EvaluatedBytesOp {
             Self::ConvLegacy => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ConvLegacy);
             }
+            Self::SinGoNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SinGoNative);
+            }
+            Self::CosGoNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::CosGoNative);
+            }
+            Self::TanGoNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::TanGoNative);
+            }
+            Self::CotGoNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::CotGoNative);
+            }
+            Self::AtanGoNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AtanGoNative);
+            }
+            Self::Atan2GoNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Atan2GoNative);
+            }
+            Self::SinLibmLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SinLibmLegacy);
+            }
+            Self::CosLibmLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::CosLibmLegacy);
+            }
+            Self::CotLibmLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::CotLibmLegacy);
+            }
+            Self::AtanLibmLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AtanLibmLegacy);
+            }
+            Self::Atan2LibmLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Atan2LibmLegacy);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1365,7 +1409,9 @@ impl EvaluatedBytesOp {
             Self::FindInSetPreparedNative => EvaluatedArgsRole::FindInSetPrepared,
             Self::PiRaw => EvaluatedArgsRole::NoArgs,
             Self::Sha2Native => EvaluatedArgsRole::ReadyBytesInt,
-            Self::LogNative | Self::PowNative => EvaluatedArgsRole::Ieee754Bits2,
+            Self::LogNative | Self::PowNative | Self::Atan2GoNative | Self::Atan2LibmLegacy => {
+                EvaluatedArgsRole::Ieee754Bits2
+            }
             Self::Substring2BytesNative
             | Self::Substring3BytesNative
             | Self::Substring2Utf8Native
@@ -1392,7 +1438,16 @@ impl EvaluatedBytesOp {
             | Self::RadiansRaw
             | Self::DegreesRaw
             | Self::LnNative
-            | Self::Log2Native => EvaluatedArgsRole::Ieee754Bits,
+            | Self::Log2Native
+            | Self::SinGoNative
+            | Self::CosGoNative
+            | Self::TanGoNative
+            | Self::CotGoNative
+            | Self::AtanGoNative
+            | Self::SinLibmLegacy
+            | Self::CosLibmLegacy
+            | Self::CotLibmLegacy
+            | Self::AtanLibmLegacy => EvaluatedArgsRole::Ieee754Bits,
             _ => EvaluatedArgsRole::Values,
         }
     }
@@ -1488,6 +1543,17 @@ impl EvaluatedBytesOp {
                 | Self::TruncateRealNative
                 | Self::RoundRealLegacy
                 | Self::RoundDecimalLegacy
+                | Self::SinGoNative
+                | Self::CosGoNative
+                | Self::TanGoNative
+                | Self::CotGoNative
+                | Self::AtanGoNative
+                | Self::Atan2GoNative
+                | Self::SinLibmLegacy
+                | Self::CosLibmLegacy
+                | Self::CotLibmLegacy
+                | Self::AtanLibmLegacy
+                | Self::Atan2LibmLegacy
         )
     }
 
@@ -1552,6 +1618,17 @@ impl EvaluatedBytesOp {
             Self::ConvNative => crate::impl_math::conv_native_fn_meta(),
             Self::ConvBinaryLiteralNative => crate::impl_math::conv_binary_literal_native_fn_meta(),
             Self::ConvLegacy => crate::impl_math::conv_legacy_fn_meta(),
+            Self::SinGoNative => crate::impl_math::sin_go_native_fn_meta(),
+            Self::CosGoNative => crate::impl_math::cos_go_native_fn_meta(),
+            Self::TanGoNative => crate::impl_math::tan_go_native_fn_meta(),
+            Self::CotGoNative => crate::impl_math::cot_go_native_fn_meta(),
+            Self::AtanGoNative => crate::impl_math::atan_go_native_fn_meta(),
+            Self::Atan2GoNative => crate::impl_math::atan2_go_native_fn_meta(),
+            Self::SinLibmLegacy => crate::impl_math::sin_libm_legacy_fn_meta(),
+            Self::CosLibmLegacy => crate::impl_math::cos_libm_legacy_fn_meta(),
+            Self::CotLibmLegacy => crate::impl_math::cot_libm_legacy_fn_meta(),
+            Self::AtanLibmLegacy => crate::impl_math::atan_libm_legacy_fn_meta(),
+            Self::Atan2LibmLegacy => crate::impl_math::atan2_libm_legacy_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1795,7 +1872,18 @@ impl EvaluatedBytesOp {
             | Self::CharNative
             | Self::ConvNative
             | Self::ConvBinaryLiteralNative
-            | Self::ConvLegacy => EvalType::Bytes,
+            | Self::ConvLegacy
+            | Self::SinGoNative
+            | Self::CosGoNative
+            | Self::TanGoNative
+            | Self::CotGoNative
+            | Self::AtanGoNative
+            | Self::Atan2GoNative
+            | Self::SinLibmLegacy
+            | Self::CosLibmLegacy
+            | Self::CotLibmLegacy
+            | Self::AtanLibmLegacy
+            | Self::Atan2LibmLegacy => EvalType::Bytes,
         }
     }
 
@@ -1824,6 +1912,16 @@ impl EvaluatedBytesOp {
                 &[EvalType::Bytes, EvalType::Int, EvalType::Int]
             }
             Self::ConvLegacy => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
+            Self::SinGoNative
+            | Self::CosGoNative
+            | Self::TanGoNative
+            | Self::CotGoNative
+            | Self::AtanGoNative
+            | Self::SinLibmLegacy
+            | Self::CosLibmLegacy
+            | Self::CotLibmLegacy
+            | Self::AtanLibmLegacy => &[EvalType::Bytes],
+            Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative
             | Self::CeilIntNative
@@ -2480,9 +2578,14 @@ impl EvaluatedArgs {
             }
             Self::Ieee754Bits2 { left, right } => match (left, right) {
                 (ReadyIeee754Arg::Value(_), ReadyIeee754Arg::Value(_)) => true,
-                (ReadyIeee754Arg::Undemanded, ReadyIeee754Arg::Value(None))
-                | (ReadyIeee754Arg::Value(None), ReadyIeee754Arg::Undemanded) => {
+                (ReadyIeee754Arg::Undemanded, ReadyIeee754Arg::Value(None)) => {
                     operation == EvaluatedBytesOp::PowNative
+                }
+                (ReadyIeee754Arg::Value(None), ReadyIeee754Arg::Undemanded) => {
+                    matches!(
+                        operation,
+                        EvaluatedBytesOp::PowNative | EvaluatedBytesOp::Atan2LibmLegacy
+                    )
                 }
                 _ => false,
             },
@@ -2875,8 +2978,9 @@ impl EvaluatedArgs {
                 1,
             ),
             Self::Ieee754Bits2 { left, right } => {
-                // Only validated POW + a truly NULL opposite operand permits
-                // this irrelevant +0 bit pattern; it is not a fake SQL NULL.
+                // Admission allows POW with a truly NULL opposite operand,
+                // or legacy ATAN2's undemanded right after an actual left NULL.
+                // This irrelevant +0 representative is never a fake SQL NULL.
                 let into_ready = |arg: ReadyIeee754Arg| match arg {
                     ReadyIeee754Arg::Value(value) => value,
                     ReadyIeee754Arg::Undemanded => Some(0),

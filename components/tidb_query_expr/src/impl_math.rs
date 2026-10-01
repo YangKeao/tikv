@@ -23,6 +23,8 @@ use tidb_query_datatype::{
 };
 use tikv_util::time::get_time;
 
+pub(crate) mod native_go_trig;
+
 const MAX_RAND_VALUE: u32 = 0x3FFFFFFF;
 
 #[rpn_fn]
@@ -402,29 +404,132 @@ pub fn exp(arg: &Real) -> Result<Option<Real>> {
     }
 }
 
+// Wire and legacy share libm arithmetic, not native Go's approximations. Their
+// result policies remain separate: wire uses Real/overflow, legacy keeps raw
+// computed IEEE values, including NaN and infinity.
+#[inline]
+fn sin_libm(value: f64) -> f64 {
+    value.sin()
+}
+
+#[inline]
+fn cos_libm(value: f64) -> f64 {
+    value.cos()
+}
+
+#[inline]
+fn tan_libm(value: f64) -> f64 {
+    value.tan()
+}
+
+#[inline]
+fn cot_libm(value: f64) -> f64 {
+    tan_libm(value).recip()
+}
+
+#[inline]
+fn atan_libm(value: f64) -> f64 {
+    value.atan()
+}
+
+#[inline]
+fn atan2_libm(y: f64, x: f64) -> f64 {
+    y.atan2(x)
+}
+
+fn trig_raw_unary(arg: Option<BytesRef>, operation: fn(f64) -> f64) -> Result<Option<Bytes>> {
+    Ok(decode_raw_f64(arg)?.map(operation).map(encode_raw_f64))
+}
+
+fn trig_raw_binary(
+    y: Option<BytesRef>,
+    x: Option<BytesRef>,
+    operation: fn(f64, f64) -> f64,
+) -> Result<Option<Bytes>> {
+    let y = decode_raw_f64(y)?;
+    let x = decode_raw_f64(x)?;
+    Ok(y.zip(x).map(|(y, x)| operation(y, x)).map(encode_raw_f64))
+}
+
+// These private Go entries return computed raw bits, not a Real projection.
+// Native finite_float and its existing GoError/AST rendering run afterward.
+#[rpn_fn(nullable)]
+fn sin_go_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_unary(arg, native_go_trig::go_sin)
+}
+
+#[rpn_fn(nullable)]
+fn cos_go_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_unary(arg, native_go_trig::go_cos)
+}
+
+#[rpn_fn(nullable)]
+fn tan_go_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_unary(arg, native_go_trig::go_tan)
+}
+
+#[rpn_fn(nullable)]
+fn cot_go_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_unary(arg, |value| 1.0 / native_go_trig::go_tan(value))
+}
+
+#[rpn_fn(nullable)]
+fn atan_go_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_unary(arg, native_go_trig::go_atan)
+}
+
+#[rpn_fn(nullable)]
+fn atan2_go_native(y: Option<BytesRef>, x: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_binary(y, x, native_go_trig::go_atan2)
+}
+
+#[rpn_fn(nullable)]
+fn sin_libm_legacy(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_unary(arg, sin_libm)
+}
+
+#[rpn_fn(nullable)]
+fn cos_libm_legacy(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_unary(arg, cos_libm)
+}
+
+#[rpn_fn(nullable)]
+fn cot_libm_legacy(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_unary(arg, cot_libm)
+}
+
+#[rpn_fn(nullable)]
+fn atan_libm_legacy(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_unary(arg, atan_libm)
+}
+
+#[rpn_fn(nullable)]
+fn atan2_libm_legacy(y: Option<BytesRef>, x: Option<BytesRef>) -> Result<Option<Bytes>> {
+    trig_raw_binary(y, x, atan2_libm)
+}
+
 #[inline]
 #[rpn_fn]
 fn sin(arg: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(arg.sin()).ok())
+    Ok(Real::new(sin_libm(**arg)).ok())
 }
 
 #[inline]
 #[rpn_fn]
 fn cos(arg: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(arg.cos()).ok())
+    Ok(Real::new(cos_libm(**arg)).ok())
 }
 
 #[inline]
 #[rpn_fn]
 fn tan(arg: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(arg.tan()).ok())
+    Ok(Real::new(tan_libm(**arg)).ok())
 }
 
 #[inline]
 #[rpn_fn]
 fn cot(arg: &Real) -> Result<Option<Real>> {
-    let tan = arg.tan();
-    let cot = tan.recip();
+    let cot = cot_libm(**arg);
     if cot.is_infinite() {
         Err(Error::overflow("DOUBLE", format!("cot({})", arg)).into())
     } else {
@@ -531,13 +636,13 @@ fn acos_raw(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
 #[inline]
 #[rpn_fn]
 pub fn atan_1_arg(arg: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(arg.atan()).ok())
+    Ok(Real::new(atan_libm(**arg)).ok())
 }
 
 #[inline]
 #[rpn_fn]
 pub fn atan_2_args(arg0: &Real, arg1: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(arg0.atan2(arg1.into_inner())).ok())
+    Ok(Real::new(atan2_libm(**arg0, **arg1)).ok())
 }
 
 #[derive(Clone, Copy)]
@@ -1355,6 +1460,61 @@ mod tests {
 
     use super::*;
     use crate::types::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_trig_native_go_and_libm_keep_distinct_computed_bits() {
+        let one = encode_raw_f64(1.0);
+        let go = cot_go_native(Some(&one)).unwrap().unwrap();
+        let libm = cot_libm_legacy(Some(&one)).unwrap().unwrap();
+        assert_eq!(go, encode_raw_f64(0.6420926159343308_f64));
+        assert_eq!(libm, encode_raw_f64(1.0 / 1.0_f64.tan()));
+        assert_ne!(go, libm);
+        let negative_zero = encode_raw_f64(-0.0);
+        assert_eq!(
+            atan_go_native(Some(&negative_zero)).unwrap(),
+            Some(negative_zero)
+        );
+        // Go COS returns its computed canonical NaN, not the original payload.
+        let payload_nan = encode_raw_f64(f64::from_bits(0x7ff8_0000_0000_0042));
+        assert_eq!(
+            cos_go_native(Some(&payload_nan)).unwrap(),
+            Some(encode_raw_f64(f64::NAN))
+        );
+        assert_eq!(sin_go_native(None).unwrap(), None);
+    }
+
+    #[test]
+    fn test_trig_legacy_raw_classes_and_atan2_order() {
+        for zero in [0.0, -0.0] {
+            let arg = encode_raw_f64(zero);
+            let expected = Some(encode_raw_f64(1.0 / zero));
+            assert_eq!(cot_libm_legacy(Some(&arg)).unwrap(), expected);
+            assert_eq!(cot_go_native(Some(&arg)).unwrap(), expected);
+            // Wire retains its existing infinity error, unlike either raw ABI.
+            assert!(cot(&Real::new(zero).unwrap()).is_err());
+        }
+        let nan = f64::from_bits(0x7ff8_0000_0000_0042);
+        let arg = encode_raw_f64(nan);
+        assert_eq!(
+            sin_libm_legacy(Some(&arg)).unwrap(),
+            Some(encode_raw_f64(nan.sin()))
+        );
+        let infinity = encode_raw_f64(f64::INFINITY);
+        let legacy = cos_libm_legacy(Some(&infinity)).unwrap().unwrap();
+        assert!(decode_raw_f64(Some(&legacy)).unwrap().unwrap().is_nan());
+        assert_eq!(cos(&Real::new(f64::INFINITY).unwrap()).unwrap(), None);
+        let y = encode_raw_f64(1.0);
+        let x = encode_raw_f64(2.0);
+        assert_eq!(
+            atan2_libm_legacy(Some(&y), Some(&x)).unwrap(),
+            Some(encode_raw_f64(1.0_f64.atan2(2.0)))
+        );
+        assert_eq!(
+            atan2_go_native(Some(&y), Some(&x)).unwrap(),
+            Some(encode_raw_f64(native_go_trig::go_atan2(1.0, 2.0)))
+        );
+        assert_eq!(atan2_libm_legacy(None, Some(&x)).unwrap(), None);
+    }
 
     #[test]
     fn test_native_math_scalar_policies_and_overflow_cause() {
