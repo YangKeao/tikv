@@ -906,6 +906,12 @@ pub enum EvaluatedBytesOp {
     Log10GoNative,
     CompressGoNative,
     UncompressNative,
+    JsonValidTextNative,
+    JsonValidBinaryNative,
+    JsonValidOtherNative,
+    JsonTypeTextNative,
+    JsonTypeBinaryNative,
+    JsonDepthNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1387,6 +1393,34 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::UncompressNative,
                 );
             }
+            Self::JsonValidTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonValidTextNative,
+                );
+            }
+            Self::JsonValidBinaryNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonValidBinaryNative,
+                );
+            }
+            Self::JsonValidOtherNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonValidOtherNative,
+                );
+            }
+            Self::JsonTypeTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonTypeTextNative,
+                );
+            }
+            Self::JsonTypeBinaryNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonTypeBinaryNative,
+                );
+            }
+            Self::JsonDepthNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::JsonDepthNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1427,7 +1461,7 @@ impl EvaluatedBytesOp {
             Self::StrcmpNative | Self::FindInSetNative => EvaluatedArgsRole::CollatedBytes2,
             Self::Locate2Native | Self::Locate3Native => EvaluatedArgsRole::NativeSearch,
             Self::FindInSetPreparedNative => EvaluatedArgsRole::FindInSetPrepared,
-            Self::PiRaw => EvaluatedArgsRole::NoArgs,
+            Self::PiRaw | Self::JsonValidOtherNative => EvaluatedArgsRole::NoArgs,
             Self::Sha2Native => EvaluatedArgsRole::ReadyBytesInt,
             Self::LogNative | Self::PowNative | Self::Atan2GoNative | Self::Atan2LibmLegacy => {
                 EvaluatedArgsRole::Ieee754Bits2
@@ -1545,6 +1579,13 @@ impl EvaluatedBytesOp {
         self != Self::OrdNative || value.is_none_or(|bytes| bytes.len() <= 4)
     }
 
+    fn returns_json_report(self) -> bool {
+        matches!(
+            self,
+            Self::JsonTypeTextNative | Self::JsonTypeBinaryNative | Self::JsonDepthNative
+        )
+    }
+
     fn returns_ieee754_bits(self) -> bool {
         matches!(
             self,
@@ -1657,6 +1698,12 @@ impl EvaluatedBytesOp {
             Self::Log10GoNative => crate::impl_math::log10_go_native_fn_meta(),
             Self::CompressGoNative => crate::impl_encryption::compress_go_native_fn_meta(),
             Self::UncompressNative => crate::impl_encryption::uncompress_native_fn_meta(),
+            Self::JsonValidTextNative => crate::impl_json::json_valid_text_native_fn_meta(),
+            Self::JsonValidBinaryNative => crate::impl_json::json_valid_binary_native_fn_meta(),
+            Self::JsonValidOtherNative => crate::impl_json::json_valid_other_native_fn_meta(),
+            Self::JsonTypeTextNative => crate::impl_json::json_type_text_native_fn_meta(),
+            Self::JsonTypeBinaryNative => crate::impl_json::json_type_binary_native_fn_meta(),
+            Self::JsonDepthNative => crate::impl_json::json_depth_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1816,7 +1863,10 @@ impl EvaluatedBytesOp {
             | Self::TruncateIntNative
             | Self::TruncateUIntNative
             | Self::TruncateIntUnsignedScaleNative
-            | Self::MathNullWitnessNative => EvalType::Int,
+            | Self::MathNullWitnessNative
+            | Self::JsonValidTextNative
+            | Self::JsonValidBinaryNative
+            | Self::JsonValidOtherNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -1915,7 +1965,10 @@ impl EvaluatedBytesOp {
             | Self::ExpGoNative
             | Self::Log10GoNative
             | Self::CompressGoNative
-            | Self::UncompressNative => EvalType::Bytes,
+            | Self::UncompressNative
+            | Self::JsonTypeTextNative
+            | Self::JsonTypeBinaryNative
+            | Self::JsonDepthNative => EvalType::Bytes,
         }
     }
 
@@ -1930,7 +1983,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
-            Self::PiRaw => &[],
+            Self::PiRaw | Self::JsonValidOtherNative => &[],
             Self::OctInt => &[EvalType::Int],
             Self::OctStringNative | Self::ConcatNative | Self::ConcatWsNative => &[EvalType::Bytes],
             Self::EltNative => &[EvalType::Int, EvalType::Int, EvalType::Bytes],
@@ -1956,7 +2009,12 @@ impl EvaluatedBytesOp {
             | Self::ExpGoNative
             | Self::Log10GoNative
             | Self::CompressGoNative
-            | Self::UncompressNative => &[EvalType::Bytes],
+            | Self::UncompressNative
+            | Self::JsonValidTextNative
+            | Self::JsonValidBinaryNative
+            | Self::JsonTypeTextNative
+            | Self::JsonTypeBinaryNative
+            | Self::JsonDepthNative => &[EvalType::Bytes],
             Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative
@@ -3201,6 +3259,74 @@ fn decode_uncompress_frame(encoded: Option<&[u8]>) -> LocalResult<UncompressFram
     }
 }
 
+/// A computed result of the three closed JSON report recipes. Text parser
+/// failures are explicit outcomes, not inferred SQL diagnostics or raw errors.
+#[derive(Debug, PartialEq, Eq)]
+pub enum JsonReportOutcome {
+    Null,
+    Bytes(Vec<u8>),
+    Int(i64),
+    EmptyText,
+    InvalidText,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputedJsonReportMetadata {
+    OwnJsonReport,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ComputedJsonReport {
+    outcome: JsonReportOutcome,
+}
+
+impl ComputedJsonReport {
+    pub fn outcome(&self) -> &JsonReportOutcome {
+        &self.outcome
+    }
+    pub fn into_outcome(self) -> JsonReportOutcome {
+        self.outcome
+    }
+    pub fn metadata(&self) -> ComputedJsonReportMetadata {
+        ComputedJsonReportMetadata::OwnJsonReport
+    }
+}
+
+// An ephemeral result view, not an input JSON domain or a public constructor.
+#[derive(Debug, PartialEq, Eq)]
+enum JsonReportFrame<'a> {
+    Null,
+    Bytes(&'a [u8]),
+    Int(i64),
+    EmptyText,
+    InvalidText,
+}
+
+fn decode_json_report_frame(
+    operation: EvaluatedBytesOp,
+    encoded: Option<&[u8]>,
+) -> LocalResult<JsonReportFrame<'_>> {
+    let invalid = || {
+        LocalError::InvalidBatch("JSON report has an invalid canonical envelope or recipe".into())
+    };
+    if !operation.returns_json_report() {
+        return Err(invalid());
+    }
+    match encoded {
+        None => Ok(JsonReportFrame::Null),
+        Some([0, payload @ ..]) if operation == EvaluatedBytesOp::JsonDepthNative => {
+            let bytes = <[u8; 8]>::try_from(payload).map_err(|_| invalid())?;
+            Ok(JsonReportFrame::Int(i64::from_le_bytes(bytes)))
+        }
+        Some([0, payload @ ..]) => Ok(JsonReportFrame::Bytes(payload)),
+        Some([1]) if operation != EvaluatedBytesOp::JsonTypeBinaryNative => {
+            Ok(JsonReportFrame::EmptyText)
+        }
+        Some([2]) => Ok(JsonReportFrame::InvalidText),
+        _ => Err(invalid()),
+    }
+}
+
 /// IEEE754 output identity, not a SQL integer, Bytes descriptor or input donor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComputedIeee754BitsMetadata {
@@ -3355,6 +3481,7 @@ pub enum ComputedValue {
     Int(ComputedInt),
     Bytes(ComputedBytes),
     Uncompress(ComputedUncompress),
+    JsonReport(ComputedJsonReport),
     Ieee754Bits(ComputedIeee754Bits),
     Decimal(ComputedDecimal),
     Int128(ComputedInt128),
@@ -3590,6 +3717,7 @@ impl EvaluatedAsciiWorker {
             ComputedValue::Int(value) => Ok(value),
             ComputedValue::Bytes(_)
             | ComputedValue::Uncompress(_)
+            | ComputedValue::JsonReport(_)
             | ComputedValue::Ieee754Bits(_)
             | ComputedValue::Decimal(_)
             | ComputedValue::Int128(_) => {
@@ -4005,6 +4133,42 @@ impl EvaluatedBytesWorker {
                     retained,
                 )
             }
+            ScalarValueRef::Bytes(value) if self.operation.returns_json_report() => {
+                let outcome = match decode_json_report_frame(self.operation, value)? {
+                    JsonReportFrame::Null => JsonReportOutcome::Null,
+                    JsonReportFrame::Int(value) => JsonReportOutcome::Int(value),
+                    JsonReportFrame::EmptyText => JsonReportOutcome::EmptyText,
+                    JsonReportFrame::InvalidText => JsonReportOutcome::InvalidText,
+                    JsonReportFrame::Bytes(source) => {
+                        // Only the TYPE payload is copied. The encoded result
+                        // (including its tag) and ready owner remain charged.
+                        let overlap = output_bytes
+                            .checked_add(source.len())
+                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        budget.check_output(overlap, input_bytes)?;
+                        let mut owned = Vec::new();
+                        owned.try_reserve_exact(source.len()).map_err(|_| {
+                            LocalError::ResourceLimit(
+                                "JSON report payload allocation failed".into(),
+                            )
+                        })?;
+                        let overlap = output_bytes
+                            .checked_add(owned.capacity())
+                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        budget.check_output(overlap, input_bytes)?;
+                        owned.extend_from_slice(source);
+                        JsonReportOutcome::Bytes(owned)
+                    }
+                };
+                let retained = match &outcome {
+                    JsonReportOutcome::Bytes(value) => value.capacity(),
+                    _ => 0,
+                };
+                (
+                    ComputedValue::JsonReport(ComputedJsonReport { outcome }),
+                    retained,
+                )
+            }
             ScalarValueRef::Bytes(value) => {
                 let value = match value {
                     None => None,
@@ -4078,6 +4242,67 @@ mod evaluated_ascii_tests {
         for encoded in malformed {
             assert!(matches!(
                 decode_uncompress_frame(Some(*encoded)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn json_report_envelope_is_recipe_specific_and_exact() {
+        use EvaluatedBytesOp::{JsonDepthNative, JsonTypeBinaryNative, JsonTypeTextNative};
+        for operation in [JsonTypeTextNative, JsonTypeBinaryNative, JsonDepthNative] {
+            assert_eq!(
+                decode_json_report_frame(operation, None).unwrap(),
+                JsonReportFrame::Null
+            );
+            assert_eq!(
+                decode_json_report_frame(operation, Some(&[2])).unwrap(),
+                JsonReportFrame::InvalidText
+            );
+            let malformed: &[&[u8]] = &[&[], &[3], &[255], &[1, 0], &[2, 0]];
+            for encoded in malformed {
+                assert!(matches!(
+                    decode_json_report_frame(operation, Some(*encoded)),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+        }
+        for operation in [JsonTypeTextNative, JsonTypeBinaryNative] {
+            assert_eq!(
+                decode_json_report_frame(operation, Some(b"\0OBJECT")).unwrap(),
+                JsonReportFrame::Bytes(b"OBJECT")
+            );
+            assert_eq!(
+                decode_json_report_frame(operation, Some(&[0])).unwrap(),
+                JsonReportFrame::Bytes(&[])
+            );
+        }
+        for operation in [JsonTypeTextNative, JsonDepthNative] {
+            assert_eq!(
+                decode_json_report_frame(operation, Some(&[1])).unwrap(),
+                JsonReportFrame::EmptyText
+            );
+        }
+        assert!(matches!(
+            decode_json_report_frame(JsonTypeBinaryNative, Some(&[1])),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(
+            decode_json_report_frame(JsonDepthNative, Some(&[0, 3, 0, 0, 0, 0, 0, 0, 0])).unwrap(),
+            JsonReportFrame::Int(3)
+        );
+        for encoded in [&[0][..], &[0; 8][..], &[0; 10][..]] {
+            assert!(matches!(
+                decode_json_report_frame(JsonDepthNative, Some(encoded)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+        }
+        for operation in [
+            EvaluatedBytesOp::JsonValidTextNative,
+            EvaluatedBytesOp::UncompressNative,
+        ] {
+            assert!(matches!(
+                decode_json_report_frame(operation, None),
                 Err(LocalError::InvalidBatch(_))
             ));
         }

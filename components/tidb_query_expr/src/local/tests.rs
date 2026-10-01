@@ -2115,7 +2115,8 @@ fn local_evaluated_args_packet_roles_reject_plain_carriers() {
             ComputedValue::Ieee754Bits(_)
             | ComputedValue::Decimal(_)
             | ComputedValue::Int128(_)
-            | ComputedValue::Uncompress(_) => {
+            | ComputedValue::Uncompress(_)
+            | ComputedValue::JsonReport(_) => {
                 panic!("packet role check returned an unexpected output type")
             }
         }
@@ -6048,4 +6049,185 @@ fn local_evaluated_args_compression_preserves_owned_values_and_uncompress_outcom
         panic!("owned UNCOMPRESS payload was lost after dropping the worker");
     };
     assert_eq!(value.as_slice(), payload);
+}
+
+#[test]
+fn local_evaluated_args_json_introspection_keeps_carriers_and_transport_errors_distinct() {
+    use tidb_query_common::error::{ErrorInner, EvaluateError};
+
+    let valid_cases: [(EvaluatedBytesOp, Vec<(Option<&[u8]>, Option<i64>)>); 2] = [
+        (
+            EvaluatedBytesOp::JsonValidTextNative,
+            vec![
+                (None, None),
+                (Some(b"\"\xff\""), Some(0)),
+                (Some(b"{"), Some(0)),
+                (Some(b"[]"), Some(1)),
+            ],
+        ),
+        (
+            EvaluatedBytesOp::JsonValidBinaryNative,
+            vec![(None, None), (Some(b"\xff\0"), Some(1))],
+        ),
+    ];
+    for (operation, cases) in valid_cases {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Ieee754Bits(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        for (index, (input, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Int(value) = worker
+                .eval_args(EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec())))
+                .unwrap()
+            else {
+                panic!("JSON_VALID returned a non-Int value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::JsonValidOtherNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::JsonValidOtherNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::Int(Some(0))),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    for expected_calls in 1..=2 {
+        let ComputedValue::Int(value) = worker.eval_args(EvaluatedArgs::NoArgs).unwrap() else {
+            panic!("JSON_VALID Others returned a non-Int value");
+        };
+        assert_eq!(value.value(), Some(0));
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), Some(0));
+        assert_eq!(worker.kernel_invocations(), expected_calls);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let report_cases: [(EvaluatedBytesOp, Vec<(Option<&[u8]>, JsonReportOutcome)>); 3] = [
+        (
+            EvaluatedBytesOp::JsonTypeTextNative,
+            vec![
+                (None, JsonReportOutcome::Null),
+                (Some(b""), JsonReportOutcome::EmptyText),
+                (Some(b"{"), JsonReportOutcome::InvalidText),
+                (Some(b"[]"), JsonReportOutcome::Bytes(b"ARRAY".to_vec())),
+            ],
+        ),
+        (
+            EvaluatedBytesOp::JsonTypeBinaryNative,
+            vec![
+                (None, JsonReportOutcome::Null),
+                (Some(b"\xff\0"), JsonReportOutcome::InvalidText),
+            ],
+        ),
+        (
+            EvaluatedBytesOp::JsonDepthNative,
+            vec![
+                (None, JsonReportOutcome::Null),
+                (Some(b"0"), JsonReportOutcome::Int(1)),
+            ],
+        ),
+    ];
+    for (operation, cases) in report_cases {
+        let retained = {
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits {
+                    max_retained_bytes: 8 * 1024,
+                    ..ExecutionLimits::default()
+                },
+                usize::MAX,
+            )
+            .unwrap();
+            assert_eq!(worker.operation(), operation);
+            assert_eq!(worker.kernel_invocations(), 0);
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Ieee754Bits(None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            if operation == EvaluatedBytesOp::JsonTypeTextNative {
+                let mut oversized = Vec::with_capacity(16 * 1024);
+                oversized.push(b'{');
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
+                    Err(LocalError::ResourceLimit(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            let preceding = if operation == EvaluatedBytesOp::JsonTypeBinaryNative {
+                let error = worker
+                    .eval_args(EvaluatedArgs::Bytes(Some(Vec::new())))
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    LocalError::Evaluation(error)
+                        if matches!(error.0.as_ref(), ErrorInner::Evaluate(EvaluateError::Other(_)))
+                ));
+                1_u64
+            } else {
+                0
+            };
+            assert_eq!(worker.kernel_invocations(), preceding);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let mut retained = JsonReportOutcome::Null;
+            for (index, (input, expected)) in cases.into_iter().enumerate() {
+                let ComputedValue::JsonReport(value) = worker
+                    .eval_args(EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec())))
+                    .unwrap()
+                else {
+                    panic!("JSON introspection returned an unexpected output type");
+                };
+                assert_eq!(value.metadata(), ComputedJsonReportMetadata::OwnJsonReport);
+                assert_eq!(value.outcome(), &expected);
+                retained = value.into_outcome();
+                assert_eq!(retained, expected);
+                assert_eq!(worker.kernel_invocations(), preceding + index as u64 + 1);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            retained
+        };
+        if operation == EvaluatedBytesOp::JsonTypeTextNative {
+            let JsonReportOutcome::Bytes(value) = retained else {
+                panic!("JSON type name was lost after dropping the worker");
+            };
+            assert_eq!(value.as_slice(), b"ARRAY");
+        }
+    }
 }

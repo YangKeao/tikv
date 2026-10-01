@@ -133,8 +133,12 @@ fn check_evaluated_bytes_source(
         )
     };
     let arity_matches = match (operation, operation.input_role()) {
-        (EvaluatedBytesOp::PiRaw, EvaluatedArgsRole::NoArgs) => arity == 0 && calls == 1,
-        (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
+        (
+            EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative,
+            EvaluatedArgsRole::NoArgs,
+        ) => arity == 0 && calls == 1,
+        (EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative, _)
+        | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
         (_, EvaluatedArgsRole::Values) if operation.is_insert() => arity == 4 && calls == 1,
         (_, EvaluatedArgsRole::NativeSearch) if operation.is_locate3_native() => {
@@ -1657,6 +1661,12 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::Log10GoNative,
             EvaluatedBytesOp::CompressGoNative,
             EvaluatedBytesOp::UncompressNative,
+            EvaluatedBytesOp::JsonValidTextNative,
+            EvaluatedBytesOp::JsonValidBinaryNative,
+            EvaluatedBytesOp::JsonValidOtherNative,
+            EvaluatedBytesOp::JsonTypeTextNative,
+            EvaluatedBytesOp::JsonTypeBinaryNative,
+            EvaluatedBytesOp::JsonDepthNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
@@ -1705,7 +1715,10 @@ mod evaluated_ascii_compile_tests {
                     ]
                 ));
             }
-            if operation == EvaluatedBytesOp::PiRaw {
+            if matches!(
+                operation,
+                EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative
+            ) {
                 assert_eq!(arity, 0);
                 assert_eq!(calls, 1);
                 assert!(program.schema.is_empty());

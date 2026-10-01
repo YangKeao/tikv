@@ -1,43 +1,87 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use serde_json::Value;
+
 use super::{super::Result, JsonRef, JsonType};
 
 impl JsonRef<'_> {
     /// Returns maximum depth of JSON document
     pub fn depth(&self) -> Result<i64> {
-        depth_json(self)
+        native_json_depth_from_children(&DepthNode::Binary(*self), DepthNode::visit_children)
     }
 }
 
-// See `GetElemDepth()` in TiDB `json/binary_function.go`
-fn depth_json(j: &JsonRef<'_>) -> Result<i64> {
-    Ok(match j.get_type() {
-        JsonType::Object => {
-            let length = j.get_elem_count();
-            let mut max_depth = 0;
-            for i in 0..length {
-                let val = j.object_get_val(i)?;
-                let depth = depth_json(&val)?;
-                if depth > max_depth {
-                    max_depth = depth;
+/// Computes depth without encoding a native document into binary JSON.
+/// In particular, object keys are not narrowed to binary JSON's u16 lengths.
+pub fn native_json_depth(value: &Value) -> Result<i64> {
+    native_json_depth_from_children(&DepthNode::Native(value), DepthNode::visit_children)
+}
+
+// Representation adapters only enumerate children. The recursive algorithm
+// below is the sole depth owner for both wire and native documents.
+enum DepthNode<'a> {
+    Binary(JsonRef<'a>),
+    Native(&'a Value),
+}
+
+impl<'a> DepthNode<'a> {
+    fn visit_children(&self, visitor: &mut dyn FnMut(&Self) -> Result<()>) -> Result<()> {
+        match self {
+            Self::Binary(json) => {
+                let kind = json.get_type();
+                if matches!(kind, JsonType::Object | JsonType::Array) {
+                    let length = json.get_elem_count();
+                    for i in 0..length {
+                        let child = if kind == JsonType::Object {
+                            json.object_get_val(i)?
+                        } else {
+                            json.array_get_elem(i)?
+                        };
+                        visitor(&Self::Binary(child))?;
+                    }
                 }
             }
-            max_depth
-        }
-        JsonType::Array => {
-            let length = j.get_elem_count();
-            let mut max_depth = 0;
-            for i in 0..length {
-                let val = j.array_get_elem(i)?;
-                let depth = depth_json(&val)?;
-                if depth > max_depth {
-                    max_depth = depth;
+            Self::Native(Value::Array(values)) => {
+                for value in values {
+                    visitor(&Self::Native(value))?;
                 }
             }
-            max_depth
+            Self::Native(Value::Object(values)) => {
+                for value in values.values() {
+                    visitor(&Self::Native(value))?;
+                }
+            }
+            Self::Native(_) => {}
         }
-        _ => 0,
-    } + 1)
+        Ok(())
+    }
+}
+
+/// Computes JSON depth through a representation-only child visitor.
+/// The visitor must enumerate each immediate child in order, without computing
+/// depth or converting the document to another representation. Callers retain
+/// their original validation boundary before entering this shared recursion.
+pub fn native_json_depth_from_children<N>(
+    node: &N,
+    visitor: impl Fn(&N, &mut dyn FnMut(&N) -> Result<()>) -> Result<()>,
+) -> Result<i64> {
+    depth_json(node, &visitor)
+}
+
+// See `GetElemDepth()` in TiDB `json/binary_function.go`.
+fn depth_json<N, F>(node: &N, visitor: &F) -> Result<i64>
+where
+    F: Fn(&N, &mut dyn FnMut(&N) -> Result<()>) -> Result<()>,
+{
+    let mut max_depth = 0;
+    visitor(node, &mut |child| {
+        let depth = depth_json(child, visitor)?;
+        if depth > max_depth {
+            max_depth = depth;
+        }
+        Ok(())
+    })?;
+    Ok(max_depth + 1)
 }
 
 #[cfg(test)]

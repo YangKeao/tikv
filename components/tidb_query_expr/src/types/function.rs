@@ -220,6 +220,12 @@ pub enum LocalFunctionId {
     Log10GoNative,
     CompressGoNative,
     UncompressNative,
+    JsonValidTextNative,
+    JsonValidBinaryNative,
+    JsonValidOtherNative,
+    JsonTypeTextNative,
+    JsonTypeBinaryNative,
+    JsonDepthNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

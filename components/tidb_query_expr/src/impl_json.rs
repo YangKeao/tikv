@@ -10,6 +10,98 @@ use tidb_query_datatype::{
     codec::{data_type::*, mysql::json::*},
 };
 
+// Native introspection keeps its SQL signature and parse policy separate from
+// wire Json evaluation. Only the datatype's shared parser/type/depth primitives
+// compute these answers; the native frontend does not pre-parse the document.
+fn native_json_report_parse(
+    bytes: &[u8],
+) -> std::result::Result<serde_json::Value, NativeJsonError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| NativeJsonError::InvalidText)?;
+    parse_native_json_document(text)
+}
+
+fn native_json_report_error(error: NativeJsonError) -> Bytes {
+    vec![match error {
+        NativeJsonError::EmptyText => 1,
+        NativeJsonError::InvalidText | NativeJsonError::InvalidBinary => 2,
+    }]
+}
+
+// Closed transport: tag 0 carries a type name or i64 LE8 depth, selected by the
+// operation; exact one-byte tags 1/2 carry the computed parse error. Allocation
+// failures remain transport errors rather than fabricated JSON dispositions.
+fn native_json_report_value(payload: &[u8]) -> Result<Bytes> {
+    let length = payload
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| other_err!("Native JSON report envelope length overflow"))?;
+    let mut envelope = Vec::new();
+    envelope.try_reserve_exact(length).map_err(|source| {
+        other_err!("Unable to allocate native JSON report envelope: {}", source)
+    })?;
+    envelope.push(0);
+    envelope.extend_from_slice(payload);
+    Ok(envelope)
+}
+
+#[rpn_fn(nullable)]
+fn json_valid_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    Ok(arg.map(|bytes| i64::from(native_json_report_parse(bytes).is_ok())))
+}
+
+#[rpn_fn(nullable)]
+fn json_valid_binary_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    // The SQL JSON signature accepts every typed JSON value, without validating
+    // even its type-code/payload pair. NULL still executes this nullable body.
+    Ok(arg.map(|_| 1))
+}
+
+#[rpn_fn]
+fn json_valid_other_native() -> Result<Option<Int>> {
+    // The SQL Others signature ignores its payload, not a synthetic 0/1 input.
+    Ok(Some(0))
+}
+
+#[rpn_fn(nullable)]
+fn json_type_text_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let Some(bytes) = arg else {
+        return Ok(None);
+    };
+    match native_json_report_parse(bytes) {
+        Ok(document) => native_json_report_value(native_json_type_name(&document)).map(Some),
+        Err(error) => Ok(Some(native_json_report_error(error))),
+    }
+}
+
+#[rpn_fn(nullable)]
+fn json_type_binary_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let Some(bytes) = arg else {
+        return Ok(None);
+    };
+    let (&type_code, payload) = bytes
+        .split_first()
+        .ok_or_else(|| other_err!("Native JSON_TYPE transport is missing its SQL type code"))?;
+    match native_binary_json_type_name(type_code, payload) {
+        Ok(name) => native_json_report_value(name).map(Some),
+        Err(error) => Ok(Some(native_json_report_error(error))),
+    }
+}
+
+#[rpn_fn(nullable)]
+fn json_depth_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let Some(bytes) = arg else {
+        return Ok(None);
+    };
+    match native_json_report_parse(bytes) {
+        Ok(document) => {
+            // A real depth-helper error is not a JSON text-error disposition.
+            let depth = native_json_depth(&document)?;
+            native_json_report_value(&depth.to_le_bytes()).map(Some)
+        }
+        Err(error) => Ok(Some(native_json_report_error(error))),
+    }
+}
+
 #[rpn_fn]
 #[inline]
 fn json_depth(arg: JsonRef) -> Result<Option<i64>> {
@@ -528,6 +620,53 @@ mod tests {
 
     use super::*;
     use crate::types::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_json_valid_native_signatures_and_nulls() {
+        assert_eq!(json_valid_text_native(None).unwrap(), None);
+        assert_eq!(json_valid_text_native(Some(b"null")).unwrap(), Some(1));
+        assert_eq!(json_valid_text_native(Some(b" ")).unwrap(), Some(0));
+        assert_eq!(json_valid_text_native(Some(b"[")).unwrap(), Some(0));
+        assert_eq!(json_valid_text_native(Some(&[0xff])).unwrap(), Some(0));
+        assert_eq!(json_valid_binary_native(None).unwrap(), None);
+        assert_eq!(
+            json_valid_binary_native(Some(&[JsonType::Literal as u8])).unwrap(),
+            Some(1),
+        );
+        assert_eq!(json_valid_other_native().unwrap(), Some(0));
+    }
+
+    #[test]
+    fn test_json_report_native_values_and_parse_errors() {
+        assert_eq!(json_type_text_native(None).unwrap(), None);
+        assert_eq!(json_type_binary_native(None).unwrap(), None);
+        assert_eq!(json_depth_native(None).unwrap(), None);
+        assert_eq!(
+            json_type_text_native(Some(b"9223372036854775807")).unwrap(),
+            Some(b"\0INTEGER".to_vec()),
+        );
+        assert_eq!(json_type_text_native(Some(b" ")).unwrap(), Some(vec![1]));
+        assert_eq!(json_type_text_native(Some(&[0xff])).unwrap(), Some(vec![2]));
+        // Native TYPE treats a malformed literal payload as BOOLEAN, rather
+        // than introducing broader validation through the wire Json decoder.
+        assert_eq!(
+            json_type_binary_native(Some(&[JsonType::Literal as u8])).unwrap(),
+            Some(b"\0BOOLEAN".to_vec()),
+        );
+        assert_eq!(
+            json_type_binary_native(Some(&[JsonType::Opaque as u8])).unwrap(),
+            Some(vec![2]),
+        );
+        assert!(json_type_binary_native(Some(b"")).is_err());
+        let mut depth = vec![0];
+        depth.extend_from_slice(&3i64.to_le_bytes());
+        assert_eq!(
+            json_depth_native(Some(br#"{"a":[1]}"#)).unwrap(),
+            Some(depth)
+        );
+        assert_eq!(json_depth_native(Some(b"")).unwrap(), Some(vec![1]));
+        assert_eq!(json_depth_native(Some(b"[")).unwrap(), Some(vec![2]));
+    }
 
     #[test]
     fn test_json_depth() {

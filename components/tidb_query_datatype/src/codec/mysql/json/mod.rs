@@ -62,6 +62,7 @@ mod comparison;
 mod constants;
 mod jcodec;
 mod modifier;
+mod native_policy;
 mod path_expr;
 mod serde;
 // json functions
@@ -89,7 +90,12 @@ use tikv_util::is_even;
 
 pub use self::{
     jcodec::{JsonDatumPayloadChunkEncoder, JsonDecoder, JsonEncoder},
+    json_depth::{native_json_depth, native_json_depth_from_children},
     json_modify::ModifyType,
+    native_policy::{
+        NativeJsonError, decode_native_json_uvarint, native_binary_json_type_name,
+        native_json_opaque, native_json_type_name, parse_native_json_document,
+    },
     path_expr::{PathExpression, parse_json_path_expr},
 };
 use super::super::{Error, Result, datum::Datum};

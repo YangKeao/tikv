@@ -293,6 +293,29 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  JSON_VALID/TYPE/DEPTH use six private recipes in `impl_json.rs`. The datatype
+  `codec/mysql/json/native_policy.rs` owns the existing native serde parser,
+  opaque framing and uvarint policy; native and wire representations share one
+  type-name selector and one depth recursion/child visitor. The native public
+  `BinaryJSON::element_depth` helper also retains its original `to_node`
+  validation and uses the narrow `native_json_depth_from_children` adapter;
+  it does not keep a local depth/max calculation or assume codec equivalence.
+  Native text is not
+  re-encoded through binary JSON's u16 object-key limit. Preserve native signed
+  i64::MAX preference, duplicate-key/recursion rules, exact-null literal policy,
+  strict opaque length checks, and wire's different literal/opaque validation.
+  VALID's text/binary/Others signatures return real worker Int results; Others
+  alone adds a closed NoArgs whitelist entry and consumes no ignored payload.
+  TYPE and DEPTH return `ComputedJsonReport`/`OwnJsonReport`: NULL, owned type
+  bytes, inline depth, EmptyText or InvalidText. Only their selected recipes
+  decode this canonical result; TYPE copies only payload with existing overlap
+  checks, while depth/error states retain no allocation. Resource/transport
+  errors never become JSON statuses. Source-type, UTF8 and numeric conversion
+  errors remain before admission, but parsing and typed TYPE validation now
+  occur inside the worker: zero slots therefore precede invalid JSON results.
+  This changed resource-error priority is intentional, not claimed to preserve
+  the old preparation order. No new PB admission, role, context getter, driver
+  or fourth column is introduced. JSON_LENGTH/path handling remains separate.
   COMPRESS/UNCOMPRESS use two private nullable-Bytes unary recipes. The Go
   encoder has one production owner in `impl_encryption/native_go_flate.rs`;
   native bounded inflation belongs to `impl_encryption.rs`, while wire keeps

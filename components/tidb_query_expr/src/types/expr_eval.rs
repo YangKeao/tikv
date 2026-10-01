@@ -314,10 +314,12 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
-        (EvaluatedBytesOp::PiRaw, EvaluatedArgsRole::NoArgs) => {
-            types.is_empty() && operation.call_count() == 1
-        }
-        (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
+        (
+            EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative,
+            EvaluatedArgsRole::NoArgs,
+        ) => types.is_empty() && operation.call_count() == 1,
+        (EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative, _)
+        | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => {
             operation.is_pad_native() && types.len() == 4 && operation.call_count() == 1
         }
@@ -649,8 +651,12 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
-        (EvaluatedBytesOp::PiRaw, EvaluatedArgsRole::NoArgs) => arity == 0 && calls == 1,
-        (EvaluatedBytesOp::PiRaw, _) | (_, EvaluatedArgsRole::NoArgs) => false,
+        (
+            EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative,
+            EvaluatedArgsRole::NoArgs,
+        ) => arity == 0 && calls == 1,
+        (EvaluatedBytesOp::PiRaw | EvaluatedBytesOp::JsonValidOtherNative, _)
+        | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
         (_, EvaluatedArgsRole::Values) if operation.is_insert() => arity == 4 && calls == 1,
         (_, EvaluatedArgsRole::NativeSearch) if operation.is_locate3_native() => {
@@ -2667,7 +2673,8 @@ impl RpnExpression {
 
     /// Fixed ready operands, borrowed from the facade until its result
     /// extraction completes. Only the selected closed recipe is admitted;
-    /// zero operands are reserved for PiRaw with the explicit NoArgs role.
+    /// zero operands require PiRaw or JsonValidOtherNative with the NoArgs
+    /// role.
     pub(crate) fn eval_with_ready_args<'a, 'data: 'a>(
         &'a self,
         operation: EvaluatedBytesOp,
@@ -3315,7 +3322,7 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..87 {
+        for mismatch in 0..89 {
             let operation = match mismatch {
                 3 | 5 | 45 | 53 | 56 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
@@ -3359,6 +3366,7 @@ mod tests {
                 81 => EvaluatedBytesOp::Replace,
                 83 | 85 => EvaluatedBytesOp::Atan2GoNative,
                 84 | 86 => EvaluatedBytesOp::Atan2LibmLegacy,
+                87 | 88 => EvaluatedBytesOp::JsonValidOtherNative,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
@@ -3383,8 +3391,9 @@ mod tests {
                 | 77
                 | 80
                 | 83
-                | 84 => EvaluatedArgsRole::Values,
-                4 | 5 => EvaluatedArgsRole::NoArgs,
+                | 84
+                | 87 => EvaluatedArgsRole::Values,
+                4 | 5 | 88 => EvaluatedArgsRole::NoArgs,
                 9..=12 | 17 => EvaluatedArgsRole::Packet,
                 14 => EvaluatedArgsRole::ReadyBytesInt,
                 18 | 19 | 21 => EvaluatedArgsRole::PadPacket,
@@ -3527,7 +3536,7 @@ mod tests {
                 ready[1] = ScalarValue::Bytes(Some(i128::MAX.to_le_bytes().to_vec()));
                 ready[2] = ScalarValue::Bytes(Some(0i128.to_le_bytes().to_vec()));
             }
-            if matches!(mismatch, 13 | 14 | 16..=86) {
+            if matches!(mismatch, 13 | 14 | 16..=88) {
                 assert!(evaluated_ready_args_match(
                     operation,
                     &ready,
@@ -3634,8 +3643,14 @@ mod tests {
                 field_type: operation.return_type(),
                 metadata: Box::new(()),
             });
+            if mismatch == 88 {
+                assert!(evaluated_bytes_shape(operation, &nodes, &schema));
+                nodes.insert(0, RpnExpressionNode::ColumnRef { offset: 0 });
+            }
             let program = RpnExpression::from(nodes);
-            if !matches!(mismatch, 2 | 12) {
+            if mismatch == 88 {
+                assert!(!evaluated_bytes_shape(operation, program.as_ref(), &schema));
+            } else if !matches!(mismatch, 2 | 12) {
                 assert!(evaluated_bytes_shape(operation, program.as_ref(), &schema));
             }
             let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
