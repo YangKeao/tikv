@@ -1,11 +1,11 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::io::Read;
+use std::{convert::TryFrom, io::Read};
 
 use byteorder::{ByteOrder, LittleEndian};
 use crypto::rand;
 use flate2::{
-    Compression,
+    Compression, Decompress, FlushDecompress, Status,
     read::{ZlibDecoder, ZlibEncoder},
 };
 use openssl::hash::{self, MessageDigest};
@@ -15,6 +15,8 @@ use tidb_query_datatype::{
     codec::data_type::*,
     expr::{Error, EvalContext},
 };
+
+pub(crate) mod native_go_flate;
 
 const SHA0: i64 = 0;
 const SHA224: i64 = 224;
@@ -80,6 +82,122 @@ fn sha2_impl(input: BytesRef, hash_length: &Int) -> Result<Option<Bytes>> {
     hex_digest(sha2, input).map(Some)
 }
 
+#[inline]
+fn compressed_length_prefix(original_len: u32) -> [u8; 4] {
+    original_len.to_le_bytes()
+}
+
+#[inline]
+fn compressed_needs_dot(bytes: &[u8]) -> bool {
+    bytes.last().copied() == Some(b' ')
+}
+
+/// Native framing, also exposed narrowly for the retained native helper tests.
+/// Wire compression keeps its own streaming writer and allocation order.
+pub fn frame_compressed(original_len: u32, compressed: Vec<u8>) -> Vec<u8> {
+    let append_suffix = compressed_needs_dot(&compressed);
+    let mut framed = Vec::with_capacity(4 + compressed.len() + usize::from(append_suffix));
+    framed.extend_from_slice(&compressed_length_prefix(original_len));
+    framed.extend_from_slice(&compressed);
+    if append_suffix {
+        framed.push(b'.');
+    }
+    framed
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InflateError {
+    Decode,
+    OutputLimit,
+}
+
+/// Strictly inflates the first zlib stream without allocating the length
+/// prefix. Preserve the native progress, checksum and one-byte-over-limit
+/// decisions.
+pub fn inflate(data: &[u8], max_output: usize) -> std::result::Result<Vec<u8>, InflateError> {
+    let mut decoder = Decompress::new(true);
+    let mut out = Vec::new();
+    let mut input_offset = 0;
+    let mut chunk = [0; 8 * 1024];
+    loop {
+        let input_before = decoder.total_in();
+        let output_before = decoder.total_out();
+        let remaining = max_output.saturating_sub(out.len());
+        // Give zlib one byte beyond the remaining budget so an over-limit
+        // write is detected without ever appending bytes past the limit.
+        let output_len = chunk.len().min(remaining.saturating_add(1));
+        let status = decoder
+            .decompress(
+                &data[input_offset..],
+                &mut chunk[..output_len],
+                FlushDecompress::None,
+            )
+            .map_err(|_| InflateError::Decode)?;
+        input_offset = usize::try_from(decoder.total_in()).map_err(|_| InflateError::Decode)?;
+        let produced = usize::try_from(decoder.total_out() - output_before)
+            .map_err(|_| InflateError::Decode)?;
+        if produced > remaining {
+            return Err(InflateError::OutputLimit);
+        }
+        out.extend_from_slice(&chunk[..produced]);
+        if status == Status::StreamEnd {
+            return Ok(out);
+        }
+        // `compress/zlib.NewReader` refuses a stream that ends before the
+        // DEFLATE terminator and Adler-32 checksum.  The high-level flate2
+        // reader can instead report a successful zero-byte read for that
+        // truncated input, so require either stream completion or forward
+        // progress toward it here.
+        if decoder.total_in() == input_before && produced == 0 {
+            return Err(InflateError::Decode);
+        }
+    }
+}
+
+#[rpn_fn(nullable)]
+fn compress_go_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let Some(payload) = input else {
+        return Ok(None);
+    };
+    if payload.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let compressed = native_go_flate::go_zlib_deflate(payload);
+    Ok(Some(frame_compressed(payload.len() as u32, compressed)))
+}
+
+// Closed factory transport, not SQL bytes: NULL stays None; 0 prefixes the
+// computed value (including empty), while exact one-byte 1/2 report actual
+// corruption/output-limit dispositions. No EvalContext warning is emitted here.
+#[rpn_fn(nullable)]
+fn uncompress_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let Some(payload) = input else {
+        return Ok(None);
+    };
+    if payload.is_empty() {
+        return Ok(Some(vec![0]));
+    }
+    if payload.len() <= 4 {
+        return Ok(Some(vec![1]));
+    }
+    let length = LittleEndian::read_u32(&payload[..4]);
+    let mut bytes = match inflate(&payload[4..], length as usize) {
+        Ok(bytes) => bytes,
+        Err(InflateError::OutputLimit) => return Ok(Some(vec![2])),
+        Err(InflateError::Decode) => return Ok(Some(vec![1])),
+    };
+    // Retain the original final declared-length check after successful inflate.
+    if length < bytes.len() as u32 {
+        return Ok(Some(vec![2]));
+    }
+    // Envelope allocation failure is a transport error, not a zlib disposition.
+    bytes.try_reserve(1).map_err(|source| {
+        other_err!("Unable to allocate UNCOMPRESS result envelope: {}", source)
+    })?;
+    bytes.insert(0, 0);
+    Ok(Some(bytes))
+}
+
 #[rpn_fn(writer)]
 #[inline]
 pub fn compress(input: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
@@ -95,11 +213,11 @@ pub fn compress(input: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
     // "capacity overflow"
     let mut vec = Vec::with_capacity((input.len() + 5).min(isize::MAX as usize));
     vec.resize(4, 0);
-    LittleEndian::write_u32(&mut vec, input.len() as u32);
+    vec[..4].copy_from_slice(&compressed_length_prefix(input.len() as u32));
     match e.read_to_end(&mut vec) {
         Ok(_) => {
             // according to MySQL doc: append "." if ends with space
-            if *vec.last().unwrap() == b' ' {
+            if compressed_needs_dot(&vec) {
                 vec.push(b'.');
             }
             Ok(writer.write_ref(Some(vec.as_ref())))
@@ -233,6 +351,55 @@ mod tests {
 
     use super::*;
     use crate::types::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_compress_go_native_nullable_and_frame() {
+        assert_eq!(compress_go_native(None).unwrap(), None);
+        assert_eq!(compress_go_native(Some(b"")).unwrap(), Some(Vec::new()));
+        let payload = b"factory bytes";
+        let expected = frame_compressed(
+            payload.len() as u32,
+            native_go_flate::go_zlib_deflate(payload),
+        );
+        assert_eq!(compress_go_native(Some(payload)).unwrap(), Some(expected));
+        assert_eq!(compressed_length_prefix(0x0102_0304), [4, 3, 2, 1]);
+        assert!(compressed_needs_dot(b"stream "));
+        assert!(!compressed_needs_dot(b""));
+    }
+
+    #[test]
+    fn test_uncompress_native_computed_dispositions() {
+        assert_eq!(uncompress_native(None).unwrap(), None);
+        assert_eq!(uncompress_native(Some(b"")).unwrap(), Some(vec![0]));
+        assert_eq!(uncompress_native(Some(&[0; 4])).unwrap(), Some(vec![1]));
+        let payload = b"bounded native decoder";
+        let framed = compress_go_native(Some(payload)).unwrap().unwrap();
+        let mut expected = vec![0];
+        expected.extend_from_slice(payload);
+        assert_eq!(
+            uncompress_native(Some(&framed)).unwrap(),
+            Some(expected.clone())
+        );
+        let mut trailing = framed.clone();
+        trailing.extend_from_slice(b"ignored trailing data");
+        assert_eq!(uncompress_native(Some(&trailing)).unwrap(), Some(expected));
+        let mut too_small = framed;
+        too_small[..4].fill(0);
+        assert_eq!(uncompress_native(Some(&too_small)).unwrap(), Some(vec![2]));
+        let mut bad_checksum = native_go_flate::go_zlib_deflate(payload);
+        *bad_checksum.last_mut().unwrap() ^= 1;
+        let corrupted = frame_compressed(payload.len() as u32, bad_checksum);
+        assert_eq!(uncompress_native(Some(&corrupted)).unwrap(), Some(vec![1]));
+        // A complete stream producing zero bytes is native success, unlike
+        // wire's decoded-zero corruption policy. Do not run the Go encoder on
+        // an empty payload; COMPRESS's original empty shortcut avoids that call.
+        let mut stream = Vec::new();
+        ZlibEncoder::new(&b""[..], Compression::default())
+            .read_to_end(&mut stream)
+            .unwrap();
+        let empty = frame_compressed(0, stream);
+        assert_eq!(uncompress_native(Some(&empty)).unwrap(), Some(vec![0]));
+    }
 
     fn test_unary_func_ok_none<'a, I, O>(sig: ScalarFuncSig)
     where

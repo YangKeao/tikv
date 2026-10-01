@@ -168,11 +168,12 @@ pub use self::{
     batch::{
         ComputedBytes, ComputedBytesMetadata, ComputedDecimal, ComputedDecimalMetadata,
         ComputedIeee754Bits, ComputedIeee754BitsMetadata, ComputedInt, ComputedInt128,
-        ComputedInt128Metadata, ComputedIntMetadata, ComputedValue, EvaluatedArgs,
-        EvaluatedAsciiWorker, EvaluatedBytesOp, EvaluatedBytesWorker, EvaluatedSqlFailureKind,
-        LocalBatch, LocalEvalState, NativeSearchPolicy, OutputDisposition, ReadyBytesArg,
-        ReadyConvBaseArg, ReadyDecimalArg, ReadyIeee754Arg, ReadyIntArg, ReadySubstringI128,
-        ReportedEvaluatedFailure, WorkerStorage, native_decimal_bridge_error,
+        ComputedInt128Metadata, ComputedIntMetadata, ComputedUncompress,
+        ComputedUncompressMetadata, ComputedValue, EvaluatedArgs, EvaluatedAsciiWorker,
+        EvaluatedBytesOp, EvaluatedBytesWorker, EvaluatedSqlFailureKind, LocalBatch,
+        LocalEvalState, NativeSearchPolicy, OutputDisposition, ReadyBytesArg, ReadyConvBaseArg,
+        ReadyDecimalArg, ReadyIeee754Arg, ReadyIntArg, ReadySubstringI128,
+        ReportedEvaluatedFailure, UncompressOutcome, WorkerStorage, native_decimal_bridge_error,
         prepare_evaluated_ascii, prepare_evaluated_bytes,
     },
     compile::{
@@ -201,7 +202,13 @@ pub(crate) use self::{
     lineage::CheckedResultFlow,
 };
 pub use crate::{
-    CallMetadata, FunctionRef, LiteralKind, LocalFunctionId,
+    CallMetadata,
+    FunctionRef,
+    LiteralKind,
+    LocalFunctionId,
+    // Narrow compatibility exports for native tests; production compression
+    // enters the closed workers and consumes their owned computed outcomes.
+    impl_encryption::{InflateError, frame_compressed, inflate, native_go_flate::go_zlib_deflate},
     impl_math::{
         conv_valid_prefix_native,
         native_decimal_target_scale,

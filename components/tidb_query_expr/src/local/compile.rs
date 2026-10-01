@@ -1655,6 +1655,8 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::Atan2LibmLegacy,
             EvaluatedBytesOp::ExpGoNative,
             EvaluatedBytesOp::Log10GoNative,
+            EvaluatedBytesOp::CompressGoNative,
+            EvaluatedBytesOp::UncompressNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

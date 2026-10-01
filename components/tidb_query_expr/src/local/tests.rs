@@ -2114,7 +2114,8 @@ fn local_evaluated_args_packet_roles_reject_plain_carriers() {
             }
             ComputedValue::Ieee754Bits(_)
             | ComputedValue::Decimal(_)
-            | ComputedValue::Int128(_) => {
+            | ComputedValue::Int128(_)
+            | ComputedValue::Uncompress(_) => {
                 panic!("packet role check returned an unexpected output type")
             }
         }
@@ -5932,4 +5933,119 @@ fn local_evaluated_args_exp_log10_go_keep_nullable_and_nonfinite_bits() {
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
+}
+
+#[test]
+fn local_evaluated_args_compression_preserves_owned_values_and_uncompress_outcomes() {
+    let payload = b"owned\0payload\xff";
+    let frame = {
+        let mut worker = prepare_evaluated_bytes(
+            EvaluatedBytesOp::CompressGoNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), EvaluatedBytesOp::CompressGoNative);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Ieee754Bits(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let cases: [(Option<Vec<u8>>, Option<&[u8]>); 2] =
+            [(None, None), (Some(Vec::new()), Some(b""))];
+        for (index, (input, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Bytes(value) =
+                worker.eval_args(EvaluatedArgs::Bytes(input)).unwrap()
+            else {
+                panic!("native COMPRESS returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::Bytes(Some(payload.to_vec())))
+            .unwrap()
+        else {
+            panic!("nonempty COMPRESS returned a non-Bytes value");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        let observed = value.value().unwrap().to_vec();
+        let frame = value.into_option().unwrap();
+        assert_eq!(frame, observed);
+        assert!(frame.len() > 4);
+        assert_eq!(worker.kernel_invocations(), 3);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        frame
+    };
+    // Keep the complete encoded stream; only its declared output length changes.
+    let mut limited_frame = frame.clone();
+    limited_frame[..4].copy_from_slice(&0_u32.to_le_bytes());
+    let retained = {
+        let mut worker = prepare_evaluated_bytes(
+            EvaluatedBytesOp::UncompressNative,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_retained_bytes: 8 * 1024,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), EvaluatedBytesOp::UncompressNative);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Ieee754Bits(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let mut oversized = Vec::with_capacity(16 * 1024);
+        oversized.push(b'x');
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let cases = [
+            (None, UncompressOutcome::Null),
+            (Some(Vec::new()), UncompressOutcome::Value(Vec::new())),
+            (Some(b"x".to_vec()), UncompressOutcome::Corrupt),
+            (Some(limited_frame), UncompressOutcome::OutputLimit),
+            (Some(frame), UncompressOutcome::Value(payload.to_vec())),
+        ];
+        let mut retained = UncompressOutcome::Null;
+        for (index, (input, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Uncompress(value) =
+                worker.eval_args(EvaluatedArgs::Bytes(input)).unwrap()
+            else {
+                panic!("UNCOMPRESS returned an unexpected output type");
+            };
+            assert_eq!(value.metadata(), ComputedUncompressMetadata::OwnUncompress);
+            assert_eq!(value.outcome(), &expected);
+            retained = value.into_outcome();
+            assert_eq!(retained, expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        retained
+    };
+    let UncompressOutcome::Value(value) = retained else {
+        panic!("owned UNCOMPRESS payload was lost after dropping the worker");
+    };
+    assert_eq!(value.as_slice(), payload);
 }

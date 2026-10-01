@@ -293,6 +293,20 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  COMPRESS/UNCOMPRESS use two private nullable-Bytes unary recipes. The Go
+  encoder has one production owner in `impl_encryption/native_go_flate.rs`;
+  native bounded inflation belongs to `impl_encryption.rs`, while wire keeps
+  its original zlib/reader policies. COMPRESS returns ordinary owned bytes.
+  UNCOMPRESS has a distinct owned completed outcome: NULL, decoded bytes
+  (including empty), corrupt input or output-limit failure. Only its sealed
+  recipe can decode the canonical internal result envelope; malformed result
+  framing remains InvalidBatch, not a SQL warning. The physical encoded output
+  stays charged while Value copies its payload with fallible allocation and
+  capacity-based overlap checks. Status outcomes retain no payload allocation.
+  Native packing appends the original 1259/1258 warnings from that actual
+  outcome, never from a resource error or a frontend re-decode. Worker-context
+  warnings stay disabled, and no generic graph or driver is added. Narrow pure
+  exports support unchanged native fixtures only; production uses the worker.
   EXP/LOG10 add two closed nullable raw-IEEE unary recipes backed by the
   relocated `impl_math/native_go_exp_log.rs` compatibility core. The existing
   FMA and logarithm arithmetic is preserved, not substituted with libm. Wire

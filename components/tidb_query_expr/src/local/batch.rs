@@ -904,6 +904,8 @@ pub enum EvaluatedBytesOp {
     Atan2LibmLegacy,
     ExpGoNative,
     Log10GoNative,
+    CompressGoNative,
+    UncompressNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1375,6 +1377,16 @@ impl EvaluatedBytesOp {
             Self::Log10GoNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Log10GoNative);
             }
+            Self::CompressGoNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompressGoNative,
+                );
+            }
+            Self::UncompressNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UncompressNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1643,6 +1655,8 @@ impl EvaluatedBytesOp {
             Self::Atan2LibmLegacy => crate::impl_math::atan2_libm_legacy_fn_meta(),
             Self::ExpGoNative => crate::impl_math::exp_go_native_fn_meta(),
             Self::Log10GoNative => crate::impl_math::log10_go_native_fn_meta(),
+            Self::CompressGoNative => crate::impl_encryption::compress_go_native_fn_meta(),
+            Self::UncompressNative => crate::impl_encryption::uncompress_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1899,7 +1913,9 @@ impl EvaluatedBytesOp {
             | Self::AtanLibmLegacy
             | Self::Atan2LibmLegacy
             | Self::ExpGoNative
-            | Self::Log10GoNative => EvalType::Bytes,
+            | Self::Log10GoNative
+            | Self::CompressGoNative
+            | Self::UncompressNative => EvalType::Bytes,
         }
     }
 
@@ -1938,7 +1954,9 @@ impl EvaluatedBytesOp {
             | Self::CotLibmLegacy
             | Self::AtanLibmLegacy
             | Self::ExpGoNative
-            | Self::Log10GoNative => &[EvalType::Bytes],
+            | Self::Log10GoNative
+            | Self::CompressGoNative
+            | Self::UncompressNative => &[EvalType::Bytes],
             Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative
@@ -3127,6 +3145,62 @@ impl ComputedBytes {
     }
 }
 
+/// A completed UNCOMPRESS result. Corrupt and OutputLimit are decoder
+/// outcomes, not runtime allocation errors or already-emitted SQL warnings.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UncompressOutcome {
+    Null,
+    Value(Vec<u8>),
+    Corrupt,
+    OutputLimit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputedUncompressMetadata {
+    OwnUncompress,
+}
+
+/// Owns the result of the sealed UNCOMPRESS wrapper, never an input tag.
+/// The frontend alone applies the corresponding statement warning policy.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ComputedUncompress {
+    outcome: UncompressOutcome,
+}
+
+impl ComputedUncompress {
+    pub fn outcome(&self) -> &UncompressOutcome {
+        &self.outcome
+    }
+    pub fn into_outcome(self) -> UncompressOutcome {
+        self.outcome
+    }
+    pub fn metadata(&self) -> ComputedUncompressMetadata {
+        ComputedUncompressMetadata::OwnUncompress
+    }
+}
+
+// A short-lived view of the private kernel result, not a new RPN carrier or
+// public constructor. Only the selected UNCOMPRESS extraction uses this frame.
+#[derive(Debug, PartialEq, Eq)]
+enum UncompressFrame<'a> {
+    Null,
+    Value(&'a [u8]),
+    Corrupt,
+    OutputLimit,
+}
+
+fn decode_uncompress_frame(encoded: Option<&[u8]>) -> LocalResult<UncompressFrame<'_>> {
+    match encoded {
+        None => Ok(UncompressFrame::Null),
+        Some([0, payload @ ..]) => Ok(UncompressFrame::Value(payload)),
+        Some([1]) => Ok(UncompressFrame::Corrupt),
+        Some([2]) => Ok(UncompressFrame::OutputLimit),
+        _ => Err(LocalError::InvalidBatch(
+            "UNCOMPRESS result has an invalid canonical envelope".into(),
+        )),
+    }
+}
+
 /// IEEE754 output identity, not a SQL integer, Bytes descriptor or input donor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComputedIeee754BitsMetadata {
@@ -3280,6 +3354,7 @@ impl std::error::Error for ReportedEvaluatedFailure {
 pub enum ComputedValue {
     Int(ComputedInt),
     Bytes(ComputedBytes),
+    Uncompress(ComputedUncompress),
     Ieee754Bits(ComputedIeee754Bits),
     Decimal(ComputedDecimal),
     Int128(ComputedInt128),
@@ -3514,6 +3589,7 @@ impl EvaluatedAsciiWorker {
         match self.inner.eval_one(bytes)? {
             ComputedValue::Int(value) => Ok(value),
             ComputedValue::Bytes(_)
+            | ComputedValue::Uncompress(_)
             | ComputedValue::Ieee754Bits(_)
             | ComputedValue::Decimal(_)
             | ComputedValue::Int128(_) => {
@@ -3894,6 +3970,41 @@ impl EvaluatedBytesWorker {
                     .transpose()?;
                 (ComputedValue::Ieee754Bits(ComputedIeee754Bits { value }), 0)
             }
+            ScalarValueRef::Bytes(value)
+                if self.operation == EvaluatedBytesOp::UncompressNative =>
+            {
+                let outcome = match decode_uncompress_frame(value)? {
+                    UncompressFrame::Null => UncompressOutcome::Null,
+                    UncompressFrame::Corrupt => UncompressOutcome::Corrupt,
+                    UncompressFrame::OutputLimit => UncompressOutcome::OutputLimit,
+                    UncompressFrame::Value(source) => {
+                        // The encoded physical output, including its tag, stays
+                        // charged while only the decoded payload gets an owner.
+                        let overlap = output_bytes
+                            .checked_add(source.len())
+                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        budget.check_output(overlap, input_bytes)?;
+                        let mut owned = Vec::new();
+                        owned.try_reserve_exact(source.len()).map_err(|_| {
+                            LocalError::ResourceLimit("UNCOMPRESS result allocation failed".into())
+                        })?;
+                        let overlap = output_bytes
+                            .checked_add(owned.capacity())
+                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        budget.check_output(overlap, input_bytes)?;
+                        owned.extend_from_slice(source);
+                        UncompressOutcome::Value(owned)
+                    }
+                };
+                let retained = match &outcome {
+                    UncompressOutcome::Value(value) => value.capacity(),
+                    _ => 0,
+                };
+                (
+                    ComputedValue::Uncompress(ComputedUncompress { outcome }),
+                    retained,
+                )
+            }
             ScalarValueRef::Bytes(value) => {
                 let value = match value {
                     None => None,
@@ -3940,6 +4051,37 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn uncompress_result_envelope_is_canonical() {
+        assert_eq!(
+            decode_uncompress_frame(None).unwrap(),
+            UncompressFrame::Null
+        );
+        assert_eq!(
+            decode_uncompress_frame(Some(&[0])).unwrap(),
+            UncompressFrame::Value(&[])
+        );
+        assert_eq!(
+            decode_uncompress_frame(Some(&[0, 0, 1, 2, 255])).unwrap(),
+            UncompressFrame::Value(&[0, 1, 2, 255])
+        );
+        assert_eq!(
+            decode_uncompress_frame(Some(&[1])).unwrap(),
+            UncompressFrame::Corrupt
+        );
+        assert_eq!(
+            decode_uncompress_frame(Some(&[2])).unwrap(),
+            UncompressFrame::OutputLimit
+        );
+        let malformed: &[&[u8]] = &[&[], &[3], &[255], &[1, 0], &[2, 0]];
+        for encoded in malformed {
+            assert!(matches!(
+                decode_uncompress_frame(Some(*encoded)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+        }
+    }
 
     fn new_worker() -> EvaluatedAsciiWorker {
         prepare_evaluated_ascii(

@@ -218,6 +218,8 @@ pub enum LocalFunctionId {
     Atan2LibmLegacy,
     ExpGoNative,
     Log10GoNative,
+    CompressGoNative,
+    UncompressNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.
