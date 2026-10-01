@@ -8338,6 +8338,176 @@ fn unary_dispatch_unit_getters_roles_and_private_shapes() {
 }
 
 #[test]
+fn like_dispatch_exact_getters_metadata_roles_and_private_compile() {
+    use super::{compile::compile_evaluated_bytes, runtime::EvalBudget};
+    use crate::{
+        NativeLikeKind, RpnExpressionNode,
+        types::{
+            expr_eval::EvaluatedAsciiWitness,
+            function::{CallArg, CallShape},
+        },
+    };
+    let cases = [
+        (
+            EvaluatedBytesOp::LikeNative,
+            crate::impl_like::like_native_fn_meta(),
+            3,
+            Some(NativeLikeKind::Like),
+        ),
+        (
+            EvaluatedBytesOp::IlikeNative,
+            crate::impl_like::ilike_native_fn_meta(),
+            3,
+            Some(NativeLikeKind::Ilike),
+        ),
+        (
+            EvaluatedBytesOp::LikeLegacyNative,
+            crate::impl_like::like_legacy_native_fn_meta(),
+            3,
+            Some(NativeLikeKind::Legacy),
+        ),
+        (
+            EvaluatedBytesOp::LikeNullIntNative,
+            crate::impl_like::like_null_int_native_fn_meta(),
+            1,
+            None,
+        ),
+        (
+            EvaluatedBytesOp::LikeMissingLegacyNative,
+            crate::impl_like::like_missing_legacy_native_fn_meta(),
+            0,
+            None,
+        ),
+    ];
+    for (operation, getter, arity, kind) in cases {
+        assert_eq!(operation.input_types().len(), arity);
+        assert_eq!(operation.like_kind(), kind);
+        assert_eq!(operation.eval_type(), EvalType::Int);
+        assert_eq!(operation.call_count(), 1);
+        let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+        assert!(program.host_catalog.is_none());
+        assert_eq!(program.expression.len(), arity + 1);
+        assert_eq!(program.schema.len(), arity);
+        for slot in 0..arity {
+            assert!(
+                matches!(program.expression[slot], RpnExpressionNode::ColumnRef { offset } if offset == slot)
+            );
+        }
+        let RpnExpressionNode::FnCall {
+            func_meta,
+            args_len,
+            field_type,
+            metadata,
+        } = &program.expression[arity]
+        else {
+            panic!("missing LIKE generated call");
+        };
+        assert_eq!(*args_len, arity);
+        assert_eq!(field_type, &operation.return_type());
+        assert_eq!(func_meta.name, getter.name);
+        assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.validator_ptr,
+            getter.validator_ptr
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.metadata_ptr,
+            getter.metadata_ptr
+        ));
+        assert!(operation.metadata_matches(metadata.as_ref()));
+        assert_eq!(metadata.is::<()>(), kind.is_none());
+        assert!(
+            !operation.metadata_matches(&NativeRegexpCallMetadata::new(NativeRegexpKind::Like))
+        );
+        if let Some(kind) = kind {
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Like);
+            assert_eq!(
+                operation.input_types(),
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Int]
+            );
+            assert!(
+                metadata
+                    .downcast_ref::<NativeLikeCallMetadata>()
+                    .unwrap()
+                    .invocation()
+                    .is_err()
+            );
+            for alternate in [
+                NativeLikeKind::Like,
+                NativeLikeKind::Ilike,
+                NativeLikeKind::Legacy,
+            ] {
+                assert_eq!(
+                    operation.metadata_matches(&NativeLikeCallMetadata::new(alternate)),
+                    alternate == kind
+                );
+            }
+        }
+        let spec = LocalExpr::Call {
+            function: operation.function_ref(),
+            args: program
+                .schema
+                .iter()
+                .enumerate()
+                .map(|(slot, field_type)| LocalExpr::InputSlot {
+                    slot,
+                    field_type: field_type.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            return_type: operation.return_type(),
+            metadata: CallMetadata::None,
+        };
+        assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+        let mut raw = CallBuild::local(
+            CallShape::new(
+                operation.function_ref(),
+                operation.return_type(),
+                program
+                    .schema
+                    .iter()
+                    .cloned()
+                    .map(CallArg::dynamic)
+                    .collect(),
+            ),
+            CallMetadata::None,
+        );
+        assert!(prepare_call(&mut raw).is_err());
+    }
+    let operation = EvaluatedBytesOp::LikeNative;
+    let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+    let mut ctx = EvalContext::default();
+    let mut witness = EvaluatedAsciiWitness::default();
+    for (text, escape, role) in [
+        (Some(b"a".to_vec()), Some(92), EvaluatedArgsRole::Values),
+        (None, Some(92), EvaluatedArgsRole::Like),
+        (Some(b"a".to_vec()), None, EvaluatedArgsRole::Like),
+        (Some(b"a".to_vec()), Some(256), EvaluatedArgsRole::Like),
+    ] {
+        let values = [
+            ScalarValue::Bytes(text),
+            ScalarValue::Bytes(Some(b"a".to_vec())),
+            ScalarValue::Int(escape),
+        ];
+        let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+        assert!(matches!(
+            program.expression.eval_with_ready_args(
+                operation,
+                &mut ctx,
+                &program.schema,
+                &values,
+                role,
+                &[0],
+                &mut witness,
+                &mut budget,
+            ),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        assert_eq!(witness.invocations(), 0);
+    }
+}
+
+#[test]
 fn regexp_dispatch_exact_getters_metadata_and_closed_shapes() {
     use super::{
         compile::{ProgramEntry, compile_evaluated_bytes},

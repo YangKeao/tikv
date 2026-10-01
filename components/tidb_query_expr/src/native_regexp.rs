@@ -53,7 +53,7 @@ impl<T> NativeContextCache<T> {
         Self::default()
     }
 
-    fn share_state(&self) -> Self {
+    pub(crate) fn share_state(&self) -> Self {
         Self {
             cached: Arc::clone(&self.cached),
         }

@@ -344,6 +344,26 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  LIKE/ILIKE add five closed recipes in `impl_like.rs`; `native_like.rs` owns
+  compiled native patterns, ASCII ILIKE policy and live-cache invocations over
+  the existing datatype wildcard engine. The three non-NULL recipes have three
+  real Bytes/Bytes/Int inputs and exact typed `NativeLikeCallMetadata`, not an
+  invented fourth SQL operand. Native escape is already normalized to u8; wire
+  LikeSig keeps its original charset/collation and i64-to-u32 behavior. Actual
+  NULL witnesses and missing legacy children have separate one/zero-input
+  recipes, all returning the actual owned Int/NULL. Metadata construction shares
+  cache handles without lookup; an independent binding guard resolves/compiles
+  only inside the generated wrapper and detaches on return or unwind. Owner
+  Clone resets while invocation Clone shares; context-only cache keys preserve
+  old same-context hits even if incoming pattern bytes change. The observed
+  compiled value/Vec capacities are checked without a second cache lookup;
+  cache-lock/Arc headers and temporary folds remain outside this known-storage
+  accounting, not a physical heap or preallocation/OOM bound. Legacy LIKE uses
+  UTF-8-to-empty, the existing Go-simple Unicode leaf and Reject trailing escape,
+  distinct from modern Literal trailing escape and ASCII-only ILIKE. Native
+  AST/typed/legacy and scan/SHOW callers retain their demand and forward actual
+  contexts/errors; pure bool utility/statistics SDK calls claim no worker receipt.
+  Ordinary PB admission and unsupported Go vector tiers remain unchanged.
   Regexp algorithms remain shared in `components/tidb_query_expr/src/regexp_policy.rs`;
   `native_regexp.rs` owns the context cache, native compiler and typed causes.
   Cache-owner Clone resets, while explicit invocation handles share the actual
@@ -352,8 +372,9 @@ short-circuit admission policy described above.
   and borrow the actual cached Regex/parts, including memoized compile failures.
   Statement-context and constness semantics remain frontend-owned; metadata RAII
   detaches the handles before postflight or pool return, including unwinding.
-  Only these four exact operation/role/kind combinations admit typed metadata
-  and real 3/5/6-slot schemas; other metadata remains unit. The common driver is
+  These four exact regexp operation/role/kind combinations admit typed metadata
+  and real 3/5/6-slot schemas; the three LIKE combinations above are separate
+  typed holders, and other evaluated metadata remains unit. The common driver is
   unchanged, and ordinary wire/PB admission is not widened. Invalid INSTR return
   option alone authorizes an undemanded flags marker, never a fabricated NULL.
   Two nullable witnesses, two distinct legacy case policies and one genuine

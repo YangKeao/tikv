@@ -1,8 +1,14 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use tidb_query_codegen::rpn_fn;
-use tidb_query_common::Result;
+use tidb_query_common::{Result, error::EvaluateError};
 use tidb_query_datatype::codec::{collation::*, data_type::*};
+
+use crate::{
+    NativeLikeKind,
+    local::{LocalError, NativeLikeCallMetadata},
+    types::function::CallBuild,
+};
 
 #[rpn_fn]
 #[inline]
@@ -20,6 +26,96 @@ pub fn like<C: Collator, CS: Charset>(
         },
     )?;
     Ok(Some(i64::from(matched)))
+}
+
+fn like_infrastructure_error(error: LocalError) -> tidb_query_common::Error {
+    EvaluateError::Caused(Box::new(error)).into()
+}
+
+fn init_like_native_data(_expr: &mut CallBuild) -> Result<NativeLikeCallMetadata> {
+    Ok(NativeLikeCallMetadata::new(NativeLikeKind::Like))
+}
+
+fn init_ilike_native_data(_expr: &mut CallBuild) -> Result<NativeLikeCallMetadata> {
+    Ok(NativeLikeCallMetadata::new(NativeLikeKind::Ilike))
+}
+
+fn init_like_legacy_native_data(_expr: &mut CallBuild) -> Result<NativeLikeCallMetadata> {
+    Ok(NativeLikeCallMetadata::new(NativeLikeKind::Legacy))
+}
+
+fn evaluate_native_like(
+    metadata: &NativeLikeCallMetadata,
+    kind: NativeLikeKind,
+    text: BytesRef,
+    pattern: BytesRef,
+    escape: &Int,
+) -> Result<Option<Int>> {
+    let invocation = metadata.invocation().map_err(like_infrastructure_error)?;
+    if invocation.kind() != kind {
+        return Err(like_infrastructure_error(LocalError::InvalidSpec(
+            "LIKE invocation kind differs from its kernel".into(),
+        )));
+    }
+    // Frontends have already applied their original byte(escape) conversion.
+    // This is a carrier contract, not a new SQL range check. Wire LIKE above
+    // retains its independent i64-to-u32 escape behavior.
+    let escape = u8::try_from(*escape).map_err(|_| {
+        like_infrastructure_error(LocalError::InvalidBatch(
+            "native LIKE requires its normalized escape byte".into(),
+        ))
+    })?;
+    let (matched, known_bytes) = invocation.evaluate(text, pattern, escape);
+    metadata
+        .record_known_cache_bytes(known_bytes)
+        .map_err(like_infrastructure_error)?;
+    Ok(Some(i64::from(matched)))
+}
+
+#[rpn_fn(capture = [metadata], metadata_mapper = init_like_native_data)]
+fn like_native(
+    metadata: &NativeLikeCallMetadata,
+    text: BytesRef,
+    pattern: BytesRef,
+    escape: &Int,
+) -> Result<Option<Int>> {
+    evaluate_native_like(metadata, NativeLikeKind::Like, text, pattern, escape)
+}
+
+#[rpn_fn(capture = [metadata], metadata_mapper = init_ilike_native_data)]
+fn ilike_native(
+    metadata: &NativeLikeCallMetadata,
+    text: BytesRef,
+    pattern: BytesRef,
+    escape: &Int,
+) -> Result<Option<Int>> {
+    evaluate_native_like(metadata, NativeLikeKind::Ilike, text, pattern, escape)
+}
+
+#[rpn_fn(capture = [metadata], metadata_mapper = init_like_legacy_native_data)]
+fn like_legacy_native(
+    metadata: &NativeLikeCallMetadata,
+    text: BytesRef,
+    pattern: BytesRef,
+    escape: &Int,
+) -> Result<Option<Int>> {
+    evaluate_native_like(metadata, NativeLikeKind::Legacy, text, pattern, escape)
+}
+
+#[rpn_fn(nullable)]
+fn like_null_int_native(value: Option<&Int>) -> Result<Option<Int>> {
+    match value {
+        None => Ok(None),
+        Some(_) => Err(like_infrastructure_error(LocalError::InvalidBatch(
+            "native LIKE NULL witness must be an actual NULL".into(),
+        ))),
+    }
+}
+
+// Missing legacy children were not evaluated SQL NULL arguments.
+#[rpn_fn]
+fn like_missing_legacy_native() -> Result<Option<Int>> {
+    Ok(None)
 }
 
 #[cfg(test)]

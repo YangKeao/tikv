@@ -137,6 +137,13 @@ fn check_evaluated_bytes_source(
         )
     };
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::LikeNative
+            | EvaluatedBytesOp::IlikeNative
+            | EvaluatedBytesOp::LikeLegacyNative,
+            EvaluatedArgsRole::Like,
+        ) => arity == 3 && calls == 1,
+        (_, EvaluatedArgsRole::Like) => false,
         (EvaluatedBytesOp::RegexpLikeNative, EvaluatedArgsRole::NativeRegexpLike) => {
             arity == 3 && calls == 1
         }
@@ -159,6 +166,7 @@ fn check_evaluated_bytes_source(
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
             | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
@@ -167,6 +175,7 @@ fn check_evaluated_bytes_source(
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
             | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             _,
         )

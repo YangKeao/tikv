@@ -12,6 +12,59 @@ use super::{
 };
 use crate::codec::Result;
 
+/// Returns the width encoded by the first byte of a UTF-8 sequence.
+/// This is not validation: malformed lead bytes retain their leading-one width.
+pub const fn utf8_len(first: u8) -> usize {
+    if first & 0x80 == 0 {
+        1
+    } else {
+        first.leading_ones() as usize
+    }
+}
+
+/// Lowercases ASCII letters in place and leaves every other byte unchanged.
+pub fn lower_one_string(value: &mut [u8]) {
+    for byte in value {
+        if byte.is_ascii_uppercase() {
+            *byte = byte.to_ascii_lowercase();
+        }
+    }
+}
+
+/// Lowercases ASCII letters without changing the meaning of an ASCII-letter
+/// escape marker. Returns the possibly uppercased effective escape byte.
+/// Preserves the native byte walk, including widths of malformed lead bytes.
+pub fn lower_one_string_excluding_escape_char(value: &mut [u8], escape: u8) -> u8 {
+    let actual_escape = if escape.is_ascii_lowercase() {
+        escape.to_ascii_uppercase()
+    } else {
+        escape
+    };
+    let mut escaped = false;
+    let mut index = 0;
+    while index < value.len() {
+        if value[index].is_ascii_uppercase() {
+            if value[index] == escape && !escaped {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            value[index] = value[index].to_ascii_lowercase();
+        } else {
+            if value[index] == escape && !escaped {
+                escaped = true;
+                value[index] = actual_escape;
+                index += 1;
+                continue;
+            }
+            index += utf8_len(value[index]).saturating_sub(1);
+        }
+        escaped = false;
+        index += 1;
+    }
+    actual_escape
+}
+
 /// The public, normalized wildcard token kinds used by TiDB's string utilities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PatternType {
@@ -257,6 +310,16 @@ pub fn compile<C: Collator, CS: Charset>(pattern: &[u8], options: MatchOptions) 
 }
 
 impl CompiledPattern {
+    /// Retained heap bytes from the actual pattern and token vector capacities.
+    /// Excludes inline `Self` storage (charged by the caller) and allocator
+    /// overhead. `None` means arithmetic overflow, not allocation failure.
+    pub fn retained_heap_bytes(&self) -> Option<usize> {
+        self.tokens
+            .capacity()
+            .checked_mul(std::mem::size_of::<Token<StoredLiteral>>())?
+            .checked_add(self.pattern.capacity())
+    }
+
     /// Match an arbitrary byte string without allocating a decoded target.
     pub fn is_match(&self, target: &[u8]) -> Result<bool> {
         match_tokens(
@@ -376,6 +439,71 @@ mod tests {
     }
 
     #[test]
+    fn test_shared_ascii_lowering_escape_bytes_and_widths() {
+        let mut bytes: Vec<u8> = (0..=u8::MAX).collect();
+        lower_one_string(&mut bytes);
+        for (original, lowered) in (0..=u8::MAX).zip(bytes) {
+            let expected = if (b'A'..=b'Z').contains(&original) {
+                original + 32
+            } else {
+                original
+            };
+            assert_eq!(lowered, expected);
+        }
+
+        let rows: &[(&[u8], u8, &[u8], u8)] = &[
+            (b"", b'a', b"", b'A'),
+            (b"a", b'a', b"A", b'A'),
+            (b"A", b'A', b"A", b'A'),
+            (b"aaaZ", b'a', b"AaAz", b'A'),
+            (b"AAAZ", b'A', b"AaAz", b'A'),
+            (b"aA", b'a', b"Aa", b'A'),
+            (b"\\AZ\\\\", b'\\', b"\\az\\\\", b'\\'),
+            (b"\0AZ", 0, b"\0az", 0),
+            (b"%AZ", b'%', b"%az", b'%'),
+            ("ÉZ".as_bytes(), b'\\', "Éz".as_bytes(), b'\\'),
+            (b"\x80AZ", b'\\', b"\x80az", b'\\'),
+            (b"\xc0AB", b'\\', b"\xc0Ab", b'\\'),
+            (b"\xe0ABC", b'\\', b"\xe0ABc", b'\\'),
+            (b"\xf8ABCDE", b'\\', b"\xf8ABCDe", b'\\'),
+            (b"\xffABCDEFGH", b'\\', b"\xffABCDEFGh", b'\\'),
+            (b"\xffAZ", b'\\', b"\xffAZ", b'\\'),
+            (b"\xffAZ", 0xff, b"\xffaz", 0xff),
+        ];
+        for &(input, escape, expected, effective_escape) in rows {
+            let mut value = input.to_vec();
+            assert_eq!(
+                lower_one_string_excluding_escape_char(&mut value, escape),
+                effective_escape
+            );
+            assert_eq!(value, expected, "input={input:?}, escape={escape}");
+        }
+
+        const MALFORMED_WIDTH: usize = utf8_len(0xff);
+        assert_eq!(MALFORMED_WIDTH, 8);
+        for (first, width) in [
+            (0, 1),
+            (0x7f, 1),
+            (0x80, 1),
+            (0xbf, 1),
+            (0xc0, 2),
+            (0xdf, 2),
+            (0xe0, 3),
+            (0xef, 3),
+            (0xf0, 4),
+            (0xf7, 4),
+            (0xf8, 5),
+            (0xfb, 5),
+            (0xfc, 6),
+            (0xfd, 6),
+            (0xfe, 7),
+            (0xff, 8),
+        ] {
+            assert_eq!(utf8_len(first), width);
+        }
+    }
+
+    #[test]
     fn test_shared_pattern_trailing_escape_policy() {
         for (text, pattern, escape, literal, reject) in [
             ("\\", "\\", '\\', true, false),
@@ -476,6 +604,19 @@ mod tests {
                 }
             }
         }
+        let mut compiled = compile::<CollatorBinary, CharsetBinary>(
+            b"a",
+            options(b'\\' as u32, TrailingEscape::Literal),
+        );
+        compiled.pattern.reserve(17);
+        compiled.tokens.reserve(9);
+        assert_eq!(
+            compiled.retained_heap_bytes(),
+            Some(
+                compiled.pattern.capacity()
+                    + compiled.tokens.capacity() * std::mem::size_of::<Token<StoredLiteral>>()
+            )
+        );
         assert_eq!(
             compile_bytes(b"%%_", b'\\'),
             (b"_%".to_vec(), vec![PatternType::One, PatternType::Any])

@@ -12,7 +12,9 @@ use tidb_query_datatype::{
     codec::{
         batch::LazyBatchColumnVec,
         collation::native::NativeCollation,
-        data_type::{BATCH_MAX_SIZE, ChunkedVecBytes, ScalarValue, ScalarValueRef, VectorValue},
+        data_type::{
+            BATCH_MAX_SIZE, Bytes, ChunkedVecBytes, ScalarValue, ScalarValueRef, VectorValue,
+        },
         mysql::{
             DEFAULT_DIV_FRAC_INCR, Decimal, NativeVectorError, NativeVectorFloat32, Tz,
             decimal::NativeDecimalError, deserialize_native_vector_float32,
@@ -35,9 +37,9 @@ use super::{
 };
 use crate::{
     BinaryArithmeticErrorKind, BinaryArithmeticOperation, LegacyBinaryArithmeticError,
-    NativeBinaryArithmeticError, NativeDecimalFastOutcome, NativeRegexpError,
-    NativeRegexpInvocation, NativeUnaryMinusError, RpnExpressionNode, RpnStackNode,
-    RpnStackNodeVectorValue,
+    NativeBinaryArithmeticError, NativeDecimalFastOutcome, NativeLikeInvocation, NativeLikeKind,
+    NativeRegexpError, NativeRegexpInvocation, NativeUnaryMinusError, RpnExpressionNode,
+    RpnStackNode, RpnStackNodeVectorValue,
     impl_string::{
         ConcatKind, FieldKind, PreparedCharArgs, PreparedConcatArgs, PreparedExportSetArgs,
         PreparedFieldArgs, PreparedFindInSetKeys, PreparedMakeSetArgs,
@@ -136,6 +138,95 @@ impl NativeRegexpCallMetadata {
             .invocation
             .try_borrow_mut()
             .map_err(|_| LocalError::InvalidSpec("regexp invocation unbind conflict".into()))?
+            .take();
+        self.known_cache_bytes.set(Some(0));
+        self.known_cache_limit.set(0);
+        drop(owned);
+        Ok(())
+    }
+}
+
+/// LIKE uses the same invocation-scoped binding discipline as regexp, with a
+/// distinct typed holder. No context/cache/collation is a SQL operand, and no
+/// cache observation occurs before the actual generated wrapper executes.
+#[derive(Debug)]
+pub(crate) struct NativeLikeCallMetadata {
+    kind: NativeLikeKind,
+    invocation: RefCell<Option<NativeLikeInvocation>>,
+    known_cache_bytes: Cell<Option<usize>>,
+    known_cache_limit: Cell<usize>,
+}
+
+impl NativeLikeCallMetadata {
+    pub(crate) fn new(kind: NativeLikeKind) -> Self {
+        Self {
+            kind,
+            invocation: RefCell::new(None),
+            known_cache_bytes: Cell::new(Some(0)),
+            known_cache_limit: Cell::new(0),
+        }
+    }
+
+    pub(crate) fn invocation(&self) -> LocalResult<NativeLikeInvocation> {
+        self.invocation
+            .try_borrow()
+            .map_err(|_| LocalError::InvalidSpec("LIKE invocation is already borrowed".into()))?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| LocalError::InvalidSpec("LIKE call has no bound invocation".into()))
+    }
+
+    pub(crate) fn record_known_cache_bytes(&self, bytes: Option<usize>) -> LocalResult<()> {
+        if self
+            .invocation
+            .try_borrow()
+            .map_err(|_| LocalError::InvalidSpec("LIKE invocation is already borrowed".into()))?
+            .is_none()
+        {
+            return Err(LocalError::InvalidSpec(
+                "LIKE cache observation has no invocation".into(),
+            ));
+        }
+        let total = self
+            .known_cache_bytes
+            .get()
+            .and_then(|old| old.checked_add(bytes?));
+        // Preserve refusal/overflow until the worker checks the use-site record.
+        self.known_cache_bytes.set(total);
+        match total {
+            Some(total) if total <= self.known_cache_limit.get() => Ok(()),
+            _ => Err(evaluated_ascii_storage_overflow()),
+        }
+    }
+
+    fn is_unbound(&self) -> bool {
+        self.invocation
+            .try_borrow()
+            .is_ok_and(|value| value.is_none())
+            && self.known_cache_bytes.get() == Some(0)
+            && self.known_cache_limit.get() == 0
+    }
+
+    fn bind(&self, invocation: NativeLikeInvocation, limit: usize) -> LocalResult<()> {
+        if !self.is_unbound() || invocation.kind() != self.kind {
+            return Err(LocalError::InvalidSpec(
+                "LIKE binding is retained or has the wrong kind".into(),
+            ));
+        }
+        let mut target = self
+            .invocation
+            .try_borrow_mut()
+            .map_err(|_| LocalError::InvalidSpec("LIKE invocation bind conflict".into()))?;
+        self.known_cache_limit.set(limit);
+        *target = Some(invocation);
+        Ok(())
+    }
+
+    fn unbind(&self) -> LocalResult<()> {
+        let owned = self
+            .invocation
+            .try_borrow_mut()
+            .map_err(|_| LocalError::InvalidSpec("LIKE invocation unbind conflict".into()))?
             .take();
         self.known_cache_bytes.set(Some(0));
         self.known_cache_limit.set(0);
@@ -1093,6 +1184,11 @@ pub enum EvaluatedBytesOp {
     VecL2NormNative,
     VecFromTextNative,
     VecRealNullNative,
+    LikeNative,
+    IlikeNative,
+    LikeLegacyNative,
+    LikeNullIntNative,
+    LikeMissingLegacyNative,
     RegexpLikeNative,
     RegexpSubstrNative,
     RegexpInstrNative,
@@ -1173,6 +1269,7 @@ pub(crate) enum EvaluatedArgsRole {
     Values,
     DecimalBinary,
     Int1282,
+    Like,
     NativeRegexpLike,
     NativeRegexpSubstr,
     NativeRegexpInstr,
@@ -1997,6 +2094,27 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::VecRealNullNative,
                 );
             }
+            Self::LikeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::LikeNative);
+            }
+            Self::IlikeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::IlikeNative);
+            }
+            Self::LikeLegacyNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::LikeLegacyNative,
+                );
+            }
+            Self::LikeNullIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::LikeNullIntNative,
+                );
+            }
+            Self::LikeMissingLegacyNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::LikeMissingLegacyNative,
+                );
+            }
             Self::RegexpLikeNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::RegexpLikeNative,
@@ -2297,7 +2415,21 @@ impl EvaluatedBytesOp {
         }
     }
 
+    pub(crate) fn like_kind(self) -> Option<NativeLikeKind> {
+        match self {
+            Self::LikeNative => Some(NativeLikeKind::Like),
+            Self::IlikeNative => Some(NativeLikeKind::Ilike),
+            Self::LikeLegacyNative => Some(NativeLikeKind::Legacy),
+            _ => None,
+        }
+    }
+
     pub(crate) fn metadata_matches(self, metadata: &(dyn std::any::Any + Send)) -> bool {
+        if let Some(kind) = self.like_kind() {
+            return metadata
+                .downcast_ref::<NativeLikeCallMetadata>()
+                .is_some_and(|payload| payload.kind == kind);
+        }
         match self.regexp_kind() {
             Some(kind) => metadata
                 .downcast_ref::<NativeRegexpCallMetadata>()
@@ -2347,6 +2479,11 @@ impl EvaluatedBytesOp {
             | Self::VecL2DistanceNative
             | Self::VecNegativeInnerProductNative
             | Self::VecCosineDistanceNative => EvaluatedArgsRole::NativeVector2,
+            Self::LikeNative | Self::IlikeNative | Self::LikeLegacyNative => {
+                EvaluatedArgsRole::Like
+            }
+            Self::LikeNullIntNative => EvaluatedArgsRole::NullWitness,
+            Self::LikeMissingLegacyNative => EvaluatedArgsRole::NoArgs,
             Self::RegexpLikeNative => EvaluatedArgsRole::NativeRegexpLike,
             Self::RegexpSubstrNative => EvaluatedArgsRole::NativeRegexpSubstr,
             Self::RegexpInstrNative => EvaluatedArgsRole::NativeRegexpInstr,
@@ -2773,6 +2910,11 @@ impl EvaluatedBytesOp {
             Self::VecL2NormNative => crate::impl_vec::get_native_vec_l2_norm_fn_meta(),
             Self::VecFromTextNative => crate::impl_vec::get_native_vec_from_text_fn_meta(),
             Self::VecRealNullNative => crate::impl_vec::get_native_vec_real_null_fn_meta(),
+            Self::LikeNative => crate::impl_like::like_native_fn_meta(),
+            Self::IlikeNative => crate::impl_like::ilike_native_fn_meta(),
+            Self::LikeLegacyNative => crate::impl_like::like_legacy_native_fn_meta(),
+            Self::LikeNullIntNative => crate::impl_like::like_null_int_native_fn_meta(),
+            Self::LikeMissingLegacyNative => crate::impl_like::like_missing_legacy_native_fn_meta(),
             Self::RegexpLikeNative => crate::impl_regexp::get_regexp_like_native_fn_meta(),
             Self::RegexpSubstrNative => crate::impl_regexp::get_regexp_substr_native_fn_meta(),
             Self::RegexpInstrNative => crate::impl_regexp::get_regexp_instr_native_fn_meta(),
@@ -3196,7 +3338,12 @@ impl EvaluatedBytesOp {
             | Self::RegexpLikeLegacyCiNative
             | Self::RegexpLikeLegacyBinNative
             | Self::RegexpNullIntNative
-            | Self::RegexpMissingLegacyNative => EvalType::Int,
+            | Self::RegexpMissingLegacyNative
+            | Self::LikeNative
+            | Self::IlikeNative
+            | Self::LikeLegacyNative
+            | Self::LikeNullIntNative
+            | Self::LikeMissingLegacyNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -3411,6 +3558,11 @@ impl EvaluatedBytesOp {
             Self::UnaryPlusDecimalNative | Self::UnaryMinusDecimalNative => {
                 &[EvalType::Decimal, EvalType::Int]
             }
+            Self::LikeNative | Self::IlikeNative | Self::LikeLegacyNative => {
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Int]
+            }
+            Self::LikeNullIntNative => &[EvalType::Int],
+            Self::LikeMissingLegacyNative => &[],
             Self::RegexpLikeNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::RegexpSubstrNative => &[
                 EvalType::Bytes,
@@ -3848,6 +4000,14 @@ pub enum EvaluatedArgs {
     },
     /// Actual signed i128 operands, not narrowed native integer values.
     Int1282(Option<i128>, Option<i128>),
+    /// Three actual, non-NULL operands with invocation-scoped semantic context.
+    /// NULL short-circuit uses NullWitness instead; escape is normalized to u8.
+    Like {
+        invocation: NativeLikeInvocation,
+        text: Option<Bytes>,
+        pattern: Option<Bytes>,
+        escape: Option<i64>,
+    },
     RegexpLike {
         invocation: NativeRegexpInvocation,
         text: Vec<u8>,
@@ -4050,6 +4210,7 @@ impl EvaluatedArgs {
             }
             Self::FindInSetPreparedReady { .. } => EvaluatedArgsRole::FindInSetPrepared,
             Self::NoArgs => EvaluatedArgsRole::NoArgs,
+            Self::Like { .. } => EvaluatedArgsRole::Like,
             Self::RegexpLike { .. } => EvaluatedArgsRole::NativeRegexpLike,
             Self::RegexpSubstr { .. } => EvaluatedArgsRole::NativeRegexpSubstr,
             Self::RegexpInstr { .. } => EvaluatedArgsRole::NativeRegexpInstr,
@@ -4079,6 +4240,7 @@ impl EvaluatedArgs {
 
     fn input_types(&self) -> &'static [EvalType] {
         match self {
+            Self::Like { .. } => EvaluatedBytesOp::LikeNative.input_types(),
             Self::RegexpLike { .. } => EvaluatedBytesOp::RegexpLikeNative.input_types(),
             Self::RegexpSubstr { .. } => EvaluatedBytesOp::RegexpSubstrNative.input_types(),
             Self::RegexpInstr { .. } => EvaluatedBytesOp::RegexpInstrNative.input_types(),
@@ -4148,6 +4310,17 @@ impl EvaluatedArgs {
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
         match self {
+            Self::Like {
+                invocation,
+                text,
+                pattern,
+                escape,
+            } => {
+                operation.like_kind() == Some(invocation.kind())
+                    && text.is_some()
+                    && pattern.is_some()
+                    && escape.is_some_and(|value| u8::try_from(value).is_ok())
+            }
             Self::RegexpInstr {
                 return_option,
                 match_type,
@@ -4186,6 +4359,7 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::TranslateNullNative
                         | EvaluatedBytesOp::SqlCryptNullNative
                         | EvaluatedBytesOp::VecRealNullNative
+                        | EvaluatedBytesOp::LikeNullIntNative
                         | EvaluatedBytesOp::RegexpNullIntNative
                         | EvaluatedBytesOp::RegexpNullBytesNative
                         | EvaluatedBytesOp::UnaryNullNative
@@ -4474,6 +4648,12 @@ impl EvaluatedArgs {
         // handles are real semantic context, never hidden ScalarValue operands.
         use ScalarValue::{Bytes, Int};
         let (ready, arity) = match self {
+            Self::Like {
+                text,
+                pattern,
+                escape,
+                ..
+            } => ([Bytes(text), Bytes(pattern), Int(escape), Int(None)], 3),
             Self::RegexpLike {
                 invocation,
                 text,
@@ -5929,7 +6109,38 @@ impl Drop for RegexpBindingGuard<'_> {
     }
 }
 
+struct LikeBindingGuard<'a> {
+    worker: &'a mut EvaluatedBytesWorker,
+}
+
+impl Drop for LikeBindingGuard<'_> {
+    fn drop(&mut self) {
+        if self
+            .worker
+            .like_metadata()
+            .and_then(NativeLikeCallMetadata::unbind)
+            .is_err()
+        {
+            self.worker.poisoned = true;
+        }
+    }
+}
+
 impl EvaluatedBytesWorker {
+    fn like_metadata(&self) -> LocalResult<&NativeLikeCallMetadata> {
+        let kind = self.operation.like_kind().ok_or_else(|| {
+            LocalError::InvalidSpec("only a LIKE recipe may bind LIKE metadata".into())
+        })?;
+        let nodes: &[RpnExpressionNode] = self.program.expression.as_ref();
+        match nodes.get(self.operation.input_types().len()) {
+            Some(RpnExpressionNode::FnCall { metadata, .. }) => metadata
+                .downcast_ref::<NativeLikeCallMetadata>()
+                .filter(|payload| payload.kind == kind)
+                .ok_or_else(|| LocalError::InvalidSpec("LIKE metadata kind changed".into())),
+            _ => Err(LocalError::InvalidSpec("LIKE call is absent".into())),
+        }
+    }
+
     fn regexp_metadata(&self) -> LocalResult<&NativeRegexpCallMetadata> {
         let kind = self.operation.regexp_kind().ok_or_else(|| {
             LocalError::InvalidSpec(
@@ -6020,6 +6231,14 @@ impl EvaluatedBytesWorker {
             // statement cache use is separately recorded during an invocation;
             // opaque Regex/TLS storage is explicitly NOT measured as exact heap.
             mem::size_of::<NativeRegexpCallMetadata>()
+        } else if self.operation.like_kind().is_some() {
+            let payload = self.like_metadata()?;
+            if !payload.is_unbound() {
+                return Err(LocalError::InvalidSpec(
+                    "LIKE worker retains invocation state".into(),
+                ));
+            }
+            mem::size_of::<NativeLikeCallMetadata>()
         } else {
             0
         };
@@ -6119,6 +6338,12 @@ impl EvaluatedBytesWorker {
             } else {
                 0
             };
+            // Invocation cloning shares live state, unlike owner cloning. This
+            // reads no cache and adds no SQL slot; into_values moves the BBI owners.
+            let like_invocation = match &args {
+                EvaluatedArgs::Like { invocation, .. } => Some(invocation.clone()),
+                _ => None,
+            };
             let (ready, arity, invocation) = args.into_values(materialization_available)?;
             if let Some(invocation) = invocation {
                 let input_bytes = ready[..arity]
@@ -6141,6 +6366,29 @@ impl EvaluatedBytesWorker {
                 guard.worker.regexp_metadata()?.bind(invocation, limit)?;
                 guard.worker.eval_ready(ready, arity, &mut sql_failure)
                 // The guard clears binding/record before finish_invocation.
+            } else if let Some(invocation) = like_invocation {
+                let input_bytes = ready[..arity]
+                    .iter()
+                    .try_fold(0usize, |sum, value| {
+                        sum.checked_add(match value {
+                            ScalarValue::Bytes(Some(value)) => value.capacity(),
+                            _ => 0,
+                        })
+                    })
+                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                let limit = self
+                    .state
+                    .limits
+                    .max_retained_bytes
+                    .checked_sub(input_bytes)
+                    // Every LIKE wrapper owns one Int result. Reserve its
+                    // guaranteed minimum so even empty inputs/usize::MAX leave
+                    // finite room; the driver checks actual result capacities.
+                    .and_then(|limit| limit.checked_sub(int_min_storage_bytes(1)?))
+                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                let guard = LikeBindingGuard { worker: self };
+                guard.worker.like_metadata()?.bind(invocation, limit)?;
+                guard.worker.eval_ready(ready, arity, &mut sql_failure)
             } else {
                 self.eval_ready(ready, arity, &mut sql_failure)
             }
@@ -6229,6 +6477,22 @@ impl EvaluatedBytesWorker {
             // Check the exact use-site record even on a kernel error, before
             // authenticating any SQL cause. This also unwraps a recorded scope
             // refusal from the kernel's non-SQL Caused(LocalError) transport.
+            budget.check_output(0, observed)?;
+            observed
+        } else if self.operation.like_kind().is_some() {
+            let payload = self.like_metadata()?;
+            let known = payload
+                .known_cache_bytes
+                .get()
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            if known > payload.known_cache_limit.get() {
+                return Err(evaluated_ascii_storage_overflow());
+            }
+            let observed = input_bytes
+                .checked_add(known)
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // The actual wrapper records only known owned storage. No cache
+            // peek, speculative compilation, or SQL error authentication here.
             budget.check_output(0, observed)?;
             observed
         } else {
@@ -7092,6 +7356,364 @@ mod evaluated_ascii_tests {
         assert!(failure.native_unary_minus_error().is_none());
         assert_eq!(zero.kernel_invocations(), 0);
         assert!(zero.is_healthy());
+    }
+
+    #[test]
+    fn like_dispatch_cache_identity_roles_null_and_missing() {
+        use crate::{NativeCompiledIlikePattern, NativeCompiledLikePattern, NativeContextCache};
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        let args = |invocation, text: &[u8], pattern: &[u8]| EvaluatedArgs::Like {
+            invocation,
+            text: Some(text.to_vec()),
+            pattern: Some(pattern.to_vec()),
+            escape: Some(92),
+        };
+        let assert_int = |value, expected| {
+            let ComputedValue::Int(value) = value else {
+                panic!("LIKE must own signed Int")
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.value(), expected);
+        };
+        let cache = NativeContextCache::<NativeCompiledLikePattern>::new();
+        let invocation = NativeLikeInvocation::like(NativeCollation::Utf8Mb4Bin, Some((&cache, 1)));
+        let mut like = prepare(EvaluatedBytesOp::LikeNative);
+        let storage = like.retained_storage().unwrap();
+        assert!(like.program.host_catalog.is_none());
+        assert!(cache.get_cache(1).is_none());
+        // Preflight refuses kind, physical-role, NULL and unnormalized escapes
+        // without dispatch, cache lookup/compile, or poisoning a healthy worker.
+        for bad in [
+            args(NativeLikeInvocation::legacy(false), b"abc", b"a%"),
+            EvaluatedArgs::BytesBytesInt(Some(b"abc".to_vec()), Some(b"a%".to_vec()), Some(92)),
+            EvaluatedArgs::Like {
+                invocation: invocation.clone(),
+                text: None,
+                pattern: Some(b"a%".to_vec()),
+                escape: Some(92),
+            },
+            EvaluatedArgs::Like {
+                invocation: invocation.clone(),
+                text: Some(b"abc".to_vec()),
+                pattern: None,
+                escape: Some(92),
+            },
+            EvaluatedArgs::Like {
+                invocation: invocation.clone(),
+                text: Some(b"abc".to_vec()),
+                pattern: Some(b"a%".to_vec()),
+                escape: None,
+            },
+            EvaluatedArgs::Like {
+                invocation: invocation.clone(),
+                text: Some(b"abc".to_vec()),
+                pattern: Some(b"a%".to_vec()),
+                escape: Some(-1),
+            },
+            EvaluatedArgs::Like {
+                invocation: invocation.clone(),
+                text: Some(b"abc".to_vec()),
+                pattern: Some(b"a%".to_vec()),
+                escape: Some(256),
+            },
+        ] {
+            let failure = like.eval_args_reported(bad).unwrap_err();
+            assert!(matches!(failure.error(), LocalError::InvalidBatch(_)));
+            assert_eq!(failure.sql_failure(), None);
+            assert_eq!(like.kernel_invocations(), 0);
+            assert!(like.is_healthy());
+            assert!(cache.get_cache(1).is_none());
+        }
+        assert_int(
+            like.eval_args(args(invocation.clone(), b"abc", b"a%"))
+                .unwrap(),
+            Some(1),
+        );
+        let first = cache.get_cache(1).unwrap();
+        assert_int(
+            like.eval_args(args(invocation.clone(), b"abc", b"z%"))
+                .unwrap(),
+            Some(1),
+        );
+        assert!(Arc::ptr_eq(&first, &cache.get_cache(1).unwrap()));
+        let cloned_owner = cache.clone();
+        assert!(cloned_owner.get_cache(1).is_none());
+        assert_int(
+            like.eval_args(args(
+                NativeLikeInvocation::like(NativeCollation::Utf8Mb4Bin, Some((&cloned_owner, 1))),
+                b"abc",
+                b"z%",
+            ))
+            .unwrap(),
+            Some(0),
+        );
+        assert_int(
+            like.eval_args(args(
+                NativeLikeInvocation::like(NativeCollation::Utf8Mb4Bin, Some((&cache, 2))),
+                b"abc",
+                b"z%",
+            ))
+            .unwrap(),
+            Some(0),
+        );
+        assert!(cache.get_cache(1).is_none());
+        assert!(first.is_match(b"abc"));
+        assert_int(
+            like.eval_args(args(
+                NativeLikeInvocation::like(NativeCollation::Utf8Mb4Bin, None),
+                b"abc",
+                b"a%",
+            ))
+            .unwrap(),
+            Some(1),
+        );
+        assert_int(
+            like.eval_args(args(
+                NativeLikeInvocation::like(NativeCollation::Utf8Mb4Bin, None),
+                b"abc",
+                b"z%",
+            ))
+            .unwrap(),
+            Some(0),
+        );
+        assert_eq!(like.kernel_invocations(), 6);
+        assert!(like.like_metadata().unwrap().is_unbound());
+        assert_eq!(like.retained_storage().unwrap(), storage);
+        let ilike_cache = NativeContextCache::<NativeCompiledIlikePattern>::new();
+        let ilike_invocation =
+            NativeLikeInvocation::ilike(NativeCollation::Utf8Mb4Bin, Some((&ilike_cache, 3)));
+        let mut ilike = prepare(EvaluatedBytesOp::IlikeNative);
+        assert_int(
+            ilike
+                .eval_args(args(ilike_invocation.clone(), b"ABC", b"a%"))
+                .unwrap(),
+            Some(1),
+        );
+        let folded = ilike_cache.get_cache(3).unwrap();
+        assert_int(
+            ilike
+                .eval_args(args(ilike_invocation, b"ABC", b"z%"))
+                .unwrap(),
+            Some(1),
+        );
+        assert!(Arc::ptr_eq(&folded, &ilike_cache.get_cache(3).unwrap()));
+        assert!(ilike.like_metadata().unwrap().is_unbound());
+        let mut legacy = prepare(EvaluatedBytesOp::LikeLegacyNative);
+        assert_int(
+            legacy
+                .eval_args(args(NativeLikeInvocation::legacy(true), b"ABC", b"a%"))
+                .unwrap(),
+            Some(1),
+        );
+        assert_int(
+            legacy
+                .eval_args(args(NativeLikeInvocation::legacy(false), b"ABC", b"a%"))
+                .unwrap(),
+            Some(0),
+        );
+        assert!(legacy.like_metadata().unwrap().is_unbound());
+        let mut null = prepare(EvaluatedBytesOp::LikeNullIntNative);
+        assert!(null.eval_args(EvaluatedArgs::NullWitness(Some(0))).is_err());
+        assert!(null.eval_args(EvaluatedArgs::Int(None)).is_err());
+        assert_eq!(null.kernel_invocations(), 0);
+        assert_int(
+            null.eval_args(EvaluatedArgs::NullWitness(None)).unwrap(),
+            None,
+        );
+        assert_eq!(null.kernel_invocations(), 1);
+        assert!(null.like_metadata().is_err());
+        assert!(null.is_healthy());
+        let mut missing = prepare(EvaluatedBytesOp::LikeMissingLegacyNative);
+        assert!(missing.eval_args(EvaluatedArgs::NullWitness(None)).is_err());
+        assert_int(missing.eval_args(EvaluatedArgs::NoArgs).unwrap(), None);
+        assert_eq!(missing.kernel_invocations(), 1);
+        assert!(missing.like_metadata().is_err());
+        assert!(missing.is_healthy());
+    }
+
+    #[test]
+    fn like_dispatch_budget_binding_cleanup_and_unwind() {
+        use crate::{NativeCompiledLikePattern, NativeContextCache};
+        let cache = NativeContextCache::<NativeCompiledLikePattern>::new();
+        let invocation = NativeLikeInvocation::like(NativeCollation::Utf8Mb4Bin, Some((&cache, 1)));
+        let args = || EvaluatedArgs::Like {
+            invocation: invocation.clone(),
+            text: Some(b"abc".to_vec()),
+            pattern: Some(b"a%".to_vec()),
+            escape: Some(92),
+        };
+        let prepare = |limits| {
+            prepare_evaluated_bytes(
+                EvaluatedBytesOp::LikeNative,
+                LocalCompileContext::default(),
+                limits,
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        for limits in [
+            ExecutionLimits {
+                max_steps: 0,
+                ..ExecutionLimits::default()
+            },
+            ExecutionLimits {
+                max_retained_bytes: 0,
+                ..ExecutionLimits::default()
+            },
+        ] {
+            let mut zero = prepare(limits);
+            let storage = zero.retained_storage().unwrap();
+            let failure = zero.eval_args_reported(args()).unwrap_err();
+            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+            assert_eq!(failure.sql_failure(), None);
+            assert_eq!(zero.kernel_invocations(), 0);
+            assert!(zero.like_metadata().unwrap().is_unbound());
+            assert!(zero.is_healthy());
+            assert_eq!(zero.retained_storage().unwrap(), storage);
+            assert!(cache.get_cache(1).is_none());
+        }
+        let mut capacity_limited = prepare(ExecutionLimits {
+            max_retained_bytes: 4096,
+            ..ExecutionLimits::default()
+        });
+        let empty_owner = Vec::with_capacity(4097);
+        let failure = capacity_limited
+            .eval_args_reported(EvaluatedArgs::Like {
+                invocation: invocation.clone(),
+                text: Some(empty_owner),
+                pattern: Some(Vec::new()),
+                escape: Some(0),
+            })
+            .unwrap_err();
+        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+        assert_eq!(capacity_limited.kernel_invocations(), 0);
+        assert!(capacity_limited.is_healthy());
+        assert!(cache.get_cache(1).is_none());
+        let mut unlimited_empty = prepare(ExecutionLimits {
+            max_retained_bytes: usize::MAX,
+            ..ExecutionLimits::default()
+        });
+        assert!(
+            unlimited_empty
+                .eval_args(EvaluatedArgs::Like {
+                    invocation: NativeLikeInvocation::like(NativeCollation::Binary, None),
+                    text: Some(Vec::new()),
+                    pattern: Some(Vec::new()),
+                    escape: Some(0),
+                })
+                .is_ok()
+        );
+        assert!(unlimited_empty.like_metadata().unwrap().is_unbound());
+        let payload = NativeLikeCallMetadata::new(NativeLikeKind::Like);
+        assert!(payload.invocation().is_err());
+        assert!(payload.record_known_cache_bytes(Some(0)).is_err());
+        assert!(
+            payload
+                .bind(NativeLikeInvocation::legacy(false), 1)
+                .is_err()
+        );
+        payload.bind(invocation.clone(), 1).unwrap();
+        assert!(payload.bind(invocation.clone(), 1).is_err());
+        payload.record_known_cache_bytes(Some(1)).unwrap();
+        assert!(matches!(
+            payload.record_known_cache_bytes(Some(1)),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(payload.known_cache_bytes.get(), Some(2));
+        payload.unbind().unwrap();
+        payload.bind(invocation.clone(), usize::MAX).unwrap();
+        payload.record_known_cache_bytes(Some(usize::MAX)).unwrap();
+        assert!(payload.record_known_cache_bytes(Some(1)).is_err());
+        assert_eq!(payload.known_cache_bytes.get(), None);
+        payload.unbind().unwrap();
+        payload.bind(invocation.clone(), 1).unwrap();
+        assert!(payload.record_known_cache_bytes(None).is_err());
+        assert_eq!(payload.known_cache_bytes.get(), None);
+        payload.unbind().unwrap();
+        assert!(payload.is_unbound());
+        let mut worker = prepare(ExecutionLimits::default());
+        let storage = worker.retained_storage().unwrap();
+        let known_owner = evaluated_ascii_owned_heap_bytes(
+            worker.program.expression.capacity(),
+            worker.program.schema.capacity(),
+            worker
+                .program
+                .expression
+                .retained_metadata_heap_bytes()
+                .unwrap(),
+            worker.ctx.warnings.warnings.capacity(),
+        )
+        .unwrap();
+        assert_eq!(
+            storage.total_bytes(),
+            mem::size_of::<EvaluatedBytesWorker>()
+                + known_owner
+                + mem::size_of::<NativeLikeCallMetadata>()
+        );
+        // Force refusal at the real generated wrapper's cache observation.
+        // This must be infrastructure, never a host fallback or SQL receipt.
+        let (ready, arity, regexp) = args().into_values(0).unwrap();
+        assert!(regexp.is_none());
+        assert_eq!(arity, 3);
+        worker.begin_invocation().unwrap();
+        let mut sql_failure = None;
+        let result = {
+            let guard = LikeBindingGuard {
+                worker: &mut worker,
+            };
+            guard
+                .worker
+                .like_metadata()
+                .unwrap()
+                .bind(invocation.clone(), 0)
+                .unwrap();
+            guard.worker.eval_ready(ready, arity, &mut sql_failure)
+        };
+        assert!(matches!(
+            worker.finish_invocation(result),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(sql_failure, None);
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert!(cache.get_cache(1).is_some());
+        assert!(worker.like_metadata().unwrap().is_unbound());
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        assert!(worker.eval_args(args()).is_ok());
+        assert_eq!(worker.kernel_invocations(), 2);
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            worker.begin_invocation().unwrap();
+            let guard = LikeBindingGuard {
+                worker: &mut worker,
+            };
+            guard
+                .worker
+                .like_metadata()
+                .unwrap()
+                .bind(invocation.clone(), 100)
+                .unwrap();
+            guard
+                .worker
+                .like_metadata()
+                .unwrap()
+                .record_known_cache_bytes(Some(1))
+                .unwrap();
+            panic!("LIKE binding unwind probe");
+        }));
+        assert!(panic.is_err());
+        assert!(worker.like_metadata().unwrap().is_unbound());
+        assert!(!worker.is_healthy());
+        assert!(worker.eval_args(args()).is_err());
+        assert_eq!(worker.kernel_invocations(), 2);
+        assert!(cache.get_cache(1).is_some());
     }
 
     #[test]

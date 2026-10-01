@@ -250,6 +250,11 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::VecL2NormNative
         | LocalFunctionId::VecFromTextNative
         | LocalFunctionId::VecRealNullNative
+        | LocalFunctionId::LikeNative
+        | LocalFunctionId::IlikeNative
+        | LocalFunctionId::LikeLegacyNative
+        | LocalFunctionId::LikeNullIntNative
+        | LocalFunctionId::LikeMissingLegacyNative
         | LocalFunctionId::RegexpLikeNative
         | LocalFunctionId::RegexpSubstrNative
         | LocalFunctionId::RegexpInstrNative

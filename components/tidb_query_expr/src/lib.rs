@@ -45,6 +45,12 @@ pub mod impl_string;
 pub mod impl_time;
 pub mod impl_vec;
 
+mod native_like;
+pub use native_like::{
+    NativeCompiledIlikePattern, NativeCompiledLikePattern, NativeLikeInvocation, NativeLikeKind,
+    native_ilike_match, native_legacy_like_match, native_like_match,
+};
+
 mod native_regexp;
 pub use native_regexp::{
     NativeCachedRegexp, NativeContextCache, NativeRegexpCompileError, NativeRegexpError,

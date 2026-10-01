@@ -315,6 +315,13 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::LikeNative
+            | EvaluatedBytesOp::IlikeNative
+            | EvaluatedBytesOp::LikeLegacyNative,
+            EvaluatedArgsRole::Like,
+        ) => types.len() == 3 && operation.call_count() == 1,
+        (_, EvaluatedArgsRole::Like) => false,
         (EvaluatedBytesOp::RegexpLikeNative, EvaluatedArgsRole::NativeRegexpLike) => {
             types.len() == 3 && operation.call_count() == 1
         }
@@ -337,6 +344,7 @@ fn evaluated_ready_args_match(
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
             | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => types.is_empty() && operation.call_count() == 1,
@@ -345,6 +353,7 @@ fn evaluated_ready_args_match(
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
             | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             _,
         )
@@ -389,6 +398,11 @@ fn evaluated_ready_args_match(
         }
         && match role {
             EvaluatedArgsRole::NoArgs => values.is_empty(),
+            EvaluatedArgsRole::Like => {
+                operation.like_kind().is_some()
+                    && matches!(values, [ScalarValue::Bytes(Some(_)), ScalarValue::Bytes(Some(_)), ScalarValue::Int(Some(escape))]
+                        if u8::try_from(*escape).is_ok())
+            }
             EvaluatedArgsRole::NativeRegexpLike
             | EvaluatedArgsRole::NativeRegexpSubstr
             | EvaluatedArgsRole::NativeRegexpInstr
@@ -531,6 +545,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::TranslateNullNative
                         | EvaluatedBytesOp::SqlCryptNullNative
                         | EvaluatedBytesOp::VecRealNullNative
+                        | EvaluatedBytesOp::LikeNullIntNative
                         | EvaluatedBytesOp::RegexpNullIntNative
                         | EvaluatedBytesOp::RegexpNullBytesNative
                         | EvaluatedBytesOp::UnaryNullNative
@@ -797,6 +812,13 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::LikeNative
+            | EvaluatedBytesOp::IlikeNative
+            | EvaluatedBytesOp::LikeLegacyNative,
+            EvaluatedArgsRole::Like,
+        ) => arity == 3 && calls == 1,
+        (_, EvaluatedArgsRole::Like) => false,
         (EvaluatedBytesOp::RegexpLikeNative, EvaluatedArgsRole::NativeRegexpLike) => {
             arity == 3 && calls == 1
         }
@@ -819,6 +841,7 @@ pub(crate) fn evaluated_bytes_shape(
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
             | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
@@ -827,6 +850,7 @@ pub(crate) fn evaluated_bytes_shape(
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
             | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             _,
         )
