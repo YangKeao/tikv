@@ -233,6 +233,12 @@ pub enum LocalFunctionId {
     MonthCoreNative,
     DayOfMonthCoreNative,
     QuarterCoreNative,
+    HourTextNative,
+    MinuteTextNative,
+    SecondTextNative,
+    HourNanosNative,
+    MinuteNanosNative,
+    SecondNanosNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

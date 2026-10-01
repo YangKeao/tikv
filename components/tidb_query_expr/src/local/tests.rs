@@ -6447,3 +6447,107 @@ fn local_evaluated_args_calendar_core_fields_keep_raw_role() {
     assert!(ieee.is_healthy());
     assert_eq!(ieee.retained_storage().unwrap(), storage);
 }
+
+#[test]
+fn local_evaluated_args_time_text_and_nanos_keep_value_roles() {
+    for (operation, text, component) in [
+        (EvaluatedBytesOp::HourTextNative, true, 838_i64),
+        (EvaluatedBytesOp::MinuteTextNative, true, 59_i64),
+        (EvaluatedBytesOp::SecondTextNative, true, 59_i64),
+        (EvaluatedBytesOp::HourNanosNative, false, 900_i64),
+        (EvaluatedBytesOp::MinuteNanosNative, false, 30_i64),
+        (EvaluatedBytesOp::SecondNanosNative, false, 15_i64),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_retained_bytes: 8 * 1024,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        let wrong = if text {
+            EvaluatedArgs::Int(Some(0))
+        } else {
+            EvaluatedArgs::Bytes(Some(b"00:00:00".to_vec()))
+        };
+        for invalid in [wrong, EvaluatedArgs::TimeCoreBits(Some(0))] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        if operation == EvaluatedBytesOp::HourTextNative {
+            let mut oversized = Vec::with_capacity(16 * 1024);
+            oversized.extend_from_slice(b"bad");
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let cases = if text {
+            [
+                (EvaluatedArgs::Bytes(None), None),
+                (EvaluatedArgs::Bytes(Some(b"00:00:00".to_vec())), Some(0)),
+                (
+                    EvaluatedArgs::Bytes(Some(b"900:30:15".to_vec())),
+                    Some(component),
+                ),
+            ]
+        } else {
+            [
+                (EvaluatedArgs::Int(None), None),
+                (EvaluatedArgs::Int(Some(0)), Some(0)),
+                (
+                    EvaluatedArgs::Int(Some(3_241_815_000_000_000)),
+                    Some(component),
+                ),
+            ]
+        };
+        for (index, (args, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+                panic!("time component returned a non-Int value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let extra = match operation {
+            EvaluatedBytesOp::HourTextNative => {
+                Some((EvaluatedArgs::Bytes(Some(b"bad".to_vec())), None))
+            }
+            EvaluatedBytesOp::HourNanosNative => {
+                Some((EvaluatedArgs::Int(Some(i64::MIN)), Some(2_562_047)))
+            }
+            EvaluatedBytesOp::SecondNanosNative => {
+                Some((EvaluatedArgs::Int(Some(-61_000_000_000)), Some(1)))
+            }
+            _ => None,
+        };
+        if let Some((args, expected)) = extra {
+            let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+                panic!("time component edge returned a non-Int value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), 4);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

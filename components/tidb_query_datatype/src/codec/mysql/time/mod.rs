@@ -58,13 +58,13 @@ const MONTH_NAMES_ABBR: &[&str] = &[
 ];
 
 fn is_leap_year(year: u32) -> bool {
-    year & 3 == 0 && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+    Time::native_is_leap_year(i64::from(year))
 }
 
 fn last_day_of_month(year: u32, month: u32) -> u32 {
     match month {
-        4 | 6 | 9 | 11 => 30,
-        2 => is_leap_year(year) as u32 + 28,
+        1..=12 => Time::native_days_in_month(i64::from(year), month),
+        // Wire callers historically receive 31 for an invalid month.
         _ => 31,
     }
 }
@@ -228,6 +228,150 @@ impl From<TimeType> for FieldTypeTp {
 
 // The common set of methods for `date/time`
 impl Time {
+    /// Parses the native HOUR/MINUTE/SECOND text domain without constructing a
+    /// Time or Duration. Sign stripping, partial numeric text, date-prefix
+    /// validation, ignored digit fractions, and whole-value clamping retain
+    /// the native parser's original policies and allocation paths.
+    pub fn parse_native_hms(s: &str) -> Option<(u32, u32, u32)> {
+        let s = s.trim();
+        let s = s.strip_prefix('-').unwrap_or(s);
+        if s.contains(':') {
+            let time_str = match s.split_once(char::is_whitespace) {
+                Some((date_str, time_str)) => {
+                    Self::parse_native_date_ymd(date_str)?;
+                    time_str.trim_start()
+                }
+                None => s,
+            };
+            let mut fields = time_str.splitn(3, ':');
+            let h: i64 = fields.next()?.parse().ok()?;
+            let m: u32 = fields.next()?.parse().ok()?;
+            let sec: u32 = match fields.next() {
+                Some(field) => {
+                    let (whole, fraction) = field
+                        .split_once('.')
+                        .map_or((field, None), |(whole, fraction)| (whole, Some(fraction)));
+                    if fraction
+                        .is_some_and(|digits| !digits.bytes().all(|byte| byte.is_ascii_digit()))
+                    {
+                        return None;
+                    }
+                    whole.parse().ok()?
+                }
+                None => 0,
+            };
+            Self::clamp_native_hms(h, m, sec)
+        } else {
+            let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+            if digits.is_empty() {
+                return None;
+            }
+            let n: i64 = digits.parse().ok()?;
+            Self::clamp_native_hms(n / 10_000, ((n / 100) % 100) as u32, (n % 100) as u32)
+        }
+    }
+
+    fn clamp_native_hms(h: i64, m: u32, sec: u32) -> Option<(u32, u32, u32)> {
+        if h < 0 || m > 59 || sec > 59 {
+            return None;
+        }
+        if h > 838 {
+            return Some((838, 59, 59));
+        }
+        Some((h as u32, m, sec))
+    }
+
+    /// Parses a native calendar date, allowing its full u32 written-year
+    /// domain and ignoring a whitespace-separated time suffix. This does not
+    /// validate or narrow through the packed Time representation.
+    pub fn parse_native_date_ymd(s: &str) -> Option<(i64, u32, u32)> {
+        let input = s.trim();
+        let date = input
+            .split_once(char::is_whitespace)
+            .map_or(input, |(date, _)| date);
+        let bare = matches!(date.len(), 6 | 8) && date.bytes().all(|byte| byte.is_ascii_digit());
+        let (year, month, day) = if bare {
+            let year_digits = date.len() - 4;
+            let (year, rest) = date.split_at(year_digits);
+            let (month, day) = rest.split_at(2);
+            (
+                Self::native_expand_date_year(year.parse().ok()?, year_digits),
+                month.parse().ok()?,
+                day.parse().ok()?,
+            )
+        } else {
+            let parts = Self::native_split_date_components(date)?;
+            let [(year, year_digits), (month, _), (day, _)] = parts.as_slice() else {
+                return None;
+            };
+            (
+                Self::native_expand_date_year(*year, *year_digits),
+                *month,
+                *day,
+            )
+        };
+        if !(1..=12).contains(&month) || day == 0 || day > Self::native_days_in_month(year, month) {
+            return None;
+        }
+        Some((year, month, day))
+    }
+
+    /// Splits exactly three nonempty ASCII-digit components, preserving the
+    /// written lengths for the native year pivot. Consecutive separators fail.
+    pub fn native_split_date_components(input: &str) -> Option<Vec<(u32, usize)>> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        for character in input.chars() {
+            if character.is_ascii_digit() {
+                current.push(character);
+            } else {
+                if current.is_empty() {
+                    return None;
+                }
+                parts.push((current.parse().ok()?, current.len()));
+                current.clear();
+            }
+        }
+        if current.is_empty() {
+            return None;
+        }
+        parts.push((current.parse().ok()?, current.len()));
+        (parts.len() == 3).then_some(parts)
+    }
+
+    /// Expands one- or two-digit native date years using their written width.
+    pub const fn native_expand_date_year(value: u32, digits: usize) -> i64 {
+        if digits > 2 {
+            return value as i64;
+        }
+        if value <= 69 {
+            2000 + value as i64
+        } else {
+            1900 + value as i64
+        }
+    }
+
+    /// Tests the Gregorian leap-year rule over the native signed-year domain.
+    pub const fn native_is_leap_year(year: i64) -> bool {
+        (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    }
+
+    /// Returns the native Gregorian month length, or zero for an invalid month.
+    pub const fn native_days_in_month(year: i64, month: u32) -> u32 {
+        match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => {
+                if Self::native_is_leap_year(year) {
+                    29
+                } else {
+                    28
+                }
+            }
+            _ => 0,
+        }
+    }
+
     /// Projects the stored year from shared CoreTime calendar bits without
     /// validation. This is a field projection, not a full Time conversion:
     /// type/FSP and clock bits have no effect on this result.
@@ -3033,6 +3177,56 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn test_native_hms_and_date_policies() {
+        // Static results from the original native two-path parser, not from
+        // Time/Duration constructors (which have narrower validation domains).
+        for (text, expected) in [
+            (" -900:30:15 ", Some((838, 59, 59))),
+            ("900:60:15", None),
+            ("1:02", Some((1, 2, 0))),
+            ("+1:02:03", Some((1, 2, 3))),
+            ("--1:02:03", None),
+            ("1:02:03.", Some((1, 2, 3))),
+            ("1:02:03.9999999", Some((1, 2, 3))),
+            ("1:02:03.1.2", None),
+            ("1:02:03.x", None),
+            ("2024-01-15", Some((0, 20, 24))),
+            ("-103045tail", Some((10, 30, 45))),
+            ("+103045", None),
+            ("junk 10:30:45", None),
+            ("2024-02-29 10:30:45", Some((10, 30, 45))),
+            ("2023-02-29 10:30:45", None),
+            ("4294967295-12-31 10:30:45", Some((10, 30, 45))),
+            ("4294967296-12-31 10:30:45", None),
+        ] {
+            assert_eq!(Time::parse_native_hms(text), expected, "{text}");
+        }
+        for (text, expected) in [
+            ("4294967295-12-31 ignored", Some((4294967295, 12, 31))),
+            ("4294967296-12-31", None),
+            ("2024--01-01", None),
+            ("2024/02/29", Some((2024, 2, 29))),
+            ("0000-02-29", Some((0, 2, 29))),
+            ("00-02-29", Some((2000, 2, 29))),
+            ("099-03-15", Some((99, 3, 15))),
+            ("700101", Some((1970, 1, 1))),
+            ("20240001", None),
+        ] {
+            assert_eq!(Time::parse_native_date_ymd(text), expected, "{text}");
+        }
+        const PIVOT: i64 = Time::native_expand_date_year(69, 2);
+        const LEAP: bool = Time::native_is_leap_year(-400);
+        const FEB: u32 = Time::native_days_in_month(-400, 2);
+        assert_eq!((PIVOT, LEAP, FEB), (2069, true, 29));
+        assert_eq!(Time::native_days_in_month(2024, 13), 0);
+        assert_eq!(last_day_of_month(2024, 13), 31);
+        assert_eq!(
+            Time::native_split_date_components("1-03-15"),
+            Some(vec![(1, 1), (3, 2), (15, 2)])
+        );
+    }
 
     #[test]
     fn test_core_bits_field_projections() {

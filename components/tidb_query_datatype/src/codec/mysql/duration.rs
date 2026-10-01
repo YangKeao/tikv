@@ -319,19 +319,39 @@ impl Duration {
         self.nanos < 0
     }
 
+    /// Projects absolute hours from the original signed nanosecond value,
+    /// without constructing, rounding, or restricting a Duration. The full
+    /// i64 domain, including MIN, fits the u32 hour result.
+    #[inline]
+    pub const fn hours_from_nanos(nanos: i64) -> u32 {
+        (nanos.unsigned_abs() / NANOS_PER_HOUR as u64) as u32
+    }
+
+    /// Projects the absolute minute component without observing FSP.
+    #[inline]
+    pub const fn minutes_from_nanos(nanos: i64) -> u32 {
+        (nanos.unsigned_abs() / NANOS_PER_MINUTE as u64 % SECS_PER_MINUTE as u64) as u32
+    }
+
+    /// Projects the absolute second component without observing FSP.
+    #[inline]
+    pub const fn secs_from_nanos(nanos: i64) -> u32 {
+        (nanos.unsigned_abs() / NANOS_PER_SEC as u64 % SECS_PER_MINUTE as u64) as u32
+    }
+
     #[inline]
     pub fn hours(self) -> u32 {
-        (self.to_secs().abs() / SECS_PER_HOUR) as u32
+        Self::hours_from_nanos(self.nanos)
     }
 
     #[inline]
     pub fn minutes(self) -> u32 {
-        (self.to_secs().abs() / SECS_PER_MINUTE % 60) as u32
+        Self::minutes_from_nanos(self.nanos)
     }
 
     #[inline]
     pub fn secs(self) -> u32 {
-        (self.to_secs().abs() % SECS_PER_MINUTE) as u32
+        Self::secs_from_nanos(self.nanos)
     }
 
     /// Returns the fractional part of `Duration` in microseconds.
@@ -730,6 +750,38 @@ mod tests {
         codec::{data_type::DateTime, mysql::UNSPECIFIED_FSP},
         expr::{EvalConfig, EvalContext, Flag},
     };
+
+    #[test]
+    fn test_raw_nanos_projections() {
+        const MIN_FIELDS: [u32; 3] = [
+            Duration::hours_from_nanos(i64::MIN),
+            Duration::minutes_from_nanos(i64::MIN),
+            Duration::secs_from_nanos(i64::MIN),
+        ];
+        // abs(MIN) is 9223372036 whole seconds = 2562047h 47m 16s.
+        assert_eq!(MIN_FIELDS, [2_562_047, 47, 16]);
+        for (nanos, expected) in [
+            (0, [0, 0, 0]),
+            (-999, [0, 0, 0]),
+            (-999_999_999, [0, 0, 0]),
+            (-1_999_999_999, [0, 0, 1]),
+            (61_999_999_999, [0, 1, 1]),
+            (-3_241_815_000_000_000, [900, 30, 15]),
+            (i64::MAX, [2_562_047, 47, 16]),
+            (i64::MIN, [2_562_047, 47, 16]),
+        ] {
+            for fsp in [0, 6, u8::MAX] {
+                // Deliberately no validated constructor: raw projection does
+                // not observe FSP, clamp the SQL range, or round nanos.
+                let duration = Duration { nanos, fsp };
+                assert_eq!(
+                    [duration.hours(), duration.minutes(), duration.secs()],
+                    expected,
+                    "nanos={nanos}, fsp={fsp}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_hours() {

@@ -919,6 +919,12 @@ pub enum EvaluatedBytesOp {
     MonthCoreNative,
     DayOfMonthCoreNative,
     QuarterCoreNative,
+    HourTextNative,
+    MinuteTextNative,
+    SecondTextNative,
+    HourNanosNative,
+    MinuteNanosNative,
+    SecondNanosNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1459,6 +1465,32 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::QuarterCoreNative,
                 );
             }
+            Self::HourTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::HourTextNative);
+            }
+            Self::MinuteTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MinuteTextNative,
+                );
+            }
+            Self::SecondTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SecondTextNative,
+                );
+            }
+            Self::HourNanosNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::HourNanosNative);
+            }
+            Self::MinuteNanosNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MinuteNanosNative,
+                );
+            }
+            Self::SecondNanosNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SecondNanosNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1757,6 +1789,12 @@ impl EvaluatedBytesOp {
             Self::MonthCoreNative => crate::impl_time::month_core_native_fn_meta(),
             Self::DayOfMonthCoreNative => crate::impl_time::day_of_month_core_native_fn_meta(),
             Self::QuarterCoreNative => crate::impl_time::quarter_core_native_fn_meta(),
+            Self::HourTextNative => crate::impl_time::hour_text_native_fn_meta(),
+            Self::MinuteTextNative => crate::impl_time::minute_text_native_fn_meta(),
+            Self::SecondTextNative => crate::impl_time::second_text_native_fn_meta(),
+            Self::HourNanosNative => crate::impl_time::hour_nanos_native_fn_meta(),
+            Self::MinuteNanosNative => crate::impl_time::minute_nanos_native_fn_meta(),
+            Self::SecondNanosNative => crate::impl_time::second_nanos_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1923,7 +1961,13 @@ impl EvaluatedBytesOp {
             | Self::YearCoreNative
             | Self::MonthCoreNative
             | Self::DayOfMonthCoreNative
-            | Self::QuarterCoreNative => EvalType::Int,
+            | Self::QuarterCoreNative
+            | Self::HourTextNative
+            | Self::MinuteTextNative
+            | Self::SecondTextNative
+            | Self::HourNanosNative
+            | Self::MinuteNanosNative
+            | Self::SecondNanosNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -2044,6 +2088,9 @@ impl EvaluatedBytesOp {
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
             Self::PiRaw | Self::JsonValidOtherNative => &[],
+            Self::HourNanosNative | Self::MinuteNanosNative | Self::SecondNanosNative => {
+                &[EvalType::Int]
+            }
             Self::OctInt => &[EvalType::Int],
             Self::OctStringNative | Self::ConcatNative | Self::ConcatWsNative => &[EvalType::Bytes],
             Self::EltNative => &[EvalType::Int, EvalType::Int, EvalType::Bytes],
@@ -2081,7 +2128,10 @@ impl EvaluatedBytesOp {
             | Self::YearCoreNative
             | Self::MonthCoreNative
             | Self::DayOfMonthCoreNative
-            | Self::QuarterCoreNative => &[EvalType::Bytes],
+            | Self::QuarterCoreNative
+            | Self::HourTextNative
+            | Self::MinuteTextNative
+            | Self::SecondTextNative => &[EvalType::Bytes],
             Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative

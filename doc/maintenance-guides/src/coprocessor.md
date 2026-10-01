@@ -293,6 +293,21 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  HOUR/MINUTE/SECOND use six private recipes in `impl_time.rs`: three
+  Bytes-to-Int text recipes and three Int-to-Int signed-nanosecond recipes.
+  Native SQL retains its original string conversion, including Duration Display
+  and FSP; no ETDuration cast is introduced. Datatype `Time::parse_native_hms`
+  owns the original text parser and whole-value 838:59:59 clamp. Its date-prefix
+  parser and shared split/pivot/leap/month-length helpers also serve thin native
+  calendar delegates, retaining the full u32-year domain. Wire month-length
+  handling still returns 31 for invalid months, unlike the native helper's 0.
+  Legacy duration calls send actual signed nanoseconds, including NULL, and
+  use shared const Duration projections without constructor validation,
+  rounding, FSP normalization or SQL-text clamping. These are distinct existing
+  domains, not interchangeable Time/Duration representations. Malformed text's
+  quiet NULL is now computed after admission; original frontend UTF8/arity
+  errors still precede admission. Existing Bytes/Int roles and signed result
+  kinds suffice; no role, driver, NoArgs case or ordinary admission is added.
   YEAR/MONTH/DAYOFMONTH/QUARTER use four private core-field recipes in
   `impl_time.rs`. TimeCoreBits is a distinct nullable-u64 logical role, encoded
   as exactly eight little-endian bytes in one physical column; ordinary Bytes,

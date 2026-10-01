@@ -77,6 +77,50 @@ fn quarter_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
     })
 }
 
+// SQL's Display-derived text policy is distinct from legacy signed nanos.
+// Invalid UTF-8 is a transport error; a valid string may parse to SQL NULL.
+fn parse_native_hms_text(bytes: BytesRef) -> Result<Option<(u32, u32, u32)>> {
+    let text =
+        from_utf8(bytes).map_err(|_| other_err!("Native HMS text transport requires UTF-8"))?;
+    Ok(Time::parse_native_hms(text))
+}
+
+#[rpn_fn(nullable)]
+fn hour_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(parse_native_hms_text(bytes)?.map(|(hour, ..)| hour as Int))
+    })
+}
+
+#[rpn_fn(nullable)]
+fn minute_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(parse_native_hms_text(bytes)?.map(|(_, minute, _)| minute as Int))
+    })
+}
+
+#[rpn_fn(nullable)]
+fn second_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(parse_native_hms_text(bytes)?.map(|(_, _, second)| second as Int))
+    })
+}
+
+#[rpn_fn(nullable)]
+fn hour_nanos_native(arg: Option<&Int>) -> Result<Option<Int>> {
+    Ok(arg.map(|nanos| Duration::hours_from_nanos(*nanos) as Int))
+}
+
+#[rpn_fn(nullable)]
+fn minute_nanos_native(arg: Option<&Int>) -> Result<Option<Int>> {
+    Ok(arg.map(|nanos| Duration::minutes_from_nanos(*nanos) as Int))
+}
+
+#[rpn_fn(nullable)]
+fn second_nanos_native(arg: Option<&Int>) -> Result<Option<Int>> {
+    Ok(arg.map(|nanos| Duration::secs_from_nanos(*nanos) as Int))
+}
+
 #[rpn_fn(nullable, capture = [ctx])]
 #[inline]
 pub fn date_format(
@@ -1920,6 +1964,64 @@ mod tests {
 
     use super::*;
     use crate::{RpnExpressionBuilder, types::test_util::RpnFnScalarEvaluator};
+
+    #[test]
+    fn test_native_hms_text_fields() {
+        let kernels: [fn(Option<&[u8]>) -> Result<Option<Int>>; 3] =
+            [hour_text_native, minute_text_native, second_text_native];
+        for kernel in kernels {
+            assert_eq!(kernel(None).unwrap(), None);
+            assert!(kernel(Some(&[0xff])).is_err());
+        }
+        // Literal answers follow the pre-move string parser, not provider output.
+        let cases: [(&str, Option<[Int; 3]>); 10] = [
+            ("", None),
+            ("900:30:15", Some([838, 59, 59])),
+            ("900:60:15", None),
+            ("2024-01-15", Some([0, 20, 24])),
+            ("-12:34:56", Some([12, 34, 56])),
+            ("12:34:56.", Some([12, 34, 56])),
+            ("12:34:56.5junk", None),
+            ("123456junk", Some([12, 34, 56])),
+            ("junk 12:34:56", None),
+            ("2024-01-15 12:34:56.000", Some([12, 34, 56])),
+        ];
+        for (text, expected) in cases {
+            for (index, kernel) in kernels.iter().enumerate() {
+                assert_eq!(
+                    kernel(Some(text.as_bytes())).unwrap(),
+                    expected.map(|parts| parts[index]),
+                    "{text:?} part {index}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_native_hms_nanos_fields() {
+        let kernels: [fn(Option<&Int>) -> Result<Option<Int>>; 3] =
+            [hour_nanos_native, minute_nanos_native, second_nanos_native];
+        for kernel in kernels {
+            assert_eq!(kernel(None).unwrap(), None);
+        }
+        // Independent literals from absolute-nanosecond integer arithmetic;
+        // unlike SQL text, this domain neither clamps nor rounds to an FSP.
+        let cases: [(Int, [Int; 3]); 8] = [
+            (0, [0, 0, 0]),
+            (999_999_999, [0, 0, 0]),
+            (-999_999_999, [0, 0, 0]),
+            (45_296_123_456_789, [12, 34, 56]),
+            (-45_296_123_456_789, [12, 34, 56]),
+            (3_241_815_999_999_999, [900, 30, 15]),
+            (-3_241_815_999_999_999, [900, 30, 15]),
+            (i64::MIN, [2_562_047, 47, 16]),
+        ];
+        for (nanos, expected) in cases {
+            for (kernel, value) in kernels.iter().zip(expected) {
+                assert_eq!(kernel(Some(&nanos)).unwrap(), Some(value));
+            }
+        }
+    }
 
     #[test]
     fn test_native_calendar_core_fields() {
