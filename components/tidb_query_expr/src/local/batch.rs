@@ -1,6 +1,7 @@
 // Copyright 2026 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
+    cell::{Cell, RefCell},
     mem,
     sync::{Arc, atomic::AtomicUsize},
 };
@@ -33,13 +34,113 @@ use super::{
     runtime::{EvalBudget, bytes_min_storage_bytes, int_min_storage_bytes, vector_storage_bytes},
 };
 use crate::{
-    RpnExpressionNode, RpnStackNode, RpnStackNodeVectorValue,
+    NativeRegexpError, NativeRegexpInvocation, RpnExpressionNode, RpnStackNode,
+    RpnStackNodeVectorValue,
     impl_string::{
         ConcatKind, FieldKind, PreparedCharArgs, PreparedConcatArgs, PreparedExportSetArgs,
         PreparedFieldArgs, PreparedFindInSetKeys, PreparedMakeSetArgs,
     },
     types::expr_eval::{EvalInput, EvaluatedAsciiWitness, FrameResult, evaluated_bytes_shape},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeRegexpKind {
+    Like,
+    Substr,
+    Instr,
+    Replace,
+}
+
+/// A fixed-size, initially unbound call payload. The statement owns the actual
+/// caches: this worker holds their handles only during one guarded invocation.
+/// Known cache structures/capacities are recorded at the actual use site; the
+/// opaque regex engine and its TLS scratch are outside this Demo accounting.
+#[derive(Debug)]
+pub(crate) struct NativeRegexpCallMetadata {
+    kind: NativeRegexpKind,
+    invocation: RefCell<Option<NativeRegexpInvocation>>,
+    known_cache_bytes: Cell<Option<usize>>,
+    known_cache_limit: Cell<usize>,
+}
+
+impl NativeRegexpCallMetadata {
+    pub(crate) fn new(kind: NativeRegexpKind) -> Self {
+        Self {
+            kind,
+            invocation: RefCell::new(None),
+            known_cache_bytes: Cell::new(Some(0)),
+            known_cache_limit: Cell::new(0),
+        }
+    }
+
+    pub(crate) fn invocation(&self) -> LocalResult<NativeRegexpInvocation> {
+        self.invocation
+            .try_borrow()
+            .map_err(|_| LocalError::InvalidSpec("regexp invocation is already borrowed".into()))?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| LocalError::InvalidSpec("regexp call has no bound invocation".into()))
+    }
+
+    pub(crate) fn record_known_cache_bytes(&self, bytes: Option<usize>) -> LocalResult<()> {
+        if self
+            .invocation
+            .try_borrow()
+            .map_err(|_| LocalError::InvalidSpec("regexp invocation is already borrowed".into()))?
+            .is_none()
+        {
+            return Err(LocalError::InvalidSpec(
+                "regexp cache observation has no invocation".into(),
+            ));
+        }
+        let total = self
+            .known_cache_bytes
+            .get()
+            .and_then(|old| old.checked_add(bytes?));
+        // Retain an overflow/refusal until the worker has inspected it. It must
+        // never be authenticated as a native SQL failure, even if wrapped in Caused.
+        self.known_cache_bytes.set(total);
+        match total {
+            Some(total) if total <= self.known_cache_limit.get() => Ok(()),
+            _ => Err(evaluated_ascii_storage_overflow()),
+        }
+    }
+
+    fn is_unbound(&self) -> bool {
+        self.invocation
+            .try_borrow()
+            .is_ok_and(|value| value.is_none())
+            && self.known_cache_bytes.get() == Some(0)
+            && self.known_cache_limit.get() == 0
+    }
+
+    fn bind(&self, invocation: NativeRegexpInvocation, limit: usize) -> LocalResult<()> {
+        if !self.is_unbound() {
+            return Err(LocalError::InvalidSpec(
+                "regexp call retains a previous binding".into(),
+            ));
+        }
+        let mut target = self
+            .invocation
+            .try_borrow_mut()
+            .map_err(|_| LocalError::InvalidSpec("regexp invocation bind conflict".into()))?;
+        self.known_cache_limit.set(limit);
+        *target = Some(invocation);
+        Ok(())
+    }
+
+    fn unbind(&self) -> LocalResult<()> {
+        let owned = self
+            .invocation
+            .try_borrow_mut()
+            .map_err(|_| LocalError::InvalidSpec("regexp invocation unbind conflict".into()))?
+            .take();
+        self.known_cache_bytes.set(Some(0));
+        self.known_cache_limit.set(0);
+        drop(owned);
+        Ok(())
+    }
+}
 
 pub struct LocalBatch<'a> {
     pub columns: &'a LazyBatchColumnVec,
@@ -990,6 +1091,15 @@ pub enum EvaluatedBytesOp {
     VecL2NormNative,
     VecFromTextNative,
     VecRealNullNative,
+    RegexpLikeNative,
+    RegexpSubstrNative,
+    RegexpInstrNative,
+    RegexpReplaceNative,
+    RegexpLikeLegacyCiNative,
+    RegexpLikeLegacyBinNative,
+    RegexpNullIntNative,
+    RegexpNullBytesNative,
+    RegexpMissingLegacyNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1005,6 +1115,10 @@ pub(crate) enum EvaluatedKernelKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EvaluatedArgsRole {
     Values,
+    NativeRegexpLike,
+    NativeRegexpSubstr,
+    NativeRegexpInstr,
+    NativeRegexpReplace,
     NativeVector,
     NativeVector2,
     Ieee754Bits,
@@ -1825,6 +1939,51 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::VecRealNullNative,
                 );
             }
+            Self::RegexpLikeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RegexpLikeNative,
+                );
+            }
+            Self::RegexpSubstrNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RegexpSubstrNative,
+                );
+            }
+            Self::RegexpInstrNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RegexpInstrNative,
+                );
+            }
+            Self::RegexpReplaceNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RegexpReplaceNative,
+                );
+            }
+            Self::RegexpLikeLegacyCiNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RegexpLikeLegacyCiNative,
+                );
+            }
+            Self::RegexpLikeLegacyBinNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RegexpLikeLegacyBinNative,
+                );
+            }
+            Self::RegexpNullIntNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RegexpNullIntNative,
+                );
+            }
+            Self::RegexpNullBytesNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RegexpNullBytesNative,
+                );
+            }
+            Self::RegexpMissingLegacyNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::RegexpMissingLegacyNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1833,6 +1992,25 @@ impl EvaluatedBytesOp {
         match self.kernel_kind() {
             EvaluatedKernelKind::Wire(signature) => crate::FunctionRef::TiPb(signature),
             EvaluatedKernelKind::ClosedPrivate(id) => crate::FunctionRef::Local(id),
+        }
+    }
+
+    pub(crate) fn regexp_kind(self) -> Option<NativeRegexpKind> {
+        match self {
+            Self::RegexpLikeNative => Some(NativeRegexpKind::Like),
+            Self::RegexpSubstrNative => Some(NativeRegexpKind::Substr),
+            Self::RegexpInstrNative => Some(NativeRegexpKind::Instr),
+            Self::RegexpReplaceNative => Some(NativeRegexpKind::Replace),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn metadata_matches(self, metadata: &(dyn std::any::Any + Send)) -> bool {
+        match self.regexp_kind() {
+            Some(kind) => metadata
+                .downcast_ref::<NativeRegexpCallMetadata>()
+                .is_some_and(|payload| payload.kind == kind),
+            None => metadata.is::<()>(),
         }
     }
 
@@ -1847,6 +2025,10 @@ impl EvaluatedBytesOp {
             | Self::VecL2DistanceNative
             | Self::VecNegativeInnerProductNative
             | Self::VecCosineDistanceNative => EvaluatedArgsRole::NativeVector2,
+            Self::RegexpLikeNative => EvaluatedArgsRole::NativeRegexpLike,
+            Self::RegexpSubstrNative => EvaluatedArgsRole::NativeRegexpSubstr,
+            Self::RegexpInstrNative => EvaluatedArgsRole::NativeRegexpInstr,
+            Self::RegexpReplaceNative => EvaluatedArgsRole::NativeRegexpReplace,
             Self::ConcatNative | Self::ConcatWsNative => EvaluatedArgsRole::ConcatPacked,
             Self::EltNative => EvaluatedArgsRole::EltReady,
             Self::FieldBytesNative | Self::FieldIntNative | Self::FieldRealNative => {
@@ -1870,7 +2052,9 @@ impl EvaluatedBytesOp {
             | Self::DateFormatNullNative
             | Self::TranslateNullNative
             | Self::SqlCryptNullNative
-            | Self::VecRealNullNative => EvaluatedArgsRole::NullWitness,
+            | Self::VecRealNullNative
+            | Self::RegexpNullIntNative
+            | Self::RegexpNullBytesNative => EvaluatedArgsRole::NullWitness,
             Self::DateDiffCoreNative => EvaluatedArgsRole::TimeCoreBits2,
             Self::DateFormatCoreNative => EvaluatedArgsRole::TimeCoreBitsBytes,
             Self::CharNative => EvaluatedArgsRole::CharReady,
@@ -1890,9 +2074,10 @@ impl EvaluatedBytesOp {
             Self::StrcmpNative | Self::FindInSetNative => EvaluatedArgsRole::CollatedBytes2,
             Self::Locate2Native | Self::Locate3Native => EvaluatedArgsRole::NativeSearch,
             Self::FindInSetPreparedNative => EvaluatedArgsRole::FindInSetPrepared,
-            Self::PiRaw | Self::JsonValidOtherNative | Self::DateFormatMissingNative => {
-                EvaluatedArgsRole::NoArgs
-            }
+            Self::PiRaw
+            | Self::JsonValidOtherNative
+            | Self::DateFormatMissingNative
+            | Self::RegexpMissingLegacyNative => EvaluatedArgsRole::NoArgs,
             Self::Sha2Native => EvaluatedArgsRole::ReadyBytesInt,
             Self::LogNative | Self::PowNative | Self::Atan2GoNative | Self::Atan2LibmLegacy => {
                 EvaluatedArgsRole::Ieee754Bits2
@@ -2082,6 +2267,23 @@ impl EvaluatedBytesOp {
             Self::VecL2NormNative => crate::impl_vec::get_native_vec_l2_norm_fn_meta(),
             Self::VecFromTextNative => crate::impl_vec::get_native_vec_from_text_fn_meta(),
             Self::VecRealNullNative => crate::impl_vec::get_native_vec_real_null_fn_meta(),
+            Self::RegexpLikeNative => crate::impl_regexp::get_regexp_like_native_fn_meta(),
+            Self::RegexpSubstrNative => crate::impl_regexp::get_regexp_substr_native_fn_meta(),
+            Self::RegexpInstrNative => crate::impl_regexp::get_regexp_instr_native_fn_meta(),
+            Self::RegexpReplaceNative => crate::impl_regexp::get_regexp_replace_native_fn_meta(),
+            Self::RegexpLikeLegacyCiNative => {
+                crate::impl_regexp::get_regexp_like_legacy_ci_native_fn_meta()
+            }
+            Self::RegexpLikeLegacyBinNative => {
+                crate::impl_regexp::get_regexp_like_legacy_bin_native_fn_meta()
+            }
+            Self::RegexpNullIntNative => crate::impl_regexp::get_regexp_null_int_native_fn_meta(),
+            Self::RegexpNullBytesNative => {
+                crate::impl_regexp::get_regexp_null_bytes_native_fn_meta()
+            }
+            Self::RegexpMissingLegacyNative => {
+                crate::impl_regexp::get_regexp_missing_legacy_native_fn_meta()
+            }
             Self::Ascii => crate::impl_string::ascii_fn_meta(),
             Self::Length => crate::impl_string::length_fn_meta(),
             Self::BitLength => crate::impl_string::bit_length_fn_meta(),
@@ -2428,7 +2630,13 @@ impl EvaluatedBytesOp {
             | Self::UuidVersionNative
             | Self::TidbShardNative
             | Self::VitessHashNative
-            | Self::VecDimsNative => EvalType::Int,
+            | Self::VecDimsNative
+            | Self::RegexpLikeNative
+            | Self::RegexpInstrNative
+            | Self::RegexpLikeLegacyCiNative
+            | Self::RegexpLikeLegacyBinNative
+            | Self::RegexpNullIntNative
+            | Self::RegexpMissingLegacyNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -2570,7 +2778,10 @@ impl EvaluatedBytesOp {
             | Self::VecCosineDistanceNative
             | Self::VecL2NormNative
             | Self::VecFromTextNative
-            | Self::VecRealNullNative => EvalType::Bytes,
+            | Self::VecRealNullNative
+            | Self::RegexpSubstrNative
+            | Self::RegexpReplaceNative
+            | Self::RegexpNullBytesNative => EvalType::Bytes,
         }
     }
 
@@ -2585,6 +2796,34 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::RegexpLikeNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
+            Self::RegexpSubstrNative => &[
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Int,
+                EvalType::Int,
+                EvalType::Bytes,
+            ],
+            Self::RegexpInstrNative => &[
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Int,
+                EvalType::Int,
+                EvalType::Int,
+                EvalType::Bytes,
+            ],
+            Self::RegexpReplaceNative => &[
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Int,
+                EvalType::Int,
+                EvalType::Bytes,
+            ],
+            Self::RegexpLikeLegacyCiNative | Self::RegexpLikeLegacyBinNative => {
+                &[EvalType::Bytes, EvalType::Bytes]
+            }
+            Self::RegexpNullIntNative | Self::RegexpNullBytesNative => &[EvalType::Int],
             Self::VecAsTextNative | Self::VecDimsNative | Self::VecL2NormNative => {
                 &[EvalType::VectorFloat32]
             }
@@ -2608,7 +2847,10 @@ impl EvaluatedBytesOp {
                 &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
             }
             Self::TranslateNullNative => &[EvalType::Int],
-            Self::PiRaw | Self::JsonValidOtherNative | Self::DateFormatMissingNative => &[],
+            Self::PiRaw
+            | Self::JsonValidOtherNative
+            | Self::DateFormatMissingNative
+            | Self::RegexpMissingLegacyNative => &[],
             Self::DateFormatTextNative
             | Self::DateFormatCoreNative
             | Self::TimeFormatTextNative => &[EvalType::Bytes, EvalType::Bytes],
@@ -2922,7 +3164,8 @@ pub fn native_decimal_bridge_error(error: NativeDecimalError) -> LocalError {
 
 /// PAD's two string arguments are either both evaluated values or both
 /// explicitly undemanded. The latter requires an earlier length/packet exit;
-/// it is not a claim that either original argument was SQL NULL.
+/// it is not a claim that either original argument was SQL NULL. Native regexp
+/// INSTR also permits undemanded flags, only after an invalid return_option.
 #[derive(Debug)]
 pub enum ReadyBytesArg {
     Value(Option<Vec<u8>>),
@@ -2982,6 +3225,38 @@ impl NativeSearchPolicy {
 /// NULL.
 #[derive(Debug)]
 pub enum EvaluatedArgs {
+    RegexpLike {
+        invocation: NativeRegexpInvocation,
+        text: Vec<u8>,
+        pattern: Vec<u8>,
+        match_type: Vec<u8>,
+    },
+    RegexpSubstr {
+        invocation: NativeRegexpInvocation,
+        text: Vec<u8>,
+        pattern: Vec<u8>,
+        pos: i64,
+        occurrence: i64,
+        match_type: Vec<u8>,
+    },
+    RegexpInstr {
+        invocation: NativeRegexpInvocation,
+        text: Vec<u8>,
+        pattern: Vec<u8>,
+        pos: i64,
+        occurrence: i64,
+        return_option: i64,
+        match_type: ReadyBytesArg,
+    },
+    RegexpReplace {
+        invocation: NativeRegexpInvocation,
+        text: Vec<u8>,
+        pattern: Vec<u8>,
+        replacement: Vec<u8>,
+        pos: i64,
+        occurrence: i64,
+        match_type: Vec<u8>,
+    },
     /// Actual aligned vectors, never ordinary Bytes or serialized controls.
     NativeVector(Option<NativeVectorFloat32>),
     NativeVector2(Option<NativeVectorFloat32>, Option<NativeVectorFloat32>),
@@ -3150,6 +3425,10 @@ impl EvaluatedArgs {
             }
             Self::FindInSetPreparedReady { .. } => EvaluatedArgsRole::FindInSetPrepared,
             Self::NoArgs => EvaluatedArgsRole::NoArgs,
+            Self::RegexpLike { .. } => EvaluatedArgsRole::NativeRegexpLike,
+            Self::RegexpSubstr { .. } => EvaluatedArgsRole::NativeRegexpSubstr,
+            Self::RegexpInstr { .. } => EvaluatedArgsRole::NativeRegexpInstr,
+            Self::RegexpReplace { .. } => EvaluatedArgsRole::NativeRegexpReplace,
             Self::NativeVector(_) => EvaluatedArgsRole::NativeVector,
             Self::NativeVector2(..) => EvaluatedArgsRole::NativeVector2,
             Self::Ieee754Bits(_) => EvaluatedArgsRole::Ieee754Bits,
@@ -3175,6 +3454,10 @@ impl EvaluatedArgs {
 
     fn input_types(&self) -> &'static [EvalType] {
         match self {
+            Self::RegexpLike { .. } => EvaluatedBytesOp::RegexpLikeNative.input_types(),
+            Self::RegexpSubstr { .. } => EvaluatedBytesOp::RegexpSubstrNative.input_types(),
+            Self::RegexpInstr { .. } => EvaluatedBytesOp::RegexpInstrNative.input_types(),
+            Self::RegexpReplace { .. } => EvaluatedBytesOp::RegexpReplaceNative.input_types(),
             Self::NativeVector(_) => &[EvalType::VectorFloat32],
             Self::NativeVector2(..) => &[EvalType::VectorFloat32, EvalType::VectorFloat32],
             Self::NoArgs => &[],
@@ -3238,6 +3521,18 @@ impl EvaluatedArgs {
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
         match self {
+            Self::RegexpInstr {
+                return_option,
+                match_type,
+                ..
+            } => {
+                operation == EvaluatedBytesOp::RegexpInstrNative
+                    && match match_type {
+                        ReadyBytesArg::Value(Some(_)) => true,
+                        ReadyBytesArg::Undemanded => !matches!(return_option, 0 | 1),
+                        ReadyBytesArg::Value(None) => false,
+                    }
+            }
             Self::BytesInt(bytes, flag) if operation == EvaluatedBytesOp::UuidToBinSwapNative => {
                 // Only the parsed UUID stage has a nonnullable, exact-width input.
                 // Other BytesInt operations retain their existing NULL policies.
@@ -3264,6 +3559,8 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::TranslateNullNative
                         | EvaluatedBytesOp::SqlCryptNullNative
                         | EvaluatedBytesOp::VecRealNullNative
+                        | EvaluatedBytesOp::RegexpNullIntNative
+                        | EvaluatedBytesOp::RegexpNullBytesNative
                 ) && value.is_none()
             }
             Self::ConvReady {
@@ -3540,12 +3837,98 @@ impl EvaluatedArgs {
         Ok((ready, arity))
     }
 
-    fn into_values(self, available: usize) -> LocalResult<([ScalarValue; 4], usize)> {
-        // The fixed owner stays inline. Only four PAD, two INSERT and native
-        // LOCATE3 recipes publish all slots; unused slots never enter the driver.
-        // IEEE754's physical Byte8 allocation is charged like any Bytes owner.
+    fn into_values(
+        self,
+        available: usize,
+    ) -> LocalResult<([ScalarValue; 6], usize, Option<NativeRegexpInvocation>)> {
+        // Only the selected arity enters the common driver. Regex invocation
+        // handles are real semantic context, never hidden ScalarValue operands.
         use ScalarValue::{Bytes, Int};
-        Ok(match self {
+        let (ready, arity) = match self {
+            Self::RegexpLike {
+                invocation,
+                text,
+                pattern,
+                match_type,
+            } => {
+                return Ok((
+                    [
+                        Bytes(Some(text)),
+                        Bytes(Some(pattern)),
+                        Bytes(Some(match_type)),
+                        Int(None),
+                        Int(None),
+                        Int(None),
+                    ],
+                    3,
+                    Some(invocation),
+                ));
+            }
+            Self::RegexpSubstr {
+                invocation,
+                text,
+                pattern,
+                pos,
+                occurrence,
+                match_type,
+            } => {
+                return Ok((
+                    [
+                        Bytes(Some(text)),
+                        Bytes(Some(pattern)),
+                        Int(Some(pos)),
+                        Int(Some(occurrence)),
+                        Bytes(Some(match_type)),
+                        Int(None),
+                    ],
+                    5,
+                    Some(invocation),
+                ));
+            }
+            Self::RegexpInstr {
+                invocation,
+                text,
+                pattern,
+                pos,
+                occurrence,
+                return_option,
+                match_type,
+            } => {
+                return Ok((
+                    [
+                        Bytes(Some(text)),
+                        Bytes(Some(pattern)),
+                        Int(Some(pos)),
+                        Int(Some(occurrence)),
+                        Int(Some(return_option)),
+                        Self::ready_bytes_value(match_type),
+                    ],
+                    6,
+                    Some(invocation),
+                ));
+            }
+            Self::RegexpReplace {
+                invocation,
+                text,
+                pattern,
+                replacement,
+                pos,
+                occurrence,
+                match_type,
+            } => {
+                return Ok((
+                    [
+                        Bytes(Some(text)),
+                        Bytes(Some(pattern)),
+                        Bytes(Some(replacement)),
+                        Int(Some(pos)),
+                        Int(Some(occurrence)),
+                        Bytes(Some(match_type)),
+                    ],
+                    6,
+                    Some(invocation),
+                ));
+            }
             Self::NativeVector(value) => Self::native_vector_values([value, None], 1, available)?,
             Self::NativeVector2(left, right) => {
                 Self::native_vector_values([left, right], 2, available)?
@@ -3927,7 +4310,13 @@ impl EvaluatedArgs {
                     2,
                 )
             }
-        })
+        };
+        let [first, second, third, fourth] = ready;
+        Ok((
+            [first, second, third, fourth, Int(None), Int(None)],
+            arity,
+            None,
+        ))
     }
 
     fn ready_bytes_value(arg: ReadyBytesArg) -> ScalarValue {
@@ -4383,6 +4772,7 @@ pub enum EvaluatedSqlFailureKind {
     UuidTimestampInvalid,
     BinToUuidInvalidLength,
     VectorNative,
+    RegexpNative,
 }
 
 /// Fresh owned failure-only observation for one ready-value invocation.
@@ -4414,6 +4804,26 @@ impl ReportedEvaluatedFailure {
     pub fn sql_failure(&self) -> Option<EvaluatedSqlFailureKind> {
         self.sql_failure
     }
+    /// Only the four native regexp operations authenticate this actual cause.
+    pub fn native_regexp_error(&self) -> Option<&NativeRegexpError> {
+        if self.sql_failure != Some(EvaluatedSqlFailureKind::RegexpNative)
+            || !self
+                .operation
+                .is_some_and(|operation| operation.regexp_kind().is_some())
+        {
+            return None;
+        }
+        match &self.error {
+            LocalError::Evaluation(error) => match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::Caused(source)) => {
+                    source.downcast_ref::<NativeRegexpError>()
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Borrows only the matching invocation's actual typed native vector cause.
     pub fn native_vector_error(&self) -> Option<&NativeVectorError> {
         if self.sql_failure != Some(EvaluatedSqlFailureKind::VectorNative)
@@ -4609,7 +5019,10 @@ fn evaluated_ascii_context_is_sealed(ctx: &EvalContext) -> bool {
 /// retained program/context/state. They are boundary accounting, not a bound on
 /// temporary kernel allocations (including UNHEX's decoder/padding).
 /// Worker/pool ownership remains separately charged. No operand, result or
-/// invocation borrow is cached.
+/// invocation borrow is cached. Native regexp calls briefly bind shared handles
+/// to statement-owned caches and charge their observed known
+/// layouts/capacities; opaque regex engine/TLS allocations are excluded, not
+/// claimed ExactRetained.
 pub struct EvaluatedBytesWorker {
     operation: EvaluatedBytesOp,
     program: LocalProgram,
@@ -4634,8 +5047,9 @@ impl std::fmt::Debug for EvaluatedBytesWorker {
 /// Prepare one fixed operation after the frontend has produced demanded ready
 /// arguments, under the caller's creating-worker reservation. No kernel is
 /// evaluated (not even a fake NULL), and no native descriptor or SQL context is
-/// retained. The admitted official kernels are context-free on ready Int/Bytes;
-/// the private UTC context disables warning storage and still checks that no
+/// retained by the idle worker. Native regexp payloads are prepared unbound;
+/// their explicit statement-cache handles are supplied only during evaluation.
+/// The private UTC context disables warning storage and still checks that no
 /// warning was raised. Prewarming inspects structure, never a fabricated input
 /// or an assumption that NULL input must produce NULL output.
 pub fn prepare_evaluated_bytes(
@@ -4749,7 +5163,43 @@ impl EvaluatedAsciiWorker {
     }
 }
 
+/// Borrows the worker, not one of its fields, so evaluation can keep using the
+/// unchanged common driver. Drop precedes postflight on normal and error exits.
+struct RegexpBindingGuard<'a> {
+    worker: &'a mut EvaluatedBytesWorker,
+}
+
+impl Drop for RegexpBindingGuard<'_> {
+    fn drop(&mut self) {
+        if self
+            .worker
+            .regexp_metadata()
+            .and_then(NativeRegexpCallMetadata::unbind)
+            .is_err()
+        {
+            // A leftover binding/borrow also makes observe_storage refuse reuse.
+            self.worker.poisoned = true;
+        }
+    }
+}
+
 impl EvaluatedBytesWorker {
+    fn regexp_metadata(&self) -> LocalResult<&NativeRegexpCallMetadata> {
+        let kind = self.operation.regexp_kind().ok_or_else(|| {
+            LocalError::InvalidSpec(
+                "only a native regexp recipe may bind invocation metadata".into(),
+            )
+        })?;
+        let nodes: &[RpnExpressionNode] = self.program.expression.as_ref();
+        match nodes.get(self.operation.input_types().len()) {
+            Some(RpnExpressionNode::FnCall { metadata, .. }) => metadata
+                .downcast_ref::<NativeRegexpCallMetadata>()
+                .filter(|payload| payload.kind == kind)
+                .ok_or_else(|| LocalError::InvalidSpec("regexp metadata kind changed".into())),
+            _ => Err(LocalError::InvalidSpec("regexp call is absent".into())),
+        }
+    }
+
     pub fn operation(&self) -> EvaluatedBytesOp {
         self.operation
     }
@@ -4813,16 +5263,29 @@ impl EvaluatedBytesWorker {
                 "evaluated ASCII worker metadata was not prewarmed".into(),
             ));
         }
-        // Fresh scalar-only canonical descriptors are heap-free BY CONSTRUCTION,
-        // not because their values compare equal or serialize to a small size.
-        // There is no parse/clear/reuse/mutable descriptor escape. Unit Any owns
-        // no allocation. State and witness contain only inline scalar counters.
+        let payload_bytes = if self.operation.regexp_kind().is_some() {
+            let payload = self.regexp_metadata()?;
+            if !payload.is_unbound() {
+                return Err(LocalError::InvalidSpec(
+                    "regexp worker retains invocation state".into(),
+                ));
+            }
+            // The Box and its handle slots are fixed owned storage. Actual
+            // statement cache use is separately recorded during an invocation;
+            // opaque Regex/TLS storage is explicitly NOT measured as exact heap.
+            mem::size_of::<NativeRegexpCallMetadata>()
+        } else {
+            0
+        };
+        // Canonical descriptors and unit Any remain heap-free by construction.
         let owned_heap_bytes = evaluated_ascii_owned_heap_bytes(
             self.program.expression.capacity(),
             self.program.schema.capacity(),
             metadata_bytes,
             self.ctx.warnings.warnings.capacity(),
-        )?;
+        )?
+        .checked_add(payload_bytes)
+        .ok_or_else(evaluated_ascii_storage_overflow)?;
         WorkerStorage::new(mem::size_of::<Self>(), owned_heap_bytes)
     }
 
@@ -4909,8 +5372,31 @@ impl EvaluatedBytesWorker {
             } else {
                 0
             };
-            let (ready, arity) = args.into_values(materialization_available)?;
-            self.eval_ready(ready, arity, &mut sql_failure)
+            let (ready, arity, invocation) = args.into_values(materialization_available)?;
+            if let Some(invocation) = invocation {
+                let input_bytes = ready[..arity]
+                    .iter()
+                    .try_fold(0usize, |sum, value| {
+                        sum.checked_add(match value {
+                            ScalarValue::Bytes(Some(value)) => value.capacity(),
+                            _ => 0,
+                        })
+                    })
+                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                let limit = self
+                    .state
+                    .limits
+                    .max_retained_bytes
+                    .checked_sub(input_bytes)
+                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                // Arm the guard before binding, including any failing bind.
+                let guard = RegexpBindingGuard { worker: self };
+                guard.worker.regexp_metadata()?.bind(invocation, limit)?;
+                guard.worker.eval_ready(ready, arity, &mut sql_failure)
+                // The guard clears binding/record before finish_invocation.
+            } else {
+                self.eval_ready(ready, arity, &mut sql_failure)
+            }
         })();
         self.finish_invocation(result)
             .map_err(|error| ReportedEvaluatedFailure {
@@ -4953,7 +5439,7 @@ impl EvaluatedBytesWorker {
 
     fn eval_ready(
         &mut self,
-        ready: [ScalarValue; 4],
+        ready: [ScalarValue; 6],
         arity: usize,
         sql_failure: &mut Option<EvaluatedSqlFailureKind>,
     ) -> LocalResult<ComputedValue> {
@@ -4971,83 +5457,105 @@ impl EvaluatedBytesWorker {
         self.state.row = [0];
         let mut budget = EvalBudget::exact(self.state.limits)?;
         let calls_before = self.witness.invocations();
-        let result = self
-            .program
-            .expression
-            .eval_with_ready_args(
-                self.operation,
-                &mut self.ctx,
-                &self.program.schema,
-                &ready[..arity],
-                self.operation.input_role(),
-                &self.state.row,
-                &mut self.witness,
-                &mut budget,
-            )
-            .map_err(|error| {
-                // This exact closed recipe has one canonical generated wrapper.
-                // Capture only its just-returned typed failure, not a later output
-                // or cleanup failure, an input error, or an overflow-looking code.
-                if calls_before.checked_add(1) == Some(self.witness.invocations()) {
-                    if let LocalError::Evaluation(cause) = &error {
-                        *sql_failure = match (self.operation, cause.0.as_ref()) {
-                            (
-                                EvaluatedBytesOp::VecFromTextNative
-                                | EvaluatedBytesOp::VecL1DistanceNative
-                                | EvaluatedBytesOp::VecL2DistanceNative
-                                | EvaluatedBytesOp::VecNegativeInnerProductNative
-                                | EvaluatedBytesOp::VecCosineDistanceNative,
-                                ErrorInner::Evaluate(EvaluateError::Caused(source)),
-                            ) if source.downcast_ref::<NativeVectorError>().is_some() => {
-                                Some(EvaluatedSqlFailureKind::VectorNative)
-                            }
-                            (
-                                EvaluatedBytesOp::AbsIntNative,
-                                ErrorInner::Evaluate(EvaluateError::AbsSignedOverflow { .. }),
-                            ) => Some(EvaluatedSqlFailureKind::AbsSignedOverflow),
-                            (
-                                EvaluatedBytesOp::ConvNative
-                                | EvaluatedBytesOp::ConvBinaryLiteralNative,
-                                ErrorInner::Evaluate(EvaluateError::ConvUnsignedOverflow {
-                                    ..
-                                }),
-                            ) => Some(EvaluatedSqlFailureKind::ConvUnsignedOverflow),
-                            (
-                                EvaluatedBytesOp::PeriodAddNative,
-                                ErrorInner::Evaluate(EvaluateError::PeriodAddIncorrectArguments),
-                            ) => Some(EvaluatedSqlFailureKind::PeriodAddIncorrectArguments),
-                            (
-                                EvaluatedBytesOp::PeriodDiffNative,
-                                ErrorInner::Evaluate(EvaluateError::PeriodDiffIncorrectArguments),
-                            ) => Some(EvaluatedSqlFailureKind::PeriodDiffIncorrectArguments),
-                            (
-                                EvaluatedBytesOp::UuidToBinParseNative,
-                                ErrorInner::Evaluate(EvaluateError::UuidToBinWhitespace),
-                            ) => Some(EvaluatedSqlFailureKind::UuidToBinWhitespace),
-                            (
-                                EvaluatedBytesOp::UuidToBinParseNative,
-                                ErrorInner::Evaluate(EvaluateError::UuidToBinInvalid),
-                            ) => Some(EvaluatedSqlFailureKind::UuidToBinInvalid),
-                            (
-                                EvaluatedBytesOp::UuidVersionNative,
-                                ErrorInner::Evaluate(EvaluateError::UuidVersionInvalid),
-                            ) => Some(EvaluatedSqlFailureKind::UuidVersionInvalid),
-                            (
-                                EvaluatedBytesOp::UuidTimestampNative,
-                                ErrorInner::Evaluate(EvaluateError::UuidTimestampInvalid),
-                            ) => Some(EvaluatedSqlFailureKind::UuidTimestampInvalid),
-                            (
-                                EvaluatedBytesOp::BinToUuidNative,
-                                ErrorInner::Evaluate(EvaluateError::BinToUuidInvalidLength {
-                                    ..
-                                }),
-                            ) => Some(EvaluatedSqlFailureKind::BinToUuidInvalidLength),
-                            _ => None,
-                        };
-                    }
+        let result = self.program.expression.eval_with_ready_args(
+            self.operation,
+            &mut self.ctx,
+            &self.program.schema,
+            &ready[..arity],
+            self.operation.input_role(),
+            &self.state.row,
+            &mut self.witness,
+            &mut budget,
+        );
+        let input_bytes = if self.operation.regexp_kind().is_some() {
+            let payload = self.regexp_metadata()?;
+            let known = payload
+                .known_cache_bytes
+                .get()
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            if known > payload.known_cache_limit.get() {
+                return Err(evaluated_ascii_storage_overflow());
+            }
+            let observed = input_bytes
+                .checked_add(known)
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // Check the exact use-site record even on a kernel error, before
+            // authenticating any SQL cause. This also unwraps a recorded scope
+            // refusal from the kernel's non-SQL Caused(LocalError) transport.
+            budget.check_output(0, observed)?;
+            observed
+        } else {
+            input_bytes
+        };
+        let result = result.map_err(|error| {
+            // This exact closed recipe has one canonical generated wrapper.
+            // Capture only its just-returned typed failure, not a later output
+            // or cleanup failure, an input error, or an overflow-looking code.
+            if calls_before.checked_add(1) == Some(self.witness.invocations()) {
+                if let LocalError::Evaluation(cause) = &error {
+                    *sql_failure = match (self.operation, cause.0.as_ref()) {
+                        (
+                            EvaluatedBytesOp::RegexpLikeNative
+                            | EvaluatedBytesOp::RegexpSubstrNative
+                            | EvaluatedBytesOp::RegexpInstrNative
+                            | EvaluatedBytesOp::RegexpReplaceNative,
+                            ErrorInner::Evaluate(EvaluateError::Caused(source)),
+                        ) if source.downcast_ref::<NativeRegexpError>().is_some() => {
+                            Some(EvaluatedSqlFailureKind::RegexpNative)
+                        }
+                        (
+                            EvaluatedBytesOp::VecFromTextNative
+                            | EvaluatedBytesOp::VecL1DistanceNative
+                            | EvaluatedBytesOp::VecL2DistanceNative
+                            | EvaluatedBytesOp::VecNegativeInnerProductNative
+                            | EvaluatedBytesOp::VecCosineDistanceNative,
+                            ErrorInner::Evaluate(EvaluateError::Caused(source)),
+                        ) if source.downcast_ref::<NativeVectorError>().is_some() => {
+                            Some(EvaluatedSqlFailureKind::VectorNative)
+                        }
+                        (
+                            EvaluatedBytesOp::AbsIntNative,
+                            ErrorInner::Evaluate(EvaluateError::AbsSignedOverflow { .. }),
+                        ) => Some(EvaluatedSqlFailureKind::AbsSignedOverflow),
+                        (
+                            EvaluatedBytesOp::ConvNative
+                            | EvaluatedBytesOp::ConvBinaryLiteralNative,
+                            ErrorInner::Evaluate(EvaluateError::ConvUnsignedOverflow { .. }),
+                        ) => Some(EvaluatedSqlFailureKind::ConvUnsignedOverflow),
+                        (
+                            EvaluatedBytesOp::PeriodAddNative,
+                            ErrorInner::Evaluate(EvaluateError::PeriodAddIncorrectArguments),
+                        ) => Some(EvaluatedSqlFailureKind::PeriodAddIncorrectArguments),
+                        (
+                            EvaluatedBytesOp::PeriodDiffNative,
+                            ErrorInner::Evaluate(EvaluateError::PeriodDiffIncorrectArguments),
+                        ) => Some(EvaluatedSqlFailureKind::PeriodDiffIncorrectArguments),
+                        (
+                            EvaluatedBytesOp::UuidToBinParseNative,
+                            ErrorInner::Evaluate(EvaluateError::UuidToBinWhitespace),
+                        ) => Some(EvaluatedSqlFailureKind::UuidToBinWhitespace),
+                        (
+                            EvaluatedBytesOp::UuidToBinParseNative,
+                            ErrorInner::Evaluate(EvaluateError::UuidToBinInvalid),
+                        ) => Some(EvaluatedSqlFailureKind::UuidToBinInvalid),
+                        (
+                            EvaluatedBytesOp::UuidVersionNative,
+                            ErrorInner::Evaluate(EvaluateError::UuidVersionInvalid),
+                        ) => Some(EvaluatedSqlFailureKind::UuidVersionInvalid),
+                        (
+                            EvaluatedBytesOp::UuidTimestampNative,
+                            ErrorInner::Evaluate(EvaluateError::UuidTimestampInvalid),
+                        ) => Some(EvaluatedSqlFailureKind::UuidTimestampInvalid),
+                        (
+                            EvaluatedBytesOp::BinToUuidNative,
+                            ErrorInner::Evaluate(EvaluateError::BinToUuidInvalidLength { .. }),
+                        ) => Some(EvaluatedSqlFailureKind::BinToUuidInvalidLength),
+                        _ => None,
+                    };
                 }
-                error
-            })?;
+            }
+            error
+        })?;
         let output = match result {
             RpnStackNode::Vector {
                 value: RpnStackNodeVectorValue::Generated { physical_value },
@@ -5296,6 +5804,444 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn regexp_dispatch_cache_identity_owner_reuse_and_typed_results() {
+        use crate::{
+            NativeCachedRegexp, NativeContextCache, NativeRegexpCompileError, NativeReplacementPart,
+        };
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        let patterns = NativeContextCache::<NativeCachedRegexp>::default();
+        let parts = NativeContextCache::<Vec<NativeReplacementPart>>::default();
+        let other_patterns = NativeContextCache::<NativeCachedRegexp>::default();
+        let other_parts = NativeContextCache::<Vec<NativeReplacementPart>>::default();
+        let same = NativeRegexpInvocation::new(&patterns, &parts, 11, true, true);
+        let next = NativeRegexpInvocation::new(&patterns, &parts, 12, true, true);
+        let other = NativeRegexpInvocation::new(&other_patterns, &other_parts, 12, true, true);
+        assert!(patterns.get_cache(11).is_none());
+        let replacement =
+            |invocation, pattern: &[u8], replacement: &[u8]| EvaluatedArgs::RegexpReplace {
+                invocation,
+                text: b"abc".to_vec(),
+                pattern: pattern.to_vec(),
+                replacement: replacement.to_vec(),
+                pos: 1,
+                occurrence: 0,
+                match_type: Vec::new(),
+            };
+        let mut worker = prepare(EvaluatedBytesOp::RegexpReplaceNative);
+        let storage = worker.retained_storage().unwrap();
+        let mut first_pattern = None;
+        let mut first_parts = None;
+        // First three rows are the original native cache-lifecycle literals;
+        // fourth probes a different expression owner reusing this same worker.
+        for (index, (invocation, pattern, replace, expected)) in [
+            (
+                same.clone(),
+                b"a".as_slice(),
+                b"X".as_slice(),
+                b"Xbc".as_slice(),
+            ),
+            (
+                same.clone(),
+                b"c".as_slice(),
+                b"Y".as_slice(),
+                b"Xbc".as_slice(),
+            ),
+            (next, b"c".as_slice(), b"Y".as_slice(), b"abY".as_slice()),
+            (other, b"c".as_slice(), b"Z".as_slice(), b"abZ".as_slice()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ComputedValue::Bytes(value) = worker
+                .eval_args(replacement(invocation, pattern, replace))
+                .unwrap()
+            else {
+                panic!("regexp replacement must own Bytes");
+            };
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.into_option().as_deref(), Some(expected));
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.regexp_metadata().unwrap().is_unbound());
+            assert!(worker.regexp_metadata().unwrap().invocation().is_err());
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            if index == 0 {
+                first_pattern = patterns.get_cache(11);
+                first_parts = parts.get_cache(11);
+            } else if index == 1 {
+                assert!(Arc::ptr_eq(
+                    first_pattern.as_ref().unwrap(),
+                    &patterns.get_cache(11).unwrap()
+                ));
+                assert!(Arc::ptr_eq(
+                    first_parts.as_ref().unwrap(),
+                    &parts.get_cache(11).unwrap()
+                ));
+            }
+        }
+        assert!(patterns.get_cache(11).is_none());
+        assert!(parts.get_cache(11).is_none());
+        assert!(!Arc::ptr_eq(
+            &patterns.get_cache(12).unwrap(),
+            &other_patterns.get_cache(12).unwrap()
+        ));
+        assert!(patterns.clone().get_cache(12).is_none());
+        drop(worker);
+        assert_eq!(
+            parts.get_cache(12).unwrap().as_ref(),
+            &[NativeReplacementPart::Literal(b"Y".to_vec())]
+        );
+
+        let bad_patterns = NativeContextCache::default();
+        let bad_parts = NativeContextCache::default();
+        let invocation = NativeRegexpInvocation::new(&bad_patterns, &bad_parts, 7, true, true);
+        let mut like = prepare(EvaluatedBytesOp::RegexpLikeNative);
+        let storage = like.retained_storage().unwrap();
+        assert!(matches!(
+            like.eval_args(EvaluatedArgs::Bytes3([
+                Some(b"a".to_vec()),
+                Some(b"a".to_vec()),
+                Some(Vec::new())
+            ])),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(like.kernel_invocations(), 0);
+        let mut old_error = None;
+        for (index, (pattern, flags)) in [
+            (b"(".as_slice(), b"".as_slice()),
+            (b"a".as_slice(), b"x".as_slice()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut failure = like
+                .eval_args_reported(EvaluatedArgs::RegexpLike {
+                    invocation: invocation.clone(),
+                    text: b"a".to_vec(),
+                    pattern: pattern.to_vec(),
+                    match_type: flags.to_vec(),
+                })
+                .unwrap_err();
+            assert_eq!(
+                failure.operation(),
+                Some(EvaluatedBytesOp::RegexpLikeNative)
+            );
+            assert_eq!(
+                failure.sql_failure(),
+                Some(EvaluatedSqlFailureKind::RegexpNative)
+            );
+            assert!(matches!(
+                failure.native_regexp_error(),
+                Some(NativeRegexpError::Compile(
+                    NativeRegexpCompileError::InvalidPattern(_)
+                ))
+            ));
+            let LocalError::Evaluation(error) = failure.error() else {
+                panic!("lost real regexp cause");
+            };
+            let ErrorInner::Evaluate(EvaluateError::Caused(source)) = error.0.as_ref() else {
+                panic!("lost typed regexp source");
+            };
+            assert!(std::ptr::eq(
+                failure.native_regexp_error().unwrap(),
+                source.downcast_ref::<NativeRegexpError>().unwrap()
+            ));
+            if index == 0 {
+                old_error = bad_patterns.get_cache(7);
+            }
+            assert!(Arc::ptr_eq(
+                old_error.as_ref().unwrap(),
+                &bad_patterns.get_cache(7).unwrap()
+            ));
+            assert_eq!(like.kernel_invocations(), index as u64 + 1);
+            assert!(like.regexp_metadata().unwrap().is_unbound());
+            assert!(like.is_healthy());
+            assert_eq!(like.retained_storage().unwrap(), storage);
+            failure.operation = Some(EvaluatedBytesOp::RegexpLikeLegacyCiNative);
+            assert!(failure.native_regexp_error().is_none());
+            failure.operation = Some(EvaluatedBytesOp::RegexpLikeNative);
+            failure.sql_failure = None;
+            assert!(failure.native_regexp_error().is_none());
+        }
+        let ComputedValue::Int(value) = like
+            .eval_args(EvaluatedArgs::RegexpLike {
+                invocation: NativeRegexpInvocation::new(&bad_patterns, &bad_parts, 10, true, true),
+                text: b"a".to_vec(),
+                pattern: b"a".to_vec(),
+                match_type: Vec::new(),
+            })
+            .unwrap()
+        else {
+            panic!("regexp LIKE must own Int");
+        };
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), Some(1));
+        assert_eq!(like.kernel_invocations(), 3);
+        assert!(like.regexp_metadata().unwrap().is_unbound());
+        let mut substr = prepare(EvaluatedBytesOp::RegexpSubstrNative);
+        let ComputedValue::Bytes(value) = substr
+            .eval_args(EvaluatedArgs::RegexpSubstr {
+                invocation: NativeRegexpInvocation::new(&bad_patterns, &bad_parts, 8, true, true),
+                text: b"ab".to_vec(),
+                pattern: b".".to_vec(),
+                pos: 2,
+                occurrence: 1,
+                match_type: Vec::new(),
+            })
+            .unwrap()
+        else {
+            panic!("regexp substring must own Bytes");
+        };
+        assert_eq!(value.into_option(), Some(b"b".to_vec()));
+        assert!(substr.regexp_metadata().unwrap().is_unbound());
+        assert_eq!(substr.kernel_invocations(), 1);
+
+        let fresh_patterns = NativeContextCache::default();
+        let fresh_parts = NativeContextCache::default();
+        let invocation = NativeRegexpInvocation::new(&fresh_patterns, &fresh_parts, 9, true, true);
+        let instr = |return_option, match_type| EvaluatedArgs::RegexpInstr {
+            invocation: invocation.clone(),
+            text: b"ab".to_vec(),
+            pattern: b"b".to_vec(),
+            pos: 1,
+            occurrence: 1,
+            return_option,
+            match_type,
+        };
+        let mut position = prepare(EvaluatedBytesOp::RegexpInstrNative);
+        assert!(matches!(
+            position.eval_args(instr(0, ReadyBytesArg::Undemanded)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert!(matches!(
+            position.eval_args(instr(0, ReadyBytesArg::Value(None))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(position.kernel_invocations(), 0);
+        let failure = position
+            .eval_args_reported(instr(2, ReadyBytesArg::Undemanded))
+            .unwrap_err();
+        assert!(matches!(
+            failure.native_regexp_error(),
+            Some(NativeRegexpError::InvalidReturnOption(2))
+        ));
+        assert!(fresh_patterns.get_cache(9).is_none());
+        assert!(fresh_parts.get_cache(9).is_none());
+        assert!(position.regexp_metadata().unwrap().is_unbound());
+        let ComputedValue::Int(value) = position
+            .eval_args(instr(0, ReadyBytesArg::Value(Some(Vec::new()))))
+            .unwrap()
+        else {
+            panic!("regexp position must own Int");
+        };
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), Some(2));
+        assert_eq!(position.kernel_invocations(), 2);
+        assert!(position.is_healthy());
+        for (operation, expected) in [
+            (EvaluatedBytesOp::RegexpLikeLegacyCiNative, 1),
+            (EvaluatedBytesOp::RegexpLikeLegacyBinNative, 0),
+        ] {
+            let mut legacy = prepare(operation);
+            let ComputedValue::Int(value) = legacy
+                .eval_args(EvaluatedArgs::Bytes2(
+                    Some(b"ABC".to_vec()),
+                    Some(b"abc".to_vec()),
+                ))
+                .unwrap()
+            else {
+                panic!("legacy regexp must own Int");
+            };
+            assert_eq!(value.into_option(), Some(expected));
+            assert_eq!(legacy.kernel_invocations(), 1);
+        }
+        let mut missing = prepare(EvaluatedBytesOp::RegexpMissingLegacyNative);
+        assert!(matches!(
+            missing.eval_args(EvaluatedArgs::NullWitness(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(missing.kernel_invocations(), 0);
+        let ComputedValue::Int(value) = missing.eval_args(EvaluatedArgs::NoArgs).unwrap() else {
+            panic!("legacy missing operands must retain Int result domain");
+        };
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), None);
+        assert_eq!(missing.kernel_invocations(), 1);
+        assert!(missing.is_healthy());
+        for operation in [
+            EvaluatedBytesOp::RegexpNullIntNative,
+            EvaluatedBytesOp::RegexpNullBytesNative,
+        ] {
+            let mut null = prepare(operation);
+            assert!(matches!(
+                null.eval_args(EvaluatedArgs::NullWitness(Some(0))),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(null.kernel_invocations(), 0);
+            match null.eval_args(EvaluatedArgs::NullWitness(None)).unwrap() {
+                ComputedValue::Int(value) => assert_eq!(value.into_option(), None),
+                ComputedValue::Bytes(value) => assert_eq!(value.into_option(), None),
+                _ => panic!("wrong genuine-NULL result domain"),
+            }
+            assert_eq!(null.kernel_invocations(), 1);
+            assert!(null.is_healthy());
+        }
+    }
+
+    #[test]
+    fn regexp_dispatch_binding_guard_scope_accounting_and_unwind() {
+        use crate::{NativeCachedRegexp, NativeContextCache, NativeReplacementPart};
+        let patterns = NativeContextCache::<NativeCachedRegexp>::default();
+        let parts = NativeContextCache::<Vec<NativeReplacementPart>>::default();
+        let invocation = NativeRegexpInvocation::new(&patterns, &parts, 1, true, true);
+        let payload = NativeRegexpCallMetadata::new(NativeRegexpKind::Like);
+        assert!(matches!(
+            payload.record_known_cache_bytes(Some(1)),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        payload.bind(invocation.clone(), 30).unwrap();
+        payload.record_known_cache_bytes(Some(10)).unwrap();
+        payload.record_known_cache_bytes(Some(20)).unwrap();
+        assert_eq!(payload.known_cache_bytes.get(), Some(30));
+        assert!(matches!(
+            payload.record_known_cache_bytes(Some(1)),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(payload.known_cache_bytes.get(), Some(31));
+        payload.unbind().unwrap();
+        assert!(payload.is_unbound());
+        payload.bind(invocation.clone(), usize::MAX).unwrap();
+        payload.record_known_cache_bytes(Some(usize::MAX)).unwrap();
+        assert!(matches!(
+            payload.record_known_cache_bytes(Some(1)),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(payload.known_cache_bytes.get(), None);
+        payload.unbind().unwrap();
+        payload.bind(invocation.clone(), usize::MAX).unwrap();
+        assert!(matches!(
+            payload.record_known_cache_bytes(None),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        payload.unbind().unwrap();
+        assert!(payload.is_unbound());
+        assert!(patterns.get_cache(1).is_none());
+        let args = || EvaluatedArgs::RegexpLike {
+            invocation: invocation.clone(),
+            text: b"a".to_vec(),
+            pattern: b"a".to_vec(),
+            match_type: Vec::new(),
+        };
+        let mut zero = prepare_evaluated_bytes(
+            EvaluatedBytesOp::RegexpLikeNative,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_steps: 0,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        let storage = zero.retained_storage().unwrap();
+        let failure = zero.eval_args_reported(args()).unwrap_err();
+        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+        assert_eq!(failure.sql_failure(), None);
+        assert!(failure.native_regexp_error().is_none());
+        assert_eq!(zero.kernel_invocations(), 0);
+        assert!(zero.regexp_metadata().unwrap().is_unbound());
+        assert!(zero.is_healthy());
+        assert_eq!(zero.retained_storage().unwrap(), storage);
+        assert!(patterns.get_cache(1).is_none());
+        let mut worker = prepare_evaluated_bytes(
+            EvaluatedBytesOp::RegexpLikeNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        let storage = worker.retained_storage().unwrap();
+        let metadata_bytes = worker
+            .program
+            .expression
+            .retained_metadata_heap_bytes()
+            .unwrap();
+        let old_known = evaluated_ascii_owned_heap_bytes(
+            worker.program.expression.capacity(),
+            worker.program.schema.capacity(),
+            metadata_bytes,
+            worker.ctx.warnings.warnings.capacity(),
+        )
+        .unwrap();
+        assert_eq!(
+            storage.total_bytes(),
+            mem::size_of::<EvaluatedBytesWorker>()
+                + old_known
+                + mem::size_of::<NativeRegexpCallMetadata>()
+        );
+        // Private cap fault injection: the actual generated kernel observes a
+        // real cache Arc, then record refusal must escape as infrastructure.
+        let (ready, arity, bound) = args().into_values(0).unwrap();
+        let mut sql_failure = None;
+        worker.begin_invocation().unwrap();
+        let result = {
+            let guard = RegexpBindingGuard {
+                worker: &mut worker,
+            };
+            guard
+                .worker
+                .regexp_metadata()
+                .unwrap()
+                .bind(bound.unwrap(), 0)
+                .unwrap();
+            guard.worker.eval_ready(ready, arity, &mut sql_failure)
+        };
+        let error = worker.finish_invocation(result).unwrap_err();
+        assert!(matches!(error, LocalError::ResourceLimit(_)));
+        assert_eq!(sql_failure, None);
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert!(patterns.get_cache(1).is_some());
+        assert!(worker.regexp_metadata().unwrap().is_unbound());
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        // An unwind clears handles and observations, but never heals poison or
+        // empties the statement's cache. This is not a callback-based kernel.
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.begin_invocation().unwrap();
+            let guard = RegexpBindingGuard {
+                worker: &mut worker,
+            };
+            guard
+                .worker
+                .regexp_metadata()
+                .unwrap()
+                .bind(invocation.clone(), usize::MAX)
+                .unwrap();
+            guard
+                .worker
+                .regexp_metadata()
+                .unwrap()
+                .record_known_cache_bytes(Some(9))
+                .unwrap();
+            panic!("regexp binding unwind probe");
+        }));
+        assert!(panic.is_err());
+        assert!(worker.regexp_metadata().unwrap().is_unbound());
+        assert!(worker.poisoned);
+        assert!(!worker.is_healthy());
+        assert_eq!(worker.kernel_invocations(), 1);
+        drop(worker);
+        assert!(patterns.get_cache(1).is_some());
+    }
 
     #[test]
     fn vector_dispatch_owned_values_typed_failures_and_storage() {

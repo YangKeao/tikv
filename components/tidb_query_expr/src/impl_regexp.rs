@@ -1,16 +1,20 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use tidb_query_codegen::rpn_fn;
-use tidb_query_common::Result;
+use tidb_query_common::{Result, error::EvaluateError};
 use tidb_query_datatype::codec::{Error, collation::Collator, data_type::*};
 
 use crate::{
+    NativeCachedRegexp, NativeRegexpError, NativeRegexpInvocation,
     NativeReplacementPart as ReplaceInstruction, RegexpPolicyError, RegexpReplacementEncoding,
+    local::{LocalError, NativeRegexpCallMetadata, NativeRegexpKind},
+    native_regexp::{known_pattern_cache_bytes, known_replacement_cache_bytes},
     regexp_instr_match, regexp_match_flags, regexp_replace_matches, regexp_replacement_parts,
-    regexp_substr_match, regexp_trim_at, types::function::CallBuild,
+    regexp_substr_match, regexp_trim_at,
+    types::function::CallBuild,
 };
 
 const PATTERN_IDX: usize = 1;
@@ -316,6 +320,402 @@ pub fn regexp_replace<C: Collator>(
     )
     .map(Some)
     .map_err(wire_regexp_policy_error)
+}
+
+// Native-only fixed recipes. Their typed invocation metadata is initially
+// empty; the guarded worker binds actual statement-owned cache handles for one
+// call. Ordinary wire recipes and their construction-time metadata remain
+// above.
+fn native_regexp_error(error: NativeRegexpError) -> tidb_query_common::Error {
+    EvaluateError::Caused(Box::new(error)).into()
+}
+
+fn native_regexp_infrastructure_error(error: LocalError) -> tidb_query_common::Error {
+    EvaluateError::Caused(Box::new(error)).into()
+}
+
+fn native_regexp_policy_error(error: RegexpPolicyError) -> tidb_query_common::Error {
+    native_regexp_error(NativeRegexpError::Policy(error))
+}
+
+fn native_regexp_bytes<'a>(
+    args: &[ScalarValueRef<'a>],
+    index: usize,
+) -> Result<Option<BytesRef<'a>>> {
+    match args.get(index).copied() {
+        Some(ScalarValueRef::Bytes(value)) => Ok(value),
+        _ => Err(other_err!(
+            "Native regexp argument {} requires Bytes",
+            index
+        )),
+    }
+}
+
+fn native_regexp_text<'a>(args: &[ScalarValueRef<'a>], index: usize) -> Result<&'a str> {
+    let bytes = native_regexp_bytes(args, index)?.ok_or_else(|| {
+        other_err!(
+            "Native regexp argument {} requires a non-NULL string",
+            index
+        )
+    })?;
+    // Native frontends retain SQL string coercion and its original ordering.
+    // A malformed prepared string is a transport fault, never a regex SQL cause.
+    std::str::from_utf8(bytes).map_err(|error| {
+        other_err!(
+            "Native regexp argument {} is not prepared UTF-8: {}",
+            index,
+            error
+        )
+    })
+}
+
+fn native_regexp_int(args: &[ScalarValueRef<'_>], index: usize) -> Result<Int> {
+    match args.get(index).copied() {
+        Some(ScalarValueRef::Int(Some(value))) => Ok(*value),
+        _ => Err(other_err!(
+            "Native regexp argument {} requires a non-NULL Int",
+            index
+        )),
+    }
+}
+
+fn native_regexp_instr_tail<'a>(args: &[ScalarValueRef<'a>]) -> Result<(Int, &'a str)> {
+    let return_option = native_regexp_int(args, 4)?;
+    if return_option != 0 && return_option != 1 {
+        return Err(native_regexp_error(NativeRegexpError::InvalidReturnOption(
+            return_option,
+        )));
+    }
+    // The closed role permits an Undemanded flags slot only for the rejected
+    // return_option above. Do not inspect even its physical representation early.
+    Ok((return_option, native_regexp_text(args, 5)?))
+}
+
+fn native_regexp_resolve_pattern(
+    metadata: &NativeRegexpCallMetadata,
+    invocation: &NativeRegexpInvocation,
+    pattern: &str,
+    match_type: &str,
+) -> Result<Arc<NativeCachedRegexp>> {
+    let cached = invocation.resolve_pattern(pattern, match_type);
+    // Observe the very Arc the kernel will borrow, including a cached failure.
+    // Never re-read the owner's context slot after another context can replace it.
+    metadata
+        .record_known_cache_bytes(known_pattern_cache_bytes(&cached))
+        .map_err(native_regexp_infrastructure_error)?;
+    Ok(cached)
+}
+
+fn native_regexp_pattern(cached: &NativeCachedRegexp) -> Result<&Regex> {
+    cached
+        .result
+        .as_ref()
+        .map_err(|error| native_regexp_error(NativeRegexpError::Compile(error.clone())))
+}
+
+fn init_regexp_like_native_data(_expr: &mut CallBuild) -> Result<NativeRegexpCallMetadata> {
+    Ok(NativeRegexpCallMetadata::new(NativeRegexpKind::Like))
+}
+
+fn init_regexp_substr_native_data(_expr: &mut CallBuild) -> Result<NativeRegexpCallMetadata> {
+    Ok(NativeRegexpCallMetadata::new(NativeRegexpKind::Substr))
+}
+
+fn init_regexp_instr_native_data(_expr: &mut CallBuild) -> Result<NativeRegexpCallMetadata> {
+    Ok(NativeRegexpCallMetadata::new(NativeRegexpKind::Instr))
+}
+
+fn init_regexp_replace_native_data(_expr: &mut CallBuild) -> Result<NativeRegexpCallMetadata> {
+    Ok(NativeRegexpCallMetadata::new(NativeRegexpKind::Replace))
+}
+
+#[rpn_fn(nullable, raw_varg, min_args = 3, max_args = 3, capture = [metadata], metadata_mapper = init_regexp_like_native_data)]
+fn get_regexp_like_native(
+    metadata: &NativeRegexpCallMetadata,
+    args: &[ScalarValueRef<'_>],
+) -> Result<Option<Int>> {
+    let invocation = metadata
+        .invocation()
+        .map_err(native_regexp_infrastructure_error)?;
+    let text = native_regexp_text(args, 0)?;
+    let pattern = native_regexp_text(args, 1)?;
+    // The caller has already prepended only its original collation-derived flag.
+    let match_type = native_regexp_text(args, 2)?;
+    let cached = native_regexp_resolve_pattern(metadata, &invocation, pattern, match_type)?;
+    Ok(Some(i64::from(
+        native_regexp_pattern(&cached)?.is_match(text),
+    )))
+}
+
+#[rpn_fn(nullable, raw_varg, min_args = 5, max_args = 5, capture = [metadata], metadata_mapper = init_regexp_substr_native_data)]
+fn get_regexp_substr_native(
+    metadata: &NativeRegexpCallMetadata,
+    args: &[ScalarValueRef<'_>],
+) -> Result<Option<Bytes>> {
+    let invocation = metadata
+        .invocation()
+        .map_err(native_regexp_infrastructure_error)?;
+    let text = native_regexp_text(args, 0)?;
+    let pattern = native_regexp_text(args, 1)?;
+    let pos = native_regexp_int(args, 2)?;
+    let occurrence = native_regexp_int(args, 3)?;
+    let match_type = native_regexp_text(args, 4)?;
+    let (_, trimmed) = regexp_trim_at(text, pos).map_err(native_regexp_policy_error)?;
+    let cached = native_regexp_resolve_pattern(metadata, &invocation, pattern, match_type)?;
+    Ok(
+        regexp_substr_match(native_regexp_pattern(&cached)?, trimmed, occurrence)
+            .map(|matched| matched.as_bytes().to_vec()),
+    )
+}
+
+#[rpn_fn(nullable, raw_varg, min_args = 6, max_args = 6, capture = [metadata], metadata_mapper = init_regexp_instr_native_data)]
+fn get_regexp_instr_native(
+    metadata: &NativeRegexpCallMetadata,
+    args: &[ScalarValueRef<'_>],
+) -> Result<Option<Int>> {
+    let invocation = metadata
+        .invocation()
+        .map_err(native_regexp_infrastructure_error)?;
+    let text = native_regexp_text(args, 0)?;
+    let pattern = native_regexp_text(args, 1)?;
+    let pos = native_regexp_int(args, 2)?;
+    let occurrence = native_regexp_int(args, 3)?;
+    let (return_option, match_type) = native_regexp_instr_tail(args)?;
+    let (_, trimmed) = regexp_trim_at(text, pos).map_err(native_regexp_policy_error)?;
+    let cached = native_regexp_resolve_pattern(metadata, &invocation, pattern, match_type)?;
+    Ok(Some(regexp_instr_match(
+        native_regexp_pattern(&cached)?,
+        trimmed,
+        pos,
+        occurrence,
+        return_option,
+    )))
+}
+
+#[rpn_fn(nullable, raw_varg, min_args = 6, max_args = 6, capture = [metadata], metadata_mapper = init_regexp_replace_native_data)]
+fn get_regexp_replace_native(
+    metadata: &NativeRegexpCallMetadata,
+    args: &[ScalarValueRef<'_>],
+) -> Result<Option<Bytes>> {
+    let invocation = metadata
+        .invocation()
+        .map_err(native_regexp_infrastructure_error)?;
+    let text = native_regexp_text(args, 0)?;
+    let pattern = native_regexp_text(args, 1)?;
+    let replacement = native_regexp_text(args, 2)?;
+    let pos = native_regexp_int(args, 3)?;
+    let occurrence = native_regexp_int(args, 4)?;
+    let match_type = native_regexp_text(args, 5)?;
+    let (prefix_len, trimmed) = regexp_trim_at(text, pos).map_err(native_regexp_policy_error)?;
+    let cached = native_regexp_resolve_pattern(metadata, &invocation, pattern, match_type)?;
+    let regex = native_regexp_pattern(&cached)?;
+    let parts = invocation.resolve_replacement(replacement);
+    // This is an additional checked charge, not a replacement for the pattern's.
+    metadata
+        .record_known_cache_bytes(known_replacement_cache_bytes(&parts))
+        .map_err(native_regexp_infrastructure_error)?;
+    regexp_replace_matches(
+        &text[..prefix_len],
+        trimmed,
+        regex,
+        parts.as_ref(),
+        occurrence,
+        RegexpReplacementEncoding::NativeUtf8,
+    )
+    .map(Some)
+    .map_err(native_regexp_policy_error)
+}
+
+fn native_regexp_legacy_like(
+    args: &[ScalarValueRef<'_>],
+    case_insensitive: bool,
+) -> Result<Option<Int>> {
+    // Both evaluated operands belong to the old legacy demand frontier.
+    let (text, pattern) = (native_regexp_bytes(args, 0)?, native_regexp_bytes(args, 1)?);
+    let (Some(text), Some(pattern)) = (text, pattern) else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(text).unwrap_or_default();
+    let pattern = std::str::from_utf8(pattern).unwrap_or_default();
+    match RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .build()
+    {
+        Ok(regex) => Ok(Some(i64::from(regex.is_match(text)))),
+        // Only the original regex compilation failure domain becomes NULL.
+        // Argument, binding, budget and outer worker failures are never folded.
+        Err(_) => Ok(None),
+    }
+}
+
+#[rpn_fn(nullable, raw_varg, min_args = 2, max_args = 2)]
+fn get_regexp_like_legacy_ci_native(args: &[ScalarValueRef<'_>]) -> Result<Option<Int>> {
+    native_regexp_legacy_like(args, true)
+}
+
+#[rpn_fn(nullable, raw_varg, min_args = 2, max_args = 2)]
+fn get_regexp_like_legacy_bin_native(args: &[ScalarValueRef<'_>]) -> Result<Option<Int>> {
+    native_regexp_legacy_like(args, false)
+}
+
+#[rpn_fn(nullable)]
+fn get_regexp_null_int_native(value: Option<&Int>) -> Result<Option<Int>> {
+    match value {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Native regexp NULL witness must be an actual NULL"
+        )),
+    }
+}
+
+#[rpn_fn(nullable)]
+fn get_regexp_null_bytes_native(value: Option<&Int>) -> Result<Option<Bytes>> {
+    match value {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Native regexp NULL witness must be an actual NULL"
+        )),
+    }
+}
+
+// A missing legacy child is not an evaluated SQL NULL operand. This recipe
+// consumes no value at all; the caller retains the original child-presence
+// gate.
+#[rpn_fn]
+fn get_regexp_missing_legacy_native() -> Result<Option<Int>> {
+    Ok(None)
+}
+
+#[cfg(test)]
+mod native_tests {
+    use tidb_query_common::error::ErrorInner;
+
+    use super::*;
+
+    fn native_cause(error: &tidb_query_common::Error) -> Option<&NativeRegexpError> {
+        match error.0.as_ref() {
+            ErrorInner::Evaluate(EvaluateError::Caused(cause)) => cause.downcast_ref(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn native_regexp_legacy_policies_and_real_null_witnesses() {
+        // Hand-derived literals, not a provider-produced expected table.
+        let mixed_case = [
+            ScalarValueRef::Bytes(Some(b"A")),
+            ScalarValueRef::Bytes(Some(b"a")),
+        ];
+        assert_eq!(
+            get_regexp_like_legacy_ci_native(&mixed_case).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            get_regexp_like_legacy_bin_native(&mixed_case).unwrap(),
+            Some(0)
+        );
+        for (text, pattern, expected) in [
+            (&b"abc"[..], &b""[..], Some(1)),
+            (&b"abc"[..], &b"("[..], None),
+            (&b"\xff"[..], &b"^$"[..], Some(1)),
+            (&b"abc"[..], &b"\xff"[..], Some(1)),
+        ] {
+            let args = [
+                ScalarValueRef::Bytes(Some(text)),
+                ScalarValueRef::Bytes(Some(pattern)),
+            ];
+            assert_eq!(get_regexp_like_legacy_bin_native(&args).unwrap(), expected);
+        }
+        let null = [
+            ScalarValueRef::Bytes(None),
+            ScalarValueRef::Bytes(Some(b"(")),
+        ];
+        assert_eq!(get_regexp_like_legacy_ci_native(&null).unwrap(), None);
+        let wrong_type = [
+            ScalarValueRef::Bytes(Some(b"a")),
+            ScalarValueRef::Int(Some(&1)),
+        ];
+        assert!(get_regexp_like_legacy_bin_native(&wrong_type).is_err());
+        assert_eq!(get_regexp_null_int_native(None).unwrap(), None);
+        assert_eq!(get_regexp_null_bytes_native(None).unwrap(), None);
+        assert_eq!(get_regexp_missing_legacy_native().unwrap(), None);
+        assert!(get_regexp_null_int_native(Some(&0)).is_err());
+        assert!(get_regexp_null_bytes_native(Some(&0)).is_err());
+    }
+
+    #[test]
+    fn native_regexp_instr_rejects_return_option_before_reading_flags() {
+        let mut args = [
+            ScalarValueRef::Bytes(Some(b"a")),
+            ScalarValueRef::Bytes(Some(b"(")),
+            ScalarValueRef::Int(Some(&0)),
+            ScalarValueRef::Int(Some(&1)),
+            ScalarValueRef::Int(Some(&2)),
+            ScalarValueRef::Bytes(Some(b"\xff")),
+        ];
+        let error = native_regexp_instr_tail(&args).unwrap_err();
+        assert!(matches!(
+            native_cause(&error),
+            Some(NativeRegexpError::InvalidReturnOption(2))
+        ));
+        // Validating the tail really demands flags only after the option passes.
+        args[4] = ScalarValueRef::Int(Some(&0));
+        let error = native_regexp_instr_tail(&args).unwrap_err();
+        assert!(native_cause(&error).is_none());
+        args[5] = ScalarValueRef::Bytes(Some(b""));
+        assert_eq!(native_regexp_instr_tail(&args).unwrap(), (0, ""));
+        let error = regexp_trim_at("a", 0)
+            .map_err(native_regexp_policy_error)
+            .unwrap_err();
+        assert!(matches!(
+            native_cause(&error),
+            Some(NativeRegexpError::Policy(
+                RegexpPolicyError::InvalidPosition { pos: 0, count: 1 }
+            ))
+        ));
+    }
+
+    #[test]
+    fn native_regexp_unbound_metadata_is_infrastructure_not_sql() {
+        let bytes = ScalarValueRef::Bytes(Some(b"a"));
+        let flags = ScalarValueRef::Bytes(Some(b""));
+        let one = ScalarValueRef::Int(Some(&1));
+        let zero = ScalarValueRef::Int(Some(&0));
+        let errors = [
+            get_regexp_like_native(
+                &NativeRegexpCallMetadata::new(NativeRegexpKind::Like),
+                &[bytes, bytes, flags],
+            )
+            .unwrap_err(),
+            get_regexp_substr_native(
+                &NativeRegexpCallMetadata::new(NativeRegexpKind::Substr),
+                &[bytes, bytes, one, one, flags],
+            )
+            .unwrap_err(),
+            get_regexp_instr_native(
+                &NativeRegexpCallMetadata::new(NativeRegexpKind::Instr),
+                &[bytes, bytes, one, one, zero, flags],
+            )
+            .unwrap_err(),
+            get_regexp_replace_native(
+                &NativeRegexpCallMetadata::new(NativeRegexpKind::Replace),
+                &[bytes, bytes, bytes, one, zero, flags],
+            )
+            .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(native_cause(&error).is_none());
+            match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::Caused(cause)) => {
+                    assert!(matches!(
+                        cause.downcast_ref::<LocalError>(),
+                        Some(LocalError::InvalidSpec(_))
+                    ));
+                }
+                _ => panic!("unbound metadata lost its actual LocalError: {error:?}"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

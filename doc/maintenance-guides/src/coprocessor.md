@@ -293,17 +293,31 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
-  Regexp foundation helpers in `components/tidb_query_expr/src/regexp_policy.rs`
-  share flag reduction, character trimming, substring/position search, replacement
-  tokens and capture/replacement assembly between wire and native callers. Typed
-  errors retain actual position/capture/UTF-8 details; frontends map their existing
-  diagnostics. Native replacement validates each selected expansion while wire
-  output permits raw bytes. Wire HashSet inline flags and native RegexBuilder
-  representation remain separate policies. Coercion, NULL and error precedence,
-  constant metadata and statement-context success/failure/replacement caches stay
-  with their existing callers. This foundation adds no closed evaluator recipes,
-  six-slot admission or migrated-family credit; cache-aware worker integration is
-  still pending. Allocation strategy and performance are not claimed equivalent.
+  Regexp algorithms remain shared in `components/tidb_query_expr/src/regexp_policy.rs`;
+  `native_regexp.rs` owns the context cache, native compiler and typed causes.
+  Cache-owner Clone resets, while explicit invocation handles share the actual
+  state. Binding does not initialize or evict anything. Four private native
+  recipes in `impl_regexp.rs` lazily compile after the original validation frontier
+  and borrow the actual cached Regex/parts, including memoized compile failures.
+  Statement-context and constness semantics remain frontend-owned; metadata RAII
+  detaches the handles before postflight or pool return, including unwinding.
+  Only these four exact operation/role/kind combinations admit typed metadata
+  and real 3/5/6-slot schemas; other metadata remains unit. The common driver is
+  unchanged, and ordinary wire/PB admission is not widened. Invalid INSTR return
+  option alone authorizes an undemanded flags marker, never a fabricated NULL.
+  Two nullable witnesses, two distinct legacy case policies and one genuine
+  zero-operand missing-child recipe complete the nine-operation closed set.
+  Legacy children retain their original demand; missing operands are not SQL NULL.
+  Typed native SQL causes are authenticated only for the four main operations;
+  binding, counting and resource failures never acquire a regexp SQL cause.
+  The fixed metadata box is charged with the worker. Use-site observations charge
+  known cache structures and actual parts/error-buffer capacities using checked
+  sums; cache slots are not re-read after context replacement. Opaque engine/TLS
+  storage and allocation peaks remain outside this partial logical accounting,
+  including transient uncached engines; full memory accounting is deferred to M6.
+  The public statistics helper is a shared pure SDK helper, not a pooled SQL path.
+  Native per-expansion UTF-8 versus wire raw bytes, builder versus inline flags,
+  diagnostic mapping and original NULL/error precedence remain distinct policies.
   Eight native VECTOR functions use nine private `impl_vec.rs` recipes. The
   aligned native-policy type and complete public helpers live in datatype
   `codec/mysql/vector_native.rs`; the older packed wire type retains its own

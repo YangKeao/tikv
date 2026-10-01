@@ -7894,6 +7894,217 @@ fn local_evaluated_args_date_format_core_keeps_roles_and_missing_distinct() {
 }
 
 #[test]
+fn regexp_dispatch_exact_getters_metadata_and_closed_shapes() {
+    use super::{
+        compile::{ProgramEntry, compile_evaluated_bytes},
+        runtime::EvalBudget,
+    };
+    use crate::{
+        RpnExpressionNode,
+        types::{
+            expr_eval::EvaluatedAsciiWitness,
+            function::{CallArg, CallShape},
+        },
+    };
+    let cases = [
+        (
+            EvaluatedBytesOp::RegexpLikeNative,
+            crate::impl_regexp::get_regexp_like_native_fn_meta(),
+            3,
+            Some(NativeRegexpKind::Like),
+            EvalType::Int,
+        ),
+        (
+            EvaluatedBytesOp::RegexpSubstrNative,
+            crate::impl_regexp::get_regexp_substr_native_fn_meta(),
+            5,
+            Some(NativeRegexpKind::Substr),
+            EvalType::Bytes,
+        ),
+        (
+            EvaluatedBytesOp::RegexpInstrNative,
+            crate::impl_regexp::get_regexp_instr_native_fn_meta(),
+            6,
+            Some(NativeRegexpKind::Instr),
+            EvalType::Int,
+        ),
+        (
+            EvaluatedBytesOp::RegexpReplaceNative,
+            crate::impl_regexp::get_regexp_replace_native_fn_meta(),
+            6,
+            Some(NativeRegexpKind::Replace),
+            EvalType::Bytes,
+        ),
+        (
+            EvaluatedBytesOp::RegexpLikeLegacyCiNative,
+            crate::impl_regexp::get_regexp_like_legacy_ci_native_fn_meta(),
+            2,
+            None,
+            EvalType::Int,
+        ),
+        (
+            EvaluatedBytesOp::RegexpLikeLegacyBinNative,
+            crate::impl_regexp::get_regexp_like_legacy_bin_native_fn_meta(),
+            2,
+            None,
+            EvalType::Int,
+        ),
+        (
+            EvaluatedBytesOp::RegexpNullIntNative,
+            crate::impl_regexp::get_regexp_null_int_native_fn_meta(),
+            1,
+            None,
+            EvalType::Int,
+        ),
+        (
+            EvaluatedBytesOp::RegexpNullBytesNative,
+            crate::impl_regexp::get_regexp_null_bytes_native_fn_meta(),
+            1,
+            None,
+            EvalType::Bytes,
+        ),
+        (
+            EvaluatedBytesOp::RegexpMissingLegacyNative,
+            crate::impl_regexp::get_regexp_missing_legacy_native_fn_meta(),
+            0,
+            None,
+            EvalType::Int,
+        ),
+    ];
+    for (operation, getter, arity, kind, output) in cases {
+        assert_eq!(operation.input_types().len(), arity);
+        assert_eq!(operation.regexp_kind(), kind);
+        assert_eq!(operation.eval_type(), output);
+        assert_eq!(operation.call_count(), 1);
+        assert!(matches!(
+            operation.kernel_kind(),
+            EvaluatedKernelKind::ClosedPrivate(_)
+        ));
+        let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+        assert!(program.check_entry(ProgramEntry::EvaluatedBytes).is_ok());
+        assert!(program.check_entry(ProgramEntry::Row).is_err());
+        assert_eq!(program.expression.len(), arity + 1);
+        for (slot, field_type) in program.schema.iter().enumerate() {
+            assert_eq!(Some(field_type), operation.input_field_type(slot).as_ref());
+            assert!(
+                matches!(program.expression[slot], RpnExpressionNode::ColumnRef { offset } if offset == slot)
+            );
+        }
+        let RpnExpressionNode::FnCall {
+            func_meta,
+            args_len,
+            field_type,
+            metadata,
+        } = &program.expression[arity]
+        else {
+            panic!("missing regexp generated call");
+        };
+        assert_eq!(*args_len, arity);
+        assert_eq!(field_type, &operation.return_type());
+        assert_eq!(func_meta.name, getter.name);
+        assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.validator_ptr,
+            getter.validator_ptr
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.metadata_ptr,
+            getter.metadata_ptr
+        ));
+        assert!(operation.metadata_matches(metadata.as_ref()));
+        assert_eq!(metadata.is::<()>(), kind.is_none());
+        if let Some(kind) = kind {
+            assert!(
+                metadata
+                    .downcast_ref::<NativeRegexpCallMetadata>()
+                    .unwrap()
+                    .invocation()
+                    .is_err()
+            );
+            for alternate in [
+                NativeRegexpKind::Like,
+                NativeRegexpKind::Substr,
+                NativeRegexpKind::Instr,
+                NativeRegexpKind::Replace,
+            ] {
+                assert_eq!(
+                    operation.metadata_matches(&NativeRegexpCallMetadata::new(alternate)),
+                    alternate == kind
+                );
+            }
+        }
+        let spec = LocalExpr::Call {
+            function: operation.function_ref(),
+            args: program
+                .schema
+                .iter()
+                .enumerate()
+                .map(|(slot, field_type)| LocalExpr::InputSlot {
+                    slot,
+                    field_type: field_type.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            return_type: operation.return_type(),
+            metadata: crate::CallMetadata::None,
+        };
+        assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+        let mut raw = CallBuild::local(
+            CallShape::new(
+                operation.function_ref(),
+                operation.return_type(),
+                program
+                    .schema
+                    .iter()
+                    .cloned()
+                    .map(CallArg::dynamic)
+                    .collect(),
+            ),
+            crate::CallMetadata::None,
+        );
+        assert!(prepare_call(&mut raw).is_err());
+    }
+    let operation = EvaluatedBytesOp::RegexpLikeNative;
+    let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+    let mut ctx = EvalContext::default();
+    let mut witness = EvaluatedAsciiWitness::default();
+    for (values, role) in [
+        (
+            [
+                ScalarValue::Bytes(Some(b"a".to_vec())),
+                ScalarValue::Bytes(Some(b"a".to_vec())),
+                ScalarValue::Bytes(Some(Vec::new())),
+            ],
+            EvaluatedArgsRole::Values,
+        ),
+        (
+            [
+                ScalarValue::Bytes(None),
+                ScalarValue::Bytes(Some(b"a".to_vec())),
+                ScalarValue::Bytes(Some(Vec::new())),
+            ],
+            EvaluatedArgsRole::NativeRegexpLike,
+        ),
+    ] {
+        let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+        assert!(matches!(
+            program.expression.eval_with_ready_args(
+                operation,
+                &mut ctx,
+                &program.schema,
+                &values,
+                role,
+                &[0],
+                &mut witness,
+                &mut budget
+            ),
+            Err(LocalError::InvalidSpec(_))
+        ));
+        assert_eq!(witness.invocations(), 0);
+    }
+}
+
+#[test]
 fn vector_dispatch_getters_shapes_roles_and_private_compile() {
     use tidb_query_datatype::codec::{
         data_type::ScalarValueRef,

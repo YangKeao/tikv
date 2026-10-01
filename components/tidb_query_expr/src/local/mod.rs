@@ -198,7 +198,7 @@ pub use self::{
     spec::{CompileLimits, LocalCompileContext, LocalError, LocalExpr, LocalResult},
 };
 pub(crate) use self::{
-    batch::{EvaluatedArgsRole, EvaluatedKernelKind},
+    batch::{EvaluatedArgsRole, EvaluatedKernelKind, NativeRegexpCallMetadata, NativeRegexpKind},
     diagnostic::FailureRecorder,
     lineage::CheckedResultFlow,
 };

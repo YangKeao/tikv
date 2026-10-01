@@ -137,16 +137,35 @@ fn check_evaluated_bytes_source(
         )
     };
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::RegexpLikeNative, EvaluatedArgsRole::NativeRegexpLike) => {
+            arity == 3 && calls == 1
+        }
+        (EvaluatedBytesOp::RegexpSubstrNative, EvaluatedArgsRole::NativeRegexpSubstr) => {
+            arity == 5 && calls == 1
+        }
+        (EvaluatedBytesOp::RegexpInstrNative, EvaluatedArgsRole::NativeRegexpInstr)
+        | (EvaluatedBytesOp::RegexpReplaceNative, EvaluatedArgsRole::NativeRegexpReplace) => {
+            arity == 6 && calls == 1
+        }
+        (
+            _,
+            EvaluatedArgsRole::NativeRegexpLike
+            | EvaluatedArgsRole::NativeRegexpSubstr
+            | EvaluatedArgsRole::NativeRegexpInstr
+            | EvaluatedArgsRole::NativeRegexpReplace,
+        ) => false,
         (
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
-            | EvaluatedBytesOp::DateFormatMissingNative,
+            | EvaluatedBytesOp::DateFormatMissingNative
+            | EvaluatedBytesOp::RegexpMissingLegacyNative,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
         (
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
-            | EvaluatedBytesOp::DateFormatMissingNative,
+            | EvaluatedBytesOp::DateFormatMissingNative
+            | EvaluatedBytesOp::RegexpMissingLegacyNative,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,
@@ -227,7 +246,7 @@ fn check_evaluated_bytes_kernel(
                 && func_meta.name == official.name
                 && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
                 && field_type == &primitive.return_type()
-                && metadata.is::<()>()
+                && primitive.metadata_matches(metadata.as_ref())
     ) {
         return Err(evaluated_bytes_error(
             operation,

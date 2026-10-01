@@ -315,16 +315,35 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::RegexpLikeNative, EvaluatedArgsRole::NativeRegexpLike) => {
+            types.len() == 3 && operation.call_count() == 1
+        }
+        (EvaluatedBytesOp::RegexpSubstrNative, EvaluatedArgsRole::NativeRegexpSubstr) => {
+            types.len() == 5 && operation.call_count() == 1
+        }
+        (EvaluatedBytesOp::RegexpInstrNative, EvaluatedArgsRole::NativeRegexpInstr)
+        | (EvaluatedBytesOp::RegexpReplaceNative, EvaluatedArgsRole::NativeRegexpReplace) => {
+            types.len() == 6 && operation.call_count() == 1
+        }
+        (
+            _,
+            EvaluatedArgsRole::NativeRegexpLike
+            | EvaluatedArgsRole::NativeRegexpSubstr
+            | EvaluatedArgsRole::NativeRegexpInstr
+            | EvaluatedArgsRole::NativeRegexpReplace,
+        ) => false,
         (
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
-            | EvaluatedBytesOp::DateFormatMissingNative,
+            | EvaluatedBytesOp::DateFormatMissingNative
+            | EvaluatedBytesOp::RegexpMissingLegacyNative,
             EvaluatedArgsRole::NoArgs,
         ) => types.is_empty() && operation.call_count() == 1,
         (
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
-            | EvaluatedBytesOp::DateFormatMissingNative,
+            | EvaluatedBytesOp::DateFormatMissingNative
+            | EvaluatedBytesOp::RegexpMissingLegacyNative,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,
@@ -368,6 +387,18 @@ fn evaluated_ready_args_match(
         }
         && match role {
             EvaluatedArgsRole::NoArgs => values.is_empty(),
+            EvaluatedArgsRole::NativeRegexpLike
+            | EvaluatedArgsRole::NativeRegexpSubstr
+            | EvaluatedArgsRole::NativeRegexpInstr
+            | EvaluatedArgsRole::NativeRegexpReplace => {
+                operation.regexp_kind().is_some()
+                    && values.iter().all(|value| {
+                        matches!(
+                            value,
+                            ScalarValue::Bytes(Some(_)) | ScalarValue::Int(Some(_))
+                        )
+                    })
+            }
             EvaluatedArgsRole::NativeVector | EvaluatedArgsRole::NativeVector2 => {
                 let selected = match role {
                     EvaluatedArgsRole::NativeVector => {
@@ -480,6 +511,8 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::TranslateNullNative
                         | EvaluatedBytesOp::SqlCryptNullNative
                         | EvaluatedBytesOp::VecRealNullNative
+                        | EvaluatedBytesOp::RegexpNullIntNative
+                        | EvaluatedBytesOp::RegexpNullBytesNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
@@ -736,16 +769,35 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::RegexpLikeNative, EvaluatedArgsRole::NativeRegexpLike) => {
+            arity == 3 && calls == 1
+        }
+        (EvaluatedBytesOp::RegexpSubstrNative, EvaluatedArgsRole::NativeRegexpSubstr) => {
+            arity == 5 && calls == 1
+        }
+        (EvaluatedBytesOp::RegexpInstrNative, EvaluatedArgsRole::NativeRegexpInstr)
+        | (EvaluatedBytesOp::RegexpReplaceNative, EvaluatedArgsRole::NativeRegexpReplace) => {
+            arity == 6 && calls == 1
+        }
+        (
+            _,
+            EvaluatedArgsRole::NativeRegexpLike
+            | EvaluatedArgsRole::NativeRegexpSubstr
+            | EvaluatedArgsRole::NativeRegexpInstr
+            | EvaluatedArgsRole::NativeRegexpReplace,
+        ) => false,
         (
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
-            | EvaluatedBytesOp::DateFormatMissingNative,
+            | EvaluatedBytesOp::DateFormatMissingNative
+            | EvaluatedBytesOp::RegexpMissingLegacyNative,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
         (
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
-            | EvaluatedBytesOp::DateFormatMissingNative,
+            | EvaluatedBytesOp::DateFormatMissingNative
+            | EvaluatedBytesOp::RegexpMissingLegacyNative,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,
@@ -802,7 +854,7 @@ pub(crate) fn evaluated_bytes_shape(
                     && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
                     && *field_type == primitive.return_type()
                     && (index + 1 != calls || *field_type == operation.return_type())
-                    && metadata.is::<()>()
+                    && primitive.metadata_matches(metadata.as_ref())
             }
             _ => false,
         }
@@ -2765,8 +2817,9 @@ impl RpnExpression {
 
     /// Fixed ready operands, borrowed from the facade until its result
     /// extraction completes. Only the selected closed recipe is admitted;
-    /// zero operands require PiRaw, JsonValidOtherNative or
-    /// DateFormatMissingNative with the NoArgs role.
+    /// zero operands require PiRaw, JsonValidOtherNative,
+    /// DateFormatMissingNative or RegexpMissingLegacyNative with the exact
+    /// NoArgs role.
     pub(crate) fn eval_with_ready_args<'a, 'data: 'a>(
         &'a self,
         operation: EvaluatedBytesOp,

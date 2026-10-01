@@ -45,6 +45,12 @@ pub mod impl_string;
 pub mod impl_time;
 pub mod impl_vec;
 
+mod native_regexp;
+pub use native_regexp::{
+    NativeCachedRegexp, NativeContextCache, NativeRegexpCompileError, NativeRegexpError,
+    NativeRegexpInvocation, compile_native_regexp, regexp_match_bin_collation_native,
+};
+
 mod regexp_policy;
 pub use regexp_policy::{
     NativeReplacementPart, RegexpPolicyError, RegexpReplacementEncoding, regexp_instr_match,

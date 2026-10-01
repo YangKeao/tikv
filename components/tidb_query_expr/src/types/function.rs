@@ -299,6 +299,15 @@ pub enum LocalFunctionId {
     VecL2NormNative,
     VecFromTextNative,
     VecRealNullNative,
+    RegexpLikeNative,
+    RegexpSubstrNative,
+    RegexpInstrNative,
+    RegexpReplaceNative,
+    RegexpLikeLegacyCiNative,
+    RegexpLikeLegacyBinNative,
+    RegexpNullIntNative,
+    RegexpNullBytesNative,
+    RegexpMissingLegacyNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.
