@@ -239,6 +239,8 @@ pub enum LocalFunctionId {
     HourNanosNative,
     MinuteNanosNative,
     SecondNanosNative,
+    MonthNameTextNative,
+    TimeToSecTextNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

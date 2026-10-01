@@ -6551,3 +6551,98 @@ fn local_evaluated_args_time_text_and_nanos_keep_value_roles() {
         }
     }
 }
+
+#[test]
+fn local_evaluated_args_month_name_and_time_to_sec_keep_nullable_text() {
+    let retained = {
+        let mut worker = prepare_evaluated_bytes(
+            EvaluatedBytesOp::MonthNameTextNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), EvaluatedBytesOp::MonthNameTextNative);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Int(Some(0))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let cases: [(Option<&[u8]>, Option<&[u8]>); 3] = [
+            (None, None),
+            (Some(b"2023-02-29"), None),
+            (Some(b"2024-02-29"), Some(b"February")),
+        ];
+        let mut retained = None;
+        for (index, (input, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Bytes(value) = worker
+                .eval_args(EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec())))
+                .unwrap()
+            else {
+                panic!("MONTHNAME returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            retained = value.into_option();
+            assert_eq!(retained.as_deref(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        retained
+    };
+    assert_eq!(retained.as_deref(), Some(b"February".as_slice()));
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::TimeToSecTextNative,
+        LocalCompileContext::default(),
+        ExecutionLimits {
+            max_retained_bytes: 8 * 1024,
+            ..ExecutionLimits::default()
+        },
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::TimeToSecTextNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::Int(Some(0))),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let mut oversized = Vec::with_capacity(16 * 1024);
+    oversized.extend_from_slice(b"junk");
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
+        Err(LocalError::ResourceLimit(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let cases: [(Option<&[u8]>, Option<i64>); 4] = [
+        (None, None),
+        (Some(b"-12:34:56.9999999"), Some(-45_296)),
+        (Some(b"900:00:00"), None),
+        (Some(b"junk"), Some(0)),
+    ];
+    for (index, (input, expected)) in cases.into_iter().enumerate() {
+        let ComputedValue::Int(value) = worker
+            .eval_args(EvaluatedArgs::Bytes(input.map(|bytes| bytes.to_vec())))
+            .unwrap()
+        else {
+            panic!("TIME_TO_SEC returned a non-Int value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+}

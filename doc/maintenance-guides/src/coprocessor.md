@@ -293,6 +293,21 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  MONTHNAME and TIME_TO_SEC use two private text recipes in `impl_time.rs`,
+  reusing Bytes inputs and ordinary owned Bytes / signed Int results. Native
+  MONTHNAME preserves its ETDatetime cast before string preparation; the worker
+  validates the whole calendar date and uses the shared month-name lookup. Wire
+  MONTHNAME retains its independent zero-date warning and indexing policies.
+  The existing public full MONTH_NAMES table also serves native date formatting
+  and parsing, without changing their guards or claiming those whole families;
+  abbreviation tables remain separate. `Time::parse_native_duration_text` owns
+  the distinct TIME_TO_SEC/TIME_FORMAT policy, including junk-with-no-digits as
+  zero, >838 hours as NULL, arbitrary six-character fraction truncation and
+  original unchecked arithmetic. It does not use the HMS clamp or construct
+  a Duration from nanoseconds. Native TIME_FORMAT keeps its original consumer
+  and mask demand through a thin parser delegate. No native PB/legacy admission
+  is added. Arithmetic follows the consuming workspace's overflow profile;
+  neither debug-assertions flags nor checked-arithmetic substitution infer it.
   HOUR/MINUTE/SECOND use six private recipes in `impl_time.rs`: three
   Bytes-to-Int text recipes and three Int-to-Int signed-nanosecond recipes.
   Native SQL retains its original string conversion, including Duration Display

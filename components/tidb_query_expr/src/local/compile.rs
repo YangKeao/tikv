@@ -1680,6 +1680,8 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::HourNanosNative,
             EvaluatedBytesOp::MinuteNanosNative,
             EvaluatedBytesOp::SecondNanosNative,
+            EvaluatedBytesOp::MonthNameTextNative,
+            EvaluatedBytesOp::TimeToSecTextNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

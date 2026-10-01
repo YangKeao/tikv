@@ -228,6 +228,63 @@ impl From<TimeType> for FieldTypeTp {
 
 // The common set of methods for `date/time`
 impl Time {
+    /// Parses the native TIME_TO_SEC/TIME_FORMAT text domain, preserving its
+    /// signed whole seconds and at most six fraction characters. This retains
+    /// the original unchecked arithmetic and allocation paths; it is not the
+    /// HMS parser or a validated Time/Duration constructor.
+    pub fn parse_native_duration_text(text: &str) -> Option<(i64, String)> {
+        let text = text.trim();
+        // Only the original ASCII-space suffix rule selects a datetime clock.
+        let text = match text.rsplit_once(' ') {
+            Some((date, time)) if Self::parse_native_date_ymd(date).is_some() => time,
+            _ => text,
+        };
+        let (negative, text) = text.strip_prefix('-').map_or((false, text), |s| (true, s));
+        let (h, m, seconds) = if text.contains(':') {
+            let parts: Vec<_> = text.split(':').collect();
+            if !(2..=3).contains(&parts.len()) {
+                return None;
+            }
+            let Ok(h) = parts[0].parse::<i64>() else {
+                return None;
+            };
+            let Ok(m) = parts[1].parse::<i64>() else {
+                return None;
+            };
+            let s = parts.get(2).copied().unwrap_or("0");
+            (h, m, s.to_string())
+        } else {
+            let digits: String = text.chars().take_while(char::is_ascii_digit).collect();
+            if digits.is_empty() {
+                return Some((0, String::new()));
+            }
+            let Ok(n) = digits.parse::<i64>() else {
+                return None;
+            };
+            (n / 10_000, n / 100 % 100, (n % 100).to_string())
+        };
+        let (whole, fraction) = seconds
+            .split_once('.')
+            .map_or((seconds.as_str(), ""), |(a, b)| (a, b));
+        let Ok(s) = whole.parse::<i64>() else {
+            return None;
+        };
+        if h > 838 || !(0..60).contains(&m) || !(0..60).contains(&s) {
+            return None;
+        }
+        let total = h * 3600 + m * 60 + s;
+        Some((
+            if negative { -total } else { total },
+            fraction.chars().take(6).collect(),
+        ))
+    }
+
+    /// Looks up a full month name. Callers retain their own date validation
+    /// and diagnostics; like the original lookup, months outside 1..=12 panic.
+    pub fn month_name_from_month(month: u32) -> &'static str {
+        MONTH_NAMES[(month - 1) as usize]
+    }
+
     /// Parses the native HOUR/MINUTE/SECOND text domain without constructing a
     /// Time or Duration. Sign stripping, partial numeric text, date-prefix
     /// validation, ignored digit fractions, and whole-value clamping retain
@@ -1029,21 +1086,6 @@ mod date_format_parser {
     use super::*;
     type DateFormatParser<'a> =
         fn(&mut Time, &'a str, &mut HashMap<String, i64>) -> (&'a str, bool);
-
-    const MONTH_NAMES: [&str; 12] = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ];
 
     const CONST_FOR_AM: i64 = 1;
     const CONST_FOR_PM: i64 = 2;
@@ -3177,6 +3219,62 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn test_native_duration_text_and_month_names() {
+        // Original TIME_TO_SEC/TIME_FORMAT outcomes, including policies that
+        // differ from HMS clamping and validated Duration construction.
+        for (text, expected) in [
+            ("", Some((0, ""))),
+            ("junk", Some((0, ""))),
+            ("12.34", Some((12, ""))),
+            ("-103045tail", Some((-37845, ""))),
+            ("-01:02:03.1234567", Some((-3723, "123456"))),
+            ("--1:00", Some((3600, ""))),
+            ("-0:00:00.éαxyz12", Some((0, "éαxyz1"))),
+            ("838:59:59.", Some((3020399, ""))),
+            ("900:30:15", None),
+            ("1:60:00", None),
+            ("1:02:03:04", None),
+            ("1990-05-07 19:30:10", Some((70210, ""))),
+            ("4294967295-12-31 00:00:01", Some((1, ""))),
+            ("2023-02-29 01:02:03", None),
+        ] {
+            let actual = Time::parse_native_duration_text(text);
+            assert_eq!(
+                actual
+                    .as_ref()
+                    .map(|(seconds, fraction)| (*seconds, fraction.as_str())),
+                expected,
+                "{text}"
+            );
+        }
+        // The current test profile checks overflow. Preserve the original
+        // unchecked multiplication's panic rather than inventing NULL/error.
+        assert!(
+            std::panic::catch_unwind(|| {
+                Time::parse_native_duration_text("--9223372036854775808:00")
+            })
+            .is_err()
+        );
+        let expected = [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ];
+        for (index, name) in expected.into_iter().enumerate() {
+            assert_eq!(Time::month_name_from_month(index as u32 + 1), name);
+        }
+    }
 
     #[test]
     fn test_native_hms_and_date_policies() {

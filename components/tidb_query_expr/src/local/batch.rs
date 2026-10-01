@@ -925,6 +925,8 @@ pub enum EvaluatedBytesOp {
     HourNanosNative,
     MinuteNanosNative,
     SecondNanosNative,
+    MonthNameTextNative,
+    TimeToSecTextNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1491,6 +1493,16 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::SecondNanosNative,
                 );
             }
+            Self::MonthNameTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MonthNameTextNative,
+                );
+            }
+            Self::TimeToSecTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TimeToSecTextNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1795,6 +1807,8 @@ impl EvaluatedBytesOp {
             Self::HourNanosNative => crate::impl_time::hour_nanos_native_fn_meta(),
             Self::MinuteNanosNative => crate::impl_time::minute_nanos_native_fn_meta(),
             Self::SecondNanosNative => crate::impl_time::second_nanos_native_fn_meta(),
+            Self::MonthNameTextNative => crate::impl_time::month_name_text_native_fn_meta(),
+            Self::TimeToSecTextNative => crate::impl_time::time_to_sec_text_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1967,7 +1981,8 @@ impl EvaluatedBytesOp {
             | Self::SecondTextNative
             | Self::HourNanosNative
             | Self::MinuteNanosNative
-            | Self::SecondNanosNative => EvalType::Int,
+            | Self::SecondNanosNative
+            | Self::TimeToSecTextNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -2072,7 +2087,8 @@ impl EvaluatedBytesOp {
             | Self::JsonDepthNative
             | Self::JsonStorageFreeNative
             | Self::JsonStorageSizeNative
-            | Self::JsonQuoteNative => EvalType::Bytes,
+            | Self::JsonQuoteNative
+            | Self::MonthNameTextNative => EvalType::Bytes,
         }
     }
 
@@ -2131,7 +2147,9 @@ impl EvaluatedBytesOp {
             | Self::QuarterCoreNative
             | Self::HourTextNative
             | Self::MinuteTextNative
-            | Self::SecondTextNative => &[EvalType::Bytes],
+            | Self::SecondTextNative
+            | Self::MonthNameTextNative
+            | Self::TimeToSecTextNative => &[EvalType::Bytes],
             Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative
