@@ -516,14 +516,21 @@ impl Time {
 
     /// used to convert period to month
     pub fn period_to_month(period: u64) -> u64 {
+        Self::period_to_month_with_arithmetic(period, false)
+    }
+
+    /// Native period conversion retains the Go uint64 wrapping policy.
+    pub fn period_to_month_wrapping(period: u64) -> u64 {
+        Self::period_to_month_with_arithmetic(period, true)
+    }
+
+    fn period_to_month_with_arithmetic(period: u64, wrapping: bool) -> u64 {
         if period == 0 {
             return 0;
         }
-        let (year, month) = (period / 100, period % 100);
-        if year < 70 {
-            (year + 2000) * 12 + month - 1
-        } else if year < 100 {
-            (year + 1900) * 12 + month - 1
+        let (year, month) = (Self::period_year_pivot(period / 100), period % 100);
+        if wrapping {
+            year.wrapping_mul(12).wrapping_add(month).wrapping_sub(1)
         } else {
             year * 12 + month - 1
         }
@@ -531,16 +538,88 @@ impl Time {
 
     /// used to convert month to period
     pub fn month_to_period(month: u64) -> u64 {
+        Self::month_to_period_with_arithmetic(month, false)
+    }
+
+    /// Native inverse conversion wraps rather than changing the wire helper's
+    /// profile-dependent overflow behavior for large month totals.
+    pub fn month_to_period_wrapping(month: u64) -> u64 {
+        Self::month_to_period_with_arithmetic(month, true)
+    }
+
+    fn month_to_period_with_arithmetic(month: u64, wrapping: bool) -> u64 {
         if month == 0 {
             return 0;
         }
-        let year = month / 12;
-        if year < 70 {
-            (year + 2000) * 100 + month % 12 + 1
-        } else if year < 100 {
-            (year + 1900) * 100 + month % 12 + 1
+        let year = Self::period_year_pivot(month / 12);
+        if wrapping {
+            year.wrapping_mul(100)
+                .wrapping_add(month % 12)
+                .wrapping_add(1)
         } else {
             year * 100 + month % 12 + 1
+        }
+    }
+
+    fn period_year_pivot(year: u64) -> u64 {
+        if year < 70 {
+            year + 2000
+        } else if year < 100 {
+            year + 1900
+        } else {
+            year
+        }
+    }
+
+    /// Native PERIOD_ADD/PERIOD_DIFF validation, after both nullable operands
+    /// have been observed. Periods have no additional year upper bound.
+    pub fn is_valid_native_period(period: i64) -> bool {
+        period >= 0 && period % 100 != 0 && period % 100 <= 12
+    }
+
+    /// Native GET_FORMAT lookup over raw bytes. Only the location comparison
+    /// folds ASCII case; unknown combinations produce an empty string.
+    pub fn get_format_native(format_type: &[u8], location: &[u8]) -> &'static str {
+        let location_is = |expected: &[u8]| location.eq_ignore_ascii_case(expected);
+        let datetime = format_type == b"DATETIME" || format_type == b"TIMESTAMP";
+        if format_type == b"DATE" {
+            if location_is(b"USA") {
+                "%m.%d.%Y"
+            } else if location_is(b"JIS") || location_is(b"ISO") {
+                "%Y-%m-%d"
+            } else if location_is(b"EUR") {
+                "%d.%m.%Y"
+            } else if location_is(b"INTERNAL") {
+                "%Y%m%d"
+            } else {
+                ""
+            }
+        } else if datetime {
+            if location_is(b"USA") {
+                "%Y-%m-%d %H.%i.%s"
+            } else if location_is(b"JIS") || location_is(b"ISO") {
+                "%Y-%m-%d %H:%i:%s"
+            } else if location_is(b"EUR") {
+                "%Y-%m-%d %H.%i.%s"
+            } else if location_is(b"INTERNAL") {
+                "%Y%m%d%H%i%s"
+            } else {
+                ""
+            }
+        } else if format_type == b"TIME" {
+            if location_is(b"USA") {
+                "%h:%i:%s %p"
+            } else if location_is(b"JIS") || location_is(b"ISO") {
+                "%H:%i:%s"
+            } else if location_is(b"EUR") {
+                "%H.%i.%s"
+            } else if location_is(b"INTERNAL") {
+                "%H%i%s"
+            } else {
+                ""
+            }
+        } else {
+            ""
         }
     }
 }
@@ -3219,6 +3298,51 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn test_native_period_and_get_format_policies() {
+        for (period, month) in [(0, 0), (6901, 24828), (7001, 23640), (10001, 1200)] {
+            assert_eq!(Time::period_to_month(period), month);
+            assert_eq!(Time::period_to_month_wrapping(period), month);
+        }
+        for (month, period) in [(0, 0), (12, 200101), (828, 206901), (840, 197001)] {
+            assert_eq!(Time::month_to_period(month), period);
+            assert_eq!(Time::month_to_period_wrapping(month), period);
+        }
+        assert_eq!(
+            Time::month_to_period_wrapping(u64::MAX),
+            6_148_914_691_236_517_176
+        );
+        for (period, valid) in [
+            (0, false),
+            (-1, false),
+            (13, false),
+            (100, false),
+            (7, true),
+            (i64::MAX, true),
+        ] {
+            assert_eq!(Time::is_valid_native_period(period), valid);
+        }
+        for (kind, location, expected) in [
+            (b"DATE".as_slice(), b"usa".as_slice(), "%m.%d.%Y"),
+            (b"DATE", b"JIS", "%Y-%m-%d"),
+            (b"DATE", b"EUR", "%d.%m.%Y"),
+            (b"DATE", b"INTERNAL", "%Y%m%d"),
+            (b"TIMESTAMP", b"eur", "%Y-%m-%d %H.%i.%s"),
+            (b"DATETIME", b"ISO", "%Y-%m-%d %H:%i:%s"),
+            (b"DATETIME", b"INTERNAL", "%Y%m%d%H%i%s"),
+            (b"TIME", b"USA", "%h:%i:%s %p"),
+            (b"TIME", b"ISO", "%H:%i:%s"),
+            (b"TIME", b"EUR", "%H.%i.%s"),
+            (b"TIME", b"INTERNAL", "%H%i%s"),
+            (b"date", b"USA", ""),
+            (b"DATE", b" USA", ""),
+            (b"\xff", b"USA", ""),
+            (b"DATE", b"\xff", ""),
+        ] {
+            assert_eq!(Time::get_format_native(kind, location), expected);
+        }
+    }
 
     #[test]
     fn test_native_duration_text_and_month_names() {

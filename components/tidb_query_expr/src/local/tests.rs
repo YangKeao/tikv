@@ -6646,3 +6646,213 @@ fn local_evaluated_args_month_name_and_time_to_sec_keep_nullable_text() {
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
 }
+
+#[test]
+fn local_evaluated_args_period_receipts_and_get_format_keep_nullable_boundaries() {
+    use tidb_query_common::error::{ErrorInner, EvaluateError};
+
+    for (operation, kind, left, right, expected, display) in [
+        (
+            EvaluatedBytesOp::PeriodAddNative,
+            EvaluatedSqlFailureKind::PeriodAddIncorrectArguments,
+            202312,
+            1,
+            202401,
+            "Incorrect arguments to period_add",
+        ),
+        (
+            EvaluatedBytesOp::PeriodDiffNative,
+            EvaluatedSqlFailureKind::PeriodDiffIncorrectArguments,
+            202402,
+            202401,
+            1,
+            "Incorrect arguments to period_diff",
+        ),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        let failure = worker
+            .eval_args_reported(EvaluatedArgs::Int(Some(0)))
+            .unwrap_err();
+        assert!(matches!(failure.error(), LocalError::InvalidBatch(_)));
+        assert_eq!(failure.operation(), None);
+        assert_eq!(failure.sql_failure(), None);
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let ComputedValue::Int(value) = worker
+            .eval_args_reported(EvaluatedArgs::Int2(Some(0), None))
+            .unwrap()
+        else {
+            panic!("nullable period operation returned a non-Int value");
+        };
+        assert_eq!(value.value(), None);
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), None);
+        assert_eq!(worker.kernel_invocations(), 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        for (index, reported) in [true, false].into_iter().enumerate() {
+            let error = if reported {
+                let failure = worker
+                    .eval_args_reported(EvaluatedArgs::Int2(Some(0), Some(0)))
+                    .unwrap_err();
+                assert_eq!(failure.operation(), Some(operation));
+                assert_eq!(failure.sql_failure(), Some(kind));
+                let primary = failure.error().to_string();
+                let error = failure.into_error();
+                assert_eq!(error.to_string(), primary);
+                error
+            } else {
+                worker
+                    .eval_args(EvaluatedArgs::Int2(Some(0), Some(0)))
+                    .unwrap_err()
+            };
+            let LocalError::Evaluation(error) = error else {
+                panic!("invalid period did not preserve its evaluation error");
+            };
+            let ErrorInner::Evaluate(cause) = error.0.as_ref() else {
+                panic!("invalid period did not preserve its typed cause");
+            };
+            assert!(matches!(
+                (operation, cause),
+                (
+                    EvaluatedBytesOp::PeriodAddNative,
+                    EvaluateError::PeriodAddIncorrectArguments
+                ) | (
+                    EvaluatedBytesOp::PeriodDiffNative,
+                    EvaluateError::PeriodDiffIncorrectArguments
+                )
+            ));
+            assert_eq!(cause.code(), 1210);
+            assert_eq!(cause.to_string(), display);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 2);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let ComputedValue::Int(value) = worker
+            .eval_args_reported(EvaluatedArgs::Int2(Some(left), Some(right)))
+            .unwrap()
+        else {
+            panic!("reused period worker returned a non-Int value");
+        };
+        assert_eq!(value.value(), Some(expected));
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        assert_eq!(value.into_option(), Some(expected));
+        assert_eq!(worker.kernel_invocations(), 4);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let mut bounded = prepare_evaluated_bytes(
+        EvaluatedBytesOp::PeriodAddNative,
+        LocalCompileContext::default(),
+        ExecutionLimits {
+            max_steps: 0,
+            ..ExecutionLimits::default()
+        },
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(bounded.kernel_invocations(), 0);
+    let storage = bounded.retained_storage().unwrap();
+    let failure = bounded
+        .eval_args_reported(EvaluatedArgs::Int2(Some(0), Some(0)))
+        .unwrap_err();
+    assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+    assert_eq!(failure.operation(), None);
+    assert_eq!(failure.sql_failure(), None);
+    assert_eq!(bounded.kernel_invocations(), 0);
+    assert!(bounded.is_healthy());
+    assert_eq!(bounded.retained_storage().unwrap(), storage);
+    let retained = {
+        let mut worker = prepare_evaluated_bytes(
+            EvaluatedBytesOp::GetFormatNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), EvaluatedBytesOp::GetFormatNative);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Int(Some(0))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let cases: [(Option<&[u8]>, Option<&[u8]>); 3] = [
+            (None, None),
+            (Some(b"\xff"), Some(b"")),
+            (Some(b"usa"), Some(b"%m.%d.%Y")),
+        ];
+        let mut retained = None;
+        for (index, (format, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Bytes(value) = worker
+                .eval_args(EvaluatedArgs::Bytes2(
+                    Some(b"DATE".to_vec()),
+                    format.map(|bytes| bytes.to_vec()),
+                ))
+                .unwrap()
+            else {
+                panic!("GET_FORMAT returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            retained = value.into_option();
+            assert_eq!(retained.as_deref(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        retained
+    };
+    assert_eq!(retained.as_deref(), Some(b"%m.%d.%Y".as_slice()));
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::GetFormatNullNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::GetFormatNullNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    assert!(matches!(
+        worker.eval_args(EvaluatedArgs::Int(Some(0))),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(worker.kernel_invocations(), 0);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let ComputedValue::Bytes(value) = worker
+        .eval_args_reported(EvaluatedArgs::Bytes(None))
+        .unwrap()
+    else {
+        panic!("GET_FORMAT NULL path returned a non-Bytes value");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    let failure = worker
+        .eval_args_reported(EvaluatedArgs::Bytes(Some(b"DATE".to_vec())))
+        .unwrap_err();
+    assert_eq!(failure.operation(), None);
+    assert_eq!(failure.sql_failure(), None);
+    assert!(matches!(failure.into_error(), LocalError::Evaluation(_)));
+    assert_eq!(worker.kernel_invocations(), 2);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+}

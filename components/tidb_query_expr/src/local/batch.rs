@@ -927,6 +927,10 @@ pub enum EvaluatedBytesOp {
     SecondNanosNative,
     MonthNameTextNative,
     TimeToSecTextNative,
+    PeriodAddNative,
+    PeriodDiffNative,
+    GetFormatNative,
+    GetFormatNullNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1503,6 +1507,22 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::TimeToSecTextNative,
                 );
             }
+            Self::PeriodAddNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::PeriodAddNative);
+            }
+            Self::PeriodDiffNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::PeriodDiffNative,
+                );
+            }
+            Self::GetFormatNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::GetFormatNative);
+            }
+            Self::GetFormatNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::GetFormatNullNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1809,6 +1829,10 @@ impl EvaluatedBytesOp {
             Self::SecondNanosNative => crate::impl_time::second_nanos_native_fn_meta(),
             Self::MonthNameTextNative => crate::impl_time::month_name_text_native_fn_meta(),
             Self::TimeToSecTextNative => crate::impl_time::time_to_sec_text_native_fn_meta(),
+            Self::PeriodAddNative => crate::impl_time::period_add_native_fn_meta(),
+            Self::PeriodDiffNative => crate::impl_time::period_diff_native_fn_meta(),
+            Self::GetFormatNative => crate::impl_time::get_format_native_fn_meta(),
+            Self::GetFormatNullNative => crate::impl_time::get_format_null_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1982,7 +2006,9 @@ impl EvaluatedBytesOp {
             | Self::HourNanosNative
             | Self::MinuteNanosNative
             | Self::SecondNanosNative
-            | Self::TimeToSecTextNative => EvalType::Int,
+            | Self::TimeToSecTextNative
+            | Self::PeriodAddNative
+            | Self::PeriodDiffNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -2088,7 +2114,9 @@ impl EvaluatedBytesOp {
             | Self::JsonStorageFreeNative
             | Self::JsonStorageSizeNative
             | Self::JsonQuoteNative
-            | Self::MonthNameTextNative => EvalType::Bytes,
+            | Self::MonthNameTextNative
+            | Self::GetFormatNative
+            | Self::GetFormatNullNative => EvalType::Bytes,
         }
     }
 
@@ -2104,6 +2132,8 @@ impl EvaluatedBytesOp {
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
             Self::PiRaw | Self::JsonValidOtherNative => &[],
+            Self::PeriodAddNative | Self::PeriodDiffNative => &[EvalType::Int, EvalType::Int],
+            Self::GetFormatNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::HourNanosNative | Self::MinuteNanosNative | Self::SecondNanosNative => {
                 &[EvalType::Int]
             }
@@ -2149,7 +2179,8 @@ impl EvaluatedBytesOp {
             | Self::MinuteTextNative
             | Self::SecondTextNative
             | Self::MonthNameTextNative
-            | Self::TimeToSecTextNative => &[EvalType::Bytes],
+            | Self::TimeToSecTextNative
+            | Self::GetFormatNullNative => &[EvalType::Bytes],
             Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative
@@ -3585,6 +3616,8 @@ impl ComputedInt128 {
 pub enum EvaluatedSqlFailureKind {
     AbsSignedOverflow,
     ConvUnsignedOverflow,
+    PeriodAddIncorrectArguments,
+    PeriodDiffIncorrectArguments,
 }
 
 /// Fresh owned failure-only observation for one ready-value invocation.
@@ -4022,7 +4055,7 @@ impl EvaluatedBytesWorker {
             .map_err(ReportedEvaluatedFailure::into_error)
     }
 
-    /// The same single evaluation with a narrow, owned ABS/CONV failure
+    /// The same single evaluation with a narrow, owned ABS/CONV/PERIOD failure
     /// receipt. Preparation, resource and output failures remain the
     /// original LocalError.
     pub fn eval_args_reported(
@@ -4152,6 +4185,14 @@ impl EvaluatedBytesWorker {
                                     ..
                                 }),
                             ) => Some(EvaluatedSqlFailureKind::ConvUnsignedOverflow),
+                            (
+                                EvaluatedBytesOp::PeriodAddNative,
+                                ErrorInner::Evaluate(EvaluateError::PeriodAddIncorrectArguments),
+                            ) => Some(EvaluatedSqlFailureKind::PeriodAddIncorrectArguments),
+                            (
+                                EvaluatedBytesOp::PeriodDiffNative,
+                                ErrorInner::Evaluate(EvaluateError::PeriodDiffIncorrectArguments),
+                            ) => Some(EvaluatedSqlFailureKind::PeriodDiffIncorrectArguments),
                             _ => None,
                         };
                     }

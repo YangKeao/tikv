@@ -293,6 +293,22 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  PERIOD_ADD/PERIOD_DIFF and GET_FORMAT add four private recipes in
+  `impl_time.rs`. The period pair uses existing Int2 inputs and signed Int
+  results; both nullable values are prepared before worker validation. Shared
+  Time helpers retain distinct ordinary versus wrapping arithmetic, without
+  changing wire narrowing or period-zero behavior. Two exact EvaluateError
+  variants retain the original 1210 code/message; a failure-only receipt is
+  granted only for the corresponding sealed operation and cause after exactly
+  one wrapper invocation. Resource, shape and postflight failures cannot become
+  period SQL errors. GET_FORMAT keeps byte-exact type selectors, ASCII-only
+  case-insensitive locales and empty results for unknown combinations. Its
+  two-byte-column recipe handles actual arguments; a separate one-NULL-input
+  recipe preserves first-NULL demand without inventing a second argument,
+  and rejects non-NULL witnesses. Both return existing ordinary owned Bytes.
+  The frontend's special grammar-selector AST retains strict string coercion,
+  distinct from scalar raw-byte preparation. No new role, result layout,
+  driver, NoArgs case or native PB/legacy admission is introduced.
   MONTHNAME and TIME_TO_SEC use two private text recipes in `impl_time.rs`,
   reusing Bytes inputs and ordinary owned Bytes / signed Int results. Native
   MONTHNAME preserves its ETDatetime cast before string preparation; the worker

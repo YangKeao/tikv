@@ -191,7 +191,11 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::MinuteNanosNative
         | LocalFunctionId::SecondNanosNative
         | LocalFunctionId::MonthNameTextNative
-        | LocalFunctionId::TimeToSecTextNative => Err(other_err!(
+        | LocalFunctionId::TimeToSecTextNative
+        | LocalFunctionId::PeriodAddNative
+        | LocalFunctionId::PeriodDiffNative
+        | LocalFunctionId::GetFormatNative
+        | LocalFunctionId::GetFormatNullNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

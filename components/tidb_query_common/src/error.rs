@@ -37,6 +37,14 @@ pub enum EvaluateError {
         source: Box<EvaluateError>,
     },
 
+    /// Private native PERIOD_ADD validation, with explicit operation identity.
+    #[error("Incorrect arguments to period_add")]
+    PeriodAddIncorrectArguments,
+
+    /// Private native PERIOD_DIFF validation, with explicit operation identity.
+    #[error("Incorrect arguments to period_diff")]
+    PeriodDiffIncorrectArguments,
+
     /// An explicitly retained cause; legacy boxed-error conversion stays lossy.
     #[error("{0}")]
     Caused(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -51,6 +59,8 @@ impl EvaluateError {
             EvaluateError::Custom { code, .. } => *code,
             EvaluateError::AbsSignedOverflow { source } => source.code(),
             EvaluateError::ConvUnsignedOverflow { .. } => 1690,
+            EvaluateError::PeriodAddIncorrectArguments
+            | EvaluateError::PeriodDiffIncorrectArguments => 1210,
             EvaluateError::Other(_) | EvaluateError::Caused(_) => 10000,
         }
     }
@@ -106,6 +116,8 @@ impl ErrorCodeExt for EvaluateError {
                 error_code::coprocessor::EVAL
             }
             EvaluateError::AbsSignedOverflow { source } => source.error_code(),
+            EvaluateError::PeriodAddIncorrectArguments
+            | EvaluateError::PeriodDiffIncorrectArguments => error_code::coprocessor::EVAL,
             EvaluateError::Other(_) | EvaluateError::Caused(_) => error_code::UNKNOWN,
         }
     }

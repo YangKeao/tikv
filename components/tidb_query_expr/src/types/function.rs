@@ -241,6 +241,10 @@ pub enum LocalFunctionId {
     SecondNanosNative,
     MonthNameTextNative,
     TimeToSecTextNative,
+    PeriodAddNative,
+    PeriodDiffNative,
+    GetFormatNative,
+    GetFormatNullNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

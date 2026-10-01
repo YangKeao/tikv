@@ -4,7 +4,7 @@ use std::str::from_utf8;
 
 use chrono::{self, DurationRound, Offset, TimeZone};
 use tidb_query_codegen::rpn_fn;
-use tidb_query_common::Result;
+use tidb_query_common::{Result, error::EvaluateError};
 use tidb_query_datatype::{
     FieldTypeAccessor, FieldTypeFlag,
     codec::{
@@ -140,6 +140,51 @@ fn time_to_sec_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
                 .map(|(seconds, _)| seconds),
         )
     })
+}
+
+#[rpn_fn(nullable)]
+fn period_add_native(period: Option<&Int>, months: Option<&Int>) -> Result<Option<Int>> {
+    let (Some(period), Some(months)) = (period, months) else {
+        return Ok(None);
+    };
+    if !Time::is_valid_native_period(*period) {
+        return Err(EvaluateError::PeriodAddIncorrectArguments.into());
+    }
+    let sum = (Time::period_to_month_wrapping(*period as u64) as i64).wrapping_add(*months);
+    Ok(Some(Time::month_to_period_wrapping(sum as u64) as Int))
+}
+
+#[rpn_fn(nullable)]
+fn period_diff_native(left: Option<&Int>, right: Option<&Int>) -> Result<Option<Int>> {
+    let (Some(left), Some(right)) = (left, right) else {
+        return Ok(None);
+    };
+    if !Time::is_valid_native_period(*left) || !Time::is_valid_native_period(*right) {
+        return Err(EvaluateError::PeriodDiffIncorrectArguments.into());
+    }
+    Ok(Some(
+        Time::period_to_month_wrapping(*left as u64)
+            .wrapping_sub(Time::period_to_month_wrapping(*right as u64)) as Int,
+    ))
+}
+
+#[rpn_fn(nullable)]
+fn get_format_native(kind: Option<BytesRef>, locale: Option<BytesRef>) -> Result<Option<Bytes>> {
+    Ok(kind.zip(locale).map(|(kind, locale)| {
+        Time::get_format_native(kind, locale)
+            .to_string()
+            .into_bytes()
+    }))
+}
+
+#[rpn_fn(nullable)]
+fn get_format_null_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    match arg {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Native GET_FORMAT NULL witness must be an actual NULL"
+        )),
+    }
 }
 
 #[rpn_fn(nullable, capture = [ctx])]
@@ -1987,6 +2032,109 @@ mod tests {
 
     use super::*;
     use crate::{RpnExpressionBuilder, types::test_util::RpnFnScalarEvaluator};
+
+    #[test]
+    fn test_native_period_values_nulls_and_causes() {
+        use tidb_query_common::error::ErrorInner;
+
+        let kernels: [fn(Option<&Int>, Option<&Int>) -> Result<Option<Int>>; 2] =
+            [period_add_native, period_diff_native];
+        for kernel in kernels {
+            assert_eq!(kernel(None, None).unwrap(), None);
+            assert_eq!(kernel(None, Some(&0)).unwrap(), None);
+            assert_eq!(kernel(Some(&200813), None).unwrap(), None);
+        }
+        // Independent literals from the pinned native wrapping formulas,
+        // including inverse zero, unsigned underflow and the signed-add boundary.
+        let add_cases: [(Int, Int, Int); 8] = [
+            (200802, 2, 200804),
+            (200802, -13, 200701),
+            (6901, 12, 207001),
+            (7001, -1, 196912),
+            (800_000_000_001, 0, 800_000_000_001),
+            (1, -24000, 0),
+            (1, -24001, 6_148_914_691_236_517_176),
+            (1, i64::MAX, 3_074_457_345_618_458_544),
+        ];
+        for (period, months, expected) in add_cases {
+            assert_eq!(
+                period_add_native(Some(&period), Some(&months)).unwrap(),
+                Some(expected)
+            );
+        }
+        let diff_cases: [(Int, Int, Int); 4] = [
+            (1, 2, -1),
+            (7001, 6912, -1199),
+            (i64::MAX, 200001, 1_106_804_644_422_549_102),
+            (200001, i64::MAX, -1_106_804_644_422_549_102),
+        ];
+        for (left, right, expected) in diff_cases {
+            assert_eq!(
+                period_diff_native(Some(&left), Some(&right)).unwrap(),
+                Some(expected)
+            );
+        }
+        for invalid in [0, -1, 200800, 200813] {
+            let failures = [
+                (
+                    period_add_native(Some(&invalid), Some(&1)).unwrap_err(),
+                    true,
+                    "Incorrect arguments to period_add",
+                ),
+                (
+                    period_diff_native(Some(&invalid), Some(&200801)).unwrap_err(),
+                    false,
+                    "Incorrect arguments to period_diff",
+                ),
+                (
+                    period_diff_native(Some(&200801), Some(&invalid)).unwrap_err(),
+                    false,
+                    "Incorrect arguments to period_diff",
+                ),
+            ];
+            for (failure, is_add, message) in failures {
+                let ErrorInner::Evaluate(error) = failure.0.as_ref() else {
+                    panic!("expected a typed evaluation error");
+                };
+                assert_eq!(error.code(), 1210);
+                assert_eq!(error.to_string(), message);
+                if is_add {
+                    assert!(matches!(error, EvaluateError::PeriodAddIncorrectArguments));
+                } else {
+                    assert!(matches!(error, EvaluateError::PeriodDiffIncorrectArguments));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_native_get_format_bytes_and_null_witness() {
+        assert_eq!(get_format_native(None, None).unwrap(), None);
+        assert_eq!(get_format_native(None, Some(b"\xff")).unwrap(), None);
+        assert_eq!(get_format_native(Some(b"\xff"), None).unwrap(), None);
+        // Literal table answers preserve exact type case and ASCII-only locale case.
+        let cases: [(&[u8], &[u8], &[u8]); 10] = [
+            (b"DATE", b"usa", b"%m.%d.%Y"),
+            (b"DATE", b"iSo", b"%Y-%m-%d"),
+            (b"DATE", b"INTERNAL", b"%Y%m%d"),
+            (b"DATETIME", b"EUR", b"%Y-%m-%d %H.%i.%s"),
+            (b"TIMESTAMP", b"JIS", b"%Y-%m-%d %H:%i:%s"),
+            (b"TIME", b"usa", b"%h:%i:%s %p"),
+            (b"date", b"USA", b""),
+            (b"DATE", b"unknown", b""),
+            (b"\xff", b"ISO", b""),
+            (b"DATE", b"\xff", b""),
+        ];
+        for (kind, locale, expected) in cases {
+            assert_eq!(
+                get_format_native(Some(kind), Some(locale)).unwrap(),
+                Some(expected.to_vec())
+            );
+        }
+        assert_eq!(get_format_null_native(None).unwrap(), None);
+        assert!(get_format_null_native(Some(b"")).is_err());
+        assert!(get_format_null_native(Some(b"DATE")).is_err());
+    }
 
     #[test]
     fn test_native_month_name_and_time_to_sec_text() {
