@@ -45,6 +45,27 @@ pub enum EvaluateError {
     #[error("Incorrect arguments to period_diff")]
     PeriodDiffIncorrectArguments,
 
+    /// Private native UUID_TO_BIN's distinct whitespace rejection.
+    #[error("invalid UUID_TO_BIN whitespace")]
+    UuidToBinWhitespace,
+
+    /// Private native UUID_TO_BIN's parser rejection, after whitespace policy.
+    #[error("invalid UUID for UUID_TO_BIN")]
+    UuidToBinInvalid,
+
+    /// Private native UUID_VERSION's parser rejection, not wire NULL behavior.
+    #[error("invalid UUID for UUID_VERSION")]
+    UuidVersionInvalid,
+
+    /// Private native UUID_TIMESTAMP's parser rejection, not wire NULL
+    /// behavior.
+    #[error("invalid UUID for UUID_TIMESTAMP")]
+    UuidTimestampInvalid,
+
+    /// Private native BIN_TO_UUID length failure, owning its actual payload.
+    #[error("Incorrect string value: '{}' for function bin_to_uuid", String::from_utf8_lossy(.input))]
+    BinToUuidInvalidLength { input: Vec<u8> },
+
     /// An explicitly retained cause; legacy boxed-error conversion stays lossy.
     #[error("{0}")]
     Caused(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -61,7 +82,13 @@ impl EvaluateError {
             EvaluateError::ConvUnsignedOverflow { .. } => 1690,
             EvaluateError::PeriodAddIncorrectArguments
             | EvaluateError::PeriodDiffIncorrectArguments => 1210,
-            EvaluateError::Other(_) | EvaluateError::Caused(_) => 10000,
+            EvaluateError::BinToUuidInvalidLength { .. } => 1411,
+            EvaluateError::UuidToBinWhitespace
+            | EvaluateError::UuidToBinInvalid
+            | EvaluateError::UuidVersionInvalid
+            | EvaluateError::UuidTimestampInvalid
+            | EvaluateError::Other(_)
+            | EvaluateError::Caused(_) => 10000,
         }
     }
 }
@@ -118,7 +145,13 @@ impl ErrorCodeExt for EvaluateError {
             EvaluateError::AbsSignedOverflow { source } => source.error_code(),
             EvaluateError::PeriodAddIncorrectArguments
             | EvaluateError::PeriodDiffIncorrectArguments => error_code::coprocessor::EVAL,
-            EvaluateError::Other(_) | EvaluateError::Caused(_) => error_code::UNKNOWN,
+            EvaluateError::BinToUuidInvalidLength { .. } => error_code::coprocessor::EVAL,
+            EvaluateError::UuidToBinWhitespace
+            | EvaluateError::UuidToBinInvalid
+            | EvaluateError::UuidVersionInvalid
+            | EvaluateError::UuidTimestampInvalid
+            | EvaluateError::Other(_)
+            | EvaluateError::Caused(_) => error_code::UNKNOWN,
         }
     }
 }

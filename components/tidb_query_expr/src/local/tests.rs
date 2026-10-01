@@ -7893,6 +7893,248 @@ fn local_evaluated_args_date_format_core_keeps_roles_and_missing_distinct() {
 }
 
 #[test]
+fn uuid_translate_dispatch_owned_values_and_exact_admission() {
+    let prepare = |operation| {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap()
+    };
+    // Fixed UUID rows from native builtin_ext/misc.rs, not a new UUID oracle.
+    let canonical = b"6ccd780c-baba-1026-9564-5b8c656024db";
+    let normal = vec![
+        0x6c, 0xcd, 0x78, 0x0c, 0xba, 0xba, 0x10, 0x26, 0x95, 0x64, 0x5b, 0x8c, 0x65, 0x60, 0x24,
+        0xdb,
+    ];
+    let swapped = vec![
+        0x10, 0x26, 0xba, 0xba, 0x6c, 0xcd, 0x78, 0x0c, 0x95, 0x64, 0x5b, 0x8c, 0x65, 0x60, 0x24,
+        0xdb,
+    ];
+    for operation in [
+        EvaluatedBytesOp::IsUuidNative,
+        EvaluatedBytesOp::UuidVersionNative,
+    ] {
+        let mut worker = prepare(operation);
+        let storage = worker.retained_storage().unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        for (index, (input, expected)) in [(None, None), (Some(canonical.as_slice()), Some(1))]
+            .into_iter()
+            .enumerate()
+        {
+            let ComputedValue::Int(value) = worker
+                .eval_args(EvaluatedArgs::Bytes(input.map(<[u8]>::to_vec)))
+                .unwrap()
+            else {
+                panic!("UUID predicate/version must own its integer");
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+    let mut timestamp = prepare(EvaluatedBytesOp::UuidTimestampNative);
+    let storage = timestamp.retained_storage().unwrap();
+    assert!(matches!(
+        timestamp.eval_args(EvaluatedArgs::Decimal(None)),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(timestamp.kernel_invocations(), 0);
+    for (index, input) in [
+        None,
+        Some(b"a3e3b4a1-ea6d-471e-9860-8303a8b261f6".as_slice()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ComputedValue::Decimal(value) = timestamp
+            .eval_args(EvaluatedArgs::Bytes(input.map(<[u8]>::to_vec)))
+            .unwrap()
+        else {
+            panic!("UUID_TIMESTAMP NULL must retain the Decimal result domain");
+        };
+        assert_eq!(value.metadata(), ComputedDecimalMetadata::OwnDecimal);
+        assert_eq!(value.value(), None);
+        assert_eq!(value.checked_i64_view(), None);
+        assert_eq!(value.into_option(), None);
+        assert_eq!(timestamp.kernel_invocations(), index as u64 + 1);
+    }
+    let ComputedValue::Decimal(value) = timestamp
+        .eval_args(EvaluatedArgs::Bytes(Some(
+            b"019b1440-87b7-7380-ab00-ce413e795004".to_vec(),
+        )))
+        .unwrap()
+    else {
+        panic!("UUID_TIMESTAMP must own its exact Decimal");
+    };
+    assert_eq!(value.metadata(), ComputedDecimalMetadata::OwnDecimal);
+    assert_eq!(value.checked_i64_view(), None);
+    let owned = value.into_option().unwrap();
+    assert_eq!(owned.result_scale(), 6);
+    assert_eq!(owned.to_string(), "1765571332.023000");
+    assert_eq!(timestamp.kernel_invocations(), 3);
+    assert!(timestamp.is_healthy());
+    assert_eq!(timestamp.retained_storage().unwrap(), storage);
+    drop(timestamp);
+    assert_eq!(owned.to_string(), "1765571332.023000");
+
+    let mut parser = prepare(EvaluatedBytesOp::UuidToBinParseNative);
+    let ComputedValue::Bytes(value) = parser.eval_args(EvaluatedArgs::Bytes(None)).unwrap() else {
+        panic!("UUID parse NULL must own Bytes");
+    };
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(value.into_option(), None);
+    let ComputedValue::Bytes(value) = parser
+        .eval_args(EvaluatedArgs::Bytes(Some(canonical.to_vec())))
+        .unwrap()
+    else {
+        panic!("UUID parse must own Bytes");
+    };
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    let parsed = value.into_option().unwrap();
+    assert_eq!(parsed, normal);
+    assert_eq!(parser.kernel_invocations(), 2);
+    assert!(parser.is_healthy());
+    drop(parser);
+    assert_eq!(parsed, normal);
+
+    let mut swap = prepare(EvaluatedBytesOp::UuidToBinSwapNative);
+    let storage = swap.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::BytesInt(None, Some(0)),
+        EvaluatedArgs::BytesInt(Some(vec![0; 15]), Some(0)),
+        EvaluatedArgs::BytesInt(Some(vec![0; 17]), Some(1)),
+        EvaluatedArgs::BytesInt(Some(parsed.clone()), None),
+    ] {
+        assert!(matches!(
+            swap.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(swap.kernel_invocations(), 0);
+        assert!(swap.is_healthy());
+        assert_eq!(swap.retained_storage().unwrap(), storage);
+    }
+    for (index, (flag, expected)) in [(0, &normal), (1, &swapped)].into_iter().enumerate() {
+        let ComputedValue::Bytes(value) = swap
+            .eval_args(EvaluatedArgs::BytesInt(Some(parsed.clone()), Some(flag)))
+            .unwrap()
+        else {
+            panic!("UUID swap must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.value(), Some(expected.as_slice()));
+        assert_eq!(value.into_option().as_ref(), Some(expected));
+        assert_eq!(swap.kernel_invocations(), index as u64 + 1);
+        assert!(swap.is_healthy());
+        assert_eq!(swap.retained_storage().unwrap(), storage);
+    }
+    let mut binary = prepare(EvaluatedBytesOp::BinToUuidNative);
+    for (index, (input, flag, expected)) in [
+        (None, 0, None),
+        (
+            Some(normal),
+            1,
+            Some(b"baba1026-780c-6ccd-9564-5b8c656024db".as_slice()),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ComputedValue::Bytes(value) = binary
+            .eval_args(EvaluatedArgs::BytesInt(input, Some(flag)))
+            .unwrap()
+        else {
+            panic!("BIN_TO_UUID must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.value(), expected);
+        let owned = value.into_option();
+        assert_eq!(owned.as_deref(), expected);
+        assert_eq!(binary.kernel_invocations(), index as u64 + 1);
+        assert!(binary.is_healthy());
+    }
+
+    for (operation, src, from, to, expected) in [
+        // Original string2.rs rune fixture.
+        (
+            EvaluatedBytesOp::TranslateUtf8Native,
+            "中文测试".as_bytes(),
+            "中试".as_bytes(),
+            b"XY".as_slice(),
+            "X文测Y".as_bytes(),
+        ),
+        // New hand-derived byte-policy literal: ff is replaced by 00, not decoded.
+        (
+            EvaluatedBytesOp::TranslateBinaryNative,
+            [0xff, b'a', 0xff].as_slice(),
+            [0xff].as_slice(),
+            [0].as_slice(),
+            [0, b'a', 0].as_slice(),
+        ),
+    ] {
+        let mut worker = prepare(operation);
+        let storage = worker.retained_storage().unwrap();
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::Bytes3([
+                Some(src.to_vec()),
+                None,
+                Some(to.to_vec()),
+            ]))
+            .unwrap()
+        else {
+            panic!("nullable TRANSLATE must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(value.into_option(), None);
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::Bytes3([
+                Some(src.to_vec()),
+                Some(from.to_vec()),
+                Some(to.to_vec()),
+            ]))
+            .unwrap()
+        else {
+            panic!("TRANSLATE must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        let owned = value.into_option().unwrap();
+        assert_eq!(owned.as_slice(), expected);
+        assert_eq!(worker.kernel_invocations(), 2);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        drop(worker);
+        assert_eq!(owned.as_slice(), expected);
+    }
+    let mut null = prepare(EvaluatedBytesOp::TranslateNullNative);
+    for invalid in [
+        EvaluatedArgs::NullWitness(Some(0)),
+        EvaluatedArgs::Int(None),
+        EvaluatedArgs::Bytes3([None, None, None]),
+    ] {
+        assert!(matches!(
+            null.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(null.kernel_invocations(), 0);
+        assert!(null.is_healthy());
+    }
+    let ComputedValue::Bytes(value) = null.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+    else {
+        panic!("observed TRANSLATE NULL must own Bytes");
+    };
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(null.kernel_invocations(), 1);
+    assert!(null.is_healthy());
+}
+
+#[test]
 fn local_evaluated_args_date_format_and_last_day_keep_distinct_clock_policies() {
     let cases: [(EvaluatedBytesOp, Vec<(EvaluatedArgs, Option<&[u8]>)>); 2] = [
         (

@@ -224,7 +224,16 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::DateFormatMissingNative
         | LocalFunctionId::DurationTextProbeNative
         | LocalFunctionId::TimeFormatTextNative
-        | LocalFunctionId::LastDayTextNative => Err(other_err!(
+        | LocalFunctionId::LastDayTextNative
+        | LocalFunctionId::IsUuidNative
+        | LocalFunctionId::UuidVersionNative
+        | LocalFunctionId::UuidTimestampNative
+        | LocalFunctionId::UuidToBinParseNative
+        | LocalFunctionId::UuidToBinSwapNative
+        | LocalFunctionId::BinToUuidNative
+        | LocalFunctionId::TranslateUtf8Native
+        | LocalFunctionId::TranslateBinaryNative
+        | LocalFunctionId::TranslateNullNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

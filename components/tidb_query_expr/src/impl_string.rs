@@ -1124,6 +1124,74 @@ fn validate_target_len_for_pad(
     Some(target_len)
 }
 
+#[rpn_fn]
+fn get_native_translate_utf8(src: BytesRef, from: BytesRef, to: BytesRef) -> Result<Option<Bytes>> {
+    let src = str::from_utf8(src)?;
+    let from = str::from_utf8(from)?;
+    let to = str::from_utf8(to)?;
+    let from: Vec<char> = from.chars().collect();
+    let to: Vec<char> = to.chars().collect();
+    let min_len = from.len().min(to.len());
+
+    // Build the map in Go's descending order so that, for a repeated `from`
+    // character, the first occurrence (lowest index, inserted last) wins.
+    // Characters beyond `to`'s length delete (`None`); the rest map to `to`.
+    let mut map: std::collections::HashMap<char, Option<char>> = std::collections::HashMap::new();
+    for idx in (to.len()..from.len()).rev() {
+        map.insert(from[idx], None);
+    }
+    for idx in (0..min_len).rev() {
+        map.insert(from[idx], Some(to[idx]));
+    }
+
+    let mut out = String::with_capacity(src.len());
+    for ch in src.chars() {
+        match map.get(&ch) {
+            Some(Some(replacement)) => out.push(*replacement),
+            Some(None) => {} // character deleted
+            None => out.push(ch),
+        }
+    }
+    Ok(Some(out.into_bytes()))
+}
+
+#[rpn_fn]
+fn get_native_translate_binary(
+    src: BytesRef,
+    from: BytesRef,
+    to: BytesRef,
+) -> Result<Option<Bytes>> {
+    // Go builds the map in DESCENDING index order in both loops, so for a
+    // repeated `from` byte the lowest index is inserted last and wins.
+    let mut map: std::collections::HashMap<u8, Option<u8>> = std::collections::HashMap::new();
+    for idx in (to.len()..from.len()).rev() {
+        map.insert(from[idx], None);
+    }
+    for idx in (0..from.len().min(to.len())).rev() {
+        map.insert(from[idx], Some(to[idx]));
+    }
+
+    let mut out = Vec::with_capacity(src.len());
+    for &byte in src {
+        match map.get(&byte) {
+            Some(Some(replacement)) => out.push(*replacement),
+            Some(None) => {} // byte deleted
+            None => out.push(byte),
+        }
+    }
+    Ok(Some(out))
+}
+
+#[rpn_fn(nullable)]
+fn get_native_translate_null(arg: Option<&Int>) -> Result<Option<Bytes>> {
+    match arg {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Native TRANSLATE NULL witness must be an actual NULL"
+        )),
+    }
+}
+
 #[rpn_fn(writer)]
 #[inline]
 pub fn replace(
@@ -3552,6 +3620,62 @@ mod tests {
 
     use super::*;
     use crate::types::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_native_translate_utf8_source_literals() {
+        // Original builtin_ext/string2.rs translate_utf8_vectors expectations.
+        for (src, from, to, expected) in [
+            ("abcabc", "ab", "xy", "xycxyc"),
+            ("hello", "lo", "L", "heLL"),
+            ("中文测试", "中试", "XY", "X文测Y"),
+            ("aaa", "aa", "xy", "xxx"),
+            ("hello", "", "x", "hello"),
+            ("mississippi", "sp", "SP", "miSSiSSiPPi"),
+        ] {
+            assert_eq!(
+                get_native_translate_utf8(src.as_bytes(), from.as_bytes(), to.as_bytes()).unwrap(),
+                Some(expected.as_bytes().to_vec())
+            );
+        }
+    }
+
+    #[test]
+    fn test_native_translate_binary_source_literals() {
+        // Native binary source-capture literals; hex78/5863 spell x/Xc.
+        // These check computed bytes, not the caller's arg0 result metadata.
+        let cases: &[(&[u8], &[u8], &[u8], &[u8])] = &[
+            ("中文".as_bytes(), "中".as_bytes(), b"ab", "ab文".as_bytes()),
+            ("中".as_bytes(), "中".as_bytes(), b"x", b"x"),
+            (b"abc", b"ab", b"X", b"Xc"),
+        ];
+        for &(src, from, to, expected) in cases {
+            assert_eq!(
+                get_native_translate_binary(src, from, to).unwrap(),
+                Some(expected.to_vec())
+            );
+        }
+        // Source-derived byte-policy literals, not old fixture rows: the
+        // first duplicate overrides a later deletion; arbitrary bytes stay raw.
+        assert_eq!(
+            get_native_translate_binary(b"aaab", b"aab", b"X").unwrap(),
+            Some(b"XXX".to_vec())
+        );
+        assert_eq!(
+            get_native_translate_binary(&[0xff, 0, 0xfe], &[0xff], &[0x80]).unwrap(),
+            Some(vec![0x80, 0, 0xfe])
+        );
+    }
+
+    #[test]
+    fn test_native_translate_null_and_utf8_transport() {
+        assert_eq!(get_native_translate_null(None).unwrap(), None);
+        assert!(get_native_translate_null(Some(&0)).is_err());
+        // Source-derived closed UTF-8 transport checks, not binary SQL rows:
+        // no empty-input/from optimization may hide an invalid ready operand.
+        assert!(get_native_translate_utf8(&[0xff], b"", b"").is_err());
+        assert!(get_native_translate_utf8(b"", &[0xff], b"").is_err());
+        assert!(get_native_translate_utf8(b"", b"", &[0xff]).is_err());
+    }
 
     #[test]
     fn test_get_utf8_byte_index() {

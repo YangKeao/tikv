@@ -1395,6 +1395,224 @@ mod evaluated_ascii_compile_tests {
     }
 
     #[test]
+    fn uuid_translate_dispatch_shapes_getters_and_private_compile() {
+        use tidb_query_datatype::{EvalType, expr::EvalContext};
+
+        use crate::{
+            local::{ExecutionLimits, runtime::EvalBudget},
+            types::expr_eval::EvaluatedAsciiWitness,
+        };
+
+        let cases: [(
+            EvaluatedBytesOp,
+            crate::RpnFnMeta,
+            &[EvalType],
+            EvalType,
+            EvaluatedArgsRole,
+        ); 9] = [
+            (
+                EvaluatedBytesOp::IsUuidNative,
+                crate::impl_miscellaneous::get_native_is_uuid_fn_meta(),
+                &[EvalType::Bytes],
+                EvalType::Int,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::UuidVersionNative,
+                crate::impl_miscellaneous::get_native_uuid_version_fn_meta(),
+                &[EvalType::Bytes],
+                EvalType::Int,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::UuidTimestampNative,
+                crate::impl_miscellaneous::get_native_uuid_timestamp_fn_meta(),
+                &[EvalType::Bytes],
+                EvalType::Decimal,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::UuidToBinParseNative,
+                crate::impl_miscellaneous::get_native_uuid_to_bin_parse_fn_meta(),
+                &[EvalType::Bytes],
+                EvalType::Bytes,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::UuidToBinSwapNative,
+                crate::impl_miscellaneous::get_native_uuid_to_bin_swap_fn_meta(),
+                &[EvalType::Bytes, EvalType::Int],
+                EvalType::Bytes,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::BinToUuidNative,
+                crate::impl_miscellaneous::get_native_bin_to_uuid_fn_meta(),
+                &[EvalType::Bytes, EvalType::Int],
+                EvalType::Bytes,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::TranslateUtf8Native,
+                crate::impl_string::get_native_translate_utf8_fn_meta(),
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
+                EvalType::Bytes,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::TranslateBinaryNative,
+                crate::impl_string::get_native_translate_binary_fn_meta(),
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
+                EvalType::Bytes,
+                EvaluatedArgsRole::Values,
+            ),
+            (
+                EvaluatedBytesOp::TranslateNullNative,
+                crate::impl_string::get_native_translate_null_fn_meta(),
+                &[EvalType::Int],
+                EvalType::Bytes,
+                EvaluatedArgsRole::NullWitness,
+            ),
+        ];
+        for (operation, official, inputs, output, role) in cases {
+            assert_eq!(operation.input_types(), inputs);
+            assert_eq!(operation.eval_type(), output);
+            assert_eq!(operation.input_role(), role);
+            assert_eq!(operation.call_count(), 1);
+            let EvaluatedKernelKind::ClosedPrivate(id) = operation.kernel_kind() else {
+                panic!("UUID and TRANSLATE must not select ordinary wire kernels");
+            };
+            assert_eq!(operation.function_ref(), FunctionRef::Local(id));
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert!(program.check_entry(ProgramEntry::EvaluatedBytes).is_ok());
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            assert_eq!(program.schema.len(), inputs.len());
+            assert_eq!(program.expression.len(), inputs.len() + 1);
+            for (slot, field_type) in program.schema.iter().enumerate() {
+                assert_eq!(Some(field_type), operation.input_field_type(slot).as_ref());
+                assert!(
+                    matches!(program.expression[slot], RpnExpressionNode::ColumnRef { offset } if offset == slot)
+                );
+            }
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                args_len,
+                field_type,
+                metadata,
+            } = &program.expression[inputs.len()]
+            else {
+                panic!("expected the canonical generated call");
+            };
+            assert_eq!(*args_len, inputs.len());
+            assert_eq!(field_type, &operation.return_type());
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, official.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                official.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                official.metadata_ptr
+            ));
+            check_evaluated_bytes_kernel(operation, 0, &program.expression[inputs.len()]).unwrap();
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(matches!(
+                compile_local(&spec, &program.schema, LocalCompileContext::default()),
+                Err(LocalError::InvalidSpec(_))
+            ));
+            let mut raw_call = CallBuild::local(
+                CallShape::new(
+                    operation.function_ref(),
+                    operation.return_type(),
+                    program
+                        .schema
+                        .iter()
+                        .cloned()
+                        .map(CallArg::dynamic)
+                        .collect(),
+                ),
+                crate::CallMetadata::None,
+            );
+            assert!(prepare_call(&mut raw_call).is_err());
+        }
+
+        // Check the physical boundary too, rather than only the facade enum.
+        let operation = EvaluatedBytesOp::UuidToBinSwapNative;
+        let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+        let mut ctx = EvalContext::default();
+        let mut witness = EvaluatedAsciiWitness::default();
+        for ready in [
+            vec![ScalarValue::Bytes(None), ScalarValue::Int(Some(0))],
+            vec![
+                ScalarValue::Bytes(Some(vec![0; 15])),
+                ScalarValue::Int(Some(0)),
+            ],
+            vec![
+                ScalarValue::Bytes(Some(vec![0; 17])),
+                ScalarValue::Int(Some(1)),
+            ],
+            vec![
+                ScalarValue::Bytes(Some(vec![0; 16])),
+                ScalarValue::Int(None),
+            ],
+        ] {
+            let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+            assert!(matches!(
+                program.expression.eval_with_ready_args(
+                    operation,
+                    &mut ctx,
+                    &program.schema,
+                    &ready,
+                    EvaluatedArgsRole::Values,
+                    &[0],
+                    &mut witness,
+                    &mut budget
+                ),
+                Err(LocalError::InvalidSpec(_))
+            ));
+            assert_eq!(witness.invocations(), 0);
+        }
+        let ready = [
+            ScalarValue::Bytes(Some(vec![0; 16])),
+            ScalarValue::Int(Some(-1)),
+        ];
+        let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+        assert!(
+            program
+                .expression
+                .eval_with_ready_args(
+                    operation,
+                    &mut ctx,
+                    &program.schema,
+                    &ready,
+                    EvaluatedArgsRole::Values,
+                    &[0],
+                    &mut witness,
+                    &mut budget
+                )
+                .is_ok()
+        );
+        assert_eq!(witness.invocations(), 1);
+    }
+
+    #[test]
     fn evaluated_ascii_factory_uses_canonical_two_node_rpn_and_own_entry() {
         let program = compile_evaluated_ascii(LocalCompileContext::default()).unwrap();
         assert_eq!(

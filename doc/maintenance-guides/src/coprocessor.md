@@ -293,6 +293,22 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  UUID inspection/conversion and TRANSLATE use nine closed private recipes with
+  existing Bytes, BytesInt, Bytes3 and actual-NULL witness roles. Native UUID
+  parsing retains its 32/36/45/38-byte spellings and distinct trim/UTF-8 policies;
+  wire UUID parsing and unsigned timestamp behavior are not broadened or repaired.
+  Native timestamp extraction keeps signed pre-epoch arithmetic and exact six-place
+  Decimal results. UUID_TO_BIN first computes actual UUID bytes before demanding
+  the optional flag in a second complete call; the extra lease is an explicit cost.
+  BIN_TO_UUID retains flag warnings before payload NULL/length checks. Five typed
+  causes authorize native SQL errors only for matching sealed calls; an invalid
+  binary payload is borrowed from its actual cause, not reconstructed from input.
+  UUID host generators share the pure formatter and epoch constant without gaining
+  whole-family migration credit. TRANSLATE has separate byte/rune recipes with
+  first-duplicate precedence and deletion beyond the replacement length. Frontend
+  preparation stops at the first NULL before scope discovery and selects a true
+  NULL witness, never fabricated suffix operands; binary result metadata depends
+  only on the first argument. No new result kind, driver or PB admission is added.
   DATE_FORMAT/TIME_FORMAT use a shared Time scanner and specifier renderer,
   retaining separate SQL-text, raw-core, wire, elapsed-text and raw-duration
   policies. Trailing percent signs, invalid-month errors, raw large years,

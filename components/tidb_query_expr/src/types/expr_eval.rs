@@ -363,7 +363,11 @@ fn evaluated_ready_args_match(
         }
         && match role {
             EvaluatedArgsRole::NoArgs => values.is_empty(),
-            EvaluatedArgsRole::Values => true,
+            EvaluatedArgsRole::Values => {
+                operation != EvaluatedBytesOp::UuidToBinSwapNative
+                    || matches!(values, [ScalarValue::Bytes(Some(bytes)), ScalarValue::Int(Some(_))]
+                        if bytes.len() == 16)
+            }
             EvaluatedArgsRole::CharReady => {
                 operation == EvaluatedBytesOp::CharNative
                     && matches!(values, [ScalarValue::Bytes(encoded)]
@@ -438,6 +442,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::DateDiffNullNative
                         | EvaluatedBytesOp::WeekNullNative
                         | EvaluatedBytesOp::DateFormatNullNative
+                        | EvaluatedBytesOp::TranslateNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,

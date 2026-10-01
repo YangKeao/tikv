@@ -60,11 +60,14 @@ use tidb_query_datatype::{
 };
 use tipb::{Expr, FieldType, ScalarFuncSig};
 
-pub use self::types::*;
 use self::{
     impl_arithmetic::*, impl_cast::*, impl_compare::*, impl_compare_in::*, impl_control::*,
     impl_encryption::*, impl_json::*, impl_like::*, impl_math::*, impl_miscellaneous::*,
     impl_op::*, impl_other::*, impl_regexp::*, impl_string::*, impl_time::*, impl_vec::*,
+};
+pub use self::{
+    impl_miscellaneous::{NATIVE_UUID_EPOCH_100NS, format_uuid_native},
+    types::*,
 };
 
 fn map_to_binary_fn_sig(call: &CallShape) -> Result<RpnFnMeta> {

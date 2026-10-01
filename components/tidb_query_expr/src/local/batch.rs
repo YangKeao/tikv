@@ -960,6 +960,15 @@ pub enum EvaluatedBytesOp {
     DurationTextProbeNative,
     TimeFormatTextNative,
     LastDayTextNative,
+    IsUuidNative,
+    UuidVersionNative,
+    UuidTimestampNative,
+    UuidToBinParseNative,
+    UuidToBinSwapNative,
+    BinToUuidNative,
+    TranslateUtf8Native,
+    TranslateBinaryNative,
+    TranslateNullNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1684,6 +1693,47 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::LastDayTextNative,
                 );
             }
+            Self::IsUuidNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::IsUuidNative);
+            }
+            Self::UuidVersionNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UuidVersionNative,
+                );
+            }
+            Self::UuidTimestampNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UuidTimestampNative,
+                );
+            }
+            Self::UuidToBinParseNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UuidToBinParseNative,
+                );
+            }
+            Self::UuidToBinSwapNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UuidToBinSwapNative,
+                );
+            }
+            Self::BinToUuidNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::BinToUuidNative);
+            }
+            Self::TranslateUtf8Native => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TranslateUtf8Native,
+                );
+            }
+            Self::TranslateBinaryNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TranslateBinaryNative,
+                );
+            }
+            Self::TranslateNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TranslateNullNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1719,7 +1769,8 @@ impl EvaluatedBytesOp {
             Self::MathNullWitnessNative
             | Self::DateDiffNullNative
             | Self::WeekNullNative
-            | Self::DateFormatNullNative => EvaluatedArgsRole::NullWitness,
+            | Self::DateFormatNullNative
+            | Self::TranslateNullNative => EvaluatedArgsRole::NullWitness,
             Self::DateDiffCoreNative => EvaluatedArgsRole::TimeCoreBits2,
             Self::DateFormatCoreNative => EvaluatedArgsRole::TimeCoreBitsBytes,
             Self::CharNative => EvaluatedArgsRole::CharReady,
@@ -2035,6 +2086,23 @@ impl EvaluatedBytesOp {
             Self::DurationTextProbeNative => crate::impl_time::duration_text_probe_native_fn_meta(),
             Self::TimeFormatTextNative => crate::impl_time::time_format_text_native_fn_meta(),
             Self::LastDayTextNative => crate::impl_time::last_day_text_native_fn_meta(),
+            Self::IsUuidNative => crate::impl_miscellaneous::get_native_is_uuid_fn_meta(),
+            Self::UuidVersionNative => crate::impl_miscellaneous::get_native_uuid_version_fn_meta(),
+            Self::UuidTimestampNative => {
+                crate::impl_miscellaneous::get_native_uuid_timestamp_fn_meta()
+            }
+            Self::UuidToBinParseNative => {
+                crate::impl_miscellaneous::get_native_uuid_to_bin_parse_fn_meta()
+            }
+            Self::UuidToBinSwapNative => {
+                crate::impl_miscellaneous::get_native_uuid_to_bin_swap_fn_meta()
+            }
+            Self::BinToUuidNative => crate::impl_miscellaneous::get_native_bin_to_uuid_fn_meta(),
+            Self::TranslateUtf8Native => crate::impl_string::get_native_translate_utf8_fn_meta(),
+            Self::TranslateBinaryNative => {
+                crate::impl_string::get_native_translate_binary_fn_meta()
+            }
+            Self::TranslateNullNative => crate::impl_string::get_native_translate_null_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -2225,12 +2293,15 @@ impl EvaluatedBytesOp {
             | Self::WeekOfYearTextNative
             | Self::WeekNullNative
             | Self::WeekCoreNative
-            | Self::DateFormatMissingNative => EvalType::Int,
+            | Self::DateFormatMissingNative
+            | Self::IsUuidNative
+            | Self::UuidVersionNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
             | Self::RoundDecimalNative
-            | Self::TruncateDecimalNative => EvalType::Decimal,
+            | Self::TruncateDecimalNative
+            | Self::UuidTimestampNative => EvalType::Decimal,
             Self::LTrim
             | Self::RTrim
             | Self::UnHex
@@ -2347,7 +2418,13 @@ impl EvaluatedBytesOp {
             | Self::DateFormatNullNative
             | Self::DurationTextProbeNative
             | Self::TimeFormatTextNative
-            | Self::LastDayTextNative => EvalType::Bytes,
+            | Self::LastDayTextNative
+            | Self::UuidToBinParseNative
+            | Self::UuidToBinSwapNative
+            | Self::BinToUuidNative
+            | Self::TranslateUtf8Native
+            | Self::TranslateBinaryNative
+            | Self::TranslateNullNative => EvalType::Bytes,
         }
     }
 
@@ -2362,6 +2439,15 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::IsUuidNative
+            | Self::UuidVersionNative
+            | Self::UuidTimestampNative
+            | Self::UuidToBinParseNative => &[EvalType::Bytes],
+            Self::UuidToBinSwapNative | Self::BinToUuidNative => &[EvalType::Bytes, EvalType::Int],
+            Self::TranslateUtf8Native | Self::TranslateBinaryNative => {
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
+            }
+            Self::TranslateNullNative => &[EvalType::Int],
             Self::PiRaw | Self::JsonValidOtherNative | Self::DateFormatMissingNative => &[],
             Self::DateFormatTextNative
             | Self::DateFormatCoreNative
@@ -2984,6 +3070,11 @@ impl EvaluatedArgs {
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
         match self {
+            Self::BytesInt(bytes, flag) if operation == EvaluatedBytesOp::UuidToBinSwapNative => {
+                // Only the parsed UUID stage has a nonnullable, exact-width input.
+                // Other BytesInt operations retain their existing NULL policies.
+                matches!((bytes, flag), (Some(bytes), Some(_)) if bytes.len() == 16)
+            }
             Self::Ieee754BitsInt { value, scale }
                 if operation == EvaluatedBytesOp::SecToTimeNative =>
             {
@@ -3002,6 +3093,7 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::DateDiffNullNative
                         | EvaluatedBytesOp::WeekNullNative
                         | EvaluatedBytesOp::DateFormatNullNative
+                        | EvaluatedBytesOp::TranslateNullNative
                 ) && value.is_none()
             }
             Self::ConvReady {
@@ -3961,6 +4053,11 @@ pub enum EvaluatedSqlFailureKind {
     ConvUnsignedOverflow,
     PeriodAddIncorrectArguments,
     PeriodDiffIncorrectArguments,
+    UuidToBinWhitespace,
+    UuidToBinInvalid,
+    UuidVersionInvalid,
+    UuidTimestampInvalid,
+    BinToUuidInvalidLength,
 }
 
 /// Fresh owned failure-only observation for one ready-value invocation.
@@ -3992,6 +4089,25 @@ impl ReportedEvaluatedFailure {
     pub fn sql_failure(&self) -> Option<EvaluatedSqlFailureKind> {
         self.sql_failure
     }
+    /// Borrow only the authenticated BIN_TO_UUID cause's original bytes.
+    /// Neither the caller's input nor an error message supplies this payload.
+    pub fn bin_to_uuid_input(&self) -> Option<&[u8]> {
+        if self.operation != Some(EvaluatedBytesOp::BinToUuidNative)
+            || self.sql_failure != Some(EvaluatedSqlFailureKind::BinToUuidInvalidLength)
+        {
+            return None;
+        }
+        match &self.error {
+            LocalError::Evaluation(error) => match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::BinToUuidInvalidLength { input }) => {
+                    Some(input.as_slice())
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Borrow the actual failing conversion stage's sign-stripped digits.
     /// They live in the original typed cause; no input reparse or prediction
     /// is performed, and unreported or unrelated failures expose no payload.
@@ -4398,8 +4514,8 @@ impl EvaluatedBytesWorker {
             .map_err(ReportedEvaluatedFailure::into_error)
     }
 
-    /// The same single evaluation with a narrow, owned ABS/CONV/PERIOD failure
-    /// receipt. Preparation, resource and output failures remain the
+    /// The same single evaluation with a narrow, owned ABS/CONV/PERIOD/UUID
+    /// failure receipt. Preparation, resource and output failures remain the
     /// original LocalError.
     pub fn eval_args_reported(
         &mut self,
@@ -4536,6 +4652,28 @@ impl EvaluatedBytesWorker {
                                 EvaluatedBytesOp::PeriodDiffNative,
                                 ErrorInner::Evaluate(EvaluateError::PeriodDiffIncorrectArguments),
                             ) => Some(EvaluatedSqlFailureKind::PeriodDiffIncorrectArguments),
+                            (
+                                EvaluatedBytesOp::UuidToBinParseNative,
+                                ErrorInner::Evaluate(EvaluateError::UuidToBinWhitespace),
+                            ) => Some(EvaluatedSqlFailureKind::UuidToBinWhitespace),
+                            (
+                                EvaluatedBytesOp::UuidToBinParseNative,
+                                ErrorInner::Evaluate(EvaluateError::UuidToBinInvalid),
+                            ) => Some(EvaluatedSqlFailureKind::UuidToBinInvalid),
+                            (
+                                EvaluatedBytesOp::UuidVersionNative,
+                                ErrorInner::Evaluate(EvaluateError::UuidVersionInvalid),
+                            ) => Some(EvaluatedSqlFailureKind::UuidVersionInvalid),
+                            (
+                                EvaluatedBytesOp::UuidTimestampNative,
+                                ErrorInner::Evaluate(EvaluateError::UuidTimestampInvalid),
+                            ) => Some(EvaluatedSqlFailureKind::UuidTimestampInvalid),
+                            (
+                                EvaluatedBytesOp::BinToUuidNative,
+                                ErrorInner::Evaluate(EvaluateError::BinToUuidInvalidLength {
+                                    ..
+                                }),
+                            ) => Some(EvaluatedSqlFailureKind::BinToUuidInvalidLength),
                             _ => None,
                         };
                     }
@@ -4772,6 +4910,171 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn uuid_translate_dispatch_authenticates_five_causes_and_payload() {
+        let input = vec![0xff, 0, b'x'];
+        let cases = [
+            (
+                EvaluatedBytesOp::UuidToBinParseNative,
+                EvaluatedArgs::Bytes(Some(b" 6ccd780c-baba-1026-9564-5b8c656024db".to_vec())),
+                EvaluatedSqlFailureKind::UuidToBinWhitespace,
+            ),
+            (
+                EvaluatedBytesOp::UuidToBinParseNative,
+                EvaluatedArgs::Bytes(Some(b"abc".to_vec())),
+                EvaluatedSqlFailureKind::UuidToBinInvalid,
+            ),
+            (
+                EvaluatedBytesOp::UuidVersionNative,
+                EvaluatedArgs::Bytes(Some(b"abc".to_vec())),
+                EvaluatedSqlFailureKind::UuidVersionInvalid,
+            ),
+            (
+                EvaluatedBytesOp::UuidTimestampNative,
+                EvaluatedArgs::Bytes(Some(b"abc".to_vec())),
+                EvaluatedSqlFailureKind::UuidTimestampInvalid,
+            ),
+            (
+                EvaluatedBytesOp::BinToUuidNative,
+                EvaluatedArgs::BytesInt(Some(input.clone()), Some(0)),
+                EvaluatedSqlFailureKind::BinToUuidInvalidLength,
+            ),
+        ];
+        for (operation, args, kind) in cases {
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let rejected = worker
+                .eval_args_reported(EvaluatedArgs::NoArgs)
+                .unwrap_err();
+            assert!(matches!(rejected.error(), LocalError::InvalidBatch(_)));
+            assert_eq!(rejected.operation(), None);
+            assert_eq!(rejected.sql_failure(), None);
+            assert_eq!(rejected.bin_to_uuid_input(), None);
+            assert_eq!(worker.kernel_invocations(), 0);
+            let failure = worker.eval_args_reported(args).unwrap_err();
+            assert_eq!(failure.operation(), Some(operation));
+            assert_eq!(failure.sql_failure(), Some(kind));
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let LocalError::Evaluation(error) = failure.error() else {
+                panic!("UUID SQL failure lost its typed evaluation cause");
+            };
+            assert!(matches!(
+                (kind, error.0.as_ref()),
+                (
+                    EvaluatedSqlFailureKind::UuidToBinWhitespace,
+                    ErrorInner::Evaluate(EvaluateError::UuidToBinWhitespace)
+                ) | (
+                    EvaluatedSqlFailureKind::UuidToBinInvalid,
+                    ErrorInner::Evaluate(EvaluateError::UuidToBinInvalid)
+                ) | (
+                    EvaluatedSqlFailureKind::UuidVersionInvalid,
+                    ErrorInner::Evaluate(EvaluateError::UuidVersionInvalid)
+                ) | (
+                    EvaluatedSqlFailureKind::UuidTimestampInvalid,
+                    ErrorInner::Evaluate(EvaluateError::UuidTimestampInvalid)
+                ) | (
+                    EvaluatedSqlFailureKind::BinToUuidInvalidLength,
+                    ErrorInner::Evaluate(EvaluateError::BinToUuidInvalidLength { .. })
+                )
+            ));
+            if let ErrorInner::Evaluate(EvaluateError::BinToUuidInvalidLength { input: actual }) =
+                error.0.as_ref()
+            {
+                let borrowed = failure.bin_to_uuid_input().unwrap();
+                assert_eq!(borrowed, input.as_slice());
+                assert_eq!(
+                    borrowed.as_ptr(),
+                    actual.as_ptr(),
+                    "borrow the owned cause, not a saved/reparsed input"
+                );
+            } else {
+                assert_eq!(failure.bin_to_uuid_input(), None);
+            }
+            drop(worker);
+            assert_eq!(
+                failure.bin_to_uuid_input(),
+                if kind == EvaluatedSqlFailureKind::BinToUuidInvalidLength {
+                    Some(input.as_slice())
+                } else {
+                    None
+                }
+            );
+            let before = failure.error().to_string();
+            assert_eq!(failure.into_error().to_string(), before);
+        }
+
+        // A missing prepared flag is a defensive kernel failure, not the SQL
+        // invalid-length cause. Other BytesInt recipes were not narrowed to Swap.
+        let mut foreign = prepare_evaluated_bytes(
+            EvaluatedBytesOp::BinToUuidNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        let failure = foreign
+            .eval_args_reported(EvaluatedArgs::BytesInt(Some(input.clone()), None))
+            .unwrap_err();
+        assert!(matches!(failure.error(), LocalError::Evaluation(_)));
+        assert_eq!(foreign.kernel_invocations(), 1);
+        assert_eq!(failure.operation(), None);
+        assert_eq!(failure.sql_failure(), None);
+        assert_eq!(failure.bin_to_uuid_input(), None);
+        assert!(foreign.is_healthy());
+        let mut bounded = prepare_evaluated_bytes(
+            EvaluatedBytesOp::BinToUuidNative,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_steps: 0,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        let failure = bounded
+            .eval_args_reported(EvaluatedArgs::BytesInt(Some(input.clone()), Some(0)))
+            .unwrap_err();
+        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+        assert_eq!(bounded.kernel_invocations(), 0);
+        assert_eq!(failure.operation(), None);
+        assert_eq!(failure.sql_failure(), None);
+        assert_eq!(failure.bin_to_uuid_input(), None);
+        assert!(bounded.is_healthy());
+
+        // Private negative receipts exercise the getter's independent seals;
+        // no production constructor or additional report DTO is exposed.
+        let error = || {
+            LocalError::Evaluation(
+                EvaluateError::BinToUuidInvalidLength {
+                    input: input.clone(),
+                }
+                .into(),
+            )
+        };
+        let unreported = ReportedEvaluatedFailure::unreported(error());
+        assert_eq!(unreported.bin_to_uuid_input(), None);
+        let mut unrelated = ReportedEvaluatedFailure {
+            error: error(),
+            operation: Some(EvaluatedBytesOp::UuidVersionNative),
+            sql_failure: Some(EvaluatedSqlFailureKind::BinToUuidInvalidLength),
+        };
+        assert_eq!(unrelated.bin_to_uuid_input(), None);
+        unrelated.operation = Some(EvaluatedBytesOp::BinToUuidNative);
+        unrelated.sql_failure = Some(EvaluatedSqlFailureKind::UuidVersionInvalid);
+        assert_eq!(unrelated.bin_to_uuid_input(), None);
+        unrelated.sql_failure = Some(EvaluatedSqlFailureKind::BinToUuidInvalidLength);
+        unrelated.error = LocalError::Evaluation(EvaluateError::UuidVersionInvalid.into());
+        assert_eq!(unrelated.bin_to_uuid_input(), None);
+    }
 
     #[test]
     fn uncompress_result_envelope_is_canonical() {

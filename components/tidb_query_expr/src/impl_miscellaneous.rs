@@ -8,9 +8,169 @@ use std::{
 
 use rand::Rng;
 use tidb_query_codegen::rpn_fn;
-use tidb_query_common::Result;
+use tidb_query_common::{Result, error::EvaluateError};
 use tidb_query_datatype::codec::{data_type::*, mysql::RoundMode};
 use uuid::Uuid;
+
+/// UUID epoch offset used by the native UUID generator and timestamp kernels.
+pub const NATIVE_UUID_EPOCH_100NS: i64 = 122_192_928_000_000_000;
+
+/// Canonical lowercase UUID spelling, shared with native host generation.
+pub fn format_uuid_native(bytes: &[u8; 16]) -> String {
+    Uuid::from_bytes(*bytes).hyphenated().to_string()
+}
+
+// Native google/uuid.Parse accepts arbitrary enclosing bytes in its 38-byte
+// form and case-insensitive URN prefixes. Wire uuidcrate parsing stays
+// separate.
+fn parse_uuid_native(value: &[u8]) -> Option<[u8; 16]> {
+    let canonical = match value.len() {
+        36 => value,
+        45 if value[..9].eq_ignore_ascii_case(b"urn:uuid:") => &value[9..],
+        38 => &value[1..37],
+        32 => value,
+        _ => return None,
+    };
+    // Only 32/36-byte interiors reach the existing wire decoder. Invalid
+    // UTF-8 cannot be hexadecimal; the ignored wrapper bytes stay unchecked.
+    let text = std::str::from_utf8(canonical).ok()?;
+    Uuid::parse_str(text).ok().map(|uuid| *uuid.as_bytes())
+}
+
+// Both callers retain their original signed/unsigned microsecond arithmetic;
+// this exact decimal scaling leaf has no floating-point conversion.
+fn uuid_decimal_micros(micros: Decimal) -> Decimal {
+    let shifted = micros.shift(-6);
+    let rounded = (*shifted).clone().round(6, RoundMode::Truncate);
+    (*rounded).clone()
+}
+
+#[rpn_fn(nullable)]
+fn is_uuid_native(input: Option<BytesRef>) -> Result<Option<Int>> {
+    Ok(input.map(|input| {
+        let trim_view = String::from_utf8_lossy(input);
+        if trim_view.trim() != trim_view.as_ref() {
+            0
+        } else {
+            i64::from(parse_uuid_native(input).is_some())
+        }
+    }))
+}
+
+#[rpn_fn(nullable)]
+fn uuid_version_native(input: Option<BytesRef>) -> Result<Option<Int>> {
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    let uuid = parse_uuid_native(input).ok_or(EvaluateError::UuidVersionInvalid)?;
+    Ok(Some(i64::from(uuid[6] >> 4)))
+}
+
+#[rpn_fn(nullable)]
+fn uuid_timestamp_native(input: Option<BytesRef>) -> Result<Option<Decimal>> {
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    let uuid = parse_uuid_native(input).ok_or(EvaluateError::UuidTimestampInvalid)?;
+    let timestamp_100ns = match uuid[6] >> 4 {
+        1 => {
+            i64::from(u32::from_be_bytes([uuid[0], uuid[1], uuid[2], uuid[3]]))
+                | (i64::from(u16::from_be_bytes([uuid[4], uuid[5]])) << 32)
+                | (i64::from(u16::from_be_bytes([uuid[6], uuid[7]]) & 0x0fff) << 48)
+        }
+        6 => {
+            (i64::from(u32::from_be_bytes([uuid[0], uuid[1], uuid[2], uuid[3]])) << 28)
+                | (i64::from(u16::from_be_bytes([uuid[4], uuid[5]])) << 12)
+                | i64::from(u16::from_be_bytes([uuid[6], uuid[7]]) & 0x0fff)
+        }
+        7 => {
+            let first_eight = u64::from_be_bytes([
+                uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
+            ]);
+            ((first_eight >> 16) * 10_000) as i64 + NATIVE_UUID_EPOCH_100NS
+        }
+        _ => return Ok(None),
+    };
+    let unix_micros = (timestamp_100ns - NATIVE_UUID_EPOCH_100NS) / 10;
+    Ok(Some(uuid_decimal_micros(Decimal::from(unix_micros))))
+}
+
+#[rpn_fn(nullable)]
+fn uuid_to_bin_parse_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    if std::str::from_utf8(input)
+        .map(|text| text.trim() != text)
+        .unwrap_or(false)
+    {
+        return Err(EvaluateError::UuidToBinWhitespace.into());
+    }
+    let uuid = parse_uuid_native(input).ok_or(EvaluateError::UuidToBinInvalid)?;
+    Ok(Some(uuid.to_vec()))
+}
+
+#[rpn_fn(nullable)]
+fn uuid_to_bin_swap_native(input: Option<BytesRef>, flag: Option<&Int>) -> Result<Option<Bytes>> {
+    let (Some(input), Some(flag)) = (input, flag) else {
+        return Err(other_err!("invalid UUID_TO_BIN computed operand shape"));
+    };
+    let uuid: &[u8; 16] = input
+        .try_into()
+        .map_err(|_| other_err!("invalid UUID_TO_BIN computed operand width"))?;
+    let output = if *flag != 0 {
+        [
+            uuid[6], uuid[7], uuid[4], uuid[5], uuid[0], uuid[1], uuid[2], uuid[3], uuid[8],
+            uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15],
+        ]
+    } else {
+        *uuid
+    };
+    Ok(Some(output.to_vec()))
+}
+
+#[rpn_fn(nullable)]
+fn bin_to_uuid_native(input: Option<BytesRef>, flag: Option<&Int>) -> Result<Option<Bytes>> {
+    let flag = flag.ok_or_else(|| other_err!("missing BIN_TO_UUID prepared flag"))?;
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    let uuid: &[u8; 16] = input
+        .try_into()
+        .map_err(|_| EvaluateError::BinToUuidInvalidLength {
+            input: input.to_vec(),
+        })?;
+    let output = if *flag != 0 {
+        // Inverse field permutation, not UUID_TO_BIN's forward byte swap.
+        let restored = [
+            uuid[4], uuid[5], uuid[6], uuid[7], uuid[2], uuid[3], uuid[0], uuid[1], uuid[8],
+            uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15],
+        ];
+        format_uuid_native(&restored)
+    } else {
+        format_uuid_native(uuid)
+    };
+    Ok(Some(output.into_bytes()))
+}
+
+pub(crate) fn get_native_is_uuid_fn_meta() -> crate::RpnFnMeta {
+    is_uuid_native_fn_meta()
+}
+pub(crate) fn get_native_uuid_version_fn_meta() -> crate::RpnFnMeta {
+    uuid_version_native_fn_meta()
+}
+pub(crate) fn get_native_uuid_timestamp_fn_meta() -> crate::RpnFnMeta {
+    uuid_timestamp_native_fn_meta()
+}
+pub(crate) fn get_native_uuid_to_bin_parse_fn_meta() -> crate::RpnFnMeta {
+    uuid_to_bin_parse_native_fn_meta()
+}
+pub(crate) fn get_native_uuid_to_bin_swap_fn_meta() -> crate::RpnFnMeta {
+    uuid_to_bin_swap_native_fn_meta()
+}
+pub(crate) fn get_native_bin_to_uuid_fn_meta() -> crate::RpnFnMeta {
+    bin_to_uuid_native_fn_meta()
+}
 
 const IPV4_LENGTH: usize = 4;
 const IPV6_LENGTH: usize = 16;
@@ -229,9 +389,7 @@ pub fn uuid() -> Result<Option<Bytes>> {
     node_id[0] |= 0x01; // RFC 4122 multicast bit
 
     let result = Uuid::now_v1(&node_id);
-    let mut buf = vec![0; uuid::fmt::Hyphenated::LENGTH];
-    result.hyphenated().encode_lower(&mut buf);
-    Ok(Some(buf))
+    Ok(Some(format_uuid_native(result.as_bytes()).into_bytes()))
 }
 
 #[rpn_fn(nullable)]
@@ -268,9 +426,9 @@ pub fn uuid_timestamp(input: Option<BytesRef>) -> Result<Option<Decimal>> {
     // ns / 1_000 to convert from nanoseconds to microseconds
     // shift by -6 to get from microseconds to seconds
     // in the end we return a decimal of seconds since the UNIX epoch.
-    let shifted = Decimal::from(s * 1_000_000 + ((ns as u64) / 1_000)).shift(-6);
-    let r = (*shifted).clone().round(6, RoundMode::Truncate);
-    Ok(Some((*r).clone()))
+    Ok(Some(uuid_decimal_micros(Decimal::from(
+        s * 1_000_000 + ((ns as u64) / 1_000),
+    ))))
 }
 
 #[cfg(test)]
@@ -281,6 +439,141 @@ mod tests {
 
     use super::*;
     use crate::test_util::RpnFnScalarEvaluator;
+
+    #[test]
+    fn test_uuid_native_parse_policy_and_null() {
+        // Canonical/compact/braced source spellings, plus hand-derived ignored
+        // wrapper and mixed-case URN policy literals (not provider recordings).
+        let canonical = b"6ccd780c-baba-1026-9564-5b8c656024db";
+        let expected = hex("6ccd780cbaba102695645b8c656024db");
+        for input in [
+            canonical.as_slice(),
+            b"6CCD780CBABA102695645B8C656024DB",
+            b"{6ccd780c-baba-1026-9564-5b8c656024db}",
+            b"X6ccd780c-baba-1026-9564-5b8c656024dbY",
+            b"UrN:UuId:6ccd780c-baba-1026-9564-5b8c656024db",
+            b"\xff6ccd780c-baba-1026-9564-5b8c656024db\xfe",
+        ] {
+            assert_eq!(is_uuid_native(Some(input)).unwrap(), Some(1));
+            assert_eq!(
+                uuid_to_bin_parse_native(Some(input)).unwrap(),
+                Some(expected.clone())
+            );
+            assert_eq!(uuid_version_native(Some(input)).unwrap(), Some(1));
+        }
+        // No common trim step: version accepts these ignored wrapper bytes.
+        let spaces = b" 6ccd780c-baba-1026-9564-5b8c656024db ";
+        assert_eq!(is_uuid_native(Some(spaces)).unwrap(), Some(0));
+        assert_eq!(uuid_version_native(Some(spaces)).unwrap(), Some(1));
+        assert_eq!(is_uuid_native(Some(b"abc")).unwrap(), Some(0));
+        assert_eq!(is_uuid_native(None).unwrap(), None);
+        assert_eq!(uuid_version_native(None).unwrap(), None);
+        assert_eq!(uuid_to_bin_parse_native(None).unwrap(), None);
+        // The wire parser must NOT inherit native's arbitrary-wrapper policy.
+        assert_eq!(
+            uuid_version(Some(b"X6ccd780c-baba-1026-9564-5b8c656024dbY")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_uuid_native_binary_source_vectors() {
+        // Existing native UUID_TO_BIN/BIN_TO_UUID source literals.
+        let normal = hex("6ccd780cbaba102695645b8c656024db");
+        let swapped = hex("1026baba6ccd780c95645b8c656024db");
+        assert_eq!(
+            uuid_to_bin_swap_native(Some(&normal), Some(&0)).unwrap(),
+            Some(normal.clone())
+        );
+        assert_eq!(
+            uuid_to_bin_swap_native(Some(&normal), Some(&1)).unwrap(),
+            Some(swapped.clone())
+        );
+        let canonical = b"6ccd780c-baba-1026-9564-5b8c656024db".to_vec();
+        assert_eq!(
+            bin_to_uuid_native(Some(&normal), Some(&0)).unwrap(),
+            Some(canonical.clone())
+        );
+        assert_eq!(
+            bin_to_uuid_native(Some(&swapped), Some(&1)).unwrap(),
+            Some(canonical)
+        );
+        assert_eq!(bin_to_uuid_native(None, Some(&0)).unwrap(), None);
+        assert!(uuid_to_bin_swap_native(None, Some(&0)).is_err());
+        assert!(uuid_to_bin_swap_native(Some(&normal), None).is_err());
+        let error = uuid_to_bin_swap_native(Some(b"short"), Some(&1)).unwrap_err();
+        assert!(matches!(
+            *error.0,
+            tidb_query_common::error::ErrorInner::Evaluate(EvaluateError::Other(_))
+        ));
+    }
+
+    #[test]
+    fn test_uuid_native_timestamp_source_vectors() {
+        // Exact native fixture literals, including signed pre-1970 output.
+        for (text, expected) in [
+            ("5f13f854-d74a-11f0-9b7a-0ae0156bd76b", "1765537487.118139"),
+            ("1f0e48c1-7860-69cc-9b3f-35f89c103d4d", "1766995078.970004"),
+            ("019b1440-87b7-7380-ab00-ce413e795004", "1765571332.023000"),
+            ("6ccd780cbaba102695645b8c656024db", "-11129156903.290674"),
+        ] {
+            let actual = uuid_timestamp_native(Some(text.as_bytes()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(actual, Decimal::from_str(expected).unwrap());
+            assert_eq!(actual.result_frac_cnt(), 6);
+        }
+        assert_eq!(uuid_timestamp_native(None).unwrap(), None);
+        assert_eq!(
+            uuid_timestamp_native(Some(b"a3e3b4a1-ea6d-471e-9860-8303a8b261f6")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_uuid_native_typed_error_causes() {
+        use tidb_query_common::error::ErrorInner;
+        let whitespace = uuid_to_bin_parse_native(Some(b" bad ")).unwrap_err();
+        assert!(matches!(
+            *whitespace.0,
+            ErrorInner::Evaluate(EvaluateError::UuidToBinWhitespace)
+        ));
+        let invalid = uuid_to_bin_parse_native(Some(b"bad")).unwrap_err();
+        assert!(matches!(
+            *invalid.0,
+            ErrorInner::Evaluate(EvaluateError::UuidToBinInvalid)
+        ));
+        let version = uuid_version_native(Some(b"bad")).unwrap_err();
+        assert!(matches!(
+            *version.0,
+            ErrorInner::Evaluate(EvaluateError::UuidVersionInvalid)
+        ));
+        let timestamp = uuid_timestamp_native(Some(b"bad")).unwrap_err();
+        assert!(matches!(
+            *timestamp.0,
+            ErrorInner::Evaluate(EvaluateError::UuidTimestampInvalid)
+        ));
+        // Hand-derived binary diagnostic payload; no lossy conversion in cause.
+        let invalid_bytes = b"\xffx";
+        let bin = bin_to_uuid_native(Some(invalid_bytes), Some(&0)).unwrap_err();
+        let ErrorInner::Evaluate(cause @ EvaluateError::BinToUuidInvalidLength { .. }) = *bin.0
+        else {
+            panic!("expected typed length cause");
+        };
+        assert_eq!(cause.code(), 1411);
+        let EvaluateError::BinToUuidInvalidLength { input } = cause else {
+            unreachable!()
+        };
+        assert_eq!(input, invalid_bytes);
+        for cause in [
+            EvaluateError::UuidToBinWhitespace,
+            EvaluateError::UuidToBinInvalid,
+            EvaluateError::UuidVersionInvalid,
+            EvaluateError::UuidTimestampInvalid,
+        ] {
+            assert_eq!(cause.code(), 10000);
+        }
+    }
 
     fn hex(data: impl AsRef<[u8]>) -> Vec<u8> {
         hex::decode(data).unwrap()

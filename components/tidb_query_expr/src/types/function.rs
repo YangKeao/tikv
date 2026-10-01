@@ -274,6 +274,15 @@ pub enum LocalFunctionId {
     DurationTextProbeNative,
     TimeFormatTextNative,
     LastDayTextNative,
+    IsUuidNative,
+    UuidVersionNative,
+    UuidTimestampNative,
+    UuidToBinParseNative,
+    UuidToBinSwapNative,
+    BinToUuidNative,
+    TranslateUtf8Native,
+    TranslateBinaryNative,
+    TranslateNullNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.
