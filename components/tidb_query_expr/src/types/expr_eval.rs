@@ -501,7 +501,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::FromBase64Native
                 ) && matches!(values.last(), Some(ScalarValue::Int(Some(0 | 1))))
             }
-            EvaluatedArgsRole::Ieee754Bits => match values {
+            EvaluatedArgsRole::Ieee754Bits | EvaluatedArgsRole::TimeCoreBits => match values {
                 [ScalarValue::Bytes(None)] => true,
                 [ScalarValue::Bytes(Some(bytes))] => bytes.len() == 8,
                 _ => false,
@@ -3322,7 +3322,7 @@ mod tests {
             &[],
             EvaluatedArgsRole::NoArgs,
         ));
-        for mismatch in 0..89 {
+        for mismatch in 0..90 {
             let operation = match mismatch {
                 3 | 5 | 45 | 53 | 56 => EvaluatedBytesOp::Md5,
                 6 | 7 => EvaluatedBytesOp::PiRaw,
@@ -3367,6 +3367,7 @@ mod tests {
                 83 | 85 => EvaluatedBytesOp::Atan2GoNative,
                 84 | 86 => EvaluatedBytesOp::Atan2LibmLegacy,
                 87 | 88 => EvaluatedBytesOp::JsonValidOtherNative,
+                89 => EvaluatedBytesOp::YearCoreNative,
                 _ => EvaluatedBytesOp::AsinRaw,
             };
             let role = match mismatch {
@@ -3417,6 +3418,7 @@ mod tests {
                 74..=76 => EvaluatedArgsRole::CharReady,
                 78 | 79 => EvaluatedArgsRole::ConvNative,
                 81 | 82 => EvaluatedArgsRole::ConvLegacy,
+                89 => EvaluatedArgsRole::TimeCoreBits,
                 _ => EvaluatedArgsRole::Ieee754Bits,
             };
             let schema: Vec<_> = (0..operation.input_types().len())
@@ -3536,7 +3538,7 @@ mod tests {
                 ready[1] = ScalarValue::Bytes(Some(i128::MAX.to_le_bytes().to_vec()));
                 ready[2] = ScalarValue::Bytes(Some(0i128.to_le_bytes().to_vec()));
             }
-            if matches!(mismatch, 13 | 14 | 16..=88) {
+            if matches!(mismatch, 13 | 14 | 16..=89) {
                 assert!(evaluated_ready_args_match(
                     operation,
                     &ready,
@@ -3614,6 +3616,8 @@ mod tests {
                 ready[0] = ScalarValue::Bytes(Some(vec![0; 7]));
             } else if mismatch == 86 {
                 ready[1] = ScalarValue::Bytes(Some(vec![0; 9]));
+            } else if mismatch == 89 {
+                ready[0] = ScalarValue::Bytes(Some(vec![0; 7]));
             }
             if mismatch == 15 {
                 let input = EvalInput::ReadyBytes {

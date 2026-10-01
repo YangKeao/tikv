@@ -229,6 +229,10 @@ pub enum LocalFunctionId {
     JsonStorageFreeNative,
     JsonStorageSizeNative,
     JsonQuoteNative,
+    YearCoreNative,
+    MonthCoreNative,
+    DayOfMonthCoreNative,
+    QuarterCoreNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

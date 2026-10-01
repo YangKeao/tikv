@@ -915,6 +915,10 @@ pub enum EvaluatedBytesOp {
     JsonStorageFreeNative,
     JsonStorageSizeNative,
     JsonQuoteNative,
+    YearCoreNative,
+    MonthCoreNative,
+    DayOfMonthCoreNative,
+    QuarterCoreNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -925,11 +929,13 @@ pub(crate) enum EvaluatedKernelKind {
 }
 
 /// Logical admission remains distinct even when transport uses the same Bytes
-/// storage. In particular, ordinary Bytes cannot impersonate IEEE754 bits.
+/// storage. Ordinary Bytes, IEEE754 bits and time core bits cannot impersonate
+/// one another, including when their physical value is NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EvaluatedArgsRole {
     Values,
     Ieee754Bits,
+    TimeCoreBits,
     Ieee754Bits2,
     NoArgs,
     Packet,
@@ -1437,6 +1443,22 @@ impl EvaluatedBytesOp {
             Self::JsonQuoteNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::JsonQuoteNative);
             }
+            Self::YearCoreNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::YearCoreNative);
+            }
+            Self::MonthCoreNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::MonthCoreNative);
+            }
+            Self::DayOfMonthCoreNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DayOfMonthCoreNative,
+                );
+            }
+            Self::QuarterCoreNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::QuarterCoreNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1470,6 +1492,10 @@ impl EvaluatedBytesOp {
             Self::CharNative => EvaluatedArgsRole::CharReady,
             Self::ConvNative | Self::ConvBinaryLiteralNative => EvaluatedArgsRole::ConvNative,
             Self::ConvLegacy => EvaluatedArgsRole::ConvLegacy,
+            Self::YearCoreNative
+            | Self::MonthCoreNative
+            | Self::DayOfMonthCoreNative
+            | Self::QuarterCoreNative => EvaluatedArgsRole::TimeCoreBits,
             Self::AbsRealNative
             | Self::CeilRealNative
             | Self::FloorRealNative
@@ -1727,6 +1753,10 @@ impl EvaluatedBytesOp {
             Self::JsonStorageFreeNative => crate::impl_json::json_storage_free_native_fn_meta(),
             Self::JsonStorageSizeNative => crate::impl_json::json_storage_size_native_fn_meta(),
             Self::JsonQuoteNative => crate::impl_json::json_quote_native_fn_meta(),
+            Self::YearCoreNative => crate::impl_time::year_core_native_fn_meta(),
+            Self::MonthCoreNative => crate::impl_time::month_core_native_fn_meta(),
+            Self::DayOfMonthCoreNative => crate::impl_time::day_of_month_core_native_fn_meta(),
+            Self::QuarterCoreNative => crate::impl_time::quarter_core_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -1889,7 +1919,11 @@ impl EvaluatedBytesOp {
             | Self::MathNullWitnessNative
             | Self::JsonValidTextNative
             | Self::JsonValidBinaryNative
-            | Self::JsonValidOtherNative => EvalType::Int,
+            | Self::JsonValidOtherNative
+            | Self::YearCoreNative
+            | Self::MonthCoreNative
+            | Self::DayOfMonthCoreNative
+            | Self::QuarterCoreNative => EvalType::Int,
             Self::AbsDecimalNative
             | Self::CeilDecimalNative
             | Self::FloorDecimalNative
@@ -2043,7 +2077,11 @@ impl EvaluatedBytesOp {
             | Self::JsonDepthNative
             | Self::JsonStorageFreeNative
             | Self::JsonStorageSizeNative
-            | Self::JsonQuoteNative => &[EvalType::Bytes],
+            | Self::JsonQuoteNative
+            | Self::YearCoreNative
+            | Self::MonthCoreNative
+            | Self::DayOfMonthCoreNative
+            | Self::QuarterCoreNative => &[EvalType::Bytes],
             Self::Atan2GoNative | Self::Atan2LibmLegacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::AbsIntNative
             | Self::AbsUIntNative
@@ -2408,6 +2446,10 @@ pub enum EvaluatedArgs {
     /// Nullable IEEE754 binary64 bits, not a SQL integer or ordinary Bytes.
     /// All bit patterns are admitted; only None represents an absent input.
     Ieee754Bits(Option<u64>),
+    /// Raw calendar core-time data, not packed time, IEEE754, or ordinary
+    /// Bytes. All bits are retained; no Datetime or precomputed field is
+    /// constructed.
+    TimeCoreBits(Option<u64>),
     Ieee754Bits2 {
         left: ReadyIeee754Arg,
         right: ReadyIeee754Arg,
@@ -2486,6 +2528,7 @@ impl EvaluatedArgs {
             Self::FindInSetPreparedReady { .. } => EvaluatedArgsRole::FindInSetPrepared,
             Self::NoArgs => EvaluatedArgsRole::NoArgs,
             Self::Ieee754Bits(_) => EvaluatedArgsRole::Ieee754Bits,
+            Self::TimeCoreBits(_) => EvaluatedArgsRole::TimeCoreBits,
             Self::Ieee754Bits2 { .. } => EvaluatedArgsRole::Ieee754Bits2,
             Self::BytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesInt,
             Self::BytesBytesIntReady { .. } => EvaluatedArgsRole::ReadyBytesBytesInt,
@@ -2529,7 +2572,7 @@ impl EvaluatedArgs {
                 EvalType::Int,
                 EvalType::Int,
             ],
-            Self::Bytes(_) | Self::Ieee754Bits(_) => &[EvalType::Bytes],
+            Self::Bytes(_) | Self::Ieee754Bits(_) | Self::TimeCoreBits(_) => &[EvalType::Bytes],
             Self::Bytes2(..) | Self::Ieee754Bits2 { .. } => &[EvalType::Bytes, EvalType::Bytes],
             Self::BytesIntIntBytes(..) => &[
                 EvalType::Bytes,
@@ -3100,6 +3143,15 @@ impl EvaluatedArgs {
                 [Self::ieee754_value(value)?, Int(None), Int(None), Int(None)],
                 1,
             ),
+            Self::TimeCoreBits(value) => (
+                [
+                    Self::raw_u64_value(value, "time core bits input allocation failed")?,
+                    Int(None),
+                    Int(None),
+                    Int(None),
+                ],
+                1,
+            ),
             Self::Ieee754Bits2 { left, right } => {
                 // Admission allows POW with a truly NULL opposite operand,
                 // or legacy ATAN2's undemanded right after an actual left NULL.
@@ -3166,12 +3218,21 @@ impl EvaluatedArgs {
     }
 
     fn ieee754_value(value: Option<u64>) -> LocalResult<ScalarValue> {
+        Self::raw_u64_value(value, "IEEE754 input allocation failed")
+    }
+
+    // Share only fallible physical LE8 allocation. Logical roles are checked
+    // before materialization and remain distinct even for a nullable input.
+    fn raw_u64_value(
+        value: Option<u64>,
+        allocation_failure: &'static str,
+    ) -> LocalResult<ScalarValue> {
         let value = value
             .map(|bits| -> LocalResult<Vec<u8>> {
                 let mut bytes = Vec::new();
-                bytes.try_reserve_exact(8).map_err(|_| {
-                    LocalError::ResourceLimit("IEEE754 input allocation failed".into())
-                })?;
+                bytes
+                    .try_reserve_exact(8)
+                    .map_err(|_| LocalError::ResourceLimit(allocation_failure.into()))?;
                 bytes.extend_from_slice(&bits.to_le_bytes());
                 Ok(bytes)
             })

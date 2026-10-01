@@ -28,6 +28,55 @@ use tidb_query_datatype::{
 
 use crate::RpnFnCallExtra;
 
+// TimeCoreBits is a field-projection carrier, not a validated DateTime or a
+// packed-Time conversion. Only transport width is checked here.
+fn decode_time_core_native(bytes: BytesRef) -> Result<u64> {
+    if bytes.len() != 8 {
+        return Err(other_err!(
+            "Native TimeCoreBits transport requires exactly 8 bytes"
+        ));
+    }
+    let mut encoded = [0; 8];
+    encoded.copy_from_slice(bytes);
+    Ok(u64::from_le_bytes(encoded))
+}
+
+#[rpn_fn(nullable)]
+fn year_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(Some(
+            Time::year_from_core_bits(decode_time_core_native(bytes)?) as Int,
+        ))
+    })
+}
+
+#[rpn_fn(nullable)]
+fn month_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(Some(
+            Time::month_from_core_bits(decode_time_core_native(bytes)?) as Int,
+        ))
+    })
+}
+
+#[rpn_fn(nullable)]
+fn day_of_month_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(Some(
+            Time::day_from_core_bits(decode_time_core_native(bytes)?) as Int,
+        ))
+    })
+}
+
+#[rpn_fn(nullable)]
+fn quarter_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(Some(
+            Time::quarter_from_core_bits(decode_time_core_native(bytes)?) as Int,
+        ))
+    })
+}
+
 #[rpn_fn(nullable, capture = [ctx])]
 #[inline]
 pub fn date_format(
@@ -896,7 +945,7 @@ pub fn duration_string_time_diff(
 #[rpn_fn]
 #[inline]
 pub fn quarter(t: &DateTime) -> Result<Option<Int>> {
-    Ok(Some(Int::from(t.month() + 2) / 3))
+    Ok(Some(Int::from(t.quarter())))
 }
 
 /// Cast Duration into string representation and drop subsec if possible.
@@ -1871,6 +1920,40 @@ mod tests {
 
     use super::*;
     use crate::{RpnExpressionBuilder, types::test_util::RpnFnScalarEvaluator};
+
+    #[test]
+    fn test_native_calendar_core_fields() {
+        let kernels: [fn(Option<&[u8]>) -> Result<Option<Int>>; 4] = [
+            year_core_native,
+            month_core_native,
+            day_of_month_core_native,
+            quarter_core_native,
+        ];
+        for kernel in kernels {
+            assert_eq!(kernel(None).unwrap(), None);
+            assert!(kernel(Some(&[0; 7])).is_err());
+            assert!(kernel(Some(&[0; 9])).is_err());
+        }
+        // Calendar fields occupy 63..50, 49..46 and 45..41. Expected answers
+        // are literal calendar values, not obtained from the new provider.
+        const NORMAL: u64 = (2024u64 << 50) | (11u64 << 46) | (30u64 << 41);
+        let cases: [(u64, [Int; 4]); 5] = [
+            (0, [0, 0, 0, 0]),
+            (NORMAL, [2024, 11, 30, 4]),
+            (NORMAL | ((1u64 << 41) - 1), [2024, 11, 30, 4]),
+            (
+                (2024u64 << 50) | (15u64 << 46) | (31u64 << 41),
+                [2024, 15, 31, 5],
+            ),
+            (u64::MAX, [16383, 15, 31, 5]),
+        ];
+        for (raw, expected) in cases {
+            let encoded = raw.to_le_bytes();
+            for (kernel, value) in kernels.iter().zip(expected) {
+                assert_eq!(kernel(Some(&encoded)).unwrap(), Some(value));
+            }
+        }
+    }
 
     #[test]
     fn test_add_duration_and_duration() {

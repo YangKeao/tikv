@@ -6336,3 +6336,114 @@ fn local_evaluated_args_json_storage_quote_preserves_computed_carriers() {
     };
     assert_eq!(quoted.as_slice(), expected);
 }
+
+#[test]
+fn local_evaluated_args_calendar_core_fields_keep_raw_role() {
+    for (operation, maximum) in [
+        (EvaluatedBytesOp::YearCoreNative, 16383_i64),
+        (EvaluatedBytesOp::MonthCoreNative, 15_i64),
+        (EvaluatedBytesOp::DayOfMonthCoreNative, 31_i64),
+        (EvaluatedBytesOp::QuarterCoreNative, 5_i64),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(Some(0_u64.to_le_bytes().to_vec())),
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Ieee754Bits(None),
+            EvaluatedArgs::Ieee754Bits(Some(0)),
+            EvaluatedArgs::Int(Some(0)),
+        ] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        for (index, (input, expected)) in [
+            (None, None),
+            (Some(0), Some(0)),
+            (Some(u64::MAX), Some(maximum)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ComputedValue::Int(value) = worker
+                .eval_args(EvaluatedArgs::TimeCoreBits(input))
+                .unwrap()
+            else {
+                panic!("calendar core field returned a non-Int value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+    // Execution charges the materialized LE8 input, independently of the
+    // constructor's worker-retained reservation. No caller Vec is supplied.
+    let mut bounded = prepare_evaluated_bytes(
+        EvaluatedBytesOp::YearCoreNative,
+        LocalCompileContext::default(),
+        ExecutionLimits {
+            max_retained_bytes: 7,
+            ..ExecutionLimits::default()
+        },
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(bounded.operation(), EvaluatedBytesOp::YearCoreNative);
+    assert_eq!(bounded.kernel_invocations(), 0);
+    let storage = bounded.retained_storage().unwrap();
+    assert!(matches!(
+        bounded.eval_args(EvaluatedArgs::TimeCoreBits(Some(0))),
+        Err(LocalError::ResourceLimit(_))
+    ));
+    assert_eq!(bounded.kernel_invocations(), 0);
+    assert!(bounded.is_healthy());
+    assert_eq!(bounded.retained_storage().unwrap(), storage);
+    let mut ieee = prepare_evaluated_bytes(
+        EvaluatedBytesOp::ExpGoNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(ieee.operation(), EvaluatedBytesOp::ExpGoNative);
+    assert_eq!(ieee.kernel_invocations(), 0);
+    let storage = ieee.retained_storage().unwrap();
+    assert!(matches!(
+        ieee.eval_args(EvaluatedArgs::TimeCoreBits(Some(0))),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert_eq!(ieee.kernel_invocations(), 0);
+    assert!(ieee.is_healthy());
+    assert_eq!(ieee.retained_storage().unwrap(), storage);
+    let ComputedValue::Ieee754Bits(value) = ieee
+        .eval_args(EvaluatedArgs::Ieee754Bits(Some(0.0_f64.to_bits())))
+        .unwrap()
+    else {
+        panic!("reused IEEE worker returned a non-IEEE754 value");
+    };
+    assert_eq!(value.value(), Some(1.0_f64.to_bits()));
+    assert_eq!(
+        value.metadata(),
+        ComputedIeee754BitsMetadata::OwnIeee754Bits
+    );
+    assert_eq!(value.into_option(), Some(1.0_f64.to_bits()));
+    assert_eq!(ieee.kernel_invocations(), 1);
+    assert!(ieee.is_healthy());
+    assert_eq!(ieee.retained_storage().unwrap(), storage);
+}

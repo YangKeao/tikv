@@ -1670,6 +1670,10 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::JsonStorageFreeNative,
             EvaluatedBytesOp::JsonStorageSizeNative,
             EvaluatedBytesOp::JsonQuoteNative,
+            EvaluatedBytesOp::YearCoreNative,
+            EvaluatedBytesOp::MonthCoreNative,
+            EvaluatedBytesOp::DayOfMonthCoreNative,
+            EvaluatedBytesOp::QuarterCoreNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

@@ -179,7 +179,11 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::JsonDepthNative
         | LocalFunctionId::JsonStorageFreeNative
         | LocalFunctionId::JsonStorageSizeNative
-        | LocalFunctionId::JsonQuoteNative => Err(other_err!(
+        | LocalFunctionId::JsonQuoteNative
+        | LocalFunctionId::YearCoreNative
+        | LocalFunctionId::MonthCoreNative
+        | LocalFunctionId::DayOfMonthCoreNative
+        | LocalFunctionId::QuarterCoreNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

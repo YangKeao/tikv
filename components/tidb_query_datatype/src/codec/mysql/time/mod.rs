@@ -170,11 +170,11 @@ bitfield! {
 
     u32;
     #[inline]
-    get_year, set_year: 63, 50;
+    _, set_year: 63, 50;
     #[inline]
-    get_month, set_month: 49, 46;
+    _, set_month: 49, 46;
     #[inline]
-    get_day, set_day: 45, 41;
+    _, set_day: 45, 41;
     #[inline]
     get_hour, set_hour: 40, 36;
     #[inline]
@@ -228,6 +228,53 @@ impl From<TimeType> for FieldTypeTp {
 
 // The common set of methods for `date/time`
 impl Time {
+    /// Projects the stored year from shared CoreTime calendar bits without
+    /// validation. This is a field projection, not a full Time conversion:
+    /// type/FSP and clock bits have no effect on this result.
+    #[inline]
+    pub const fn year_from_core_bits(raw: u64) -> u32 {
+        ((raw >> 50) & 0x3fff) as u32
+    }
+
+    /// Projects the stored month, including zero and invalid month fields.
+    #[inline]
+    pub const fn month_from_core_bits(raw: u64) -> u32 {
+        ((raw >> 46) & 0x0f) as u32
+    }
+
+    /// Projects the stored day without validating its calendar combination.
+    #[inline]
+    pub const fn day_from_core_bits(raw: u64) -> u32 {
+        ((raw >> 41) & 0x1f) as u32
+    }
+
+    /// Computes the quarter from the stored four-bit month, including zero.
+    #[inline]
+    pub const fn quarter_from_core_bits(raw: u64) -> u32 {
+        (Self::month_from_core_bits(raw) + 2) / 3
+    }
+
+    #[inline]
+    const fn get_year(&self) -> u32 {
+        Self::year_from_core_bits(self.0)
+    }
+
+    #[inline]
+    const fn get_month(&self) -> u32 {
+        Self::month_from_core_bits(self.0)
+    }
+
+    #[inline]
+    const fn get_day(&self) -> u32 {
+        Self::day_from_core_bits(self.0)
+    }
+
+    /// Returns the quarter of the stored month without date validation.
+    #[inline]
+    pub const fn quarter(self) -> u32 {
+        Self::quarter_from_core_bits(self.0)
+    }
+
     /// Returns the hour number from 0 to 23.
     #[inline]
     pub fn hour(self) -> u32 {
@@ -2986,6 +3033,45 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn test_core_bits_field_projections() {
+        // Fixed old-mask fields, with every clock/micro/type/FSP bit set.
+        const RAW: u64 = (2024 << 50) | (15 << 46) | (31 << 41) | ((1 << 41) - 1);
+        const FIELDS: [u32; 4] = [
+            Time::year_from_core_bits(RAW),
+            Time::month_from_core_bits(RAW),
+            Time::day_from_core_bits(RAW),
+            Time::quarter_from_core_bits(RAW),
+        ];
+        const QUARTER: u32 = Time(RAW).quarter();
+        assert_eq!(FIELDS, [2024, 15, 31, 5]);
+        assert_eq!(QUARTER, 5);
+        assert_eq!(Time::year_from_core_bits(0), 0);
+        assert_eq!(Time::month_from_core_bits(0), 0);
+        assert_eq!(Time::day_from_core_bits(0), 0);
+        assert_eq!(Time::quarter_from_core_bits(0), 0);
+
+        // Exercise all stored month/day fields, not only calendar-valid dates.
+        // The expected values come from the input fields and old month policy.
+        for year in [0_u32, 1, 9999, 16383] {
+            for month in 0_u32..16 {
+                for day in 0_u32..32 {
+                    for low_bits in [0, (1_u64 << 41) - 1] {
+                        let raw = (u64::from(year) << 50)
+                            | (u64::from(month) << 46)
+                            | (u64::from(day) << 41)
+                            | low_bits;
+                        let time = Time(raw);
+                        assert_eq!(time.year(), year);
+                        assert_eq!(time.month(), month);
+                        assert_eq!(time.day(), day);
+                        assert_eq!(time.quarter(), month.div_ceil(3));
+                    }
+                }
+            }
+        }
+    }
 
     #[derive(Debug, Default)]
     struct TimeEnv {

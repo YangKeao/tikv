@@ -293,6 +293,19 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  YEAR/MONTH/DAYOFMONTH/QUARTER use four private core-field recipes in
+  `impl_time.rs`. TimeCoreBits is a distinct nullable-u64 logical role, encoded
+  as exactly eight little-endian bytes in one physical column; ordinary Bytes,
+  IEEE754Bits and Int cannot impersonate it, including NULL. Results reuse signed
+  Int. Datatype `Time` owns const raw-core field projections, shared by its
+  bitfield getters and native CoreTime getters; quarter uses the same primitive.
+  This is not a whole-Time bridge: no strict constructor, packed timestamp
+  conversion, calendar validation or new warning policy is introduced. Zero and
+  invalid stored fields survive; kind/FSP/clock are not observed by these four
+  results. Original wire YEAR/DAYOFMONTH zero-date warnings remain independent.
+  The original native ETDatetime casts stay frontend-owned. Only existing MONTH
+  PB/legacy paths are connected; no ordinary admission, driver or context getter
+  is added.
   JSON_STORAGE_FREE/SIZE reuse the closed JSON Int/error report recipes:
   parse the actual prepared document before returning zero or measured size.
   `native_policy` measures serde values through common `jcodec` container and
