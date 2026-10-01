@@ -34,8 +34,10 @@ use super::{
     runtime::{EvalBudget, bytes_min_storage_bytes, int_min_storage_bytes, vector_storage_bytes},
 };
 use crate::{
-    NativeRegexpError, NativeRegexpInvocation, NativeUnaryMinusError, RpnExpressionNode,
-    RpnStackNode, RpnStackNodeVectorValue,
+    BinaryArithmeticErrorKind, BinaryArithmeticOperation, LegacyBinaryArithmeticError,
+    NativeBinaryArithmeticError, NativeDecimalFastOutcome, NativeRegexpError,
+    NativeRegexpInvocation, NativeUnaryMinusError, RpnExpressionNode, RpnStackNode,
+    RpnStackNodeVectorValue,
     impl_string::{
         ConcatKind, FieldKind, PreparedCharArgs, PreparedConcatArgs, PreparedExportSetArgs,
         PreparedFieldArgs, PreparedFindInSetKeys, PreparedMakeSetArgs,
@@ -1111,6 +1113,49 @@ pub enum EvaluatedBytesOp {
     UnaryMinusBitsNative,
     UnaryMinusDecimalNative,
     UnaryNullNative,
+    AddIntSsNative,
+    AddIntSuNative,
+    AddIntUsNative,
+    AddIntUuNative,
+    SubIntSsNative,
+    SubIntSuNative,
+    SubIntUsNative,
+    SubIntUuNative,
+    SubIntSuForcedNative,
+    SubIntUsForcedNative,
+    SubIntUuForcedNative,
+    MulIntSignedNative,
+    MulIntUnsignedNative,
+    AddRealNative,
+    SubRealNative,
+    MulRealNative,
+    AddDecimalNative,
+    SubDecimalNative,
+    MulDecimalNative,
+    AddVectorNative,
+    SubVectorNative,
+    MulVectorNative,
+    BinaryArithmeticNullNative,
+    AddInt128SignedLegacy,
+    AddInt128UnsignedLegacy,
+    AddInt128RejectLeftLegacy,
+    AddInt128RejectRightLegacy,
+    SubInt128SignedLegacy,
+    SubInt128UnsignedLegacy,
+    SubInt128RejectLeftLegacy,
+    SubInt128RejectRightLegacy,
+    MulInt128SignedLegacy,
+    MulInt128UnsignedLegacy,
+    AddRealLegacy,
+    SubRealLegacy,
+    MulRealLegacy,
+    AddDecimalLegacy,
+    SubDecimalLegacy,
+    MulDecimalLegacy,
+    BinaryArithmeticMissingLegacy,
+    AddDecimalFastNative,
+    SubDecimalFastNative,
+    MulDecimalFastNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1126,6 +1171,8 @@ pub(crate) enum EvaluatedKernelKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EvaluatedArgsRole {
     Values,
+    DecimalBinary,
+    Int1282,
     NativeRegexpLike,
     NativeRegexpSubstr,
     NativeRegexpInstr,
@@ -2048,6 +2095,187 @@ impl EvaluatedBytesOp {
             Self::UnaryNullNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::UnaryNullNative);
             }
+            Self::AddIntSsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AddIntSsNative);
+            }
+            Self::AddIntSuNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AddIntSuNative);
+            }
+            Self::AddIntUsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AddIntUsNative);
+            }
+            Self::AddIntUuNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AddIntUuNative);
+            }
+            Self::SubIntSsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SubIntSsNative);
+            }
+            Self::SubIntSuNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SubIntSuNative);
+            }
+            Self::SubIntUsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SubIntUsNative);
+            }
+            Self::SubIntUuNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SubIntUuNative);
+            }
+            Self::SubIntSuForcedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubIntSuForcedNative,
+                );
+            }
+            Self::SubIntUsForcedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubIntUsForcedNative,
+                );
+            }
+            Self::SubIntUuForcedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubIntUuForcedNative,
+                );
+            }
+            Self::MulIntSignedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MulIntSignedNative,
+                );
+            }
+            Self::MulIntUnsignedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MulIntUnsignedNative,
+                );
+            }
+            Self::AddRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AddRealNative);
+            }
+            Self::SubRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SubRealNative);
+            }
+            Self::MulRealNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::MulRealNative);
+            }
+            Self::AddDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AddDecimalNative,
+                );
+            }
+            Self::SubDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubDecimalNative,
+                );
+            }
+            Self::MulDecimalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MulDecimalNative,
+                );
+            }
+            Self::AddVectorNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AddVectorNative);
+            }
+            Self::SubVectorNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SubVectorNative);
+            }
+            Self::MulVectorNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::MulVectorNative);
+            }
+            Self::BinaryArithmeticNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::BinaryArithmeticNullNative,
+                );
+            }
+            Self::AddInt128SignedLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AddInt128SignedLegacy,
+                );
+            }
+            Self::AddInt128UnsignedLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AddInt128UnsignedLegacy,
+                );
+            }
+            Self::AddInt128RejectLeftLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AddInt128RejectLeftLegacy,
+                );
+            }
+            Self::AddInt128RejectRightLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AddInt128RejectRightLegacy,
+                );
+            }
+            Self::SubInt128SignedLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubInt128SignedLegacy,
+                );
+            }
+            Self::SubInt128UnsignedLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubInt128UnsignedLegacy,
+                );
+            }
+            Self::SubInt128RejectLeftLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubInt128RejectLeftLegacy,
+                );
+            }
+            Self::SubInt128RejectRightLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubInt128RejectRightLegacy,
+                );
+            }
+            Self::MulInt128SignedLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MulInt128SignedLegacy,
+                );
+            }
+            Self::MulInt128UnsignedLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MulInt128UnsignedLegacy,
+                );
+            }
+            Self::AddRealLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AddRealLegacy);
+            }
+            Self::SubRealLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SubRealLegacy);
+            }
+            Self::MulRealLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::MulRealLegacy);
+            }
+            Self::AddDecimalLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AddDecimalLegacy,
+                );
+            }
+            Self::SubDecimalLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubDecimalLegacy,
+                );
+            }
+            Self::MulDecimalLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MulDecimalLegacy,
+                );
+            }
+            Self::BinaryArithmeticMissingLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::BinaryArithmeticMissingLegacy,
+                );
+            }
+            Self::AddDecimalFastNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::AddDecimalFastNative,
+                );
+            }
+            Self::SubDecimalFastNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::SubDecimalFastNative,
+                );
+            }
+            Self::MulDecimalFastNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MulDecimalFastNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -2082,6 +2310,36 @@ impl EvaluatedBytesOp {
         // A private identity does not determine its carrier or packet policy.
         // In particular, value-only FROM_BASE64 keeps the ordinary Bytes role.
         match self {
+            Self::AddDecimalNative
+            | Self::SubDecimalNative
+            | Self::MulDecimalNative
+            | Self::AddDecimalLegacy
+            | Self::SubDecimalLegacy
+            | Self::MulDecimalLegacy
+            | Self::AddDecimalFastNative
+            | Self::SubDecimalFastNative
+            | Self::MulDecimalFastNative => EvaluatedArgsRole::DecimalBinary,
+            Self::AddInt128SignedLegacy
+            | Self::AddInt128UnsignedLegacy
+            | Self::AddInt128RejectLeftLegacy
+            | Self::AddInt128RejectRightLegacy
+            | Self::SubInt128SignedLegacy
+            | Self::SubInt128UnsignedLegacy
+            | Self::SubInt128RejectLeftLegacy
+            | Self::SubInt128RejectRightLegacy
+            | Self::MulInt128SignedLegacy
+            | Self::MulInt128UnsignedLegacy => EvaluatedArgsRole::Int1282,
+            Self::AddRealNative
+            | Self::SubRealNative
+            | Self::MulRealNative
+            | Self::AddRealLegacy
+            | Self::SubRealLegacy
+            | Self::MulRealLegacy => EvaluatedArgsRole::Ieee754Bits2,
+            Self::AddVectorNative | Self::SubVectorNative | Self::MulVectorNative => {
+                EvaluatedArgsRole::NativeVector2
+            }
+            Self::BinaryArithmeticNullNative => EvaluatedArgsRole::NullWitness,
+            Self::BinaryArithmeticMissingLegacy => EvaluatedArgsRole::NoArgs,
             Self::VecAsTextNative | Self::VecDimsNative | Self::VecL2NormNative => {
                 EvaluatedArgsRole::NativeVector
             }
@@ -2264,6 +2522,89 @@ impl EvaluatedBytesOp {
         self != Self::OrdNative || value.is_none_or(|bytes| bytes.len() <= 4)
     }
 
+    fn native_binary_error_profile(
+        self,
+    ) -> Option<(BinaryArithmeticOperation, BinaryArithmeticErrorKind)> {
+        use BinaryArithmeticErrorKind::{DecimalOverflow, FloatOverflow, IntOverflow};
+        use BinaryArithmeticOperation::{Add, Multiply, Subtract};
+        Some(match self {
+            Self::AddIntSsNative
+            | Self::AddIntSuNative
+            | Self::AddIntUsNative
+            | Self::AddIntUuNative => (Add, IntOverflow),
+            Self::SubIntSsNative
+            | Self::SubIntSuNative
+            | Self::SubIntUsNative
+            | Self::SubIntUuNative
+            | Self::SubIntSuForcedNative
+            | Self::SubIntUsForcedNative
+            | Self::SubIntUuForcedNative => (Subtract, IntOverflow),
+            Self::MulIntSignedNative | Self::MulIntUnsignedNative => (Multiply, IntOverflow),
+            Self::AddRealNative => (Add, FloatOverflow),
+            Self::SubRealNative => (Subtract, FloatOverflow),
+            Self::MulRealNative => (Multiply, FloatOverflow),
+            Self::AddDecimalNative => (Add, DecimalOverflow),
+            Self::SubDecimalNative => (Subtract, DecimalOverflow),
+            Self::MulDecimalNative => (Multiply, DecimalOverflow),
+            _ => return None,
+        })
+    }
+
+    fn legacy_binary_error_profile(self) -> Option<(BinaryArithmeticOperation, bool)> {
+        use BinaryArithmeticOperation::{Add, Multiply, Subtract};
+        Some(match self {
+            Self::AddInt128SignedLegacy => (Add, false),
+            Self::AddInt128UnsignedLegacy
+            | Self::AddInt128RejectLeftLegacy
+            | Self::AddInt128RejectRightLegacy => (Add, true),
+            Self::SubInt128SignedLegacy => (Subtract, false),
+            Self::SubInt128UnsignedLegacy
+            | Self::SubInt128RejectLeftLegacy
+            | Self::SubInt128RejectRightLegacy => (Subtract, true),
+            Self::MulInt128SignedLegacy => (Multiply, false),
+            Self::MulInt128UnsignedLegacy => (Multiply, true),
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn is_binary_decimal(self) -> bool {
+        matches!(
+            self,
+            Self::AddDecimalNative
+                | Self::SubDecimalNative
+                | Self::MulDecimalNative
+                | Self::AddDecimalLegacy
+                | Self::SubDecimalLegacy
+                | Self::MulDecimalLegacy
+                | Self::AddDecimalFastNative
+                | Self::SubDecimalFastNative
+                | Self::MulDecimalFastNative
+        )
+    }
+
+    pub(crate) fn is_binary_int128(self) -> bool {
+        matches!(
+            self,
+            Self::AddInt128SignedLegacy
+                | Self::AddInt128UnsignedLegacy
+                | Self::AddInt128RejectLeftLegacy
+                | Self::AddInt128RejectRightLegacy
+                | Self::SubInt128SignedLegacy
+                | Self::SubInt128UnsignedLegacy
+                | Self::SubInt128RejectLeftLegacy
+                | Self::SubInt128RejectRightLegacy
+                | Self::MulInt128SignedLegacy
+                | Self::MulInt128UnsignedLegacy
+        )
+    }
+
+    fn returns_decimal_fast(self) -> bool {
+        matches!(
+            self,
+            Self::AddDecimalFastNative | Self::SubDecimalFastNative | Self::MulDecimalFastNative
+        )
+    }
+
     fn returns_json_report(self) -> bool {
         matches!(
             self,
@@ -2278,7 +2619,13 @@ impl EvaluatedBytesOp {
     fn returns_ieee754_bits(self) -> bool {
         matches!(
             self,
-            Self::UnaryPlusBitsNative
+            Self::AddRealNative
+                | Self::SubRealNative
+                | Self::MulRealNative
+                | Self::AddRealLegacy
+                | Self::SubRealLegacy
+                | Self::MulRealLegacy
+                | Self::UnaryPlusBitsNative
                 | Self::UnaryMinusBitsNative
                 | Self::AsinRaw
                 | Self::AcosRaw
@@ -2325,6 +2672,79 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::AddIntSsNative => crate::impl_arithmetic::add_int_ss_native_fn_meta(),
+            Self::AddIntSuNative => crate::impl_arithmetic::add_int_su_native_fn_meta(),
+            Self::AddIntUsNative => crate::impl_arithmetic::add_int_us_native_fn_meta(),
+            Self::AddIntUuNative => crate::impl_arithmetic::add_int_uu_native_fn_meta(),
+            Self::SubIntSsNative => crate::impl_arithmetic::sub_int_ss_native_fn_meta(),
+            Self::SubIntSuNative => crate::impl_arithmetic::sub_int_su_native_fn_meta(),
+            Self::SubIntUsNative => crate::impl_arithmetic::sub_int_us_native_fn_meta(),
+            Self::SubIntUuNative => crate::impl_arithmetic::sub_int_uu_native_fn_meta(),
+            Self::SubIntSuForcedNative => {
+                crate::impl_arithmetic::sub_int_su_forced_native_fn_meta()
+            }
+            Self::SubIntUsForcedNative => {
+                crate::impl_arithmetic::sub_int_us_forced_native_fn_meta()
+            }
+            Self::SubIntUuForcedNative => {
+                crate::impl_arithmetic::sub_int_uu_forced_native_fn_meta()
+            }
+            Self::MulIntSignedNative => crate::impl_arithmetic::mul_int_signed_native_fn_meta(),
+            Self::MulIntUnsignedNative => crate::impl_arithmetic::mul_int_unsigned_native_fn_meta(),
+            Self::AddRealNative => crate::impl_arithmetic::add_real_native_fn_meta(),
+            Self::SubRealNative => crate::impl_arithmetic::sub_real_native_fn_meta(),
+            Self::MulRealNative => crate::impl_arithmetic::mul_real_native_fn_meta(),
+            Self::AddDecimalNative => crate::impl_arithmetic::add_decimal_native_fn_meta(),
+            Self::SubDecimalNative => crate::impl_arithmetic::sub_decimal_native_fn_meta(),
+            Self::MulDecimalNative => crate::impl_arithmetic::mul_decimal_native_fn_meta(),
+            Self::AddVectorNative => crate::impl_vec::add_vector_native_fn_meta(),
+            Self::SubVectorNative => crate::impl_vec::sub_vector_native_fn_meta(),
+            Self::MulVectorNative => crate::impl_vec::mul_vector_native_fn_meta(),
+            Self::BinaryArithmeticNullNative => {
+                crate::impl_arithmetic::binary_arithmetic_null_native_fn_meta()
+            }
+            Self::AddInt128SignedLegacy => {
+                crate::impl_arithmetic::add_int128_signed_legacy_fn_meta()
+            }
+            Self::AddInt128UnsignedLegacy => {
+                crate::impl_arithmetic::add_int128_unsigned_legacy_fn_meta()
+            }
+            Self::AddInt128RejectLeftLegacy => {
+                crate::impl_arithmetic::add_int128_reject_left_legacy_fn_meta()
+            }
+            Self::AddInt128RejectRightLegacy => {
+                crate::impl_arithmetic::add_int128_reject_right_legacy_fn_meta()
+            }
+            Self::SubInt128SignedLegacy => {
+                crate::impl_arithmetic::sub_int128_signed_legacy_fn_meta()
+            }
+            Self::SubInt128UnsignedLegacy => {
+                crate::impl_arithmetic::sub_int128_unsigned_legacy_fn_meta()
+            }
+            Self::SubInt128RejectLeftLegacy => {
+                crate::impl_arithmetic::sub_int128_reject_left_legacy_fn_meta()
+            }
+            Self::SubInt128RejectRightLegacy => {
+                crate::impl_arithmetic::sub_int128_reject_right_legacy_fn_meta()
+            }
+            Self::MulInt128SignedLegacy => {
+                crate::impl_arithmetic::mul_int128_signed_legacy_fn_meta()
+            }
+            Self::MulInt128UnsignedLegacy => {
+                crate::impl_arithmetic::mul_int128_unsigned_legacy_fn_meta()
+            }
+            Self::AddRealLegacy => crate::impl_arithmetic::add_real_legacy_fn_meta(),
+            Self::SubRealLegacy => crate::impl_arithmetic::sub_real_legacy_fn_meta(),
+            Self::MulRealLegacy => crate::impl_arithmetic::mul_real_legacy_fn_meta(),
+            Self::AddDecimalLegacy => crate::impl_arithmetic::add_decimal_legacy_fn_meta(),
+            Self::SubDecimalLegacy => crate::impl_arithmetic::sub_decimal_legacy_fn_meta(),
+            Self::MulDecimalLegacy => crate::impl_arithmetic::mul_decimal_legacy_fn_meta(),
+            Self::BinaryArithmeticMissingLegacy => {
+                crate::impl_arithmetic::binary_arithmetic_missing_legacy_fn_meta()
+            }
+            Self::AddDecimalFastNative => crate::impl_arithmetic::add_decimal_fast_native_fn_meta(),
+            Self::SubDecimalFastNative => crate::impl_arithmetic::sub_decimal_fast_native_fn_meta(),
+            Self::MulDecimalFastNative => crate::impl_arithmetic::mul_decimal_fast_native_fn_meta(),
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
             Self::UnaryPlusBitsNative => crate::impl_op::unary_plus_bits_native_fn_meta(),
             Self::UnaryPlusDecimalNative => crate::impl_op::unary_plus_decimal_native_fn_meta(),
@@ -2629,6 +3049,49 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::AddIntSsNative
+            | Self::AddIntSuNative
+            | Self::AddIntUsNative
+            | Self::AddIntUuNative
+            | Self::SubIntSsNative
+            | Self::SubIntSuNative
+            | Self::SubIntUsNative
+            | Self::SubIntUuNative
+            | Self::SubIntSuForcedNative
+            | Self::SubIntUsForcedNative
+            | Self::SubIntUuForcedNative
+            | Self::MulIntSignedNative
+            | Self::MulIntUnsignedNative
+            | Self::BinaryArithmeticNullNative
+            | Self::BinaryArithmeticMissingLegacy => EvalType::Int,
+            Self::AddDecimalNative
+            | Self::SubDecimalNative
+            | Self::MulDecimalNative
+            | Self::AddDecimalLegacy
+            | Self::SubDecimalLegacy
+            | Self::MulDecimalLegacy => EvalType::Decimal,
+            Self::AddRealNative
+            | Self::SubRealNative
+            | Self::MulRealNative
+            | Self::AddRealLegacy
+            | Self::SubRealLegacy
+            | Self::MulRealLegacy
+            | Self::AddVectorNative
+            | Self::SubVectorNative
+            | Self::MulVectorNative
+            | Self::AddInt128SignedLegacy
+            | Self::AddInt128UnsignedLegacy
+            | Self::AddInt128RejectLeftLegacy
+            | Self::AddInt128RejectRightLegacy
+            | Self::SubInt128SignedLegacy
+            | Self::SubInt128UnsignedLegacy
+            | Self::SubInt128RejectLeftLegacy
+            | Self::SubInt128RejectRightLegacy
+            | Self::MulInt128SignedLegacy
+            | Self::MulInt128UnsignedLegacy
+            | Self::AddDecimalFastNative
+            | Self::SubDecimalFastNative
+            | Self::MulDecimalFastNative => EvalType::Bytes,
             Self::UnaryPlusIntNative
             | Self::UnaryMinusIntNative
             | Self::UnaryMinusUIntNative
@@ -2893,6 +3356,49 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::AddIntSsNative
+            | Self::AddIntSuNative
+            | Self::AddIntUsNative
+            | Self::AddIntUuNative
+            | Self::SubIntSsNative
+            | Self::SubIntSuNative
+            | Self::SubIntUsNative
+            | Self::SubIntUuNative
+            | Self::SubIntSuForcedNative
+            | Self::SubIntUsForcedNative
+            | Self::SubIntUuForcedNative
+            | Self::MulIntSignedNative
+            | Self::MulIntUnsignedNative => &[EvalType::Int, EvalType::Int],
+            Self::AddRealNative
+            | Self::SubRealNative
+            | Self::MulRealNative
+            | Self::AddRealLegacy
+            | Self::SubRealLegacy
+            | Self::MulRealLegacy
+            | Self::AddInt128SignedLegacy
+            | Self::AddInt128UnsignedLegacy
+            | Self::AddInt128RejectLeftLegacy
+            | Self::AddInt128RejectRightLegacy
+            | Self::SubInt128SignedLegacy
+            | Self::SubInt128UnsignedLegacy
+            | Self::SubInt128RejectLeftLegacy
+            | Self::SubInt128RejectRightLegacy
+            | Self::MulInt128SignedLegacy
+            | Self::MulInt128UnsignedLegacy => &[EvalType::Bytes, EvalType::Bytes],
+            Self::AddDecimalNative
+            | Self::SubDecimalNative
+            | Self::MulDecimalNative
+            | Self::AddDecimalLegacy
+            | Self::SubDecimalLegacy
+            | Self::MulDecimalLegacy
+            | Self::AddDecimalFastNative
+            | Self::SubDecimalFastNative
+            | Self::MulDecimalFastNative => &[EvalType::Decimal, EvalType::Decimal, EvalType::Int],
+            Self::AddVectorNative | Self::SubVectorNative | Self::MulVectorNative => {
+                &[EvalType::VectorFloat32, EvalType::VectorFloat32]
+            }
+            Self::BinaryArithmeticNullNative => &[EvalType::Int],
+            Self::BinaryArithmeticMissingLegacy => &[],
             Self::UnaryPlusIntNative
             | Self::UnaryMinusIntNative
             | Self::UnaryMinusUIntNative
@@ -3334,6 +3840,14 @@ impl NativeSearchPolicy {
 /// NULL.
 #[derive(Debug)]
 pub enum EvaluatedArgs {
+    /// Two actual Decimal owners; the facade derives their finite shared
+    /// budget.
+    Decimal2 {
+        left: Option<Decimal>,
+        right: Option<Decimal>,
+    },
+    /// Actual signed i128 operands, not narrowed native integer values.
+    Int1282(Option<i128>, Option<i128>),
     RegexpLike {
         invocation: NativeRegexpInvocation,
         text: Vec<u8>,
@@ -3514,6 +4028,8 @@ pub enum EvaluatedArgs {
 impl EvaluatedArgs {
     fn role(&self) -> EvaluatedArgsRole {
         match self {
+            Self::Decimal2 { .. } => EvaluatedArgsRole::DecimalBinary,
+            Self::Int1282(..) => EvaluatedArgsRole::Int1282,
             Self::Decimal(_) => EvaluatedArgsRole::DecimalUnary,
             Self::DecimalIntReady { .. } => EvaluatedArgsRole::DecimalInt,
             Self::Ieee754BitsInt { .. } => EvaluatedArgsRole::Ieee754Int,
@@ -3570,6 +4086,8 @@ impl EvaluatedArgs {
             Self::NativeVector(_) => &[EvalType::VectorFloat32],
             Self::NativeVector2(..) => &[EvalType::VectorFloat32, EvalType::VectorFloat32],
             Self::NoArgs => &[],
+            Self::Decimal2 { .. } => &[EvalType::Decimal, EvalType::Decimal, EvalType::Int],
+            Self::Int1282(..) => &[EvalType::Bytes, EvalType::Bytes],
             Self::Decimal(_) => &[EvalType::Decimal, EvalType::Int],
             Self::DecimalIntReady { .. } => &[EvalType::Decimal, EvalType::Int, EvalType::Int],
             Self::Ieee754BitsInt { .. } => &[EvalType::Bytes, EvalType::Int],
@@ -3671,6 +4189,7 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::RegexpNullIntNative
                         | EvaluatedBytesOp::RegexpNullBytesNative
                         | EvaluatedBytesOp::UnaryNullNative
+                        | EvaluatedBytesOp::BinaryArithmeticNullNative
                 ) && value.is_none()
             }
             Self::ConvReady {
@@ -4044,6 +4563,32 @@ impl EvaluatedArgs {
                 Self::native_vector_values([left, right], 2, available)?
             }
             Self::NoArgs => ([Int(None), Int(None), Int(None), Int(None)], 0),
+            Self::Decimal2 { left, right } => {
+                // Both actual owners remain live through conversion and kernel
+                // execution. Subtract each spill before exposing one budget.
+                let available = available
+                    .checked_sub(right.as_ref().map_or(0, Decimal::spill_capacity_bytes))
+                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                let limit = Self::decimal_materialization_budget(left.as_ref(), available)?;
+                (
+                    [
+                        ScalarValue::Decimal(left),
+                        ScalarValue::Decimal(right),
+                        Int(Some(limit)),
+                        Int(None),
+                    ],
+                    3,
+                )
+            }
+            Self::Int1282(left, right) => (
+                [
+                    Bytes(left.map(|value| value.to_le_bytes().to_vec())),
+                    Bytes(right.map(|value| value.to_le_bytes().to_vec())),
+                    Int(None),
+                    Int(None),
+                ],
+                2,
+            ),
             Self::Decimal(value) => {
                 let limit = Self::decimal_materialization_budget(value.as_ref(), available)?;
                 (
@@ -4762,6 +5307,30 @@ impl ComputedDecimal {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComputedDecimalFastMetadata {
+    OwnDecimalFast,
+}
+
+/// Owns the kernel's actual fast outcome, including distinct NULL/Unsupported.
+/// Decoding is owned by impl_arithmetic; this wrapper performs no arithmetic.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ComputedDecimalFast {
+    outcome: NativeDecimalFastOutcome,
+}
+
+impl ComputedDecimalFast {
+    pub fn outcome(&self) -> &NativeDecimalFastOutcome {
+        &self.outcome
+    }
+    pub fn into_outcome(self) -> NativeDecimalFastOutcome {
+        self.outcome
+    }
+    pub fn metadata(&self) -> ComputedDecimalFastMetadata {
+        ComputedDecimalFastMetadata::OwnDecimalFast
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComputedInt128Metadata {
     OwnInt128,
 }
@@ -4885,6 +5454,8 @@ pub enum EvaluatedSqlFailureKind {
     VectorNative,
     RegexpNative,
     UnaryMinusNative,
+    BinaryArithmeticNative,
+    BinaryArithmeticLegacy,
 }
 
 /// Fresh owned failure-only observation for one ready-value invocation.
@@ -4916,6 +5487,41 @@ impl ReportedEvaluatedFailure {
     pub fn sql_failure(&self) -> Option<EvaluatedSqlFailureKind> {
         self.sql_failure
     }
+    /// Borrow the actual native cause only for its exact operation/domain
+    /// recipe.
+    pub fn native_binary_arithmetic_error(&self) -> Option<&NativeBinaryArithmeticError> {
+        if self.sql_failure != Some(EvaluatedSqlFailureKind::BinaryArithmeticNative) {
+            return None;
+        }
+        let profile = self.operation?.native_binary_error_profile()?;
+        match &self.error {
+            LocalError::Evaluation(error) => match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::Caused(source)) => source
+                    .downcast_ref::<NativeBinaryArithmeticError>()
+                    .filter(|cause| (cause.operation, cause.kind) == profile),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Legacy real/Decimal warning values are not integer overflow receipts.
+    pub fn legacy_binary_arithmetic_error(&self) -> Option<&LegacyBinaryArithmeticError> {
+        if self.sql_failure != Some(EvaluatedSqlFailureKind::BinaryArithmeticLegacy) {
+            return None;
+        }
+        let profile = self.operation?.legacy_binary_error_profile()?;
+        match &self.error {
+            LocalError::Evaluation(error) => match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::Caused(source)) => source
+                    .downcast_ref::<LegacyBinaryArithmeticError>()
+                    .filter(|cause| (cause.operation, cause.unsigned) == profile),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Only dynamic signed/unsigned negation authenticates this typed source.
     /// A constant's Decimal widening and all scope failures are different
     /// paths.
@@ -4970,6 +5576,9 @@ impl ReportedEvaluatedFailure {
                         | EvaluatedBytesOp::VecL2DistanceNative
                         | EvaluatedBytesOp::VecNegativeInnerProductNative
                         | EvaluatedBytesOp::VecCosineDistanceNative
+                        | EvaluatedBytesOp::AddVectorNative
+                        | EvaluatedBytesOp::SubVectorNative
+                        | EvaluatedBytesOp::MulVectorNative
                 )
             )
         {
@@ -5047,6 +5656,7 @@ pub enum ComputedValue {
     JsonReport(ComputedJsonReport),
     Ieee754Bits(ComputedIeee754Bits),
     Decimal(ComputedDecimal),
+    DecimalFast(ComputedDecimalFast),
     Int128(ComputedInt128),
 }
 
@@ -5287,6 +5897,7 @@ impl EvaluatedAsciiWorker {
             | ComputedValue::JsonReport(_)
             | ComputedValue::Ieee754Bits(_)
             | ComputedValue::Decimal(_)
+            | ComputedValue::DecimalFast(_)
             | ComputedValue::Int128(_)
             | ComputedValue::NativeVector(_) => {
                 self.inner.poisoned = true;
@@ -5492,6 +6103,7 @@ impl EvaluatedBytesWorker {
             let materialization_available = if matches!(
                 args.role(),
                 EvaluatedArgsRole::DecimalUnary
+                    | EvaluatedArgsRole::DecimalBinary
                     | EvaluatedArgsRole::DecimalInt
                     | EvaluatedArgsRole::NativeVector
                     | EvaluatedArgsRole::NativeVector2
@@ -5629,6 +6241,26 @@ impl EvaluatedBytesWorker {
             if calls_before.checked_add(1) == Some(self.witness.invocations()) {
                 if let LocalError::Evaluation(cause) = &error {
                     *sql_failure = match (self.operation, cause.0.as_ref()) {
+                        (operation, ErrorInner::Evaluate(EvaluateError::Caused(source)))
+                            if source
+                                .downcast_ref::<NativeBinaryArithmeticError>()
+                                .is_some_and(|cause| {
+                                    operation.native_binary_error_profile()
+                                        == Some((cause.operation, cause.kind))
+                                }) =>
+                        {
+                            Some(EvaluatedSqlFailureKind::BinaryArithmeticNative)
+                        }
+                        (operation, ErrorInner::Evaluate(EvaluateError::Caused(source)))
+                            if source
+                                .downcast_ref::<LegacyBinaryArithmeticError>()
+                                .is_some_and(|cause| {
+                                    operation.legacy_binary_error_profile()
+                                        == Some((cause.operation, cause.unsigned))
+                                }) =>
+                        {
+                            Some(EvaluatedSqlFailureKind::BinaryArithmeticLegacy)
+                        }
                         (
                             EvaluatedBytesOp::UnaryMinusIntNative
                             | EvaluatedBytesOp::UnaryMinusUIntNative,
@@ -5656,7 +6288,10 @@ impl EvaluatedBytesWorker {
                             | EvaluatedBytesOp::VecL1DistanceNative
                             | EvaluatedBytesOp::VecL2DistanceNative
                             | EvaluatedBytesOp::VecNegativeInnerProductNative
-                            | EvaluatedBytesOp::VecCosineDistanceNative,
+                            | EvaluatedBytesOp::VecCosineDistanceNative
+                            | EvaluatedBytesOp::AddVectorNative
+                            | EvaluatedBytesOp::SubVectorNative
+                            | EvaluatedBytesOp::MulVectorNative,
                             ErrorInner::Evaluate(EvaluateError::Caused(source)),
                         ) if source.downcast_ref::<NativeVectorError>().is_some() => {
                             Some(EvaluatedSqlFailureKind::VectorNative)
@@ -5786,8 +6421,21 @@ impl EvaluatedBytesWorker {
                     retained,
                 )
             }
+            ScalarValueRef::Bytes(value) if self.operation.returns_decimal_fast() => {
+                let outcome = crate::impl_arithmetic::decode_native_decimal_fast_outcome(value)
+                    .map_err(|error| {
+                        LocalError::InvalidBatch(format!("invalid decimal fast result: {error}"))
+                    })?;
+                // Only the inline actual outcome survives; the physical encoded
+                // result stays charged by output_bytes until the vector drops.
+                (
+                    ComputedValue::DecimalFast(ComputedDecimalFast { outcome }),
+                    0,
+                )
+            }
             ScalarValueRef::Bytes(value)
-                if self.operation == EvaluatedBytesOp::RoundInt128Legacy =>
+                if self.operation == EvaluatedBytesOp::RoundInt128Legacy
+                    || self.operation.is_binary_int128() =>
             {
                 let value = value
                     .map(|source| {
@@ -5804,7 +6452,13 @@ impl EvaluatedBytesWorker {
                 (ComputedValue::Int128(ComputedInt128 { value }), 0)
             }
             ScalarValueRef::Bytes(value)
-                if self.operation == EvaluatedBytesOp::VecFromTextNative =>
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::VecFromTextNative
+                        | EvaluatedBytesOp::AddVectorNative
+                        | EvaluatedBytesOp::SubVectorNative
+                        | EvaluatedBytesOp::MulVectorNative
+                ) =>
             {
                 let value = value
                     .map(|source| {
@@ -5955,6 +6609,341 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn binary_arithmetic_dispatch_typed_failures_int128_and_budget() {
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        let real = |left: f64, right: f64| EvaluatedArgs::Ieee754Bits2 {
+            left: ReadyIeee754Arg::Value(Some(left.to_bits())),
+            right: ReadyIeee754Arg::Value(Some(right.to_bits())),
+        };
+        let mut add = prepare(EvaluatedBytesOp::AddIntSsNative);
+        let storage = add.retained_storage().unwrap();
+        let mut failure = add
+            .eval_args_reported(EvaluatedArgs::Int2(Some(i64::MAX), Some(1)))
+            .unwrap_err();
+        assert_eq!(
+            failure.sql_failure(),
+            Some(EvaluatedSqlFailureKind::BinaryArithmeticNative)
+        );
+        assert_eq!(
+            failure.native_binary_arithmetic_error(),
+            Some(&NativeBinaryArithmeticError {
+                operation: BinaryArithmeticOperation::Add,
+                kind: BinaryArithmeticErrorKind::IntOverflow
+            })
+        );
+        for wrong in [
+            EvaluatedBytesOp::SubIntSsNative,
+            EvaluatedBytesOp::AddRealNative,
+            EvaluatedBytesOp::AddInt128SignedLegacy,
+            EvaluatedBytesOp::AddDecimalFastNative,
+        ] {
+            failure.operation = Some(wrong);
+            assert!(failure.native_binary_arithmetic_error().is_none());
+        }
+        assert_eq!(add.kernel_invocations(), 1);
+        assert!(add.is_healthy());
+        assert_eq!(add.retained_storage().unwrap(), storage);
+        let ComputedValue::Int(value) = add
+            .eval_args(EvaluatedArgs::Int2(Some(2), Some(3)))
+            .unwrap()
+        else {
+            panic!("native integer must own Int");
+        };
+        assert_eq!(value.into_option(), Some(5));
+        assert_eq!(add.kernel_invocations(), 2);
+        let failure = prepare(EvaluatedBytesOp::MulRealNative)
+            .eval_args_reported(real(f64::MAX, 2.0))
+            .unwrap_err();
+        assert_eq!(
+            failure.native_binary_arithmetic_error(),
+            Some(&NativeBinaryArithmeticError {
+                operation: BinaryArithmeticOperation::Multiply,
+                kind: BinaryArithmeticErrorKind::FloatOverflow
+            }),
+            "actual failure: {failure:?}"
+        );
+        let full = || Decimal::try_from_native_digits(false, &[b'9'; 81], 0, 0, 4096).unwrap();
+        let failure = prepare(EvaluatedBytesOp::AddDecimalNative)
+            .eval_args_reported(EvaluatedArgs::Decimal2 {
+                left: Some(full()),
+                right: Some(Decimal::from(1i64)),
+            })
+            .unwrap_err();
+        assert_eq!(
+            failure.native_binary_arithmetic_error(),
+            Some(&NativeBinaryArithmeticError {
+                operation: BinaryArithmeticOperation::Add,
+                kind: BinaryArithmeticErrorKind::DecimalOverflow
+            })
+        );
+        assert!(matches!(
+            prepare(EvaluatedBytesOp::AddDecimalLegacy)
+                .eval_args(EvaluatedArgs::Decimal2 {
+                    left: Some(full()),
+                    right: Some(Decimal::from(1i64))
+                })
+                .unwrap(),
+            ComputedValue::Decimal(_)
+        ));
+        let ComputedValue::Ieee754Bits(value) = prepare(EvaluatedBytesOp::AddRealLegacy)
+            .eval_args(real(f64::INFINITY, 1.0))
+            .unwrap()
+        else {
+            panic!("legacy real must preserve IEEE bits");
+        };
+        assert_eq!(value.into_option(), Some(f64::INFINITY.to_bits()));
+
+        let mut legacy = prepare(EvaluatedBytesOp::AddInt128SignedLegacy);
+        assert!(matches!(
+            legacy.eval_args(EvaluatedArgs::Bytes2(Some(vec![0; 16]), Some(vec![0; 16]))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(legacy.kernel_invocations(), 0);
+        let ComputedValue::Int128(value) = legacy
+            .eval_args(EvaluatedArgs::Int1282(
+                Some(1i128 << 100),
+                Some(-(1i128 << 100) + 7),
+            ))
+            .unwrap()
+        else {
+            panic!("legacy arithmetic must not narrow input to i64");
+        };
+        assert_eq!(value.metadata(), ComputedInt128Metadata::OwnInt128);
+        assert_eq!(value.into_option(), Some(7));
+        assert_eq!(legacy.kernel_invocations(), 1);
+        let mut failure = prepare(EvaluatedBytesOp::MulInt128UnsignedLegacy)
+            .eval_args_reported(EvaluatedArgs::Int1282(Some(i128::from(u64::MAX)), Some(2)))
+            .unwrap_err();
+        assert_eq!(
+            failure.sql_failure(),
+            Some(EvaluatedSqlFailureKind::BinaryArithmeticLegacy)
+        );
+        assert_eq!(
+            failure.legacy_binary_arithmetic_error(),
+            Some(&LegacyBinaryArithmeticError {
+                operation: BinaryArithmeticOperation::Multiply,
+                unsigned: true
+            })
+        );
+        failure.operation = Some(EvaluatedBytesOp::MulInt128SignedLegacy);
+        assert!(failure.legacy_binary_arithmetic_error().is_none());
+        failure.operation = Some(EvaluatedBytesOp::AddInt128UnsignedLegacy);
+        assert!(failure.legacy_binary_arithmetic_error().is_none());
+        assert!(failure.native_binary_arithmetic_error().is_none());
+
+        let wide = || Decimal::try_from_native_digits(false, &[b'9'; 90], 0, 0, 4096).unwrap();
+        let (left, right) = (wide(), wide());
+        let live = left
+            .spill_capacity_bytes()
+            .checked_add(right.spill_capacity_bytes())
+            .unwrap();
+        assert!(left.spill_capacity_bytes() > 0 && right.spill_capacity_bytes() > 0);
+        let (ready, arity, binding) = EvaluatedArgs::Decimal2 {
+            left: Some(left),
+            right: Some(right),
+        }
+        .into_values(live + 64)
+        .unwrap();
+        assert_eq!(arity, 3);
+        assert!(binding.is_none());
+        assert_eq!(ready[2], ScalarValue::Int(Some(64)));
+        drop(ready);
+        let (left, right) = (wide(), wide());
+        let live = left
+            .spill_capacity_bytes()
+            .checked_add(right.spill_capacity_bytes())
+            .unwrap();
+        assert!(matches!(
+            EvaluatedArgs::Decimal2 {
+                left: Some(left),
+                right: Some(right)
+            }
+            .into_values(live - 1),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        for (operation, args) in [
+            (
+                EvaluatedBytesOp::BinaryArithmeticNullNative,
+                EvaluatedArgs::NullWitness(None),
+            ),
+            (
+                EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
+                EvaluatedArgs::NoArgs,
+            ),
+        ] {
+            let mut worker = prepare(operation);
+            let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+                panic!("NULL and missing keep the Int result domain");
+            };
+            assert_eq!(value.into_option(), None);
+            assert_eq!(worker.kernel_invocations(), 1);
+        }
+        let mut zero = prepare_evaluated_bytes(
+            EvaluatedBytesOp::AddIntSsNative,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_steps: 0,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        let failure = zero
+            .eval_args_reported(EvaluatedArgs::Int2(Some(i64::MAX), Some(1)))
+            .unwrap_err();
+        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+        assert_eq!(failure.sql_failure(), None);
+        assert!(failure.native_binary_arithmetic_error().is_none());
+        assert!(failure.legacy_binary_arithmetic_error().is_none());
+        assert_eq!(zero.kernel_invocations(), 0);
+        assert!(zero.is_healthy());
+    }
+
+    #[test]
+    fn binary_arithmetic_dispatch_fast_outcomes_and_vector_results() {
+        use crate::{NativeDecimalFastOutcome, NativeDecimalFastValue};
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        let decimal = |coefficient, storage_scale, scale| {
+            Decimal::try_from_native_fast(
+                NativeDecimalFastValue {
+                    coefficient,
+                    storage_scale,
+                    scale,
+                },
+                4096,
+            )
+            .unwrap()
+        };
+        // Hand-derived coefficient/scale results; the ordinary result carrier is
+        // never substituted for Unsupported or for a genuine SQL NULL.
+        for (operation, coefficient, storage_scale, scale) in [
+            (EvaluatedBytesOp::AddDecimalFastNative, 46, 1, 1),
+            (EvaluatedBytesOp::SubDecimalFastNative, -22, 1, 1),
+            (EvaluatedBytesOp::MulDecimalFastNative, 408, 2, 2),
+        ] {
+            let mut worker = prepare(operation);
+            let storage = worker.retained_storage().unwrap();
+            let ComputedValue::DecimalFast(value) = worker
+                .eval_args(EvaluatedArgs::Decimal2 {
+                    left: Some(decimal(12, 1, 1)),
+                    right: Some(decimal(34, 1, 1)),
+                })
+                .unwrap()
+            else {
+                panic!("fast result must be a distinct computed outcome");
+            };
+            assert_eq!(
+                value.metadata(),
+                ComputedDecimalFastMetadata::OwnDecimalFast
+            );
+            let expected = NativeDecimalFastOutcome::Value(Some(NativeDecimalFastValue {
+                coefficient,
+                storage_scale,
+                scale,
+            }));
+            assert_eq!(value.outcome(), &expected);
+            assert_eq!(value.into_outcome(), expected);
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let mut fast = prepare(EvaluatedBytesOp::SubDecimalFastNative);
+        let ComputedValue::DecimalFast(value) = fast
+            .eval_args(EvaluatedArgs::Decimal2 {
+                left: Some(decimal(i128::MIN, 0, 0)),
+                right: Some(decimal(i128::MIN, 0, 0)),
+            })
+            .unwrap()
+        else {
+            panic!("fast unsupported lost its result domain");
+        };
+        assert_eq!(value.into_outcome(), NativeDecimalFastOutcome::Unsupported);
+        assert_eq!(fast.kernel_invocations(), 1);
+        // The fallback is another genuine ordinary TiKV worker, not a native
+        // host subtraction or an invented zero replacing the fast outcome.
+        let mut ordinary = prepare(EvaluatedBytesOp::SubDecimalNative);
+        let ComputedValue::Decimal(value) = ordinary
+            .eval_args(EvaluatedArgs::Decimal2 {
+                left: Some(decimal(i128::MIN, 0, 0)),
+                right: Some(decimal(i128::MIN, 0, 0)),
+            })
+            .unwrap()
+        else {
+            panic!("ordinary fallback must own Decimal");
+        };
+        assert_eq!(value.value().unwrap().to_string(), "0");
+        assert_eq!(value.checked_i64_view(), None);
+        assert_eq!(ordinary.kernel_invocations(), 1);
+        let ComputedValue::DecimalFast(value) = fast
+            .eval_args(EvaluatedArgs::Decimal2 {
+                left: None,
+                right: Some(decimal(1, 0, 0)),
+            })
+            .unwrap()
+        else {
+            panic!("SQL NULL lost its fast domain");
+        };
+        assert_eq!(value.into_outcome(), NativeDecimalFastOutcome::Value(None));
+        assert_eq!(fast.kernel_invocations(), 2);
+        assert!(fast.is_healthy());
+
+        for (operation, expected) in [
+            (EvaluatedBytesOp::AddVectorNative, [4.0f32, 6.0]),
+            (EvaluatedBytesOp::SubVectorNative, [-2.0f32, -2.0]),
+            (EvaluatedBytesOp::MulVectorNative, [3.0f32, 8.0]),
+        ] {
+            let mut worker = prepare(operation);
+            let storage = worker.retained_storage().unwrap();
+            let ComputedValue::NativeVector(value) = worker
+                .eval_args(EvaluatedArgs::NativeVector2(
+                    Some(NativeVectorFloat32::must_create(vec![1.0, 2.0])),
+                    Some(NativeVectorFloat32::must_create(vec![3.0, 4.0])),
+                ))
+                .unwrap()
+            else {
+                panic!("vector arithmetic must use the actual LE output bridge");
+            };
+            assert_eq!(
+                value.metadata(),
+                ComputedNativeVectorMetadata::OwnNativeVector
+            );
+            assert_eq!(value.value().unwrap().elements(), &expected);
+            assert_eq!(worker.kernel_invocations(), 1);
+            let failure = worker
+                .eval_args_reported(EvaluatedArgs::NativeVector2(
+                    Some(NativeVectorFloat32::must_create(vec![1.0])),
+                    Some(NativeVectorFloat32::must_create(vec![1.0, 2.0])),
+                ))
+                .unwrap_err();
+            assert_eq!(
+                failure.sql_failure(),
+                Some(EvaluatedSqlFailureKind::VectorNative)
+            );
+            assert!(failure.native_vector_error().is_some());
+            assert!(failure.native_binary_arithmetic_error().is_none());
+            assert_eq!(worker.kernel_invocations(), 2);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
 
     #[test]
     fn unary_dispatch_dynamic_constant_boundaries_and_scope_receipts() {

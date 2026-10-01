@@ -1,12 +1,547 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::fmt;
+
 use num_traits::identities::Zero;
 use tidb_query_codegen::rpn_fn;
-use tidb_query_common::Result;
+use tidb_query_common::{Result, error::EvaluateError};
+pub use tidb_query_datatype::codec::mysql::decimal::NativeDecimalFastValue;
 use tidb_query_datatype::{
-    codec::{self, Error, data_type::*, div_i64, div_i64_with_u64, div_u64_with_i64, mysql::Res},
+    codec::{
+        self, Error,
+        data_type::*,
+        div_i64, div_i64_with_u64, div_u64_with_i64,
+        mysql::{
+            Res,
+            decimal::{
+                NativeDecimalBinaryOp, NativeDecimalBinaryPolicy, native_decimal_fast_binary,
+            },
+        },
+    },
     expr::EvalContext,
 };
+
+use crate::impl_math::{native_decimal_budget, native_decimal_failure};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryArithmeticOperation {
+    Add,
+    Subtract,
+    Multiply,
+}
+
+impl BinaryArithmeticOperation {
+    fn sql_name(self) -> &'static str {
+        match self {
+            Self::Add => "ADD",
+            Self::Subtract => "SUBTRACT",
+            Self::Multiply => "MULTIPLY",
+        }
+    }
+
+    fn decimal(self) -> NativeDecimalBinaryOp {
+        match self {
+            Self::Add => NativeDecimalBinaryOp::Add,
+            Self::Subtract => NativeDecimalBinaryOp::Subtract,
+            Self::Multiply => NativeDecimalBinaryOp::Multiply,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryArithmeticErrorKind {
+    IntOverflow,
+    FloatOverflow,
+    DecimalOverflow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeBinaryArithmeticError {
+    pub operation: BinaryArithmeticOperation,
+    pub kind: BinaryArithmeticErrorKind,
+}
+
+impl fmt::Display for NativeBinaryArithmeticError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {:?}", self.operation.sql_name(), self.kind)
+    }
+}
+
+impl std::error::Error for NativeBinaryArithmeticError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LegacyBinaryArithmeticError {
+    pub operation: BinaryArithmeticOperation,
+    pub unsigned: bool,
+}
+
+impl fmt::Display for LegacyBinaryArithmeticError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let domain = if self.unsigned {
+            "BIGINT UNSIGNED"
+        } else {
+            "BIGINT"
+        };
+        write!(
+            formatter,
+            "{domain} value is out of range in '{}'",
+            self.operation.sql_name()
+        )
+    }
+}
+
+impl std::error::Error for LegacyBinaryArithmeticError {}
+
+/// A computed fast result, not a SQL value masquerading as an unsupported flag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeDecimalFastOutcome {
+    Unsupported,
+    Value(Option<NativeDecimalFastValue>),
+}
+
+/// Sole decoder for the factory-only fast report. None is exclusively SQL NULL.
+pub(crate) fn decode_native_decimal_fast_outcome(
+    value: Option<&[u8]>,
+) -> Result<NativeDecimalFastOutcome> {
+    let Some(bytes) = value else {
+        return Ok(NativeDecimalFastOutcome::Value(None));
+    };
+    if bytes == [0] {
+        return Ok(NativeDecimalFastOutcome::Unsupported);
+    }
+    if bytes.len() != 25 || bytes[0] != 1 {
+        return Err(other_err!(
+            "Invalid native decimal fast outcome tag or length"
+        ));
+    }
+    let mut coefficient = [0; 16];
+    coefficient.copy_from_slice(&bytes[1..17]);
+    let mut storage_scale = [0; 4];
+    storage_scale.copy_from_slice(&bytes[17..21]);
+    let mut scale = [0; 4];
+    scale.copy_from_slice(&bytes[21..25]);
+    let value = NativeDecimalFastValue {
+        coefficient: i128::from_le_bytes(coefficient),
+        storage_scale: u32::from_le_bytes(storage_scale),
+        scale: u32::from_le_bytes(scale),
+    };
+    if value.scale > value.storage_scale {
+        return Err(other_err!(
+            "Native decimal fast outcome has invalid scale shape"
+        ));
+    }
+    Ok(NativeDecimalFastOutcome::Value(Some(value)))
+}
+
+fn encode_native_decimal_fast_outcome(value: Option<NativeDecimalFastValue>) -> Bytes {
+    let Some(value) = value else {
+        return vec![0];
+    };
+    let mut bytes = Vec::with_capacity(25);
+    bytes.push(1);
+    bytes.extend_from_slice(&value.coefficient.to_le_bytes());
+    bytes.extend_from_slice(&value.storage_scale.to_le_bytes());
+    bytes.extend_from_slice(&value.scale.to_le_bytes());
+    bytes
+}
+
+fn native_binary_arithmetic_error(
+    operation: BinaryArithmeticOperation,
+    kind: BinaryArithmeticErrorKind,
+) -> tidb_query_common::Error {
+    EvaluateError::Caused(Box::new(NativeBinaryArithmeticError { operation, kind })).into()
+}
+
+fn checked_add_integer(lhs: Int, rhs: Int, lhs_unsigned: bool, rhs_unsigned: bool) -> Option<Int> {
+    match (lhs_unsigned, rhs_unsigned) {
+        (false, false) => lhs.checked_add(rhs),
+        (true, true) => (lhs as u64)
+            .checked_add(rhs as u64)
+            .map(|value| value as Int),
+        (true, false) => checked_add_integer(rhs, lhs, false, true),
+        (false, true) => {
+            let value = if lhs >= 0 {
+                (lhs as u64).checked_add(rhs as u64)
+            } else {
+                (rhs as u64).checked_sub(lhs.unsigned_abs())
+            };
+            value.map(|value| value as Int)
+        }
+    }
+}
+
+fn checked_multiply_integer(lhs: Int, rhs: Int, unsigned: bool) -> Option<Int> {
+    if unsigned {
+        (lhs as u64)
+            .checked_mul(rhs as u64)
+            .map(|value| value as Int)
+    } else {
+        lhs.checked_mul(rhs)
+    }
+}
+
+// Complete original Go minus_overflows policy, including signed zero minus MIN.
+// Do not replace the branches with a mathematical i128 range comparison.
+fn integer_minus_overflows(
+    lhs_unsigned: bool,
+    rhs_unsigned: bool,
+    force_signed: bool,
+    a: Int,
+    b: Int,
+) -> bool {
+    let signed = force_signed || (!lhs_unsigned && !rhs_unsigned);
+    let res = a.wrapping_sub(b);
+    let (ua, ub) = (a as u64, b as u64);
+    let mut res_unsigned = false;
+    if lhs_unsigned {
+        if rhs_unsigned {
+            if ua < ub {
+                if res >= 0 {
+                    return true;
+                }
+            } else {
+                res_unsigned = true;
+            }
+        } else if b >= 0 {
+            if ua > ub {
+                res_unsigned = true;
+            }
+        } else if ua > u64::MAX - b.unsigned_abs() {
+            return true;
+        } else {
+            res_unsigned = true;
+        }
+    } else if rhs_unsigned {
+        if (a.wrapping_sub(i64::MIN) as u64) < ub {
+            return true;
+        }
+    } else if a > 0 && b < 0 {
+        res_unsigned = true;
+    } else if a < 0 && b > 0 && res >= 0 {
+        return true;
+    }
+    (!signed && !res_unsigned && res < 0)
+        || (signed && res_unsigned && (res as u64) > i64::MAX as u64)
+}
+
+#[derive(Clone, Copy)]
+enum IntegerSubtractionPolicy {
+    Wire,
+    Native { force_signed: bool },
+}
+
+fn checked_subtract_integer(
+    lhs: Int,
+    rhs: Int,
+    lhs_unsigned: bool,
+    rhs_unsigned: bool,
+    policy: IntegerSubtractionPolicy,
+) -> Option<Int> {
+    let force_signed = match policy {
+        IntegerSubtractionPolicy::Wire => {
+            // Original wire checked_sub rejects this one signed edge which the
+            // original native Go predicate accepts. Keep both existing policies.
+            if !lhs_unsigned && !rhs_unsigned && lhs == 0 && rhs == i64::MIN {
+                return None;
+            }
+            false
+        }
+        IntegerSubtractionPolicy::Native { force_signed } => force_signed,
+    };
+    if integer_minus_overflows(lhs_unsigned, rhs_unsigned, force_signed, lhs, rhs) {
+        None
+    } else {
+        Some(lhs.wrapping_sub(rhs))
+    }
+}
+
+fn binary_arithmetic_value<T>(lhs: T, rhs: T, operation: BinaryArithmeticOperation) -> T
+where
+    T: std::ops::Add<Output = T> + std::ops::Sub<Output = T> + std::ops::Mul<Output = T>,
+{
+    // Real keeps its original NotNan operator policy; raw f64 keeps IEEE bits.
+    match operation {
+        BinaryArithmeticOperation::Add => lhs + rhs,
+        BinaryArithmeticOperation::Subtract => lhs - rhs,
+        BinaryArithmeticOperation::Multiply => lhs * rhs,
+    }
+}
+
+fn native_integer_binary(
+    lhs: Int,
+    rhs: Int,
+    operation: BinaryArithmeticOperation,
+    lhs_unsigned: bool,
+    rhs_unsigned: bool,
+    force_signed: bool,
+) -> Result<Option<Int>> {
+    let value = match operation {
+        BinaryArithmeticOperation::Add => checked_add_integer(lhs, rhs, lhs_unsigned, rhs_unsigned),
+        BinaryArithmeticOperation::Subtract => checked_subtract_integer(
+            lhs,
+            rhs,
+            lhs_unsigned,
+            rhs_unsigned,
+            IntegerSubtractionPolicy::Native { force_signed },
+        ),
+        // Native unsigned multiply always reads BOTH original u64 bit patterns.
+        BinaryArithmeticOperation::Multiply => {
+            checked_multiply_integer(lhs, rhs, lhs_unsigned || rhs_unsigned)
+        }
+    };
+    value.map(Some).ok_or_else(|| {
+        native_binary_arithmetic_error(operation, BinaryArithmeticErrorKind::IntOverflow)
+    })
+}
+
+macro_rules! native_integer_binary_recipe {
+    ($name:ident, $operation:ident, $left:expr, $right:expr, $forced:expr) => {
+        #[rpn_fn]
+        fn $name(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+            native_integer_binary(
+                *lhs,
+                *rhs,
+                BinaryArithmeticOperation::$operation,
+                $left,
+                $right,
+                $forced,
+            )
+        }
+    };
+}
+
+native_integer_binary_recipe!(add_int_ss_native, Add, false, false, false);
+native_integer_binary_recipe!(add_int_su_native, Add, false, true, false);
+native_integer_binary_recipe!(add_int_us_native, Add, true, false, false);
+native_integer_binary_recipe!(add_int_uu_native, Add, true, true, false);
+native_integer_binary_recipe!(sub_int_ss_native, Subtract, false, false, false);
+native_integer_binary_recipe!(sub_int_su_native, Subtract, false, true, false);
+native_integer_binary_recipe!(sub_int_us_native, Subtract, true, false, false);
+native_integer_binary_recipe!(sub_int_uu_native, Subtract, true, true, false);
+native_integer_binary_recipe!(sub_int_su_forced_native, Subtract, false, true, true);
+native_integer_binary_recipe!(sub_int_us_forced_native, Subtract, true, false, true);
+native_integer_binary_recipe!(sub_int_uu_forced_native, Subtract, true, true, true);
+native_integer_binary_recipe!(mul_int_signed_native, Multiply, false, false, false);
+native_integer_binary_recipe!(mul_int_unsigned_native, Multiply, true, true, false);
+
+fn binary_raw_f64(value: Option<BytesRef>) -> Result<Option<f64>> {
+    let Some(bytes) = value else {
+        return Ok(None);
+    };
+    let bytes = <[u8; 8]>::try_from(bytes)
+        .map_err(|_| other_err!("Binary f64 transport requires exactly 8 bytes"))?;
+    Ok(Some(f64::from_bits(u64::from_le_bytes(bytes))))
+}
+
+fn real_binary(
+    lhs: Option<BytesRef>,
+    rhs: Option<BytesRef>,
+    operation: BinaryArithmeticOperation,
+    native: bool,
+) -> Result<Option<Bytes>> {
+    let lhs = binary_raw_f64(lhs)?;
+    let rhs = binary_raw_f64(rhs)?;
+    let Some((lhs, rhs)) = lhs.zip(rhs) else {
+        return Ok(None);
+    };
+    let value = binary_arithmetic_value(lhs, rhs, operation);
+    if native && !value.is_finite() {
+        return Err(native_binary_arithmetic_error(
+            operation,
+            BinaryArithmeticErrorKind::FloatOverflow,
+        ));
+    }
+    Ok(Some(value.to_bits().to_le_bytes().to_vec()))
+}
+
+macro_rules! real_binary_recipe {
+    ($name:ident, $operation:ident, $native:expr) => {
+        #[rpn_fn(nullable)]
+        fn $name(lhs: Option<BytesRef>, rhs: Option<BytesRef>) -> Result<Option<Bytes>> {
+            real_binary(lhs, rhs, BinaryArithmeticOperation::$operation, $native)
+        }
+    };
+}
+
+real_binary_recipe!(add_real_native, Add, true);
+real_binary_recipe!(sub_real_native, Subtract, true);
+real_binary_recipe!(mul_real_native, Multiply, true);
+real_binary_recipe!(add_real_legacy, Add, false);
+real_binary_recipe!(sub_real_legacy, Subtract, false);
+real_binary_recipe!(mul_real_legacy, Multiply, false);
+
+fn decimal_binary(
+    lhs: &Decimal,
+    rhs: &Decimal,
+    budget: &Int,
+    operation: BinaryArithmeticOperation,
+    native: bool,
+) -> Result<Option<Decimal>> {
+    let value = lhs
+        .try_native_binary(
+            rhs,
+            operation.decimal(),
+            NativeDecimalBinaryPolicy::MySql,
+            native_decimal_budget(budget)?,
+        )
+        .map_err(native_decimal_failure)?;
+    match value {
+        Res::Overflow(_) if native => Err(native_binary_arithmetic_error(
+            operation,
+            BinaryArithmeticErrorKind::DecimalOverflow,
+        )),
+        Res::Ok(value) | Res::Truncated(value) | Res::Overflow(value) => Ok(Some(value)),
+    }
+}
+
+macro_rules! decimal_binary_recipe {
+    ($name:ident, $operation:ident, $native:expr) => {
+        #[rpn_fn]
+        fn $name(lhs: &Decimal, rhs: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
+            decimal_binary(
+                lhs,
+                rhs,
+                budget,
+                BinaryArithmeticOperation::$operation,
+                $native,
+            )
+        }
+    };
+}
+
+decimal_binary_recipe!(add_decimal_native, Add, true);
+decimal_binary_recipe!(sub_decimal_native, Subtract, true);
+decimal_binary_recipe!(mul_decimal_native, Multiply, true);
+decimal_binary_recipe!(add_decimal_legacy, Add, false);
+decimal_binary_recipe!(sub_decimal_legacy, Subtract, false);
+decimal_binary_recipe!(mul_decimal_legacy, Multiply, false);
+
+fn decimal_fast_binary(
+    lhs: &Decimal,
+    rhs: &Decimal,
+    budget: &Int,
+    operation: BinaryArithmeticOperation,
+) -> Result<Option<Bytes>> {
+    let budget = native_decimal_budget(budget)?;
+    let left = lhs
+        .try_native_fast_value(budget)
+        .map_err(native_decimal_failure)?;
+    let Some(left) = left else {
+        return Ok(Some(encode_native_decimal_fast_outcome(None)));
+    };
+    let right = rhs
+        .try_native_fast_value(budget)
+        .map_err(native_decimal_failure)?;
+    let value =
+        right.and_then(|right| native_decimal_fast_binary(left, right, operation.decimal()));
+    Ok(Some(encode_native_decimal_fast_outcome(value)))
+}
+
+macro_rules! decimal_fast_binary_recipe {
+    ($name:ident, $operation:ident) => {
+        #[rpn_fn]
+        fn $name(lhs: &Decimal, rhs: &Decimal, budget: &Int) -> Result<Option<Bytes>> {
+            decimal_fast_binary(lhs, rhs, budget, BinaryArithmeticOperation::$operation)
+        }
+    };
+}
+
+decimal_fast_binary_recipe!(add_decimal_fast_native, Add);
+decimal_fast_binary_recipe!(sub_decimal_fast_native, Subtract);
+decimal_fast_binary_recipe!(mul_decimal_fast_native, Multiply);
+
+fn binary_raw_i128(bytes: BytesRef) -> Result<i128> {
+    let bytes = <[u8; 16]>::try_from(bytes)
+        .map_err(|_| other_err!("Binary i128 transport requires exactly 16 bytes"))?;
+    Ok(i128::from_le_bytes(bytes))
+}
+
+#[derive(Clone, Copy)]
+enum LegacyNegativeOperand {
+    Neither,
+    Left,
+    Right,
+}
+
+fn legacy_integer_binary(
+    lhs: BytesRef,
+    rhs: BytesRef,
+    operation: BinaryArithmeticOperation,
+    unsigned: bool,
+    reject: LegacyNegativeOperand,
+) -> Result<Option<Bytes>> {
+    let lhs = binary_raw_i128(lhs)?;
+    let rhs = binary_raw_i128(rhs)?;
+    // Inputs remain full i128 through checked arithmetic, before the output
+    // range or the independently locked legacy negative-operand policy is used.
+    let raw = match operation {
+        BinaryArithmeticOperation::Add => lhs.checked_add(rhs),
+        BinaryArithmeticOperation::Subtract => lhs.checked_sub(rhs),
+        BinaryArithmeticOperation::Multiply => lhs.checked_mul(rhs),
+    };
+    let negative = match reject {
+        LegacyNegativeOperand::Neither => false,
+        LegacyNegativeOperand::Left => lhs < 0,
+        LegacyNegativeOperand::Right => rhs < 0,
+    };
+    let (low, high) = if unsigned {
+        (0, u64::MAX as i128)
+    } else {
+        (i64::MIN as i128, i64::MAX as i128)
+    };
+    let value = raw
+        .filter(|value| !negative && (low..=high).contains(value))
+        .ok_or_else(|| {
+            tidb_query_common::Error::from(EvaluateError::Caused(Box::new(
+                LegacyBinaryArithmeticError {
+                    operation,
+                    unsigned,
+                },
+            )))
+        })?;
+    Ok(Some(value.to_le_bytes().to_vec()))
+}
+
+macro_rules! legacy_integer_binary_recipe {
+    ($name:ident, $operation:ident, $unsigned:expr, $reject:ident) => {
+        #[rpn_fn]
+        fn $name(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
+            legacy_integer_binary(
+                lhs,
+                rhs,
+                BinaryArithmeticOperation::$operation,
+                $unsigned,
+                LegacyNegativeOperand::$reject,
+            )
+        }
+    };
+}
+
+legacy_integer_binary_recipe!(add_int128_signed_legacy, Add, false, Neither);
+legacy_integer_binary_recipe!(add_int128_unsigned_legacy, Add, true, Neither);
+legacy_integer_binary_recipe!(add_int128_reject_left_legacy, Add, true, Left);
+legacy_integer_binary_recipe!(add_int128_reject_right_legacy, Add, true, Right);
+legacy_integer_binary_recipe!(sub_int128_signed_legacy, Subtract, false, Neither);
+legacy_integer_binary_recipe!(sub_int128_unsigned_legacy, Subtract, true, Neither);
+legacy_integer_binary_recipe!(sub_int128_reject_left_legacy, Subtract, true, Left);
+legacy_integer_binary_recipe!(sub_int128_reject_right_legacy, Subtract, true, Right);
+legacy_integer_binary_recipe!(mul_int128_signed_legacy, Multiply, false, Neither);
+legacy_integer_binary_recipe!(mul_int128_unsigned_legacy, Multiply, true, Neither);
+
+#[rpn_fn(nullable)]
+fn binary_arithmetic_null_native(witness: Option<&Int>) -> Result<Option<Int>> {
+    match witness {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Binary arithmetic NULL witness must be an actual NULL"
+        )),
+    }
+}
+
+#[rpn_fn]
+fn binary_arithmetic_missing_legacy() -> Result<Option<Int>> {
+    Ok(None)
+}
 
 #[rpn_fn]
 #[inline]
@@ -43,7 +578,7 @@ impl ArithmeticOp for IntIntPlus {
     type T = Int;
 
     fn calc(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-        lhs.checked_add(*rhs)
+        checked_add_integer(*lhs, *rhs, false, false)
             .ok_or_else(|| Error::overflow("BIGINT", format!("({} + {})", lhs, rhs)).into())
             .map(Some)
     }
@@ -56,13 +591,11 @@ impl ArithmeticOp for IntUintPlus {
     type T = Int;
 
     fn calc(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-        let res = if *lhs >= 0 {
-            (*lhs as u64).checked_add(*rhs as u64)
-        } else {
-            (*rhs as u64).checked_sub(lhs.overflowing_neg().0 as u64)
-        };
-        res.ok_or_else(|| Error::overflow("BIGINT UNSIGNED", format!("({} + {})", lhs, rhs)).into())
-            .map(|v| Some(v as i64))
+        checked_add_integer(*lhs, *rhs, false, true)
+            .ok_or_else(|| {
+                Error::overflow("BIGINT UNSIGNED", format!("({} + {})", lhs, rhs)).into()
+            })
+            .map(Some)
     }
 }
 
@@ -84,12 +617,11 @@ impl ArithmeticOp for UintUintPlus {
     type T = Int;
 
     fn calc(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-        (*lhs as u64)
-            .checked_add(*rhs as u64)
+        checked_add_integer(*lhs, *rhs, true, true)
             .ok_or_else(|| {
                 Error::overflow("BIGINT UNSIGNED", format!("({} + {})", lhs, rhs)).into()
             })
-            .map(|v| Some(v as i64))
+            .map(Some)
     }
 }
 
@@ -100,7 +632,7 @@ impl ArithmeticOp for RealPlus {
     type T = Real;
 
     fn calc(lhs: &Real, rhs: &Real) -> Result<Option<Real>> {
-        let res = *lhs + *rhs;
+        let res = binary_arithmetic_value(*lhs, *rhs, BinaryArithmeticOperation::Add);
         if !res.is_finite() {
             return Err(Error::overflow("DOUBLE", format!("({} + {})", lhs, rhs)).into());
         }
@@ -127,7 +659,7 @@ impl ArithmeticOp for IntIntMinus {
     type T = Int;
 
     fn calc(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-        lhs.checked_sub(*rhs)
+        checked_subtract_integer(*lhs, *rhs, false, false, IntegerSubtractionPolicy::Wire)
             .ok_or_else(|| Error::overflow("BIGINT", format!("({} - {})", lhs, rhs)).into())
             .map(Some)
     }
@@ -140,14 +672,9 @@ impl ArithmeticOp for IntUintMinus {
     type T = Int;
 
     fn calc(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-        if *lhs >= 0 {
-            (*lhs as u64)
-                .checked_sub(*rhs as u64)
-                .ok_or_else(|| Error::overflow("BIGINT", format!("({} - {})", lhs, rhs)).into())
-                .map(|v| Some(v as i64))
-        } else {
-            Err(Error::overflow("BIGINT", format!("({} - {})", lhs, rhs)).into())
-        }
+        checked_subtract_integer(*lhs, *rhs, false, true, IntegerSubtractionPolicy::Wire)
+            .ok_or_else(|| Error::overflow("BIGINT", format!("({} - {})", lhs, rhs)).into())
+            .map(Some)
     }
 }
 
@@ -158,13 +685,9 @@ impl ArithmeticOp for UintIntMinus {
     type T = Int;
 
     fn calc(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-        let res = if *rhs >= 0 {
-            (*lhs as u64).checked_sub(*rhs as u64)
-        } else {
-            (*lhs as u64).checked_add(rhs.overflowing_neg().0 as u64)
-        };
-        res.ok_or_else(|| Error::overflow("BIGINT", format!("({} - {})", lhs, rhs)).into())
-            .map(|v| Some(v as i64))
+        checked_subtract_integer(*lhs, *rhs, true, false, IntegerSubtractionPolicy::Wire)
+            .ok_or_else(|| Error::overflow("BIGINT", format!("({} - {})", lhs, rhs)).into())
+            .map(Some)
     }
 }
 
@@ -175,12 +698,11 @@ impl ArithmeticOp for UintUintMinus {
     type T = Int;
 
     fn calc(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-        (*lhs as u64)
-            .checked_sub(*rhs as u64)
+        checked_subtract_integer(*lhs, *rhs, true, true, IntegerSubtractionPolicy::Wire)
             .ok_or_else(|| {
                 Error::overflow("BIGINT UNSIGNED", format!("({} - {})", lhs, rhs)).into()
             })
-            .map(|v| Some(v as i64))
+            .map(Some)
     }
 }
 
@@ -191,7 +713,7 @@ impl ArithmeticOp for RealMinus {
     type T = Real;
 
     fn calc(lhs: &Real, rhs: &Real) -> Result<Option<Real>> {
-        let res = *lhs - *rhs;
+        let res = binary_arithmetic_value(*lhs, *rhs, BinaryArithmeticOperation::Subtract);
         if !res.is_finite() {
             return Err(Error::overflow("DOUBLE", format!("({} - {})", lhs, rhs)).into());
         }
@@ -332,7 +854,7 @@ pub struct RealMultiply;
 impl ArithmeticOp for RealMultiply {
     type T = Real;
     fn calc(lhs: &Real, rhs: &Real) -> Result<Option<Real>> {
-        let res = *lhs * *rhs;
+        let res = binary_arithmetic_value(*lhs, *rhs, BinaryArithmeticOperation::Multiply);
         if res.is_infinite() {
             Err(Error::overflow("REAL", format!("({} * {})", lhs, rhs)).into())
         } else {
@@ -347,7 +869,7 @@ pub struct IntIntMultiply;
 impl ArithmeticOp for IntIntMultiply {
     type T = Int;
     fn calc(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-        lhs.checked_mul(*rhs)
+        checked_multiply_integer(*lhs, *rhs, false)
             .ok_or_else(|| Error::overflow("BIGINT", format!("({} * {})", lhs, rhs)).into())
             .map(Some)
     }
@@ -359,8 +881,10 @@ pub struct IntUintMultiply;
 impl ArithmeticOp for IntUintMultiply {
     type T = Int;
     fn calc(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+        // Wire mixed multiply rejects a negative signed operand, unlike the
+        // native unsigned recipe which intentionally reads both raw u64 values.
         if *lhs >= 0 {
-            (*lhs as u64).checked_mul(*rhs as u64).map(|x| x as i64)
+            checked_multiply_integer(*lhs, *rhs, true)
         } else {
             None
         }
@@ -385,12 +909,11 @@ pub struct UintUintMultiply;
 impl ArithmeticOp for UintUintMultiply {
     type T = Int;
     fn calc(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-        (*lhs as u64)
-            .checked_mul(*rhs as u64)
+        checked_multiply_integer(*lhs, *rhs, true)
             .ok_or_else(|| {
                 Error::overflow("BIGINT UNSIGNED", format!("({} * {})", lhs, rhs)).into()
             })
-            .map(|v| Some(v as i64))
+            .map(Some)
     }
 }
 
@@ -527,6 +1050,193 @@ impl ArithmeticOpWithCtx for RealDivide {
                 Some(result)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod native_binary_tests {
+    use tidb_query_common::error::ErrorInner;
+    use tidb_query_datatype::codec::{convert::ToStringValue, mysql::decimal::NativeDecimalError};
+
+    use super::*;
+
+    fn actual_cause<T: std::error::Error + 'static>(error: &tidb_query_common::Error) -> &T {
+        match error.0.as_ref() {
+            ErrorInner::Evaluate(EvaluateError::Caused(cause)) => {
+                cause.downcast_ref().expect("actual arithmetic cause")
+            }
+            _ => panic!("lost arithmetic cause: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn native_integer_branches_and_wire_policy_are_distinct() {
+        assert_eq!(add_int_su_native(&-1, &1).unwrap(), Some(0));
+        assert_eq!(add_int_us_native(&1, &-1).unwrap(), Some(0));
+        assert_eq!(add_int_uu_native(&-2, &1).unwrap(), Some(-1));
+        let overflow = add_int_ss_native(&i64::MAX, &1).unwrap_err();
+        assert_eq!(
+            *actual_cause::<NativeBinaryArithmeticError>(&overflow),
+            NativeBinaryArithmeticError {
+                operation: BinaryArithmeticOperation::Add,
+                kind: BinaryArithmeticErrorKind::IntOverflow,
+            }
+        );
+        // Preserve the actual native Go edge; don't repair it with wire policy.
+        assert_eq!(sub_int_ss_native(&0, &i64::MIN).unwrap(), Some(i64::MIN));
+        assert!(IntIntMinus::calc(&0, &i64::MIN).is_err());
+        assert!(sub_int_uu_native(&1, &2).is_err());
+        assert_eq!(sub_int_uu_forced_native(&1, &2).unwrap(), Some(-1));
+        assert_eq!(sub_int_uu_native(&-1, &0).unwrap(), Some(-1));
+        assert!(sub_int_uu_forced_native(&-1, &0).is_err());
+        assert_eq!(sub_int_su_forced_native(&-1, &1).unwrap(), Some(-2));
+        assert_eq!(sub_int_us_forced_native(&0, &1).unwrap(), Some(-1));
+        assert_eq!(mul_int_unsigned_native(&-1, &1).unwrap(), Some(-1));
+        assert_eq!(mul_int_unsigned_native(&-1, &0).unwrap(), Some(0));
+        assert!(IntUintMultiply::calc(&-1, &0).is_err());
+        assert!(mul_int_unsigned_native(&-1, &2).is_err());
+        assert_eq!(binary_arithmetic_null_native(None).unwrap(), None);
+        assert!(binary_arithmetic_null_native(Some(&0)).is_err());
+        assert_eq!(binary_arithmetic_missing_legacy().unwrap(), None);
+    }
+
+    #[test]
+    fn legacy_full_i128_and_raw_ieee_are_not_native_domains() {
+        let large = 1_i128 << 100;
+        let result = add_int128_signed_legacy(&large.to_le_bytes(), &(-large).to_le_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(binary_raw_i128(&result).unwrap(), 0);
+        let result = sub_int128_unsigned_legacy(&(-1_i128).to_le_bytes(), &(-2_i128).to_le_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(binary_raw_i128(&result).unwrap(), 1);
+        let rejected =
+            sub_int128_reject_left_legacy(&(-1_i128).to_le_bytes(), &(-2_i128).to_le_bytes())
+                .unwrap_err();
+        assert_eq!(
+            *actual_cause::<LegacyBinaryArithmeticError>(&rejected),
+            LegacyBinaryArithmeticError {
+                operation: BinaryArithmeticOperation::Subtract,
+                unsigned: true,
+            }
+        );
+        assert!(
+            add_int128_reject_right_legacy(&2_i128.to_le_bytes(), &(-1_i128).to_le_bytes())
+                .is_err()
+        );
+        let result = mul_int128_unsigned_legacy(&(-1_i128).to_le_bytes(), &(-1_i128).to_le_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(binary_raw_i128(&result).unwrap(), 1);
+        assert!(add_int128_signed_legacy(&i128::MAX.to_le_bytes(), &1_i128.to_le_bytes()).is_err());
+        assert!(add_int128_signed_legacy(b"short", &0_i128.to_le_bytes()).is_err());
+        let max = f64::MAX.to_bits().to_le_bytes();
+        let overflow = add_real_native(Some(&max), Some(&max)).unwrap_err();
+        assert_eq!(
+            *actual_cause::<NativeBinaryArithmeticError>(&overflow),
+            NativeBinaryArithmeticError {
+                operation: BinaryArithmeticOperation::Add,
+                kind: BinaryArithmeticErrorKind::FloatOverflow,
+            }
+        );
+        let legacy = add_real_legacy(Some(&max), Some(&max)).unwrap().unwrap();
+        assert_eq!(binary_raw_f64(Some(&legacy)).unwrap(), Some(f64::INFINITY));
+        let negative_zero = (-0.0_f64).to_bits().to_le_bytes();
+        let two = 2.0_f64.to_bits().to_le_bytes();
+        assert_eq!(
+            mul_real_native(Some(&negative_zero), Some(&two)).unwrap(),
+            Some(negative_zero.to_vec())
+        );
+        assert_eq!(sub_real_legacy(None, Some(&two)).unwrap(), None);
+    }
+
+    #[test]
+    fn decimal_status_fast_value_and_unsupported_are_separate() {
+        let maximum = "9".repeat(81);
+        let wide = Decimal::try_from_native_digits(false, maximum.as_bytes(), 0, 0, 4096).unwrap();
+        let one = Decimal::from(1_i64);
+        let overflow = add_decimal_native(&wide, &one, &4096).unwrap_err();
+        assert_eq!(
+            *actual_cause::<NativeBinaryArithmeticError>(&overflow),
+            NativeBinaryArithmeticError {
+                operation: BinaryArithmeticOperation::Add,
+                kind: BinaryArithmeticErrorKind::DecimalOverflow,
+            }
+        );
+        assert_eq!(
+            add_decimal_legacy(&wide, &one, &4096)
+                .unwrap()
+                .unwrap()
+                .to_string_value(),
+            maximum
+        );
+        let left = Decimal::try_from_native_fast(
+            NativeDecimalFastValue {
+                coefficient: 123,
+                storage_scale: 2,
+                scale: 1,
+            },
+            4096,
+        )
+        .unwrap();
+        let right = Decimal::try_from_native_fast(
+            NativeDecimalFastValue {
+                coefficient: 20,
+                storage_scale: 2,
+                scale: 1,
+            },
+            4096,
+        )
+        .unwrap();
+        let fast = add_decimal_fast_native(&left, &right, &4096).unwrap();
+        assert_eq!(
+            decode_native_decimal_fast_outcome(fast.as_deref()).unwrap(),
+            NativeDecimalFastOutcome::Value(Some(NativeDecimalFastValue {
+                coefficient: 143,
+                storage_scale: 2,
+                scale: 1,
+            }))
+        );
+        let minimum = Decimal::try_from_native_fast(
+            NativeDecimalFastValue {
+                coefficient: i128::MIN,
+                storage_scale: 0,
+                scale: 0,
+            },
+            4096,
+        )
+        .unwrap();
+        let fast = sub_decimal_fast_native(&minimum, &minimum, &4096).unwrap();
+        assert_eq!(fast, Some(vec![0])); // rhs.checked_neg fails before subtraction
+        assert_eq!(
+            decode_native_decimal_fast_outcome(fast.as_deref()).unwrap(),
+            NativeDecimalFastOutcome::Unsupported
+        );
+        assert!(
+            sub_decimal_native(&minimum, &minimum, &4096)
+                .unwrap()
+                .unwrap()
+                .is_zero()
+        );
+        assert_eq!(
+            decode_native_decimal_fast_outcome(None).unwrap(),
+            NativeDecimalFastOutcome::Value(None)
+        );
+        for bad in [&b""[..], &b"\0\0"[..], &b"\x01"[..], &b"\x02"[..]] {
+            assert!(decode_native_decimal_fast_outcome(Some(bad)).is_err());
+        }
+        let bad_shape = encode_native_decimal_fast_outcome(Some(NativeDecimalFastValue {
+            coefficient: 0,
+            storage_scale: 1,
+            scale: 2,
+        }));
+        assert!(decode_native_decimal_fast_outcome(Some(&bad_shape)).is_err());
+        let resource = mul_decimal_fast_native(&left, &right, &1).unwrap_err();
+        assert!(matches!(
+            actual_cause::<NativeDecimalError>(&resource),
+            NativeDecimalError::Resource(_)
+        ));
     }
 }
 

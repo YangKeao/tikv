@@ -269,7 +269,50 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::UnaryMinusUIntConstantNative
         | LocalFunctionId::UnaryMinusBitsNative
         | LocalFunctionId::UnaryMinusDecimalNative
-        | LocalFunctionId::UnaryNullNative => Err(other_err!(
+        | LocalFunctionId::UnaryNullNative
+        | LocalFunctionId::AddIntSsNative
+        | LocalFunctionId::AddIntSuNative
+        | LocalFunctionId::AddIntUsNative
+        | LocalFunctionId::AddIntUuNative
+        | LocalFunctionId::SubIntSsNative
+        | LocalFunctionId::SubIntSuNative
+        | LocalFunctionId::SubIntUsNative
+        | LocalFunctionId::SubIntUuNative
+        | LocalFunctionId::SubIntSuForcedNative
+        | LocalFunctionId::SubIntUsForcedNative
+        | LocalFunctionId::SubIntUuForcedNative
+        | LocalFunctionId::MulIntSignedNative
+        | LocalFunctionId::MulIntUnsignedNative
+        | LocalFunctionId::AddRealNative
+        | LocalFunctionId::SubRealNative
+        | LocalFunctionId::MulRealNative
+        | LocalFunctionId::AddDecimalNative
+        | LocalFunctionId::SubDecimalNative
+        | LocalFunctionId::MulDecimalNative
+        | LocalFunctionId::AddVectorNative
+        | LocalFunctionId::SubVectorNative
+        | LocalFunctionId::MulVectorNative
+        | LocalFunctionId::BinaryArithmeticNullNative
+        | LocalFunctionId::AddInt128SignedLegacy
+        | LocalFunctionId::AddInt128UnsignedLegacy
+        | LocalFunctionId::AddInt128RejectLeftLegacy
+        | LocalFunctionId::AddInt128RejectRightLegacy
+        | LocalFunctionId::SubInt128SignedLegacy
+        | LocalFunctionId::SubInt128UnsignedLegacy
+        | LocalFunctionId::SubInt128RejectLeftLegacy
+        | LocalFunctionId::SubInt128RejectRightLegacy
+        | LocalFunctionId::MulInt128SignedLegacy
+        | LocalFunctionId::MulInt128UnsignedLegacy
+        | LocalFunctionId::AddRealLegacy
+        | LocalFunctionId::SubRealLegacy
+        | LocalFunctionId::MulRealLegacy
+        | LocalFunctionId::AddDecimalLegacy
+        | LocalFunctionId::SubDecimalLegacy
+        | LocalFunctionId::MulDecimalLegacy
+        | LocalFunctionId::BinaryArithmeticMissingLegacy
+        | LocalFunctionId::AddDecimalFastNative
+        | LocalFunctionId::SubDecimalFastNative
+        | LocalFunctionId::MulDecimalFastNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

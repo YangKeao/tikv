@@ -310,6 +310,40 @@ short-circuit admission policy described above.
   public Decimal helper is a thin bridge. Native canonical zero and shape clearing
   do not alter wire raw zero policy. Existing coercion/warnings, NOT/BitNeg, SQL
   child demand and PB/legacy admission remain unchanged.
+  Binary plus/minus/multiply add 43 unit recipes: 13 native integer, three each
+  native IEEE/Decimal/vector, an actual-NULL witness, ten legacy i128 policies,
+  three each legacy IEEE/Decimal, genuine missing-child NoArgs, and three Decimal
+  batch-fast recipes. Kernels live in `impl_arithmetic.rs`, with vector layout and
+  kernels in `impl_vec.rs`. DecimalBinary carries two actual Decimal values and
+  the infrastructure budget; Int1282 carries two complete LE16 values. Existing
+  factory bounds and the common driver remain unchanged. Vector inputs remain
+  typed; output is actual serialized LE vector data through the existing decoder.
+  Integer and floating arithmetic share leaves while retaining explicit policies:
+  native unsigned multiplication uses both raw u64 operands, mixed wire multiply
+  still rejects negative signed input, and native's existing zero-minus-MIN
+  subtraction differs from wire signed overflow. Exact operation/domain/profile,
+  actual typed `Caused` error and this invocation's witness authenticate native and
+  legacy arithmetic SQL errors; resource and shape errors are not SQL overflow.
+  Shared Decimal Exact and MySql policies use the existing word workers. MySql
+  preserves leading-word overflow, nine-word projection, the unsigned-coefficient
+  i128 fast condition, hidden scales, signed overflow zero and native rounding;
+  wire Fixed behavior remains distinct. Native public arithmetic, coefficient
+  helpers and codec projection are thin facades. Grow/native multiplication
+  handles the additional carry reduction without changing the wire Fixed leaf.
+  Batch-fast signed coefficient/scale arithmetic is a separate shared policy.
+  Its sole new computed outcome distinguishes Unsupported from Value(NULL) and
+  Value(actual coefficient/storage/visible scales), via a strict closed decoder;
+  it is not a SQL-NULL fallback or a general JSON report. Native callers retain
+  whole-left-batch then whole-right-batch demand and stage all cells before append.
+  Native integer batch NULL cells also use the actual arithmetic NULL witness.
+  Unsupported returns to the existing ordinary TiKV worker path, never native
+  arithmetic; infrastructure errors propagate. Legacy integer child evaluation
+  remains eager on both sides, unlike sequential legacy real/Decimal demand.
+  PB admission, original warnings and caller diagnostic formatting are unchanged.
+  Added vector layout copies and coefficient bridges do not establish zero-copy,
+  physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
+  wrapping into an unrepresentable Decimal shape is explicitly deferred rather
+  than weakening all bridge validation or converting it into SQL overflow.
   Regexp algorithms remain shared in `components/tidb_query_expr/src/regexp_policy.rs`;
   `native_regexp.rs` owns the context cache, native compiler and typed causes.
   Cache-owner Clone resets, while explicit invocation handles share the actual

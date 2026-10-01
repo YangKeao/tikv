@@ -134,6 +134,41 @@ fn get_native_vec_from_text(arg: BytesRef) -> Result<Option<Bytes>> {
     ))
 }
 
+fn native_vector_from_packed(arg: VectorFloat32Ref) -> NativeVectorFloat32 {
+    // The existing typed input has no dimension header: it stores native-endian
+    // f32 cells. Copy layout only, preserving mutated NaN/Inf bits and empty or
+    // uncapped dimensions. create()/text parsing would add a different policy.
+    let packed = arg.to_owned();
+    let mut value = NativeVectorFloat32::init(arg.len());
+    for (element, bytes) in value
+        .elements_mut()
+        .iter_mut()
+        .zip(packed.value.chunks_exact(4))
+    {
+        *element = f32::from_ne_bytes(bytes.try_into().expect("one actual packed f32 cell"));
+    }
+    value
+}
+
+macro_rules! native_vector_binary_recipe {
+    ($name:ident, $method:ident) => {
+        #[rpn_fn]
+        fn $name(lhs: VectorFloat32Ref, rhs: VectorFloat32Ref) -> Result<Option<Bytes>> {
+            let lhs = native_vector_from_packed(lhs);
+            let rhs = native_vector_from_packed(rhs);
+            // Reuse the full public arithmetic policy and its actual typed
+            // cause, then the same real LE output protocol as VecFromText.
+            Ok(Some(
+                lhs.$method(&rhs).map_err(native_vector_error)?.serialize(),
+            ))
+        }
+    };
+}
+
+native_vector_binary_recipe!(add_vector_native, add);
+native_vector_binary_recipe!(sub_vector_native, sub);
+native_vector_binary_recipe!(mul_vector_native, mul);
+
 #[rpn_fn(nullable)]
 #[inline]
 fn get_native_vec_real_null(arg: Option<&Int>) -> Result<Option<Bytes>> {
@@ -142,6 +177,67 @@ fn get_native_vec_real_null(arg: Option<&Int>) -> Result<Option<Bytes>> {
         Some(_) => Err(other_err!(
             "Native vector NULL witness must be an actual NULL"
         )),
+    }
+}
+
+#[cfg(test)]
+mod binary_native_tests {
+    use tidb_query_common::error::ErrorInner;
+
+    use super::*;
+
+    #[test]
+    fn native_binary_vectors_return_actual_le_values_and_causes() {
+        type Kernel =
+            for<'a, 'b> fn(VectorFloat32Ref<'a>, VectorFloat32Ref<'b>) -> Result<Option<Bytes>>;
+        let left = NativeVectorFloat32::must_create(vec![1.0, -2.0]).into_wire_raw();
+        let right = NativeVectorFloat32::must_create(vec![2.0, 3.0]).into_wire_raw();
+        for (kernel, expected) in [
+            (add_vector_native as Kernel, [3.0_f32, 1.0]),
+            (sub_vector_native as Kernel, [-1.0, -5.0]),
+            (mul_vector_native as Kernel, [2.0, -6.0]),
+        ] {
+            let mut expected_bytes = 2_u32.to_le_bytes().to_vec();
+            for element in expected {
+                expected_bytes.extend_from_slice(&element.to_bits().to_le_bytes());
+            }
+            assert_eq!(
+                kernel(left.as_ref(), right.as_ref()).unwrap(),
+                Some(expected_bytes)
+            );
+        }
+        let empty = NativeVectorFloat32::init(0).into_wire_raw();
+        assert_eq!(
+            add_vector_native(empty.as_ref(), empty.as_ref()).unwrap(),
+            Some(vec![0; 4])
+        );
+        let mismatch = sub_vector_native(left.as_ref(), empty.as_ref()).unwrap_err();
+        let ErrorInner::Evaluate(EvaluateError::Caused(cause)) = mismatch.0.as_ref() else {
+            panic!("lost vector cause");
+        };
+        assert_eq!(
+            cause
+                .downcast_ref::<NativeVectorError>()
+                .unwrap()
+                .to_string(),
+            "vectors have different dimensions: 2 and 0"
+        );
+        // The layout copy must not substitute create()'s earlier finite check.
+        let mut raw = NativeVectorFloat32::init(1);
+        raw.elements_mut()[0] = f32::NAN;
+        let raw = raw.into_wire_raw();
+        let zero = NativeVectorFloat32::init(1).into_wire_raw();
+        let invalid = mul_vector_native(raw.as_ref(), zero.as_ref()).unwrap_err();
+        let ErrorInner::Evaluate(EvaluateError::Caused(cause)) = invalid.0.as_ref() else {
+            panic!("lost raw vector cause");
+        };
+        assert_eq!(
+            cause
+                .downcast_ref::<NativeVectorError>()
+                .unwrap()
+                .to_string(),
+            "value out of range: NaN"
+        );
     }
 }
 

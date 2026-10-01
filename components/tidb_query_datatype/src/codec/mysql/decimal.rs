@@ -858,6 +858,27 @@ fn do_add(lhs: &Decimal, rhs: &Decimal) -> Res<Decimal> {
         .expect("bounded Decimal addition allocation failed")
 }
 
+fn addition_int_word_count(lhs: &Decimal, rhs: &Decimal) -> Result<usize> {
+    let left_words = lhs.int_words();
+    let right_words = rhs.int_words();
+    let head = |value: &Decimal| {
+        if value.int_words() + value.frac_words() == 0 {
+            0
+        } else {
+            value.word_buf[0]
+        }
+    };
+    let leading = match left_words.cmp(&right_words) {
+        Ordering::Greater => head(lhs),
+        Ordering::Less => head(rhs),
+        Ordering::Equal => head(lhs) + head(rhs),
+    };
+    left_words
+        .max(right_words)
+        .checked_add(usize::from(leading > WORD_MAX - 1))
+        .ok_or_else(|| decimal_resource_error("addition carry extent overflow"))
+}
+
 fn do_add_with_limit<'a>(
     mut lhs: &'a Decimal,
     mut rhs: &'a Decimal,
@@ -865,32 +886,10 @@ fn do_add_with_limit<'a>(
 ) -> Result<Res<Decimal>> {
     let (mut l_int_word_cnt, mut l_frac_word_cnt) = (lhs.int_words(), lhs.frac_words());
     let (mut r_int_word_cnt, mut r_frac_word_cnt) = (rhs.int_words(), rhs.frac_words());
-    let (mut int_word_to, frac_word_to) = (
-        cmp::max(l_int_word_cnt, r_int_word_cnt),
+    let (int_word_to, frac_word_to) = (
+        addition_int_word_count(lhs, rhs)?,
         cmp::max(l_frac_word_cnt, r_frac_word_cnt),
     );
-    // An empty physical prefix has no numerical head word. Inactive bytes
-    // are preserved by transport, not used to predict an arithmetic carry.
-    let l_head = if l_int_word_cnt + l_frac_word_cnt == 0 {
-        0
-    } else {
-        lhs.word_buf[0]
-    };
-    let r_head = if r_int_word_cnt + r_frac_word_cnt == 0 {
-        0
-    } else {
-        rhs.word_buf[0]
-    };
-    let x = match l_int_word_cnt.cmp(&r_int_word_cnt) {
-        Ordering::Greater => l_head,
-        Ordering::Less => r_head,
-        Ordering::Equal => l_head + r_head,
-    };
-    if x > WORD_MAX - 1 {
-        int_word_to = int_word_to
-            .checked_add(1)
-            .ok_or_else(|| decimal_resource_error("addition carry extent overflow"))?;
-    }
     let res = limit.apply(int_word_to, frac_word_to)?;
     if res.is_overflow() {
         let mut max = Decimal::try_new(checked_word_digits(res.0)?, 0, false)?;
@@ -1437,6 +1436,17 @@ fn do_mul(lhs: &Decimal, rhs: &Decimal) -> Res<Decimal> {
 }
 
 fn do_mul_with_limit(lhs: &Decimal, rhs: &Decimal, limit: WordLimit) -> Result<Res<Decimal>> {
+    do_mul_with_policy(lhs, rhs, limit, false)
+}
+
+// The native MySQL wrapper uses the same multiplication loop but retains its
+// original projected storage fraction and performs its own status finishing.
+fn do_mul_with_policy(
+    lhs: &Decimal,
+    rhs: &Decimal,
+    limit: WordLimit,
+    native_mysql: bool,
+) -> Result<Res<Decimal>> {
     let (l_int_word_cnt, mut l_frac_word_cnt) =
         (lhs.int_words() as isize, lhs.frac_words() as isize);
     let (mut r_int_word_cnt, mut r_frac_word_cnt) =
@@ -1455,6 +1465,10 @@ fn do_mul_with_limit(lhs: &Decimal, rhs: &Decimal, limit: WordLimit) -> Result<R
     let (int_word_to, frac_word_to) = (res.0, res.1);
     let negative = lhs.negative != rhs.negative;
     let (frac_cnt, result_frac_cnt) = match limit {
+        WordLimit::Fixed(_) if native_mysql => (
+            (lhs.frac_cnt + rhs.frac_cnt).min(frac_word_to * DIGITS_PER_WORD),
+            (lhs.result_frac_cnt + rhs.result_frac_cnt).min(MAX_FRACTION),
+        ),
         WordLimit::Fixed(_) => (
             (lhs.frac_cnt.min(NOT_FIXED_DEC) + rhs.frac_cnt.min(NOT_FIXED_DEC)).min(NOT_FIXED_DEC),
             (lhs.result_frac_cnt.min(MAX_FRACTION) + rhs.result_frac_cnt.min(MAX_FRACTION))
@@ -1523,6 +1537,15 @@ fn do_mul_with_limit(lhs: &Decimal, rhs: &Decimal, limit: WordLimit) -> Result<R
                 &mut carry,
                 &mut dec.word_buf[idx_to as usize],
             );
+            // A product column includes a full previous high-word carry, so
+            // native/exact arithmetic can need two base reductions. The wire
+            // Fixed path deliberately retains its original one-carry leaf.
+            if (native_mysql || matches!(limit, WordLimit::Grow))
+                && dec.word_buf[idx_to as usize] >= WORD_BASE
+            {
+                dec.word_buf[idx_to as usize] -= WORD_BASE;
+                carry += 1;
+            }
             carry += hi as u32;
             r_idx -= 1;
             idx_to -= 1;
@@ -1553,7 +1576,7 @@ fn do_mul_with_limit(lhs: &Decimal, rhs: &Decimal, limit: WordLimit) -> Result<R
         // A successful zero product keeps its storage/result scale.
         // Preserve the existing truncated payload convention; overflow
         // has already returned above and may intentionally contain -0.
-        if res.is_ok() {
+        if res.is_ok() || native_mysql {
             dec.negative = false;
         } else {
             dec = Decimal::zero();
@@ -1650,6 +1673,69 @@ pub enum NativeDecimalOp {
     Truncate(i32),
 }
 
+/// Binary operations shared by exact native values and native MySQL status
+/// APIs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeDecimalBinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+}
+
+/// Native policies are separate from the original wire Fixed(9) signatures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeDecimalBinaryPolicy {
+    Exact,
+    MySql,
+}
+
+/// Signed coefficient shape used by the native column-wise fast outcome.
+/// This is not the unsigned-coefficient eligibility policy of MySql multiply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeDecimalFastValue {
+    pub coefficient: i128,
+    pub storage_scale: u32,
+    pub scale: u32,
+}
+
+/// Preserve the column fast path's checked-i128 domain. None means Unsupported,
+/// not SQL NULL; subtraction first checks negation of the right coefficient.
+pub fn native_decimal_fast_binary(
+    left: NativeDecimalFastValue,
+    mut right: NativeDecimalFastValue,
+    operation: NativeDecimalBinaryOp,
+) -> Option<NativeDecimalFastValue> {
+    if operation == NativeDecimalBinaryOp::Multiply {
+        let scale = left.scale.checked_add(right.scale)?;
+        if scale > MAX_FRACTION as u32 {
+            return None;
+        }
+        return Some(NativeDecimalFastValue {
+            coefficient: left.coefficient.checked_mul(right.coefficient)?,
+            storage_scale: left.storage_scale.checked_add(right.storage_scale)?,
+            scale,
+        });
+    }
+    if operation == NativeDecimalBinaryOp::Subtract {
+        right.coefficient = right.coefficient.checked_neg()?;
+    }
+    let storage_scale = left.storage_scale.max(right.storage_scale);
+    let aligned = |value: NativeDecimalFastValue| {
+        if storage_scale == value.storage_scale {
+            Some(value.coefficient)
+        } else {
+            value
+                .coefficient
+                .checked_mul(10i128.checked_pow(storage_scale - value.storage_scale)?)
+        }
+    };
+    Some(NativeDecimalFastValue {
+        coefficient: aligned(left)?.checked_add(aligned(right)?)?,
+        storage_scale,
+        scale: left.scale.max(right.scale),
+    })
+}
+
 /// A bridge/resource refusal is not a SQL numeric overflow. Core failures keep
 /// their original owned cause; callers must not classify them by message text.
 #[derive(Debug)]
@@ -1697,6 +1783,77 @@ fn native_decimal_word_budget(words: usize, limit: usize) -> NativeDecimalResult
         return Err(NativeDecimalError::Resource("word buffer exceeds limit"));
     }
     Ok(())
+}
+
+fn native_digit_reserve(
+    digits: &mut Vec<u8>,
+    length: usize,
+    limit: usize,
+) -> NativeDecimalResult<()> {
+    if length > limit || length > isize::MAX as usize {
+        return Err(NativeDecimalError::Resource(
+            "coefficient buffer exceeds limit",
+        ));
+    }
+    digits
+        .try_reserve_exact(length.saturating_sub(digits.len()))
+        .map_err(|_| NativeDecimalError::Resource("coefficient allocation failed"))
+}
+
+fn native_pad_coefficient(
+    digits: &mut Vec<u8>,
+    width: usize,
+    limit: usize,
+) -> NativeDecimalResult<()> {
+    if digits.len() < width {
+        native_digit_reserve(digits, width, limit)?;
+        let length = digits.len();
+        digits.resize(width, b'0');
+        digits.copy_within(..length, width - length);
+        digits[..width - length].fill(b'0');
+    }
+    Ok(())
+}
+
+/// Unsigned coefficient arithmetic for the remaining native parser/round/divide
+/// consumers. Addition/subtraction keep their original zero-padded width;
+/// multiplication returns canonical digits. Subtraction requires lhs >= rhs.
+pub fn native_decimal_coefficient_binary(
+    lhs: &[u8],
+    rhs: &[u8],
+    operation: NativeDecimalBinaryOp,
+    limit: usize,
+) -> NativeDecimalResult<Vec<u8>> {
+    if lhs.is_empty() && rhs.is_empty() && operation != NativeDecimalBinaryOp::Multiply {
+        return Ok(Vec::new());
+    }
+    let left = Decimal::try_from_native_digits(
+        false,
+        if lhs.is_empty() { b"0" } else { lhs },
+        0,
+        0,
+        limit,
+    )?;
+    let right = Decimal::try_from_native_digits(
+        false,
+        if rhs.is_empty() { b"0" } else { rhs },
+        0,
+        0,
+        limit,
+    )?;
+    let value = left
+        .try_native_binary(&right, operation, NativeDecimalBinaryPolicy::Exact, limit)?
+        .unwrap();
+    if value.negative {
+        return Err(NativeDecimalError::InvalidInput(
+            "coefficient subtraction requires lhs >= rhs",
+        ));
+    }
+    let mut digits = value.native_coefficient_digits(limit)?;
+    if operation != NativeDecimalBinaryOp::Multiply {
+        native_pad_coefficient(&mut digits, lhs.len().max(rhs.len()), limit)?;
+    }
+    Ok(digits)
 }
 
 #[derive(Debug, Clone)]
@@ -1847,6 +2004,355 @@ impl Decimal {
                 self.native_math_round_compat(scale, false, scale.max(0) as u32, limit)
             }
         }
+    }
+
+    /// Materialize the signed fast shape without parsing or visible-scale
+    /// rounding. All digit and word allocations honor the bridge buffer limit.
+    pub fn try_from_native_fast(
+        value: NativeDecimalFastValue,
+        limit: usize,
+    ) -> NativeDecimalResult<Self> {
+        if value.scale > value.storage_scale {
+            return Err(NativeDecimalError::InvalidInput(
+                "result scale exceeds storage scale",
+            ));
+        }
+        let mut buffer = [b'0'; 39];
+        let mut index = buffer.len();
+        let mut magnitude = value.coefficient.unsigned_abs();
+        loop {
+            index -= 1;
+            buffer[index] += (magnitude % 10) as u8;
+            magnitude /= 10;
+            if magnitude == 0 {
+                break;
+            }
+        }
+        let mut digits = Vec::new();
+        native_digit_reserve(
+            &mut digits,
+            (buffer.len() - index).max(value.storage_scale as usize),
+            limit,
+        )?;
+        digits.extend_from_slice(&buffer[index..]);
+        native_pad_coefficient(&mut digits, value.storage_scale as usize, limit)?;
+        Self::try_from_native_digits(
+            value.coefficient < 0,
+            &digits,
+            value.storage_scale,
+            value.scale,
+            limit,
+        )
+    }
+
+    /// Lossless signed-i128 coefficient projection, including MIN. None is an
+    /// unsupported coefficient, while invalid shape/resource refusal is Err.
+    pub fn try_native_fast_value(
+        &self,
+        limit: usize,
+    ) -> NativeDecimalResult<Option<NativeDecimalFastValue>> {
+        self.check_native_math_value(limit)?;
+        let Some(magnitude) = self.native_coefficient_u128() else {
+            return Ok(None);
+        };
+        let coefficient = if self.negative && magnitude == (1u128 << 127) {
+            i128::MIN
+        } else {
+            let Ok(value) = i128::try_from(magnitude) else {
+                return Ok(None);
+            };
+            if self.negative { -value } else { value }
+        };
+        Ok(Some(NativeDecimalFastValue {
+            coefficient,
+            storage_scale: self.frac_cnt as u32,
+            scale: self.result_frac_cnt as u32,
+        }))
+    }
+
+    /// Apply an exact/native-MySQL binary policy through the existing word
+    /// workers. Resource refusals are not SQL arithmetic statuses.
+    pub fn try_native_binary(
+        &self,
+        rhs: &Self,
+        operation: NativeDecimalBinaryOp,
+        policy: NativeDecimalBinaryPolicy,
+        limit: usize,
+    ) -> NativeDecimalResult<Res<Self>> {
+        self.check_native_math_value(limit)?;
+        rhs.check_native_math_value(limit)?;
+        if operation == NativeDecimalBinaryOp::Multiply {
+            return if policy == NativeDecimalBinaryPolicy::MySql {
+                self.native_mysql_multiply(rhs, limit)
+            } else {
+                self.native_exact_multiply(rhs, limit).map(Res::Ok)
+            };
+        }
+        let bound = self
+            .int_words()
+            .max(rhs.int_words())
+            .checked_add(1)
+            .and_then(|integer| integer.checked_add(self.frac_words().max(rhs.frac_words())))
+            .ok_or(NativeDecimalError::Resource("binary word count overflow"))?;
+        native_decimal_word_budget(bound, limit)?;
+        let value = match operation {
+            NativeDecimalBinaryOp::Add => self.try_add_exact(rhs),
+            NativeDecimalBinaryOp::Subtract => self.try_sub_exact(rhs),
+            NativeDecimalBinaryOp::Multiply => unreachable!(),
+        }
+        .map_err(NativeDecimalError::Core)?;
+        if policy == NativeDecimalBinaryPolicy::Exact {
+            return Ok(Res::Ok(value));
+        }
+        let adds_magnitudes = match operation {
+            NativeDecimalBinaryOp::Add => self.negative == rhs.negative,
+            NativeDecimalBinaryOp::Subtract => self.negative != rhs.negative,
+            NativeDecimalBinaryOp::Multiply => unreachable!(),
+        };
+        if adds_magnitudes {
+            let left = self.native_projected_value(limit)?;
+            let right = rhs.native_projected_value(limit)?;
+            if addition_int_word_count(&left, &right).map_err(NativeDecimalError::Core)?
+                > WORD_BUF_LEN
+            {
+                return Self::native_positive_maximum(limit).map(Res::Overflow);
+            }
+        }
+        let integer_words = value
+            .remove_leading_zeroes(value.int_cnt)
+            .1
+            .div_ceil(DIGITS_PER_WORD);
+        if integer_words > WORD_BUF_LEN {
+            return Self::native_positive_maximum(limit).map(Res::Overflow);
+        }
+        if integer_words + value.frac_words() <= WORD_BUF_LEN {
+            return Ok(Res::Ok(value));
+        }
+        let kept = ((WORD_BUF_LEN - integer_words) * DIGITS_PER_WORD) as i32;
+        value
+            .try_native_math(NativeDecimalOp::Truncate(kept), limit)
+            .map(Res::Truncated)
+    }
+
+    fn native_positive_maximum(limit: usize) -> NativeDecimalResult<Self> {
+        native_decimal_word_budget(WORD_BUF_LEN, limit)?;
+        let mut value = Self::try_new(WORD_BUF_LEN * DIGITS_PER_WORD, 0, false)
+            .map_err(NativeDecimalError::Core)?;
+        value.word_buf.fill(WORD_MAX);
+        Ok(value)
+    }
+
+    fn native_zero(negative: bool, scale: u32, limit: usize) -> NativeDecimalResult<Self> {
+        let fraction = scale as usize;
+        native_decimal_word_budget(fraction.div_ceil(DIGITS_PER_WORD).max(1), limit)?;
+        Self::try_new(usize::from(scale == 0), fraction, negative).map_err(NativeDecimalError::Core)
+    }
+
+    fn native_exact_multiply(&self, rhs: &Self, limit: usize) -> NativeDecimalResult<Self> {
+        // Keep the native public API's plain-u32 additions and thus this build's
+        // original overflow-check policy, rather than turning it into SQL overflow.
+        let result_scale = (self.result_frac_cnt as u32) + (rhs.result_frac_cnt as u32);
+        let storage_scale = (self.frac_cnt as u32) + (rhs.frac_cnt as u32);
+        // Explicit bridge-domain exception for unchecked-overflow builds: a
+        // wrapped visible scale beyond storage is not an admitted value. Keep
+        // this an infrastructure refusal, never a SQL Overflow disposition.
+        if result_scale > storage_scale {
+            return Err(NativeDecimalError::InvalidInput(
+                "wrapped result scale exceeds storage scale",
+            ));
+        }
+        let bound = self
+            .int_cnt
+            .checked_add(rhs.int_cnt)
+            .map(|digits| digits.div_ceil(DIGITS_PER_WORD))
+            .and_then(|words| words.checked_add(self.frac_words()))
+            .and_then(|words| words.checked_add(rhs.frac_words()))
+            .ok_or(NativeDecimalError::Resource("product word count overflow"))?;
+        native_decimal_word_budget(bound, limit)?;
+        if self.frac_cnt.checked_add(rhs.frac_cnt) == Some(storage_scale as usize)
+            && self.result_frac_cnt.checked_add(rhs.result_frac_cnt) == Some(result_scale as usize)
+        {
+            return self.try_mul_exact(rhs).map_err(NativeDecimalError::Core);
+        }
+        // In an unchecked-overflow build, preserve representable wrapped scale
+        // headers by multiplying the exact coefficients, not reinterpreting the
+        // wrapped scales as an instruction to round the mathematical product.
+        let left = self.native_coefficient_digits(limit)?;
+        let right = rhs.native_coefficient_digits(limit)?;
+        let digits = native_decimal_coefficient_binary(
+            &left,
+            &right,
+            NativeDecimalBinaryOp::Multiply,
+            limit,
+        )?;
+        let mut padded = digits;
+        native_pad_coefficient(&mut padded, (storage_scale as usize).max(1), limit)?;
+        Self::try_from_native_digits(
+            self.negative != rhs.negative && padded.iter().any(|digit| *digit != b'0'),
+            &padded,
+            storage_scale,
+            result_scale,
+            limit,
+        )
+    }
+
+    // The old i128 fast path tests unsigned coefficient magnitude, including
+    // all hidden fractional digits. It is eligibility, not a second arithmetic
+    // implementation: successful multiplication still uses the Grow worker.
+    fn native_coefficient_i128(&self) -> Option<i128> {
+        i128::try_from(self.native_coefficient_u128()?).ok()
+    }
+
+    fn native_coefficient_u128(&self) -> Option<u128> {
+        let active = self.int_words().checked_add(self.frac_words())?;
+        let mut coefficient = 0u128;
+        for (index, word) in self.word_buf[..active].iter().copied().enumerate() {
+            let width = if index + 1 == active && self.frac_cnt % DIGITS_PER_WORD != 0 {
+                self.frac_cnt % DIGITS_PER_WORD
+            } else {
+                DIGITS_PER_WORD
+            };
+            let digits = word / TEN_POW[DIGITS_PER_WORD - width];
+            coefficient = coefficient
+                .checked_mul(u128::from(TEN_POW[width]))?
+                .checked_add(u128::from(digits))?;
+        }
+        Some(coefficient)
+    }
+
+    fn native_mysql_multiply(&self, rhs: &Self, limit: usize) -> NativeDecimalResult<Res<Self>> {
+        let fast = (self.result_frac_cnt as u32)
+            .checked_add(rhs.result_frac_cnt as u32)
+            .filter(|scale| *scale <= MAX_FRACTION as u32)
+            .and_then(|_| {
+                self.native_coefficient_i128()?
+                    .checked_mul(rhs.native_coefficient_i128()?)
+            })
+            .and_then(|_| (self.frac_cnt as u32).checked_add(rhs.frac_cnt as u32));
+        if fast.is_some() {
+            return self.native_exact_multiply(rhs, limit).map(Res::Ok);
+        }
+        let left = self.native_projected_value(limit)?;
+        let right = rhs.native_projected_value(limit)?;
+        let result_scale =
+            ((self.result_frac_cnt as u32) + (rhs.result_frac_cnt as u32)).min(MAX_FRACTION as u32);
+        // Native MyDecimal uses projected fractions without the wire's 31-digit
+        // storage cap. Both policies execute the same word multiplication loop.
+        let output = do_mul_with_policy(&left, &right, WordLimit::Fixed(WORD_BUF_LEN), true)
+            .map_err(NativeDecimalError::Core)?;
+        if output.is_overflow() {
+            return Self::native_zero(self.negative != rhs.negative, result_scale, limit)
+                .map(Res::Overflow);
+        }
+        let truncated = output.is_truncated();
+        let output = output.unwrap();
+        let value = if output.is_zero() {
+            Self::native_zero(false, result_scale, limit)?
+        } else {
+            let storage = output.frac_cnt as u32;
+            let output = Self::try_finish_exact(Res::Ok(output), storage as usize)
+                .map_err(NativeDecimalError::Core)?;
+            output.try_native_round_with_storage(
+                result_scale as i32,
+                true,
+                storage.max(result_scale),
+                limit,
+            )?
+        };
+        Ok(if truncated {
+            Res::Truncated(value)
+        } else {
+            Res::Ok(value)
+        })
+    }
+
+    /// Original MyDecimalWords projection: low integer words on overflow,
+    /// leading fractional words on truncation, with no normalization of the
+    /// projected shape or zero sign. Also used by the native codec facade.
+    pub fn try_native_word_projection(&self, limit: usize) -> NativeDecimalResult<DecimalParts> {
+        self.check_native_math_value(limit)?;
+        let original_int = self.int_words();
+        let original_frac = self.frac_words();
+        let status = fix_word_cnt_err(original_int, original_frac, WORD_BUF_LEN);
+        let (integer, fraction) = *status;
+        let int_digits = if status.is_overflow() {
+            integer * DIGITS_PER_WORD
+        } else {
+            self.int_cnt
+        };
+        let frac_digits = if status.is_ok() {
+            self.frac_cnt
+        } else {
+            fraction * DIGITS_PER_WORD
+        };
+        let mut words = [0; WORD_BUF_LEN];
+        words[..integer].copy_from_slice(&self.word_buf[original_int - integer..original_int]);
+        words[integer..integer + fraction]
+            .copy_from_slice(&self.word_buf[original_int..original_int + fraction]);
+        Ok(DecimalParts {
+            int_digits: int_digits as u8,
+            frac_digits: frac_digits as u8,
+            result_frac_digits: frac_digits as u8,
+            negative: self.negative,
+            words,
+        })
+    }
+
+    fn native_projected_value(&self, limit: usize) -> NativeDecimalResult<Self> {
+        let parts = self.try_native_word_projection(limit)?;
+        let mut value = Self::try_new(
+            parts.int_digits as usize,
+            parts.frac_digits as usize,
+            parts.negative,
+        )
+        .map_err(NativeDecimalError::Core)?;
+        value.word_buf.copy_from_slice(&parts.words);
+        Ok(value)
+    }
+
+    // Exact coefficient layout conversion, without sign, SQL formatting, or
+    // result-scale rounding. This also supports the surviving coefficient-only
+    // parsing/division consumers of the native arithmetic helpers.
+    fn native_coefficient_digits(&self, limit: usize) -> NativeDecimalResult<Vec<u8>> {
+        let length =
+            self.int_cnt
+                .checked_add(self.frac_cnt)
+                .ok_or(NativeDecimalError::Resource(
+                    "coefficient digit count overflow",
+                ))?;
+        let mut digits = Vec::new();
+        native_digit_reserve(&mut digits, length.max(1), limit)?;
+        let integer = self.int_words();
+        let mut emit = |word: u32, width: usize| {
+            let mut buffer = [b'0'; DIGITS_PER_WORD];
+            let mut value = word;
+            for digit in buffer[..width].iter_mut().rev() {
+                *digit += (value % 10) as u8;
+                value /= 10;
+            }
+            digits.extend_from_slice(&buffer[..width]);
+        };
+        for index in 0..integer {
+            let width = if index == 0 {
+                (self.int_cnt - 1) % DIGITS_PER_WORD + 1
+            } else {
+                DIGITS_PER_WORD
+            };
+            emit(self.word_buf[index], width);
+        }
+        let mut remaining = self.frac_cnt;
+        for index in integer..integer + self.frac_words() {
+            let width = remaining.min(DIGITS_PER_WORD);
+            emit(
+                self.word_buf[index] / TEN_POW[DIGITS_PER_WORD - width],
+                width,
+            );
+            remaining -= width;
+        }
+        if digits.is_empty() {
+            digits.push(b'0');
+        }
+        Ok(digits)
     }
 
     /// The same native round policy with explicitly retained storage scale.
@@ -4413,6 +4919,121 @@ impl Hash for Decimal {
         // -0 should be not negative.
         let negative = self.negative && (start as isize <= end);
         negative.hash(state);
+    }
+}
+
+#[cfg(test)]
+mod native_binary_tests {
+    use super::*;
+
+    #[test]
+    fn signed_fast_layout_and_unsupported_are_distinct() {
+        let minimum = NativeDecimalFastValue {
+            coefficient: i128::MIN,
+            storage_scale: 2,
+            scale: 1,
+        };
+        let shared = Decimal::try_from_native_fast(minimum, 256).unwrap();
+        assert_eq!(shared.try_native_fast_value(256).unwrap(), Some(minimum));
+        assert_eq!(
+            native_decimal_fast_binary(minimum, minimum, NativeDecimalBinaryOp::Subtract),
+            None
+        );
+        let zero = NativeDecimalFastValue {
+            coefficient: 0,
+            storage_scale: 40,
+            scale: 30,
+        };
+        assert_eq!(
+            Decimal::try_from_native_fast(zero, 256)
+                .unwrap()
+                .try_native_fast_value(256)
+                .unwrap(),
+            Some(zero)
+        );
+        assert!(matches!(
+            shared.try_native_fast_value(1),
+            Err(NativeDecimalError::Resource(_))
+        ));
+        let sum = native_decimal_fast_binary(
+            NativeDecimalFastValue {
+                coefficient: 12,
+                storage_scale: 1,
+                scale: 1,
+            },
+            NativeDecimalFastValue {
+                coefficient: 3,
+                storage_scale: 2,
+                scale: 2,
+            },
+            NativeDecimalBinaryOp::Add,
+        )
+        .unwrap();
+        assert_eq!(
+            sum,
+            NativeDecimalFastValue {
+                coefficient: 123,
+                storage_scale: 2,
+                scale: 2
+            }
+        );
+    }
+
+    #[test]
+    fn native_binary_double_carry_and_mysql_dispositions() {
+        use NativeDecimalBinaryOp::*;
+        use NativeDecimalBinaryPolicy::*;
+        let nines =
+            Decimal::try_from_native_digits(false, "9".repeat(27).as_bytes(), 0, 0, 4096).unwrap();
+        let square = nines
+            .try_native_binary(&nines, Multiply, Exact, 4096)
+            .unwrap();
+        assert!(square.is_ok());
+        assert_eq!(
+            square.to_string_value(),
+            format!("{}8{}1", "9".repeat(26), "0".repeat(26))
+        );
+        // B=1e9: (B²-B-1)(B²-3B-1) = (B-4)B³ + B² + 4B + 1.
+        let left =
+            Decimal::try_from_native_digits(false, b"999999998999999999", 0, 0, 4096).unwrap();
+        let right =
+            Decimal::try_from_native_digits(false, b"999999996999999999", 0, 0, 4096).unwrap();
+        assert_eq!(
+            left.try_native_binary(&right, Multiply, Exact, 4096)
+                .unwrap()
+                .to_string_value(),
+            "999999996000000001000000004000000001"
+        );
+        assert_eq!(
+            native_decimal_coefficient_binary(b"0099", b"1", Add, 4096).unwrap(),
+            b"0100"
+        );
+        assert_eq!(
+            native_decimal_coefficient_binary(b"0100", b"1", Subtract, 4096).unwrap(),
+            b"0099"
+        );
+        let magnitude = format!("1{}", "0".repeat(60));
+        let positive =
+            Decimal::try_from_native_digits(false, magnitude.as_bytes(), 0, 0, 4096).unwrap();
+        let negative = positive
+            .try_native_math(NativeDecimalOp::Negate, 4096)
+            .unwrap();
+        let overflow = negative
+            .try_native_binary(&positive, Multiply, MySql, 4096)
+            .unwrap();
+        assert!(overflow.is_overflow());
+        assert!(overflow.is_zero() && overflow.is_negative());
+        // Each operand is 1 + 5e-40. Nine-word planning drops its final
+        // fractional word; unlike wire multiplication native retains 72 places.
+        let coefficient = format!("1{}5", "0".repeat(39));
+        let fractional =
+            Decimal::try_from_native_digits(false, coefficient.as_bytes(), 40, 20, 4096).unwrap();
+        let clipped = fractional
+            .try_native_binary(&fractional, Multiply, MySql, 4096)
+            .unwrap();
+        assert!(clipped.is_truncated());
+        assert_eq!((clipped.storage_scale(), clipped.result_scale()), (72, 30));
+        assert_eq!(clipped.to_string_value(), format!("1.{}", "0".repeat(72)));
     }
 }
 

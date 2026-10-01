@@ -2117,7 +2117,8 @@ fn local_evaluated_args_packet_roles_reject_plain_carriers() {
             | ComputedValue::Int128(_)
             | ComputedValue::Uncompress(_)
             | ComputedValue::JsonReport(_)
-            | ComputedValue::NativeVector(_) => {
+            | ComputedValue::NativeVector(_)
+            | ComputedValue::DecimalFast(_) => {
                 panic!("packet role check returned an unexpected output type")
             }
         }
@@ -7891,6 +7892,305 @@ fn local_evaluated_args_date_format_core_keeps_roles_and_missing_distinct() {
     assert_eq!(worker.kernel_invocations(), 1);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
+}
+
+#[test]
+fn binary_arithmetic_dispatch_exact_getters_roles_and_unit_shapes() {
+    use EvalType::{Bytes, Decimal, Int, VectorFloat32};
+    use EvaluatedArgsRole::{
+        DecimalBinary, Ieee754Bits2, Int1282, NativeVector2, NoArgs, NullWitness, Values,
+    };
+
+    use super::compile::{ProgramEntry, compile_evaluated_bytes};
+    use crate::RpnExpressionNode;
+    let groups: &[(
+        &[(EvaluatedBytesOp, crate::RpnFnMeta)],
+        EvaluatedArgsRole,
+        &[EvalType],
+        EvalType,
+    )] = &[
+        (
+            &[
+                (
+                    EvaluatedBytesOp::AddIntSsNative,
+                    crate::impl_arithmetic::add_int_ss_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::AddIntSuNative,
+                    crate::impl_arithmetic::add_int_su_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::AddIntUsNative,
+                    crate::impl_arithmetic::add_int_us_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::AddIntUuNative,
+                    crate::impl_arithmetic::add_int_uu_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubIntSsNative,
+                    crate::impl_arithmetic::sub_int_ss_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubIntSuNative,
+                    crate::impl_arithmetic::sub_int_su_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubIntUsNative,
+                    crate::impl_arithmetic::sub_int_us_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubIntUuNative,
+                    crate::impl_arithmetic::sub_int_uu_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubIntSuForcedNative,
+                    crate::impl_arithmetic::sub_int_su_forced_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubIntUsForcedNative,
+                    crate::impl_arithmetic::sub_int_us_forced_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubIntUuForcedNative,
+                    crate::impl_arithmetic::sub_int_uu_forced_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::MulIntSignedNative,
+                    crate::impl_arithmetic::mul_int_signed_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::MulIntUnsignedNative,
+                    crate::impl_arithmetic::mul_int_unsigned_native_fn_meta(),
+                ),
+            ],
+            Values,
+            &[Int, Int],
+            Int,
+        ),
+        (
+            &[
+                (
+                    EvaluatedBytesOp::AddRealNative,
+                    crate::impl_arithmetic::add_real_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubRealNative,
+                    crate::impl_arithmetic::sub_real_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::MulRealNative,
+                    crate::impl_arithmetic::mul_real_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::AddRealLegacy,
+                    crate::impl_arithmetic::add_real_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubRealLegacy,
+                    crate::impl_arithmetic::sub_real_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::MulRealLegacy,
+                    crate::impl_arithmetic::mul_real_legacy_fn_meta(),
+                ),
+            ],
+            Ieee754Bits2,
+            &[Bytes, Bytes],
+            Bytes,
+        ),
+        (
+            &[
+                (
+                    EvaluatedBytesOp::AddDecimalNative,
+                    crate::impl_arithmetic::add_decimal_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubDecimalNative,
+                    crate::impl_arithmetic::sub_decimal_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::MulDecimalNative,
+                    crate::impl_arithmetic::mul_decimal_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::AddDecimalLegacy,
+                    crate::impl_arithmetic::add_decimal_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubDecimalLegacy,
+                    crate::impl_arithmetic::sub_decimal_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::MulDecimalLegacy,
+                    crate::impl_arithmetic::mul_decimal_legacy_fn_meta(),
+                ),
+            ],
+            DecimalBinary,
+            &[Decimal, Decimal, Int],
+            Decimal,
+        ),
+        (
+            &[
+                (
+                    EvaluatedBytesOp::AddDecimalFastNative,
+                    crate::impl_arithmetic::add_decimal_fast_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubDecimalFastNative,
+                    crate::impl_arithmetic::sub_decimal_fast_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::MulDecimalFastNative,
+                    crate::impl_arithmetic::mul_decimal_fast_native_fn_meta(),
+                ),
+            ],
+            DecimalBinary,
+            &[Decimal, Decimal, Int],
+            Bytes,
+        ),
+        (
+            &[
+                (
+                    EvaluatedBytesOp::AddVectorNative,
+                    crate::impl_vec::add_vector_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubVectorNative,
+                    crate::impl_vec::sub_vector_native_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::MulVectorNative,
+                    crate::impl_vec::mul_vector_native_fn_meta(),
+                ),
+            ],
+            NativeVector2,
+            &[VectorFloat32, VectorFloat32],
+            Bytes,
+        ),
+        (
+            &[
+                (
+                    EvaluatedBytesOp::AddInt128SignedLegacy,
+                    crate::impl_arithmetic::add_int128_signed_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::AddInt128UnsignedLegacy,
+                    crate::impl_arithmetic::add_int128_unsigned_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::AddInt128RejectLeftLegacy,
+                    crate::impl_arithmetic::add_int128_reject_left_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::AddInt128RejectRightLegacy,
+                    crate::impl_arithmetic::add_int128_reject_right_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubInt128SignedLegacy,
+                    crate::impl_arithmetic::sub_int128_signed_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubInt128UnsignedLegacy,
+                    crate::impl_arithmetic::sub_int128_unsigned_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubInt128RejectLeftLegacy,
+                    crate::impl_arithmetic::sub_int128_reject_left_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::SubInt128RejectRightLegacy,
+                    crate::impl_arithmetic::sub_int128_reject_right_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::MulInt128SignedLegacy,
+                    crate::impl_arithmetic::mul_int128_signed_legacy_fn_meta(),
+                ),
+                (
+                    EvaluatedBytesOp::MulInt128UnsignedLegacy,
+                    crate::impl_arithmetic::mul_int128_unsigned_legacy_fn_meta(),
+                ),
+            ],
+            Int1282,
+            &[Bytes, Bytes],
+            Bytes,
+        ),
+        (
+            &[(
+                EvaluatedBytesOp::BinaryArithmeticNullNative,
+                crate::impl_arithmetic::binary_arithmetic_null_native_fn_meta(),
+            )],
+            NullWitness,
+            &[Int],
+            Int,
+        ),
+        (
+            &[(
+                EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
+                crate::impl_arithmetic::binary_arithmetic_missing_legacy_fn_meta(),
+            )],
+            NoArgs,
+            &[],
+            Int,
+        ),
+    ];
+    let mut count = 0;
+    for (cases, role, inputs, output) in groups {
+        for (operation, getter) in *cases {
+            count += 1;
+            assert_eq!(operation.input_role(), *role);
+            assert_eq!(operation.input_types(), *inputs);
+            assert_eq!(operation.eval_type(), *output);
+            assert_eq!(operation.call_count(), 1);
+            assert!(matches!(
+                operation.kernel_kind(),
+                EvaluatedKernelKind::ClosedPrivate(_)
+            ));
+            let program =
+                compile_evaluated_bytes(*operation, LocalCompileContext::default()).unwrap();
+            assert!(program.check_entry(ProgramEntry::EvaluatedBytes).is_ok());
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            assert_eq!(program.expression.len(), inputs.len() + 1);
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                args_len,
+                metadata,
+                ..
+            } = &program.expression[inputs.len()]
+            else {
+                panic!("missing binary arithmetic generated call");
+            };
+            assert_eq!(*args_len, inputs.len());
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+        }
+    }
+    assert_eq!(count, 43);
 }
 
 #[test]

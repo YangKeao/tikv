@@ -336,14 +336,16 @@ fn evaluated_ready_args_match(
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
-            | EvaluatedBytesOp::RegexpMissingLegacyNative,
+            | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => types.is_empty() && operation.call_count() == 1,
         (
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
-            | EvaluatedBytesOp::RegexpMissingLegacyNative,
+            | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,
@@ -416,6 +418,9 @@ fn evaluated_ready_args_match(
                                 | EvaluatedBytesOp::VecL2DistanceNative
                                 | EvaluatedBytesOp::VecNegativeInnerProductNative
                                 | EvaluatedBytesOp::VecCosineDistanceNative
+                                | EvaluatedBytesOp::AddVectorNative
+                                | EvaluatedBytesOp::SubVectorNative
+                                | EvaluatedBytesOp::MulVectorNative
                         ) && values.len() == 2
                     }
                     _ => unreachable!(),
@@ -453,6 +458,19 @@ fn evaluated_ready_args_match(
                     && matches!(values, [ScalarValue::Bytes(_), ScalarValue::Bytes(from), ScalarValue::Bytes(to)]
                         if from.as_ref().is_none_or(|bytes| bytes.len() == 16)
                             && to.as_ref().is_none_or(|bytes| bytes.len() == 16))
+            }
+            EvaluatedArgsRole::DecimalBinary => {
+                operation.is_binary_decimal()
+                    && matches!(values, [ScalarValue::Decimal(_), ScalarValue::Decimal(_), ScalarValue::Int(Some(raw_budget))]
+                        if usize::try_from(*raw_budget as u64).is_ok_and(|budget| budget != usize::MAX))
+            }
+            EvaluatedArgsRole::Int1282 => {
+                operation.is_binary_int128()
+                    && values.len() == 2
+                    && values.iter().all(|value| {
+                        matches!(value, ScalarValue::Bytes(bits)
+                        if bits.as_ref().is_none_or(|bytes| bytes.len() == 16))
+                    })
             }
             EvaluatedArgsRole::DecimalUnary => {
                 matches!(
@@ -516,6 +534,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::RegexpNullIntNative
                         | EvaluatedBytesOp::RegexpNullBytesNative
                         | EvaluatedBytesOp::UnaryNullNative
+                        | EvaluatedBytesOp::BinaryArithmeticNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
@@ -634,6 +653,12 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::PowNative
                         | EvaluatedBytesOp::Atan2GoNative
                         | EvaluatedBytesOp::Atan2LibmLegacy
+                        | EvaluatedBytesOp::AddRealNative
+                        | EvaluatedBytesOp::SubRealNative
+                        | EvaluatedBytesOp::MulRealNative
+                        | EvaluatedBytesOp::AddRealLegacy
+                        | EvaluatedBytesOp::SubRealLegacy
+                        | EvaluatedBytesOp::MulRealLegacy
                 ) && values.len() == 2
                     && values.iter().all(|value| match value {
                         ScalarValue::Bytes(None) => true,
@@ -793,14 +818,16 @@ pub(crate) fn evaluated_bytes_shape(
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
-            | EvaluatedBytesOp::RegexpMissingLegacyNative,
+            | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
         (
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
-            | EvaluatedBytesOp::RegexpMissingLegacyNative,
+            | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,
@@ -2821,8 +2848,8 @@ impl RpnExpression {
     /// Fixed ready operands, borrowed from the facade until its result
     /// extraction completes. Only the selected closed recipe is admitted;
     /// zero operands require PiRaw, JsonValidOtherNative,
-    /// DateFormatMissingNative or RegexpMissingLegacyNative with the exact
-    /// NoArgs role.
+    /// DateFormatMissingNative, RegexpMissingLegacyNative or
+    /// BinaryArithmeticMissingLegacy with the exact NoArgs role.
     pub(crate) fn eval_with_ready_args<'a, 'data: 'a>(
         &'a self,
         operation: EvaluatedBytesOp,

@@ -158,14 +158,16 @@ fn check_evaluated_bytes_source(
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
-            | EvaluatedBytesOp::RegexpMissingLegacyNative,
+            | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
         (
             EvaluatedBytesOp::PiRaw
             | EvaluatedBytesOp::JsonValidOtherNative
             | EvaluatedBytesOp::DateFormatMissingNative
-            | EvaluatedBytesOp::RegexpMissingLegacyNative,
+            | EvaluatedBytesOp::RegexpMissingLegacyNative
+            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,

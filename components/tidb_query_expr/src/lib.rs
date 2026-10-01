@@ -78,6 +78,10 @@ use self::{
     impl_op::*, impl_other::*, impl_regexp::*, impl_string::*, impl_time::*, impl_vec::*,
 };
 pub use self::{
+    impl_arithmetic::{
+        BinaryArithmeticErrorKind, BinaryArithmeticOperation, LegacyBinaryArithmeticError,
+        NativeBinaryArithmeticError, NativeDecimalFastOutcome, NativeDecimalFastValue,
+    },
     impl_miscellaneous::{NATIVE_UUID_EPOCH_100NS, format_uuid_native},
     impl_op::NativeUnaryMinusError,
     types::*,
