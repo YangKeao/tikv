@@ -149,18 +149,8 @@ impl DateTimeExtension for Time {
 }
 
 // calculates days since 0000-00-00.
-fn calc_day_number(mut year: i32, month: i32, day: i32) -> i32 {
-    if year == 0 && month == 0 {
-        return 0;
-    }
-    let mut delsum = 365 * year + 31 * (month - 1) + day;
-    if month <= 2 {
-        year -= 1;
-    } else {
-        delsum -= (month * 4 + 23) / 10;
-    }
-    let temp = ((year / 100 + 1) * 3) / 4;
-    delsum + year / 4 - temp
+fn calc_day_number(year: i32, month: i32, day: i32) -> i32 {
+    Time::native_calc_daynr_i32(year, month, day)
 }
 
 /// calculates days in one year, it works with 0 <= year <= 99.

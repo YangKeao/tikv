@@ -6970,3 +6970,199 @@ fn local_evaluated_args_day_text_fields_keep_nullable_and_year_zero_values() {
     };
     assert_eq!(retained.as_deref(), Some(b"Saturday".as_slice()));
 }
+
+#[test]
+fn local_evaluated_args_date_diff_core_pair_keeps_exclusive_raw_role() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::DateDiffCoreNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::DateDiffCoreNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::Bytes2(None, None),
+        EvaluatedArgs::Int2(None, None),
+        EvaluatedArgs::Ieee754Bits2 {
+            left: ReadyIeee754Arg::Value(None),
+            right: ReadyIeee754Arg::Value(None),
+        },
+        EvaluatedArgs::TimeCoreBits(None),
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let ComputedValue::Int(value) = worker
+        .eval_args(EvaluatedArgs::TimeCoreBits2(None, None))
+        .unwrap()
+    else {
+        panic!("nullable DATE_DIFF core returned a non-Int value");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+    // These year-zero core fixtures intentionally differ from the text policy.
+    let mut retained = None;
+    for (index, (left, right)) in [
+        (0x0000_c200_0000_0000, 0x0000_ba00_0000_0000),
+        (0x0000_c3ff_ffff_ffff, 0x0000_ba00_0000_0000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ComputedValue::Int(value) = worker
+            .eval_args(EvaluatedArgs::TimeCoreBits2(Some(left), Some(right)))
+            .unwrap()
+        else {
+            panic!("DATE_DIFF core returned a non-Int value");
+        };
+        assert_eq!(value.value(), Some(0));
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        retained = value.into_option();
+        assert_eq!(retained, Some(0));
+        assert_eq!(worker.kernel_invocations(), index as u64 + 2);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    drop(worker);
+    assert_eq!(retained, Some(0));
+    let mut bounded = prepare_evaluated_bytes(
+        EvaluatedBytesOp::DateDiffCoreNative,
+        LocalCompileContext::default(),
+        ExecutionLimits {
+            max_retained_bytes: 15,
+            ..ExecutionLimits::default()
+        },
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(bounded.kernel_invocations(), 0);
+    let storage = bounded.retained_storage().unwrap();
+    assert!(matches!(
+        bounded.eval_args(EvaluatedArgs::TimeCoreBits2(Some(0), Some(0))),
+        Err(LocalError::ResourceLimit(_))
+    ));
+    assert_eq!(bounded.kernel_invocations(), 0);
+    assert!(bounded.is_healthy());
+    assert_eq!(bounded.retained_storage().unwrap(), storage);
+}
+
+#[test]
+fn local_evaluated_args_date_text_and_tso_preserve_sql_values_and_null_witness() {
+    for (operation, nullable, normal, expected) in [
+        (
+            EvaluatedBytesOp::DateDiffTextNative,
+            EvaluatedArgs::Bytes2(Some(b"0000-03-01".to_vec()), None),
+            EvaluatedArgs::Bytes2(Some(b"0000-03-01".to_vec()), Some(b"0000-02-29".to_vec())),
+            1_i64,
+        ),
+        (
+            EvaluatedBytesOp::ToDaysTextNative,
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Bytes(Some(b"0000-01-01".to_vec())),
+            1_i64,
+        ),
+        (
+            EvaluatedBytesOp::ToSecondsTextNative,
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Bytes(Some(b"0000-01-01".to_vec())),
+            86_400_i64,
+        ),
+        (
+            EvaluatedBytesOp::TsoLogicalNative,
+            EvaluatedArgs::Int(None),
+            EvaluatedArgs::Int(Some(262_145)),
+            1_i64,
+        ),
+    ] {
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::TimeCoreBits2(None, None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        for (index, (args, expected)) in [(nullable, None), (normal, Some(expected))]
+            .into_iter()
+            .enumerate()
+        {
+            let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+                panic!("SQL date/TSO operation returned a non-Int value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.into_option(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        if operation == EvaluatedBytesOp::TsoLogicalNative {
+            for (index, input) in [0, -1].into_iter().enumerate() {
+                let ComputedValue::Int(value) =
+                    worker.eval_args(EvaluatedArgs::Int(Some(input))).unwrap()
+                else {
+                    panic!("nonpositive TSO returned a non-Int value");
+                };
+                assert_eq!(value.value(), None);
+                assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+                assert_eq!(value.into_option(), None);
+                assert_eq!(worker.kernel_invocations(), index as u64 + 3);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+        }
+    }
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::DateDiffNullNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::DateDiffNullNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::NullWitness(Some(0)),
+        EvaluatedArgs::Int(None),
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let ComputedValue::Int(value) = worker.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+    else {
+        panic!("DATE_DIFF NULL witness returned a non-Int value");
+    };
+    assert_eq!(value.value(), None);
+    assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+    assert_eq!(value.into_option(), None);
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+}

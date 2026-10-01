@@ -238,6 +238,82 @@ fn day_name_text_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
     })
 }
 
+#[rpn_fn(nullable)]
+fn date_diff_text_native(left: Option<BytesRef>, right: Option<BytesRef>) -> Result<Option<Int>> {
+    let (Some(left), Some(right)) = (left, right) else {
+        return Ok(None);
+    };
+    let left = decode_native_time_text(left)?;
+    let right = decode_native_time_text(right)?;
+    let (Some((ly, lm, ld)), Some((ry, rm, rd))) = (
+        Time::parse_native_date_ymd(left),
+        Time::parse_native_date_ymd(right),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        Time::native_days_from_civil(ly, lm, ld) - Time::native_days_from_civil(ry, rm, rd),
+    ))
+}
+
+#[rpn_fn(nullable)]
+fn date_diff_null_native(arg: Option<&Int>) -> Result<Option<Int>> {
+    match arg {
+        None => Ok(None),
+        Some(_) => Err(other_err!(
+            "Native DATEDIFF NULL witness must be an actual NULL"
+        )),
+    }
+}
+
+#[rpn_fn(nullable)]
+fn date_diff_core_native(left: Option<BytesRef>, right: Option<BytesRef>) -> Result<Option<Int>> {
+    let (Some(left), Some(right)) = (left, right) else {
+        return Ok(None);
+    };
+    Ok(Some(Time::native_core_date_diff(
+        decode_time_core_native(left)?,
+        decode_time_core_native(right)?,
+    ) as Int))
+}
+
+#[rpn_fn(nullable)]
+fn to_days_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(
+            Time::parse_native_datetime_components(decode_native_time_text(bytes)?)
+                .map(|(year, month, day, ..)| Time::native_time_diff_daynr(year, month, day)),
+        )
+    })
+}
+
+#[rpn_fn(nullable)]
+fn to_seconds_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
+    arg.map_or(Ok(None), |bytes| {
+        Ok(
+            Time::parse_native_datetime_components(decode_native_time_text(bytes)?).map(
+                |(year, month, day, hour, minute, second, _)| {
+                    Time::native_time_diff_daynr(year, month, day) * 86_400
+                        + i64::from(hour) * 3_600
+                        + i64::from(minute) * 60
+                        + i64::from(second)
+                },
+            ),
+        )
+    })
+}
+
+#[rpn_fn(nullable)]
+fn tso_logical_native(arg: Option<&Int>) -> Result<Option<Int>> {
+    Ok(arg.and_then(|tso| {
+        if *tso <= 0 {
+            None
+        } else {
+            Some(*tso & ((1_i64 << 18) - 1))
+        }
+    }))
+}
+
 #[rpn_fn(nullable, capture = [ctx])]
 #[inline]
 pub fn date_format(
@@ -2083,6 +2159,127 @@ mod tests {
 
     use super::*;
     use crate::{RpnExpressionBuilder, types::test_util::RpnFnScalarEvaluator};
+
+    #[test]
+    fn test_native_date_diff_day_counts_and_tso_literals() {
+        // Fixed pinned-native fixtures/formulas, not new-provider oracles.
+        for (left, right, expected) in [
+            ("2004-05-21", "2004:01:02", 140),
+            ("2008-12-31 99:99:99.bad", "2008-12-30", 1),
+            ("0000-03-01", "0000-02-28", 2),
+            ("4294967295-12-31", "4294967295-01-01", 364),
+            ("1010-11-30", "2210-11-01", -438_262),
+        ] {
+            assert_eq!(
+                date_diff_text_native(Some(left.as_bytes()), Some(right.as_bytes())).unwrap(),
+                Some(expected)
+            );
+        }
+        let valid = Some(b"2009-11-29".as_slice());
+        assert_eq!(date_diff_text_native(None, valid).unwrap(), None);
+        assert_eq!(date_diff_text_native(valid, None).unwrap(), None);
+        assert_eq!(
+            date_diff_text_native(Some(b"2009-13-01"), valid).unwrap(),
+            None
+        );
+        assert_eq!(
+            date_diff_text_native(valid, Some(b"0000-00-00")).unwrap(),
+            None
+        );
+        assert!(date_diff_text_native(Some(b"\xff"), valid).is_err());
+        assert!(date_diff_text_native(valid, Some(b"\xff")).is_err());
+        assert_eq!(date_diff_null_native(None).unwrap(), None);
+        assert!(date_diff_null_native(Some(&0)).is_err());
+        assert!(date_diff_null_native(Some(&1)).is_err());
+
+        let cases: [(&str, Int, Int); 7] = [
+            ("2009-11-29", 734_105, 63_426_672_000),
+            ("2009-11-29 13:43:32.1234567", 734_105, 63_426_721_412),
+            ("2009-11-29T13:43:32.", 734_105, 63_426_721_412),
+            ("0000-01-01", 1, 86_400),
+            ("0000-02-29", 60, 5_184_000),
+            ("0000-03-01", 60, 5_184_000),
+            (
+                "4294967295-12-31",
+                1_568_704_592_609,
+                135_536_076_801_417_600,
+            ),
+        ];
+        for (text, days, seconds) in cases {
+            assert_eq!(
+                to_days_text_native(Some(text.as_bytes())).unwrap(),
+                Some(days),
+                "{text}"
+            );
+            assert_eq!(
+                to_seconds_text_native(Some(text.as_bytes())).unwrap(),
+                Some(seconds),
+                "{text}"
+            );
+        }
+        let kernels: [fn(Option<BytesRef>) -> Result<Option<Int>>; 2] =
+            [to_days_text_native, to_seconds_text_native];
+        for kernel in kernels {
+            assert_eq!(kernel(None).unwrap(), None);
+            assert!(kernel(Some(b"\xff")).is_err());
+            for invalid in [
+                "0000-00-00",
+                "2009-13-01",
+                "2007-10-07 23:59:61",
+                "2009-11-29 24:00:00",
+                "2009-11-29 13:43:32.123456x",
+            ] {
+                // Clock and the entire fraction are validated even for TO_DAYS.
+                assert_eq!(kernel(Some(invalid.as_bytes())).unwrap(), None, "{invalid}");
+            }
+        }
+        assert_eq!(tso_logical_native(None).unwrap(), None);
+        for (input, expected) in [
+            (452_605_852_463_012_352, Some(137_728)),
+            (262_144, Some(0)),
+            (262_143, Some(262_143)),
+            (1, Some(1)),
+            (i64::MAX, Some(262_143)),
+            (0, None),
+            (-1, None),
+        ] {
+            assert_eq!(tso_logical_native(Some(&input)).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn test_native_date_diff_core_raw_policy() {
+        // Pack only fixture inputs in the original 14/4/5-bit layout; expected
+        // differences are literals from the old native i32 day-number formula.
+        let core = |year: u64, month: u64, day: u64, clock: u64| {
+            (year << 50) | (month << 46) | (day << 41) | clock
+        };
+        let base = core(2000, 1, 1, 0);
+        let clock = (1_u64 << 41) - 1;
+        for (left, right, expected) in [
+            (0, core(0, 1, 1, 0), -1),
+            (core(2000, 0, 1, 0), base, -31),
+            (core(2000, 13, 1, 0), base, 366),
+            (core(2000, 1, 0, 0), base, -1),
+            (core(2000, 1, 1, clock), base, 0),
+            (clock, 0, 0),
+            (u64::MAX, 0, 5_984_224),
+            (0, u64::MAX, -5_984_224),
+        ] {
+            assert_eq!(
+                date_diff_core_native(Some(&left.to_le_bytes()), Some(&right.to_le_bytes()))
+                    .unwrap(),
+                Some(expected)
+            );
+        }
+        let raw = base.to_le_bytes();
+        assert_eq!(date_diff_core_native(None, Some(&raw)).unwrap(), None);
+        assert_eq!(date_diff_core_native(Some(&raw), None).unwrap(), None);
+        for malformed in [b"".as_slice(), &[0; 7], &[0; 9]] {
+            assert!(date_diff_core_native(Some(malformed), Some(&raw)).is_err());
+            assert!(date_diff_core_native(Some(&raw), Some(malformed)).is_err());
+        }
+    }
 
     #[test]
     fn test_native_weekday_fields_literal_oracles() {

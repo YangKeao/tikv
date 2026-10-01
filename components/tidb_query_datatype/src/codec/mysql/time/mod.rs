@@ -31,6 +31,29 @@ use crate::{
     expr::{EvalContext, Flag, SqlMode},
 };
 
+// One ordinary-arithmetic day-number formula, instantiated at each caller's
+// original integer width. In particular, the i32 const API must not widen its
+// intermediates or silently acquire the wide native parser's overflow policy.
+macro_rules! native_daynr_arithmetic {
+    ($year:expr, $month:expr, $day:expr) => {{
+        let mut year = $year;
+        let month = $month;
+        let day = $day;
+        if year == 0 && month == 0 {
+            0
+        } else {
+            let mut sum = 365 * year + 31 * (month - 1) + day;
+            if month <= 2 {
+                year -= 1;
+            } else {
+                sum -= (month * 4 + 23) / 10;
+            }
+            let temp = ((year / 100 + 1) * 3) / 4;
+            sum + year / 4 - temp
+        }
+    }};
+}
+
 const MIN_TIMESTAMP: i64 = 0;
 pub const MAX_TIMESTAMP: i64 = (1 << 31) - 1;
 const MICRO_WIDTH: usize = 6;
@@ -240,6 +263,82 @@ impl From<TimeType> for FieldTypeTp {
 
 // The common set of methods for `date/time`
 impl Time {
+    /// Original native clock parser: exactly three components, with no
+    /// duration-hour clamping or datetime construction.
+    pub fn parse_native_clock_hms(s: &str) -> Option<(u32, u32, u32)> {
+        let mut parts = s.splitn(3, ':');
+        let h: u32 = parts.next()?.parse().ok()?;
+        let mi: u32 = parts.next()?.parse().ok()?;
+        let sec: u32 = parts.next()?.parse().ok()?;
+        if h > 23 || mi > 59 || sec > 59 {
+            return None;
+        }
+        Some((h, mi, sec))
+    }
+
+    /// Preserves the written fraction after validating its entire byte tail,
+    /// including characters beyond the six retained digits.
+    pub fn parse_native_clock_with_fraction(s: &str) -> Option<(u32, u32, u32, String)> {
+        if !s.contains('.') {
+            let (hour, minute, second) = Self::parse_native_clock_hms(s)?;
+            return Some((hour, minute, second, String::new()));
+        }
+        let mut parts = s.splitn(3, ':');
+        let h: u32 = parts.next()?.parse().ok()?;
+        let mi: u32 = parts.next()?.parse().ok()?;
+        let sec_part = parts.next()?;
+        let (sec_part, fraction) = sec_part.split_once('.').unwrap_or((sec_part, ""));
+        let sec: u32 = sec_part.parse().ok()?;
+        if h > 23 || mi > 59 || sec > 59 || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some((h, mi, sec, fraction.chars().take(6).collect()))
+    }
+
+    /// Native strict datetime components, in year/month/day/hour/minute/second/
+    /// microsecond order. The wide year and original parser allocation paths
+    /// remain intact rather than narrowing into a stored Time.
+    pub fn parse_native_datetime_components(
+        input: &str,
+    ) -> Option<(i64, u32, u32, u32, u32, u32, u32)> {
+        let input = input.trim();
+        let (date, time) = input
+            .split_once(char::is_whitespace)
+            .or_else(|| input.split_once('T'))
+            .map_or((input, "00:00:00"), |(date, time)| (date, time.trim()));
+        let (year, month, day) = Self::parse_native_date_ymd(date)?;
+        let (hour, minute, second, fraction) = Self::parse_native_clock_with_fraction(time)?;
+        let fsp = fraction.len();
+        let microsecond = fraction.parse::<u32>().ok().unwrap_or(0) * 10u32.pow(6 - fsp as u32);
+        Some((year, month, day, hour, minute, second, microsecond))
+    }
+
+    /// Wide native calcDaynr domain, including the original zero-month policy.
+    /// This is not the Gregorian civil-day epoch or a date validity check.
+    pub fn native_time_diff_daynr(year: i64, month: u32, day: u32) -> i64 {
+        native_daynr_arithmetic!(year, month as i64, day as i64)
+    }
+
+    /// Original i32 day-number arithmetic, retained as a const API without
+    /// widening its intermediate operations or changing overflow behavior.
+    pub const fn native_calc_daynr_i32(year: i32, month: i32, day: i32) -> i32 {
+        native_daynr_arithmetic!(year, month, day)
+    }
+
+    /// Native packed-core date difference, preserving calcDaynr's zero and
+    /// invalid-component domain while ignoring all stored clock fields.
+    pub const fn native_core_date_diff(left: u64, right: u64) -> i32 {
+        Self::native_calc_daynr_i32(
+            Self::year_from_core_bits(left) as i32,
+            Self::month_from_core_bits(left) as i32,
+            Self::day_from_core_bits(left) as i32,
+        ) - Self::native_calc_daynr_i32(
+            Self::year_from_core_bits(right) as i32,
+            Self::month_from_core_bits(right) as i32,
+            Self::day_from_core_bits(right) as i32,
+        )
+    }
+
     /// Native Gregorian day count since 1970-01-01, retaining the original wide
     /// signed arithmetic. This is Howard Hinnant's days_from_civil algorithm
     /// (https://howardhinnant.github.io/date_algorithms.html), not get_daynr's
@@ -3341,6 +3440,73 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn test_native_daynr_widths_and_core_difference() {
+        const UNIX_DAYNR: i32 = Time::native_calc_daynr_i32(1970, 1, 1);
+        assert_eq!(UNIX_DAYNR, 719528);
+        for (year, month, day, expected) in [
+            (0, 0, 31, 0),
+            (0, 1, 1, 1),
+            (0, 2, 29, 60),
+            (0, 3, 1, 60),
+            (0, 15, 31, 457),
+            (9999, 12, 31, 3652424),
+            (16383, 15, 31, 5984224),
+        ] {
+            assert_eq!(Time::native_calc_daynr_i32(year, month, day), expected);
+            assert_eq!(
+                Time::native_time_diff_daynr(i64::from(year), month as u32, day as u32),
+                i64::from(expected)
+            );
+        }
+        // The packed-core policy intentionally differs from Gregorian civil
+        // arithmetic at year zero, and remains usable by const callers.
+        const ZERO_YEAR_DIFF: i32 = Time::native_core_date_diff(
+            (3_u64 << 46) | (1_u64 << 41),
+            (2_u64 << 46) | (29_u64 << 41),
+        );
+        assert_eq!(ZERO_YEAR_DIFF, 0);
+        let date = (1970_u64 << 50) | (1_u64 << 46) | (1_u64 << 41);
+        assert_eq!(
+            Time::native_core_date_diff(date | ((1_u64 << 41) - 1), date),
+            0
+        );
+    }
+
+    #[test]
+    fn test_native_strict_clock_and_datetime_components() {
+        assert_eq!(Time::parse_native_clock_hms("23:59:59"), Some((23, 59, 59)));
+        assert_eq!(Time::parse_native_clock_hms("24:00:00"), None);
+        assert_eq!(Time::parse_native_clock_hms("01:02"), None);
+        for (text, expected) in [
+            ("01:02:03", Some((1, 2, 3, ""))),
+            ("01:02:03.", Some((1, 2, 3, ""))),
+            ("01:02:03.1234567", Some((1, 2, 3, "123456"))),
+            ("01:02:03.123456x", None),
+            ("01:02:03.é", None),
+            ("838:59:59.1", None),
+        ] {
+            let actual = Time::parse_native_clock_with_fraction(text);
+            assert_eq!(
+                actual.as_ref().map(|(h, m, s, f)| (*h, *m, *s, f.as_str())),
+                expected
+            );
+        }
+        for (text, expected) in [
+            ("0000-01-01", Some((0, 1, 1, 0, 0, 0, 0))),
+            (
+                " 2000-02-29T12:34:56.12 ",
+                Some((2000, 2, 29, 12, 34, 56, 120000)),
+            ),
+            ("1970-01-01\t01:02:03.", Some((1970, 1, 1, 1, 2, 3, 0))),
+            ("4294967295-12-31", Some((4294967295, 12, 31, 0, 0, 0, 0))),
+            ("2000-00-01", None),
+            ("2000-02-29 24:00:00", None),
+        ] {
+            assert_eq!(Time::parse_native_datetime_components(text), expected);
+        }
+    }
 
     #[test]
     fn test_native_civil_day_and_weekday_names() {

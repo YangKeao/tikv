@@ -408,8 +408,10 @@ fn evaluated_ready_args_match(
                         if bits.as_ref().is_none_or(|bytes| bytes.len() == 16))
             }
             EvaluatedArgsRole::NullWitness => {
-                operation == EvaluatedBytesOp::MathNullWitnessNative
-                    && matches!(values, [ScalarValue::Int(None)])
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::MathNullWitnessNative | EvaluatedBytesOp::DateDiffNullNative
+                ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
             EvaluatedArgsRole::FieldPacked => match (operation.field_kind(), values) {
@@ -506,6 +508,15 @@ fn evaluated_ready_args_match(
                 [ScalarValue::Bytes(Some(bytes))] => bytes.len() == 8,
                 _ => false,
             },
+            EvaluatedArgsRole::TimeCoreBits2 => {
+                operation == EvaluatedBytesOp::DateDiffCoreNative
+                    && values.len() == 2
+                    && values.iter().all(|value| match value {
+                        ScalarValue::Bytes(None) => true,
+                        ScalarValue::Bytes(Some(bytes)) => bytes.len() == 8,
+                        _ => false,
+                    })
+            }
             EvaluatedArgsRole::Ieee754Bits2 => {
                 matches!(
                     operation,

@@ -293,6 +293,22 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  DATEDIFF/TO_DAYS/TO_SECONDS/TIDB_PARSE_TSO_LOGICAL add six private
+  Int-result recipes. DATEDIFF keeps separate SQL/PB text and legacy raw-core
+  policies. PB's observed NULL uses the existing NullWitness role without
+  coercing its prefix or reading its suffix. A new TimeCoreBits2 role carries
+  two actual nullable LE8 core values; ordinary Bytes2/Int2 cannot impersonate
+  it. Legacy date construction previously did not validate calendar fields,
+  so raw zero/invalid fields and clock-independent date differences remain.
+  Shared strict clock/datetime parsers preserve full-tail fraction validation
+  before truncation; TO_DAYS validates the clock even though it returns days.
+  One private day-number macro preserves the original i32 and i64 operation
+  widths, order and const use. Native public CoreTime helpers and the existing
+  extension day-number helper delegate to it, while wire get_daynr remains
+  distinct. Neither widening then casting nor civil-day epoch substitution
+  replaces these policies. Logical TSO keeps nonpositive inputs NULL and masks
+  positive values' low 18 bits; it is not physical timestamp conversion.
+  Results, reports, diagnostics and the common driver remain unchanged.
   DAYOFWEEK/WEEKDAY/DAYOFYEAR/DAYNAME add four private nullable text
   recipes in `impl_time.rs`: three ordinary Int results and one owned Bytes
   result. Frontend casts and string preparation remain separate from the
