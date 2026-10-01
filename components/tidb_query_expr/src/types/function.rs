@@ -263,6 +263,10 @@ pub enum LocalFunctionId {
     WeekCoreNative,
     PasswordNative,
     Sm3Native,
+    MakeDateNative,
+    FromDaysNative,
+    MakeTimePartsNative,
+    SecToTimeNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

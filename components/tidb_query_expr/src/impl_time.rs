@@ -877,6 +877,167 @@ pub fn sub_duration_and_string(
     Ok(Some(res))
 }
 
+#[rpn_fn(nullable)]
+fn make_date_native(year: Option<&Int>, day: Option<&Int>) -> Result<Option<Bytes>> {
+    let (Some(year), Some(day)) = (year, day) else {
+        return Ok(None);
+    };
+    let mut year = *year;
+    let day = *day;
+    if day <= 0 || !(0..=9999).contains(&year) {
+        return Ok(None);
+    }
+    if year < 70 {
+        year += 2000;
+    } else if year < 100 {
+        year += 1900;
+    }
+    let (result_y, result_m, result_d) =
+        Time::native_civil_from_days(Time::native_days_from_civil(year, 1, 1) + day - 1);
+    if !(1..=9999).contains(&result_y) {
+        return Ok(None);
+    }
+    Ok(Some(
+        format!("{result_y:04}-{result_m:02}-{result_d:02}").into_bytes(),
+    ))
+}
+
+#[rpn_fn(nullable)]
+fn from_days_native(arg: Option<&Int>) -> Result<Option<Bytes>> {
+    let Some(&n) = arg else {
+        return Ok(None);
+    };
+    if (3_652_425..=3_652_499).contains(&n) {
+        return Ok(None);
+    }
+    if !(366..=3_652_424).contains(&n) {
+        // Actual canonical date text; the native result packer preserves its
+        // original zero-Time datum kind without inspecting the input number.
+        return Ok(Some(b"0000-00-00".to_vec()));
+    }
+    let (y, m, d) = Time::native_civil_from_days(n - 719_528);
+    Ok(Some(format!("{y:04}-{m:02}-{d:02}").into_bytes()))
+}
+
+fn decode_duration_seconds_native(bytes: BytesRef) -> Result<f64> {
+    if bytes.len() != 8 {
+        return Err(other_err!(
+            "Native duration seconds transport requires exactly 8 IEEE754 bytes"
+        ));
+    }
+    let mut encoded = [0; 8];
+    encoded.copy_from_slice(bytes);
+    Ok(f64::from_bits(u64::from_le_bytes(encoded)))
+}
+
+#[rpn_fn(nullable)]
+fn make_time_parts_native(
+    hour: Option<BytesRef>,
+    minute: Option<&Int>,
+    second: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    let (Some(hour), Some(minute), Some(second)) = (hour, minute, second) else {
+        return Ok(None);
+    };
+    if hour.len() != 9 || hour[8] > 1 {
+        return Err(other_err!(
+            "Native MAKETIME hour transport requires LE i64 and a 0/1 unsigned flag"
+        ));
+    }
+    let mut encoded_hour = [0; 8];
+    encoded_hour.copy_from_slice(&hour[..8]);
+    let hour_unsigned = hour[8] == 1;
+    let mut hour = i64::from_le_bytes(encoded_hour);
+    let minute = *minute;
+    let second = decode_duration_seconds_native(second)?;
+    if !(0..60).contains(&minute) || !(0.0..60.0).contains(&second) {
+        return Ok(None);
+    }
+    let mut overflow = false;
+    if hour < 0 && hour_unsigned {
+        hour = 838;
+        overflow = true;
+    }
+    let negative = hour < 0;
+    let hour_abs = hour.unsigned_abs();
+    if hour_abs > 838 || (hour_abs == 838 && minute == 59 && second > 59.0) {
+        overflow = true;
+    }
+    let total = if overflow {
+        838.0 * 3600.0 + 59.0 * 60.0 + 59.0
+    } else {
+        hour_abs as f64 * 3600.0 + minute as f64 * 60.0 + second
+    };
+    let seconds = if negative { -total } else { total };
+    // This is the actual signed seconds value, never a validity marker. The
+    // caller obtains FSP only after this complete worker call returns Some.
+    Ok(Some(seconds.to_bits().to_le_bytes().to_vec()))
+}
+
+#[rpn_fn(nullable)]
+fn sec_to_time_native(seconds: Option<BytesRef>, fsp: Option<&Int>) -> Result<Option<Bytes>> {
+    match (seconds, fsp) {
+        (None, None) => Ok(None),
+        (Some(seconds), Some(fsp)) => {
+            let seconds = decode_duration_seconds_native(seconds)?;
+            let fsp = usize::try_from(*fsp).map_err(|_| {
+                other_err!("Native duration FSP transport requires a nonnegative usize value")
+            })?;
+            Ok(Some(format_native_duration(seconds, fsp).into_bytes()))
+        }
+        _ => Err(other_err!(
+            "Native duration seconds and demanded FSP must be jointly absent or present"
+        )),
+    }
+}
+
+fn format_native_duration(seconds: f64, fsp: usize) -> String {
+    let sign = if seconds < 0.0 { "-" } else { "" };
+    let max = 838.0 * 3600.0 + 59.0 * 60.0 + 59.0;
+    let mut seconds = seconds.abs();
+    if seconds > max {
+        seconds = max;
+    }
+    let whole = seconds.trunc() as i64;
+    let hour = whole / 3600;
+    let minute = whole / 60 % 60;
+    let mut second = whole % 60;
+    if fsp == 0 {
+        return format!("{sign}{hour:02}:{minute:02}:{second:02}");
+    }
+    // Go reaches this text through `fmt.Sprintf("%v", second)` followed by
+    // `ParseDuration`, whose fraction rounding works on the DECIMAL DIGITS
+    // and carries half-up at the requested precision
+    // (`Duration.RoundFrac`: Go's time.Round rounds nearest values and sends
+    // exact ties toward positive infinity).
+    // Doing the arithmetic in f64 first re-derives 30.0000005 as
+    // ...4999996µs and loses the digit -- so round off the SHORTEST decimal
+    // rendering instead.
+    // Go formats the REAL second value with %v (shortest repr): 30.1 stays
+    // "30.1", 30.0000005 stays "30.0000005".
+    let digits = format!("{seconds}");
+    let mut digits_fraction = match digits.split_once('.') {
+        Some((_, fraction)) => fraction.to_owned(),
+        None => String::new(),
+    };
+    // Round half-up at the requested precision off the FIRST DISCARDED
+    // digit, carrying into the whole part when the fraction overflows.
+    let round_up = digits_fraction.len() > fsp && digits_fraction.as_bytes()[fsp] >= b'5';
+    digits_fraction.truncate(fsp);
+    while digits_fraction.len() < fsp {
+        digits_fraction.push('0');
+    }
+    let mut fraction: i64 = digits_fraction.parse().unwrap_or(0);
+    if round_up {
+        fraction += 1;
+        if fraction >= 10_i64.pow(fsp as u32) {
+            fraction = 0;
+            second += 1;
+        }
+    }
+    format!("{sign}{hour:02}:{minute:02}:{second:02}.{fraction:0fsp$}")
+}
+
 #[rpn_fn(capture = [ctx])]
 #[inline]
 pub fn from_days(ctx: &mut EvalContext, arg: &Int) -> Result<Option<DateTime>> {
@@ -2234,6 +2395,101 @@ mod tests {
 
     use super::*;
     use crate::{RpnExpressionBuilder, types::test_util::RpnFnScalarEvaluator};
+
+    #[test]
+    fn test_native_make_date_and_from_days_source_literals() {
+        // Existing native go_time_values and time_fn/tests literal fixtures.
+        for (year, day, expected) in [
+            (69, 1, Some("2069-01-01")),
+            (70, 1, Some("1970-01-01")),
+            (2060, 2_900_025, Some("9999-12-31")),
+            (2060, 2_900_026, None),
+        ] {
+            assert_eq!(
+                make_date_native(Some(&year), Some(&day)).unwrap(),
+                expected.map(|text| text.as_bytes().to_vec())
+            );
+        }
+        assert_eq!(make_date_native(None, Some(&1)).unwrap(), None);
+        assert_eq!(make_date_native(Some(&2060), None).unwrap(), None);
+        for (day, expected) in [
+            (-140, Some("0000-00-00")),
+            (140, Some("0000-00-00")),
+            (735_000, Some("2012-05-12")),
+            (3_652_424, Some("9999-12-31")),
+            (3_652_425, None),
+        ] {
+            assert_eq!(
+                from_days_native(Some(&day)).unwrap(),
+                expected.map(|text| text.as_bytes().to_vec())
+            );
+        }
+        assert_eq!(from_days_native(None).unwrap(), None);
+    }
+
+    #[test]
+    fn test_native_make_time_parts_source_literals() {
+        // Seconds below are the exact whole-second values of existing native
+        // 12:15:30, -25:15:30 and unsigned-hour 838:59:59 fixture results.
+        for (hour, minute, second, unsigned, expected_seconds) in [
+            (12_i64, 15, 30_f64, false, 44_130_f64),
+            (-25, 15, 30_f64, false, -90_930_f64),
+            (-1, 0, 0_f64, true, 3_020_399_f64),
+        ] {
+            let mut hour = hour.to_le_bytes().to_vec();
+            hour.push(u8::from(unsigned));
+            let second = second.to_bits().to_le_bytes();
+            assert_eq!(
+                make_time_parts_native(Some(&hour), Some(&minute), Some(&second)).unwrap(),
+                Some(expected_seconds.to_bits().to_le_bytes().to_vec())
+            );
+        }
+        let mut hour = [0; 9];
+        hour[..8].copy_from_slice(&12_i64.to_le_bytes());
+        let second = 30_f64.to_bits().to_le_bytes();
+        assert_eq!(
+            make_time_parts_native(None, Some(&15), Some(&second)).unwrap(),
+            None
+        );
+        assert_eq!(
+            make_time_parts_native(Some(&hour), None, Some(&second)).unwrap(),
+            None
+        );
+        assert_eq!(
+            make_time_parts_native(Some(&hour), Some(&15), None).unwrap(),
+            None
+        );
+        // Original MAKETIME(12, 60, 0) fixture is NULL, not clamped.
+        let second = 0_f64.to_bits().to_le_bytes();
+        assert_eq!(
+            make_time_parts_native(Some(&hour), Some(&60), Some(&second)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_native_duration_formatter_source_literals_and_fsp7() {
+        // Existing SEC_TO_TIME and MAKETIME expected literals; no provider oracle.
+        for (seconds, fsp, expected) in [
+            (2_378_f64, 0, "00:39:38"),
+            (3_864_000_f64, 0, "838:59:59"),
+            (-86_401.4, 1, "-24:00:01.4"),
+            (123.456_789_1, 6, "00:02:03.456789"),
+            (44_130.000_000_5, 6, "12:15:30.000001"),
+            // The original formatter pads to the actual FSP, including seven;
+            // its half-up carry increments only second, never minute/hour.
+            (1_f64, 7, "00:00:01.0000000"),
+            (59.999_999_95, 7, "00:00:60.0000000"),
+        ] {
+            let seconds = seconds.to_bits().to_le_bytes();
+            assert_eq!(
+                sec_to_time_native(Some(&seconds), Some(&fsp)).unwrap(),
+                Some(expected.as_bytes().to_vec())
+            );
+        }
+        assert_eq!(sec_to_time_native(None, None).unwrap(), None);
+        assert!(sec_to_time_native(None, Some(&0)).is_err());
+    }
 
     #[test]
     fn test_native_week_text_literal_oracles() {

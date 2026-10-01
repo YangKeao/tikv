@@ -293,6 +293,24 @@ short-circuit admission policy described above.
   changing the legacy boxed-error conversion or wire behavior. The old `eval_args`
   maps the receipt back to its original error; no context-last-error channel,
   general graph admission, alternate driver or four-column expansion is added.
+  MAKEDATE/FROM_DAYS share the native wide inverse civil-date helper in Time,
+  not the wire bounded unsigned day-number domain. FROM_DAYS returns actual
+  canonical date text; the consumer packs the computed zero-date value into
+  its original typed zero Time, without classifying the input or reparsing it.
+  MakeTimeParts is a distinct three-column role: a nullable nine-byte hour
+  packet (LE i64 plus its unsigned-type flag), nullable Int minute, and nullable
+  LE8 IEEE seconds.
+  The worker returns actual signed total-second bits or NULL. MAKETIME finishes
+  that complete driver call before demanding original input precision and
+  invoking SecToTimeNative through the existing IEEE-plus-Int role. Its scale
+  is actual nonnegative, usize-representable FSP, not restricted to six; NULL
+  seconds carry an explicitly undemanded precision. Existing rounding roles
+  retain their separate validators. Both time families share one formatter,
+  preserving raw non-finite values, negative zero and the original fractional
+  carry that does not normalize minutes. No frontend callback reenters the
+  driver. First admission can precede undemanded precision; the extra lease and
+  transport are explicit costs. Existing typed-result casts remain upstream
+  consumer policy; no new wire/PB admission, result kind or report is added.
   WEEK/WEEKOFYEAR/YEARWEEK share one width-preserving week calculation
   with native const and wire helpers, retaining the non-leap week-year zero
   rule, mode normalization and distinct zero-date policies. WEEK/YEARWEEK

@@ -509,6 +509,23 @@ impl Time {
         era * 146097 + doe - 719468
     }
 
+    /// Native inverse Gregorian civil-day arithmetic since 1970-01-01,
+    /// preserving the original wide signed operations and overflow behavior.
+    /// This is Howard Hinnant's civil_from_days algorithm, not the bounded
+    /// unsigned MySQL get_date_from_daynr policy or a Time constructor.
+    pub fn native_civil_from_days(z: i64) -> (i64, u32, u32) {
+        let z = z + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097; // [0, 146096]
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+        let mp = (5 * doy + 2) / 153; // [0, 11]
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+        let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+        (if m <= 2 { y + 1 } else { y }, m, d)
+    }
+
     /// Sunday-zero weekday for the native civil-day domain. Callers retain
     /// their original date validation before applying this arithmetic.
     pub fn native_weekday_sunday_index(y: i64, m: u32, d: u32) -> u32 {
@@ -3728,6 +3745,22 @@ mod tests {
             ("2000-02-29 24:00:00", None),
         ] {
             assert_eq!(Time::parse_native_datetime_components(text), expected);
+        }
+    }
+
+    #[test]
+    fn test_native_inverse_civil_days() {
+        // Existing epoch and FROM_DAYS fixture literals; no packed-date or
+        // zero-date classification is introduced into the inverse primitive.
+        for (day, expected) in [
+            (0, (1970, 1, 1)),
+            (-1, (1969, 12, 31)),
+            (-719_528, (0, 1, 1)),
+            (366 - 719_528, (1, 1, 1)),
+            (734_927 - 719_528, (2012, 2, 29)),
+            (3_652_424 - 719_528, (9999, 12, 31)),
+        ] {
+            assert_eq!(Time::native_civil_from_days(day), expected);
         }
     }
 

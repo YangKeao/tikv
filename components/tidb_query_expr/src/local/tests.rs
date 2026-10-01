@@ -7436,3 +7436,219 @@ fn local_evaluated_args_password_and_sm3_own_original_digest_bytes() {
         assert_eq!(retained.as_deref(), Some(digest));
     }
 }
+
+#[test]
+fn local_evaluated_args_make_time_parts_own_seconds_before_fsp_stage() {
+    let seconds = {
+        let mut worker = prepare_evaluated_bytes(
+            EvaluatedBytesOp::MakeTimePartsNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), EvaluatedBytesOp::MakeTimePartsNative);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes3([None, None, None]),
+            EvaluatedArgs::Ieee754BitsInt {
+                value: None,
+                scale: None,
+            },
+        ] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let mut seconds = None;
+        for (index, (hour, minute, second, expected)) in [
+            (None, Some(0), Some(0.0_f64.to_bits()), None),
+            (Some((0, false)), None, Some(0.0_f64.to_bits()), None),
+            (Some((0, false)), Some(0), None, None),
+            (
+                Some((-1, true)),
+                Some(0),
+                Some(0.0_f64.to_bits()),
+                Some(3_020_399.0_f64.to_bits()),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ComputedValue::Ieee754Bits(value) = worker
+                .eval_args(EvaluatedArgs::MakeTimeParts {
+                    hour,
+                    minute,
+                    second,
+                })
+                .unwrap()
+            else {
+                panic!("MAKETIME parts returned a non-IEEE754 value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(
+                value.metadata(),
+                ComputedIeee754BitsMetadata::OwnIeee754Bits
+            );
+            seconds = value.into_option();
+            assert_eq!(seconds, expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        seconds.unwrap()
+    };
+    assert_eq!(seconds, 3_020_399.0_f64.to_bits());
+    // FSP is supplied only after the first worker produced owned Some seconds.
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::SecToTimeNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::SecToTimeNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    let ComputedValue::Bytes(value) = worker
+        .eval_args(EvaluatedArgs::Ieee754BitsInt {
+            value: Some(seconds),
+            scale: Some(0),
+        })
+        .unwrap()
+    else {
+        panic!("MAKETIME formatting stage returned a non-Bytes value");
+    };
+    assert_eq!(value.value(), Some(b"838:59:59".as_slice()));
+    assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+    assert_eq!(value.into_option(), Some(b"838:59:59".to_vec()));
+    assert_eq!(worker.kernel_invocations(), 1);
+    assert!(worker.is_healthy());
+    assert_eq!(worker.retained_storage().unwrap(), storage);
+}
+
+#[test]
+fn local_evaluated_args_sec_to_time_keeps_demanded_fsp_coupling_and_seven_digits() {
+    let mut worker = prepare_evaluated_bytes(
+        EvaluatedBytesOp::SecToTimeNative,
+        LocalCompileContext::default(),
+        ExecutionLimits::default(),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(worker.operation(), EvaluatedBytesOp::SecToTimeNative);
+    assert_eq!(worker.kernel_invocations(), 0);
+    let storage = worker.retained_storage().unwrap();
+    for invalid in [
+        EvaluatedArgs::BytesInt(None, None),
+        EvaluatedArgs::Ieee754BitsInt {
+            value: None,
+            scale: Some(0),
+        },
+        EvaluatedArgs::Ieee754BitsInt {
+            value: Some(0.0_f64.to_bits()),
+            scale: None,
+        },
+        EvaluatedArgs::Ieee754BitsInt {
+            value: Some(0.0_f64.to_bits()),
+            scale: Some(-1),
+        },
+    ] {
+        assert!(matches!(
+            worker.eval_args(invalid),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    let cases: [(Option<u64>, Option<i64>, Option<&[u8]>); 3] = [
+        // With no seconds value, FSP is undemanded rather than SQL NULL.
+        (None, None, None),
+        (Some(2_378.0_f64.to_bits()), Some(0), Some(b"00:39:38")),
+        (Some(0.0_f64.to_bits()), Some(7), Some(b"00:00:00.0000000")),
+    ];
+    let mut retained = None;
+    for (index, (value, scale, expected)) in cases.into_iter().enumerate() {
+        let ComputedValue::Bytes(value) = worker
+            .eval_args(EvaluatedArgs::Ieee754BitsInt { value, scale })
+            .unwrap()
+        else {
+            panic!("SEC_TO_TIME returned a non-Bytes value");
+        };
+        assert_eq!(value.value(), expected);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        retained = value.into_option();
+        assert_eq!(retained.as_deref(), expected);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    drop(worker);
+    assert_eq!(retained.as_deref(), Some(b"00:00:00.0000000".as_slice()));
+}
+
+#[test]
+fn local_evaluated_args_date_constructors_own_normal_zero_and_null_results() {
+    let cases: [(EvaluatedBytesOp, Vec<(EvaluatedArgs, Option<&[u8]>)>); 2] = [
+        (
+            EvaluatedBytesOp::MakeDateNative,
+            vec![
+                (EvaluatedArgs::Int2(None, Some(1)), None),
+                (
+                    EvaluatedArgs::Int2(Some(2012), Some(1)),
+                    Some(b"2012-01-01"),
+                ),
+            ],
+        ),
+        (
+            EvaluatedBytesOp::FromDaysNative,
+            vec![
+                (EvaluatedArgs::Int(None), None),
+                (EvaluatedArgs::Int(Some(-140)), Some(b"0000-00-00")),
+                (EvaluatedArgs::Int(Some(3_652_425)), None),
+                (EvaluatedArgs::Int(Some(735_000)), Some(b"2012-05-12")),
+            ],
+        ),
+    ];
+    for (operation, cases) in cases {
+        let final_expected = cases.last().unwrap().1;
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(worker.operation(), operation);
+        assert_eq!(worker.kernel_invocations(), 0);
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Bytes(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(worker.kernel_invocations(), 0);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        let mut retained = None;
+        for (index, (args, expected)) in cases.into_iter().enumerate() {
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!("date constructor returned a non-Bytes value");
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            retained = value.into_option();
+            assert_eq!(retained.as_deref(), expected);
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        drop(worker);
+        assert_eq!(retained.as_deref(), final_expected);
+    }
+}

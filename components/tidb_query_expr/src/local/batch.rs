@@ -949,6 +949,10 @@ pub enum EvaluatedBytesOp {
     WeekCoreNative,
     PasswordNative,
     Sm3Native,
+    MakeDateNative,
+    FromDaysNative,
+    MakeTimePartsNative,
+    SecToTimeNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -986,6 +990,7 @@ pub(crate) enum EvaluatedArgsRole {
     DecimalUnary,
     DecimalInt,
     Ieee754Int,
+    MakeTimeParts,
     Int128,
     NullWitness,
     CharReady,
@@ -1622,6 +1627,20 @@ impl EvaluatedBytesOp {
             Self::Sm3Native => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::Sm3Native);
             }
+            Self::MakeDateNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::MakeDateNative);
+            }
+            Self::FromDaysNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::FromDaysNative);
+            }
+            Self::MakeTimePartsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MakeTimePartsNative,
+                );
+            }
+            Self::SecToTimeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SecToTimeNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -1649,7 +1668,10 @@ impl EvaluatedBytesOp {
             | Self::FloorDecimalNative
             | Self::RoundDecimalLegacy => EvaluatedArgsRole::DecimalUnary,
             Self::RoundDecimalNative | Self::TruncateDecimalNative => EvaluatedArgsRole::DecimalInt,
-            Self::RoundRealNative | Self::TruncateRealNative => EvaluatedArgsRole::Ieee754Int,
+            Self::RoundRealNative | Self::TruncateRealNative | Self::SecToTimeNative => {
+                EvaluatedArgsRole::Ieee754Int
+            }
+            Self::MakeTimePartsNative => EvaluatedArgsRole::MakeTimeParts,
             Self::RoundInt128Legacy => EvaluatedArgsRole::Int128,
             Self::MathNullWitnessNative | Self::DateDiffNullNative | Self::WeekNullNative => {
                 EvaluatedArgsRole::NullWitness
@@ -1832,6 +1854,7 @@ impl EvaluatedBytesOp {
                 | Self::Atan2LibmLegacy
                 | Self::ExpGoNative
                 | Self::Log10GoNative
+                | Self::MakeTimePartsNative
         )
     }
 
@@ -1954,6 +1977,10 @@ impl EvaluatedBytesOp {
             Self::WeekCoreNative => crate::impl_time::week_core_native_fn_meta(),
             Self::PasswordNative => crate::impl_encryption::password_native_fn_meta(),
             Self::Sm3Native => crate::impl_encryption::sm3_native_fn_meta(),
+            Self::MakeDateNative => crate::impl_time::make_date_native_fn_meta(),
+            Self::FromDaysNative => crate::impl_time::from_days_native_fn_meta(),
+            Self::MakeTimePartsNative => crate::impl_time::make_time_parts_native_fn_meta(),
+            Self::SecToTimeNative => crate::impl_time::sec_to_time_native_fn_meta(),
             Self::Left => crate::impl_string::left_fn_meta(),
             Self::LeftUtf8 => crate::impl_string::left_utf8_fn_meta(),
             Self::Right => crate::impl_string::right_fn_meta(),
@@ -2255,7 +2282,11 @@ impl EvaluatedBytesOp {
             | Self::DayNameTextNative
             | Self::WeekDateTextNative
             | Self::PasswordNative
-            | Self::Sm3Native => EvalType::Bytes,
+            | Self::Sm3Native
+            | Self::MakeDateNative
+            | Self::FromDaysNative
+            | Self::MakeTimePartsNative
+            | Self::SecToTimeNative => EvalType::Bytes,
         }
     }
 
@@ -2271,6 +2302,10 @@ impl EvaluatedBytesOp {
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
             Self::PiRaw | Self::JsonValidOtherNative => &[],
+            Self::MakeDateNative => &[EvalType::Int, EvalType::Int],
+            Self::FromDaysNative => &[EvalType::Int],
+            Self::MakeTimePartsNative => &[EvalType::Bytes, EvalType::Int, EvalType::Bytes],
+            Self::SecToTimeNative => &[EvalType::Bytes, EvalType::Int],
             Self::DateDiffNullNative | Self::TsoLogicalNative | Self::WeekNullNative => {
                 &[EvalType::Int]
             }
@@ -2645,6 +2680,13 @@ pub enum EvaluatedArgs {
         value: Option<u64>,
         scale: Option<i64>,
     },
+    /// Actually evaluated MAKETIME operands. The hour retains its integer bits
+    /// and actual signedness; seconds retain IEEE754 bits, not a computed date.
+    MakeTimeParts {
+        hour: Option<(i64, bool)>,
+        minute: Option<i64>,
+        second: Option<u64>,
+    },
     Int128(Option<i128>),
     /// Witness of some actually observed SQL NULL, not a claimed numeric value.
     NullWitness(Option<i64>),
@@ -2769,6 +2811,7 @@ impl EvaluatedArgs {
             Self::Decimal(_) => EvaluatedArgsRole::DecimalUnary,
             Self::DecimalIntReady { .. } => EvaluatedArgsRole::DecimalInt,
             Self::Ieee754BitsInt { .. } => EvaluatedArgsRole::Ieee754Int,
+            Self::MakeTimeParts { .. } => EvaluatedArgsRole::MakeTimeParts,
             Self::Int128(_) => EvaluatedArgsRole::Int128,
             Self::NullWitness(_) => EvaluatedArgsRole::NullWitness,
             Self::CharReady(_) => EvaluatedArgsRole::CharReady,
@@ -2811,6 +2854,7 @@ impl EvaluatedArgs {
             Self::Decimal(_) => &[EvalType::Decimal, EvalType::Int],
             Self::DecimalIntReady { .. } => &[EvalType::Decimal, EvalType::Int, EvalType::Int],
             Self::Ieee754BitsInt { .. } => &[EvalType::Bytes, EvalType::Int],
+            Self::MakeTimeParts { .. } => &[EvalType::Bytes, EvalType::Int, EvalType::Bytes],
             Self::Int128(_) => &[EvalType::Bytes],
             Self::NullWitness(_) => &[EvalType::Int],
             Self::CharReady(_) => &[EvalType::Bytes],
@@ -2866,6 +2910,17 @@ impl EvaluatedArgs {
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
         match self {
+            Self::Ieee754BitsInt { value, scale }
+                if operation == EvaluatedBytesOp::SecToTimeNative =>
+            {
+                // Only this recipe treats absent FSP as undemanded after a real
+                // NULL seconds value, not as a claimed second SQL NULL.
+                match (value, scale) {
+                    (None, None) => true,
+                    (Some(_), Some(scale)) => *scale >= 0 && usize::try_from(*scale).is_ok(),
+                    _ => false,
+                }
+            }
             Self::NullWitness(value) => {
                 matches!(
                     operation,
@@ -3127,6 +3182,19 @@ impl EvaluatedArgs {
                     Int(None),
                 ],
                 2,
+            ),
+            Self::MakeTimeParts {
+                hour,
+                minute,
+                second,
+            } => (
+                [
+                    Self::make_time_hour_value(hour)?,
+                    Int(minute),
+                    Self::ieee754_value(second)?,
+                    Int(None),
+                ],
+                3,
             ),
             Self::Int128(value) => (
                 [
@@ -3486,6 +3554,21 @@ impl EvaluatedArgs {
                     )
                 })?;
                 bytes.extend_from_slice(&value.to_le_bytes());
+                Ok(bytes)
+            })
+            .transpose()?;
+        Ok(ScalarValue::Bytes(value))
+    }
+
+    fn make_time_hour_value(value: Option<(i64, bool)>) -> LocalResult<ScalarValue> {
+        let value = value
+            .map(|(hour, unsigned)| -> LocalResult<Vec<u8>> {
+                let mut bytes = Vec::new();
+                bytes.try_reserve_exact(9).map_err(|_| {
+                    LocalError::ResourceLimit("MAKETIME hour input allocation failed".into())
+                })?;
+                bytes.extend_from_slice(&hour.to_le_bytes());
+                bytes.push(u8::from(unsigned));
                 Ok(bytes)
             })
             .transpose()?;

@@ -395,12 +395,29 @@ fn evaluated_ready_args_match(
                         if scale.is_none_or(|scale| i32::try_from(scale).is_ok())
                             && usize::try_from(*raw_budget as u64).is_ok_and(|budget| budget != usize::MAX))
             }
+            EvaluatedArgsRole::MakeTimeParts => {
+                operation == EvaluatedBytesOp::MakeTimePartsNative
+                    && matches!(values, [ScalarValue::Bytes(hour), ScalarValue::Int(_), ScalarValue::Bytes(second)]
+                        if hour.as_ref().is_none_or(|bytes| bytes.len() == 9 && matches!(bytes[8], 0 | 1))
+                            && second.as_ref().is_none_or(|bytes| bytes.len() == 8))
+            }
             EvaluatedArgsRole::Ieee754Int => {
-                matches!(
-                    operation,
-                    EvaluatedBytesOp::RoundRealNative | EvaluatedBytesOp::TruncateRealNative
-                ) && matches!(values, [ScalarValue::Bytes(bits), ScalarValue::Int(_)]
-                        if bits.as_ref().is_none_or(|bytes| bytes.len() == 8))
+                if operation == EvaluatedBytesOp::SecToTimeNative {
+                    match values {
+                        [ScalarValue::Bytes(None), ScalarValue::Int(None)] => true,
+                        [
+                            ScalarValue::Bytes(Some(bits)),
+                            ScalarValue::Int(Some(scale)),
+                        ] => bits.len() == 8 && *scale >= 0 && usize::try_from(*scale).is_ok(),
+                        _ => false,
+                    }
+                } else {
+                    matches!(
+                        operation,
+                        EvaluatedBytesOp::RoundRealNative | EvaluatedBytesOp::TruncateRealNative
+                    ) && matches!(values, [ScalarValue::Bytes(bits), ScalarValue::Int(_)]
+                            if bits.as_ref().is_none_or(|bytes| bytes.len() == 8))
+                }
             }
             EvaluatedArgsRole::Int128 => {
                 operation == EvaluatedBytesOp::RoundInt128Legacy

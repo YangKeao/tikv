@@ -1704,6 +1704,10 @@ mod evaluated_ascii_compile_tests {
             EvaluatedBytesOp::WeekCoreNative,
             EvaluatedBytesOp::PasswordNative,
             EvaluatedBytesOp::Sm3Native,
+            EvaluatedBytesOp::MakeDateNative,
+            EvaluatedBytesOp::FromDaysNative,
+            EvaluatedBytesOp::MakeTimePartsNative,
+            EvaluatedBytesOp::SecToTimeNative,
         ] {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();

@@ -213,7 +213,11 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::WeekNullNative
         | LocalFunctionId::WeekCoreNative
         | LocalFunctionId::PasswordNative
-        | LocalFunctionId::Sm3Native => Err(other_err!(
+        | LocalFunctionId::Sm3Native
+        | LocalFunctionId::MakeDateNative
+        | LocalFunctionId::FromDaysNative
+        | LocalFunctionId::MakeTimePartsNative
+        | LocalFunctionId::SecToTimeNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),
