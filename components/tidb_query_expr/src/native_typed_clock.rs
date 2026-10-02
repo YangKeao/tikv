@@ -54,15 +54,7 @@ pub fn native_typed_clock_fields<TZ: TimeZone>(
 /// cannot erase an earlier representation error, then construct the date result
 /// using its original kind and original FSP.
 pub fn native_typed_date_fields(raw_core: u64) -> [i32; 7] {
-    [
-        Time::year_from_core_bits(raw_core) as i32,
-        Time::month_from_core_bits(raw_core) as i32,
-        Time::day_from_core_bits(raw_core) as i32,
-        0,
-        0,
-        0,
-        0,
-    ]
+    Time::native_date_fields(raw_core)
 }
 
 #[cfg(test)]

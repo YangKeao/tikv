@@ -146,6 +146,37 @@ fn decode_time_core_native(bytes: BytesRef) -> Result<u64> {
     Ok(u64::from_le_bytes(encoded))
 }
 
+/// DATE consumes the original non-NULL core and actual SQL-mode flag bits.
+/// The allow-invalid bit is retained metadata but does not affect DATE's
+/// policy.
+pub fn date_core_native_args_valid(core: Option<&[u8]>, modes: Option<i64>) -> bool {
+    core.is_some_and(|bytes| bytes.len() == 8)
+        && modes.is_some_and(|flags| (0..=7).contains(&flags))
+}
+
+#[rpn_fn]
+fn date_core_native(core: BytesRef, modes: &Int) -> Result<Option<Int>> {
+    if !date_core_native_args_valid(Some(core), Some(*modes)) {
+        return Err(other_err!(
+            "Native DATE requires an actual 8-byte core and mode flags 0 through 7"
+        ));
+    }
+    let raw = decode_time_core_native(core)?;
+    if Time::native_date_rejects_zero(raw, *modes & 1 != 0, *modes & 2 != 0) {
+        return Ok(None);
+    }
+    // Preserve the full unsigned computed core in the existing signed owner.
+    Ok(Some(Time::native_date_core(raw) as Int))
+}
+
+#[rpn_fn(nullable)]
+fn date_core_predicate_legacy(core: Option<BytesRef>) -> Result<Option<Int>> {
+    core.map_or(Ok(None), |bytes| {
+        let raw = decode_time_core_native(bytes)?;
+        Ok(Some(Int::from(Time::native_date_core(raw) != 0)))
+    })
+}
+
 #[rpn_fn(nullable)]
 fn year_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
     arg.map_or(Ok(None), |bytes| {
@@ -2581,6 +2612,85 @@ pub fn str_to_date_duration(
     t.set_fsp(extra.ret_field_type.get_decimal() as u8);
     let duration: Duration = t.convert(ctx)?;
     Ok(Some(duration))
+}
+
+#[cfg(test)]
+mod native_date_core_worker_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_date_core_workers_preserve_raw_zero_modes_bits_and_legacy_predicate() {
+        assert_eq!(date_core_native_fn_meta().name, "date_core_native");
+        assert_eq!(
+            date_core_predicate_legacy_fn_meta().name,
+            "date_core_predicate_legacy"
+        );
+        let zero = 0u64.to_le_bytes();
+        let reserved_only = 1u64.to_le_bytes();
+        let clock_only = (1u64 << 36).to_le_bytes();
+        let high = u64::MAX.to_le_bytes();
+        let zero_results = [Some(0), None, Some(0), None, Some(0), None, Some(0), None];
+        let hidden_results = [Some(0), Some(0), None, None, Some(0), Some(0), None, None];
+        for modes in 0..=7i64 {
+            assert!(date_core_native_args_valid(Some(&high), Some(modes)));
+            // Even invalid stored calendar fields remain projections, and the
+            // computed high bit must survive transport as signed integer bits.
+            assert_eq!(
+                date_core_native(&high, &modes).unwrap(),
+                Some(-2_199_023_255_552)
+            );
+            assert_eq!(
+                date_core_native(&zero, &modes).unwrap(),
+                zero_results[modes as usize]
+            );
+            assert_eq!(
+                date_core_native(&reserved_only, &modes).unwrap(),
+                hidden_results[modes as usize]
+            );
+            assert_eq!(
+                date_core_native(&clock_only, &modes).unwrap(),
+                hidden_results[modes as usize]
+            );
+        }
+        let date = (2024u64 << 50) | (2u64 << 46) | (29u64 << 41);
+        let with_clock = (date | (23u64 << 36) | 15).to_le_bytes();
+        assert_eq!(
+            date_core_native(&with_clock, &7).unwrap(),
+            Some(date as i64)
+        );
+        let year_only = (2024u64 << 50).to_le_bytes();
+        assert_eq!(
+            date_core_native(&year_only, &1).unwrap(),
+            Some((2024u64 << 50) as i64)
+        );
+        assert_eq!(date_core_native(&year_only, &2).unwrap(), None);
+        assert_eq!(date_core_predicate_legacy(None).unwrap(), None);
+        assert_eq!(date_core_predicate_legacy(Some(&zero)).unwrap(), Some(0));
+        assert_eq!(
+            date_core_predicate_legacy(Some(&reserved_only)).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            date_core_predicate_legacy(Some(&clock_only)).unwrap(),
+            Some(0)
+        );
+        assert_eq!(date_core_predicate_legacy(Some(&high)).unwrap(), Some(1));
+        assert_eq!(
+            date_core_predicate_legacy(Some(&year_only)).unwrap(),
+            Some(1)
+        );
+        assert!(!date_core_native_args_valid(None, Some(0)));
+        assert!(!date_core_native_args_valid(Some(&zero), None));
+        for invalid in [Vec::new(), vec![0; 7], vec![0; 9]] {
+            assert!(!date_core_native_args_valid(Some(&invalid), Some(0)));
+            assert!(date_core_native(&invalid, &0).is_err());
+            assert!(date_core_predicate_legacy(Some(&invalid)).is_err());
+        }
+        for modes in [-1, 8, i64::MIN, i64::MAX] {
+            assert!(!date_core_native_args_valid(Some(&zero), Some(modes)));
+            assert!(date_core_native(&zero, &modes).is_err());
+        }
+    }
 }
 
 #[cfg(test)]

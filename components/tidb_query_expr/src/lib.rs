@@ -159,7 +159,8 @@ pub use self::{
     impl_op::NativeUnaryMinusError,
     impl_time::{
         current_date_native_fn_meta, current_time_with_fsp_native_fn_meta,
-        current_time_without_fsp_native_fn_meta, native_clock_args_valid,
+        current_time_without_fsp_native_fn_meta, date_core_native_args_valid,
+        date_core_native_fn_meta, date_core_predicate_legacy_fn_meta, native_clock_args_valid,
         native_clock_fsp_args_valid, now_native_fn_meta, sysdate_native_fn_meta,
         utc_date_native_fn_meta, utc_time_null_native_fn_meta, utc_time_with_fsp_native_fn_meta,
         utc_time_without_fsp_native_fn_meta, utc_timestamp_native_fn_meta,

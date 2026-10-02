@@ -344,6 +344,23 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  Native DATE shares `Time::native_date_core` for its sole raw-core date
+  projection, including the GetTimeValue SDK's date-only field view. It clears
+  all low41 bits (clock, fraction and reserved bits), preserving the complete
+  raw YMD domain without applying wire calendar checks. A separate shared unit
+  predicate checks the original full raw zero and month/day zero against native
+  modes. The native adapter keeps original diagnostics before admission, then
+  sends the actual non-NULL core and three actual mode flags even on soft errors;
+  the worker independently returns a computed core or NULL. ALLOW_INVALID_DATES
+  remains inert for this leaf. DateCoreNative uses existing BytesInt and an
+  OwnSignedInt bit carrier; the native Date/fsp0 representation bitcasts it back
+  without dropping the high year bit. Observed SQL/PB NULL uses the existing
+  DateDiffNullNative witness without demanding modes or unread PB suffixes.
+  DateCorePredicateLegacy instead consumes nullable TimeCoreBits and computes
+  projected-core nonzero, with no native mode/warning policy. Existing legacy
+  eval_expr/folded_int admission is unchanged; no temporal-value DATE channel is
+  added. Both closed boundaries validate the new native frame/flags; nullable
+  legacy width checks reuse the original TimeCoreBits role. Wire DATE is unchanged.
   Native CURTIME/CURRENT_TIME, UTC_TIME, UTC_DATE and UTC_TIMESTAMP use seven
   fixed byte-result workers in `impl_time.rs`. Inputs are the actual 16-byte
   clock tuple plus a separate precision operand where required; a genuine

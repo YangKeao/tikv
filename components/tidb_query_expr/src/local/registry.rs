@@ -415,7 +415,9 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::JsonMergePatchRawLegacy
         | LocalFunctionId::NowNative
         | LocalFunctionId::CurrentDateNative
-        | LocalFunctionId::SysdateNative => Err(other_err!(
+        | LocalFunctionId::SysdateNative
+        | LocalFunctionId::DateCoreNative
+        | LocalFunctionId::DateCorePredicateLegacy => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

@@ -1472,6 +1472,8 @@ pub enum EvaluatedBytesOp {
     NowNative,
     CurrentDateNative,
     SysdateNative,
+    DateCoreNative,
+    DateCorePredicateLegacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3079,6 +3081,14 @@ impl EvaluatedBytesOp {
             Self::SysdateNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SysdateNative);
             }
+            Self::DateCoreNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::DateCoreNative);
+            }
+            Self::DateCorePredicateLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DateCorePredicateLegacy,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -3502,7 +3512,8 @@ impl EvaluatedBytesOp {
             | Self::MonthCoreNative
             | Self::DayOfMonthCoreNative
             | Self::QuarterCoreNative
-            | Self::WeekCoreNative => EvaluatedArgsRole::TimeCoreBits,
+            | Self::WeekCoreNative
+            | Self::DateCorePredicateLegacy => EvaluatedArgsRole::TimeCoreBits,
             Self::AbsRealNative
             | Self::CeilRealNative
             | Self::FloorRealNative
@@ -4061,6 +4072,8 @@ impl EvaluatedBytesOp {
             }
             Self::UtcTimeWithFspNative => crate::impl_time::utc_time_with_fsp_native_fn_meta(),
             Self::UtcTimeNullNative => crate::impl_time::utc_time_null_native_fn_meta(),
+            Self::DateCoreNative => crate::impl_time::date_core_native_fn_meta(),
+            Self::DateCorePredicateLegacy => crate::impl_time::date_core_predicate_legacy_fn_meta(),
             Self::NowNative => crate::impl_time::now_native_fn_meta(),
             Self::CurrentDateNative => crate::impl_time::current_date_native_fn_meta(),
             Self::SysdateNative => crate::impl_time::sysdate_native_fn_meta(),
@@ -4382,6 +4395,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::DateCoreNative | Self::DateCorePredicateLegacy => EvalType::Int,
             Self::NowNative | Self::CurrentDateNative | Self::SysdateNative => EvalType::Bytes,
             Self::JsonMergeSerdeNative
             | Self::JsonMergePatchSerdeNative
@@ -4789,6 +4803,8 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::DateCoreNative => &[EvalType::Bytes, EvalType::Int],
+            Self::DateCorePredicateLegacy => &[EvalType::Bytes],
             Self::NowNative | Self::SysdateNative => &[EvalType::Bytes, EvalType::Int],
             Self::CurrentDateNative => &[EvalType::Bytes],
             Self::JsonMergeSerdeNative
@@ -6168,6 +6184,14 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::DateCoreNative {
+            return match self {
+                Self::BytesInt(core, modes) => {
+                    crate::impl_time::date_core_native_args_valid(core.as_deref(), *modes)
+                }
+                _ => false,
+            };
+        }
         if operation.is_clock_value() {
             return match self {
                 Self::Bytes(clock) => operation.clock_args_valid(clock.as_deref(), None),
@@ -8984,6 +9008,188 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn date_core_profiles_keep_signed_bits_nullable_predicates_and_reuse() {
+        let date = (1_u64 << 63) | (1_u64 << 46) | (2_u64 << 41);
+        let hidden = date | ((1_u64 << 41) - 1);
+        let native = |core: u64, flags| {
+            EvaluatedArgs::BytesInt(Some(core.to_le_bytes().to_vec()), Some(flags))
+        };
+        for (operation, getter) in [
+            (
+                EvaluatedBytesOp::DateCoreNative,
+                crate::impl_time::date_core_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::DateCorePredicateLegacy,
+                crate::impl_time::date_core_predicate_legacy_fn_meta(),
+            ),
+        ] {
+            let arity = operation.input_types().len();
+            assert_eq!(operation.eval_type(), EvalType::Int);
+            assert_eq!(operation.call_count(), 1);
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), arity + 1);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            if operation == EvaluatedBytesOp::DateCoreNative {
+                for invalid in [
+                    EvaluatedArgs::BytesInt(Some(vec![0; 7]), Some(0)),
+                    EvaluatedArgs::BytesInt(None, Some(0)),
+                    EvaluatedArgs::BytesInt(Some(hidden.to_le_bytes().to_vec()), None),
+                    native(hidden, -1),
+                    native(hidden, 8),
+                ] {
+                    let EvaluatedArgs::BytesInt(core, modes) = &invalid else {
+                        panic!()
+                    };
+                    let ready = [
+                        ScalarValue::Bytes(core.clone()),
+                        ScalarValue::Int(*modes),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                    ];
+                    assert!(matches!(
+                        worker.eval_args(invalid),
+                        Err(LocalError::InvalidBatch(_))
+                    ));
+                    let mut reported = None;
+                    assert!(matches!(
+                        worker.eval_ready(ready, 2, &mut reported),
+                        Err(LocalError::InvalidSpec(_))
+                    ));
+                    assert_eq!(reported, None);
+                }
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::TimeCoreBits(Some(hidden))),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            } else {
+                // Typed Option<u64> cannot carry a short frame. The official
+                // nullable temporal boundary still rejects malformed raw bytes.
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(
+                        [
+                            ScalarValue::Bytes(Some(vec![0; 7])),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None)
+                        ],
+                        1,
+                        &mut reported
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes(Some(hidden.to_le_bytes().to_vec()))),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            for invalid in [EvaluatedArgs::NoArgs, EvaluatedArgs::NullWitness(None)] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            let cases = if operation == EvaluatedBytesOp::DateCoreNative {
+                assert!((date as i64) < 0);
+                vec![
+                    (native(hidden, 7), Some(date as i64)), /* Rebuilt DATE clears hidden
+                                                             * clock/reserved bits. */
+                    (native(hidden, 3), Some(date as i64)), // allow-invalid does not affect DATE.
+                    (native(1, 1), Some(0)),                /* Original raw core is nonzero
+                                                             * before projection. */
+                    (native(1, 2), None),
+                    (native(0, 1), None),
+                    (native(0, 4), Some(0)),
+                ]
+            } else {
+                vec![
+                    (EvaluatedArgs::TimeCoreBits(Some(hidden)), Some(1)),
+                    (EvaluatedArgs::TimeCoreBits(Some(1)), Some(0)),
+                    (EvaluatedArgs::TimeCoreBits(None), None),
+                ]
+            };
+            for (calls, (args, expected)) in (1_u64..).zip(cases) {
+                assert_eq!(args.role(), operation.input_role());
+                assert_eq!(args.input_types(), operation.input_types());
+                let ComputedValue::Int(output) = worker.eval_args(args).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(output.metadata(), ComputedIntMetadata::OwnSignedInt);
+                assert_eq!(output.value(), expected);
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+        }
+        let mut null = prepare_evaluated_bytes(
+            EvaluatedBytesOp::DateDiffNullNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        let ComputedValue::Int(output) = null.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(output.value(), None);
+        assert_eq!(null.kernel_invocations(), 1);
+    }
 
     #[test]
     fn local_clock_profiles_use_actual_inputs_and_reuse_fixed_metadata() {

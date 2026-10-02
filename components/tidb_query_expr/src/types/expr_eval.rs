@@ -383,6 +383,13 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::DateCoreNative
+            || match values {
+                [ScalarValue::Bytes(core), ScalarValue::Int(modes)] => {
+                    crate::impl_time::date_core_native_args_valid(core.as_deref(), *modes)
+                }
+                _ => false,
+            })
         && (!operation.is_clock_value()
             || match values {
                 [ScalarValue::Bytes(clock)] => operation.clock_args_valid(clock.as_deref(), None),

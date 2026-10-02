@@ -465,6 +465,8 @@ pub enum LocalFunctionId {
     NowNative,
     CurrentDateNative,
     SysdateNative,
+    DateCoreNative,
+    DateCorePredicateLegacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

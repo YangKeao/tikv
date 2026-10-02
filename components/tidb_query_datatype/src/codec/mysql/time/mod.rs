@@ -1178,6 +1178,46 @@ impl Time {
         ((raw >> 41) & 0x1f) as u32
     }
 
+    /// Rebuilds the native DATE core at midnight, irrespective of input kind.
+    /// CoreTime::from_date stores Y/M/D in bits 63..41 and clears the low four
+    /// reserved bits as well as all clock fields. Preserve even invalid stored
+    /// calendar fields; this projection does not apply wire DATE validation.
+    #[inline]
+    pub const fn native_date_core(raw: u64) -> u64 {
+        raw & (u64::MAX << 41)
+    }
+
+    /// Applies native DATE's zero-mode checks to the ORIGINAL core. Native
+    /// Time::is_zero compares every bit, so hidden clock/reserved bits make a
+    /// zero-calendar input nonzero and change which SQL-mode flag rejects it.
+    #[inline]
+    pub const fn native_date_rejects_zero(
+        raw: u64,
+        no_zero_date: bool,
+        no_zero_in_date: bool,
+    ) -> bool {
+        (raw == 0 && no_zero_date)
+            || (raw != 0
+                && (Self::month_from_core_bits(raw) == 0 || Self::day_from_core_bits(raw) == 0)
+                && no_zero_in_date)
+    }
+
+    /// Projects all seven fields from the actual computed DATE core. This is
+    /// the representation view used by the typed-clock SDK, not another
+    /// implementation that independently clears the clock fields.
+    pub fn native_date_fields(raw: u64) -> [i32; 7] {
+        let date = Self(Self::native_date_core(raw));
+        [
+            date.year() as i32,
+            date.month() as i32,
+            date.day() as i32,
+            date.hour() as i32,
+            date.minute() as i32,
+            date.second() as i32,
+            date.micro() as i32,
+        ]
+    }
+
     /// Computes the quarter from the stored four-bit month, including zero.
     #[inline]
     pub const fn quarter_from_core_bits(raw: u64) -> u32 {
@@ -4279,6 +4319,57 @@ mod tests {
         for (index, name) in expected.into_iter().enumerate() {
             assert_eq!(Time::month_name_from_month(index as u32 + 1), name);
         }
+    }
+
+    #[test]
+    fn test_native_date_projection_and_original_core_zero_modes() {
+        const MAX_DATE_CORE: u64 = 0xffff_fe00_0000_0000;
+        for (raw, projected, reject_zero_date, reject_zero_in_date) in [
+            (0, 0, true, false),
+            (1, 0, false, true),
+            (1_u64 << 36, 0, false, true),
+            (1_u64 << 50, 1_u64 << 50, false, true),
+            (1_u64 << 46, 1_u64 << 46, false, true),
+            (1_u64 << 41, 1_u64 << 41, false, true),
+            (u64::MAX, MAX_DATE_CORE, false, false),
+        ] {
+            assert_eq!(Time::native_date_core(raw), projected);
+            assert!(!Time::native_date_rejects_zero(raw, false, false));
+            assert_eq!(
+                Time::native_date_rejects_zero(raw, true, false),
+                reject_zero_date
+            );
+            assert_eq!(
+                Time::native_date_rejects_zero(raw, false, true),
+                reject_zero_in_date
+            );
+            assert_eq!(
+                Time::native_date_rejects_zero(raw, true, true),
+                reject_zero_date || reject_zero_in_date
+            );
+        }
+        for raw in [0, 1, 1_u64 << 36] {
+            assert_eq!(Time::native_date_fields(raw), [0; 7]);
+        }
+        assert_eq!(
+            Time::native_date_fields(u64::MAX),
+            [16383, 15, 31, 0, 0, 0, 0]
+        );
+        let date = (2024_u64 << 50) | (3_u64 << 46) | (15_u64 << 41);
+        let with_hidden_clock_and_reserved_bits = date | 0x0000_01ff_ffff_ffff;
+        assert_eq!(
+            Time::native_date_core(with_hidden_clock_and_reserved_bits),
+            date
+        );
+        assert_eq!(
+            Time::native_date_fields(with_hidden_clock_and_reserved_bits),
+            [2024, 3, 15, 0, 0, 0, 0]
+        );
+        assert!(!Time::native_date_rejects_zero(
+            with_hidden_clock_and_reserved_bits,
+            true,
+            true
+        ));
     }
 
     #[test]
