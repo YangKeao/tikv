@@ -901,6 +901,122 @@ fn json_value_absent_legacy() -> Result<Option<Bytes>> {
     Ok(None)
 }
 
+// A nullable patch list transports actual SQL presence separately from JSON
+// null. Count zero is real data; only the pure operation decides its behavior.
+fn walk_json_merge_patch_serde_packet(
+    packet: &[u8],
+    mut consume: impl FnMut(Option<serde_json::Value>) -> Result<()>,
+) -> Result<()> {
+    let mut remaining = packet;
+    let count = json_serde_packet_word(&mut remaining)?;
+    if count > remaining.len() {
+        return Err(other_err!(
+            "Native JSON merge-patch count exceeds presence framing"
+        ));
+    }
+    for _ in 0..count {
+        let value = match json_serde_path_byte(&mut remaining)? {
+            0 => None,
+            1 => Some(json_serde_native_value(json_serde_packet_bytes(
+                &mut remaining,
+            )?)?),
+            _ => return Err(other_err!("Invalid native JSON merge-patch presence flag")),
+        };
+        consume(value)?;
+    }
+    if !remaining.is_empty() {
+        return Err(other_err!(
+            "Native JSON merge-patch packet has trailing bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn walk_json_merge_patch_raw_packet<'a>(
+    packet: &'a [u8],
+    mut consume: impl FnMut((u8, &'a [u8])) -> Result<()>,
+) -> Result<()> {
+    let mut remaining = packet;
+    let count = json_serde_packet_word(&mut remaining)?;
+    if count > remaining.len() / 9 {
+        return Err(other_err!(
+            "Legacy raw JSON merge-patch count exceeds framing"
+        ));
+    }
+    for _ in 0..count {
+        let value = json_raw_legacy_scalar(json_serde_packet_bytes(&mut remaining)?)?;
+        consume(value)?;
+    }
+    if !remaining.is_empty() {
+        return Err(other_err!(
+            "Legacy raw JSON merge-patch packet has trailing bytes"
+        ));
+    }
+    Ok(())
+}
+
+/// Checks the actual nullable document list, without computing a merged answer
+/// or suppressing the original empty-list panic of the pure native operation.
+pub fn json_merge_patch_serde_args_valid(packet: &[u8]) -> bool {
+    walk_json_merge_patch_serde_packet(packet, |_| Ok(())).is_ok()
+}
+
+/// Raw merge-patch admission checks framing only. Semantic codec failures and
+/// empty-list absence remain the actual shared legacy SDK's policy.
+pub fn json_merge_patch_raw_legacy_args_valid(packet: &[u8]) -> bool {
+    walk_json_merge_patch_raw_packet(packet, |_| Ok(())).is_ok()
+}
+
+#[rpn_fn]
+fn json_merge_serde_native(packet: BytesRef) -> Result<Option<Bytes>> {
+    let mut values = Vec::new();
+    walk_json_serde_packet(packet, false, |_, value| {
+        values.try_reserve(1).map_err(|error| {
+            other_err!("Unable to allocate native JSON merge values: {}", error)
+        })?;
+        values.push(value);
+        Ok(())
+    })?;
+    let value = crate::native_json_merge_preserve(values);
+    Ok(Some(crate::native_json_format(&value).into_bytes()))
+}
+
+#[rpn_fn]
+fn json_merge_patch_serde_native(packet: BytesRef) -> Result<Option<Bytes>> {
+    let mut values = Vec::new();
+    walk_json_merge_patch_serde_packet(packet, |value| {
+        values.try_reserve(1).map_err(|error| {
+            other_err!(
+                "Unable to allocate native JSON merge-patch values: {}",
+                error
+            )
+        })?;
+        values.push(value);
+        Ok(())
+    })?;
+    Ok(crate::native_json_merge_patch(values)
+        .map(|value| crate::native_json_format(&value).into_bytes()))
+}
+
+#[rpn_fn]
+fn json_merge_patch_raw_legacy(packet: BytesRef) -> Result<Option<Bytes>> {
+    let mut values = Vec::new();
+    walk_json_merge_patch_raw_packet(packet, |value| {
+        values.try_reserve(1).map_err(|error| {
+            other_err!(
+                "Unable to allocate legacy raw JSON merge-patch values: {}",
+                error
+            )
+        })?;
+        values.push(value);
+        Ok(())
+    })?;
+    // Only the SDK's semantic codec result is softened, exactly as before.
+    // Framing, reservation and final output allocation errors stay errors.
+    let value = merge_patch_native_binary_json(&values).ok().flatten();
+    json_raw_legacy_output(value)
+}
+
 #[rpn_fn]
 #[inline]
 fn json_depth(arg: JsonRef) -> Result<Option<i64>> {
@@ -1428,6 +1544,192 @@ fn parse_json_path(path: Option<BytesRef>) -> Result<Option<PathExpression>> {
     }?;
 
     Ok(Some(parse_json_path_expr(json_path)?))
+}
+
+#[cfg(test)]
+mod native_json_merge_worker_tests {
+    use super::*;
+
+    fn values(values: &[&[u8]]) -> Vec<u8> {
+        let mut packet = (values.len() as u64).to_le_bytes().to_vec();
+        for value in values {
+            packet.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            packet.extend_from_slice(value);
+        }
+        packet
+    }
+
+    fn nullable_values(values: &[Option<&[u8]>]) -> Vec<u8> {
+        let mut packet = (values.len() as u64).to_le_bytes().to_vec();
+        for value in values {
+            match value {
+                None => packet.push(0),
+                Some(value) => {
+                    packet.push(1);
+                    packet.extend_from_slice(&(value.len() as u64).to_le_bytes());
+                    packet.extend_from_slice(value);
+                }
+            }
+        }
+        packet
+    }
+
+    #[test]
+    fn fixed_json_merge_workers_preserve_order_null_domains_and_raw_codec_results() {
+        for (meta, name) in [
+            (json_merge_serde_native_fn_meta(), "json_merge_serde_native"),
+            (
+                json_merge_patch_serde_native_fn_meta(),
+                "json_merge_patch_serde_native",
+            ),
+            (
+                json_merge_patch_raw_legacy_fn_meta(),
+                "json_merge_patch_raw_legacy",
+            ),
+        ] {
+            assert_eq!(meta.name, name);
+        }
+        let preserve = values(&[
+            br#"{"a":1}"#,
+            br#"{"a":2}"#,
+            b"[3,[4]]",
+            br#"{"b":5}"#,
+            br#"{"b":6}"#,
+        ]);
+        assert!(json_array_serde_args_valid(&preserve));
+        assert_eq!(
+            json_merge_serde_native(&preserve).unwrap(),
+            Some(br#"[{"a": [1, 2]}, 3, [4], {"b": [5, 6]}]"#.to_vec())
+        );
+        assert_eq!(
+            json_merge_serde_native(&values(&[b"[[1]]"])).unwrap(),
+            Some(b"[[1]]".to_vec())
+        );
+        assert_eq!(
+            json_merge_serde_native(&values(&[b"null"])).unwrap(),
+            Some(b"null".to_vec())
+        );
+        assert_eq!(
+            json_merge_serde_native(&values(&[])).unwrap(),
+            Some(b"[]".to_vec())
+        );
+        let deleting_patch = nullable_values(&[Some(br#"{"a":1}"#), Some(br#"{"a":null,"b":2}"#)]);
+        assert!(json_merge_patch_serde_args_valid(&deleting_patch));
+        assert_eq!(
+            json_merge_patch_serde_native(&deleting_patch).unwrap(),
+            Some(br#"{"b": 2}"#.to_vec())
+        );
+        assert_eq!(
+            json_merge_patch_serde_native(&nullable_values(&[None, Some(br#"{"a":1}"#)])).unwrap(),
+            None
+        );
+        assert_eq!(
+            json_merge_patch_serde_native(&nullable_values(&[Some(b"null"), Some(br#"{"a":1}"#)]))
+                .unwrap(),
+            Some(br#"{"a": 1}"#.to_vec())
+        );
+        assert_eq!(
+            json_merge_patch_serde_native(&nullable_values(&[
+                None,
+                Some(b"2"),
+                Some(br#"{"b":3}"#)
+            ]))
+            .unwrap(),
+            Some(br#"{"b": 3}"#.to_vec())
+        );
+        assert_eq!(
+            json_merge_patch_serde_native(&nullable_values(&[
+                Some(br#"{"a":1}"#),
+                None,
+                Some(b"null")
+            ]))
+            .unwrap(),
+            Some(b"null".to_vec())
+        );
+        let mut one = vec![JsonType::I64 as u8];
+        one.extend_from_slice(&1i64.to_le_bytes());
+        let mut two = vec![JsonType::I64 as u8];
+        two.extend_from_slice(&2i64.to_le_bytes());
+        let raw = values(&[&one, &two]);
+        assert!(json_merge_patch_raw_legacy_args_valid(&raw));
+        assert_eq!(
+            json_merge_patch_raw_legacy(&raw).unwrap(),
+            Some(two.clone())
+        );
+        let json_null = [JsonType::Literal as u8, 0];
+        assert_eq!(
+            json_merge_patch_raw_legacy(&values(&[&one, &json_null])).unwrap(),
+            Some(json_null.to_vec())
+        );
+        let bad_then_reset = values(&[&[JsonType::Array as u8, 255], &two]);
+        assert!(json_merge_patch_raw_legacy_args_valid(&bad_then_reset));
+        assert_eq!(json_merge_patch_raw_legacy(&bad_then_reset).unwrap(), None);
+        let unknown = values(&[&[255, 77]]);
+        assert!(json_merge_patch_raw_legacy_args_valid(&unknown));
+        assert_eq!(json_merge_patch_raw_legacy(&unknown).unwrap(), None);
+        let raw_empty = values(&[]);
+        assert!(json_merge_patch_raw_legacy_args_valid(&raw_empty));
+        assert_eq!(json_merge_patch_raw_legacy(&raw_empty).unwrap(), None);
+        // Empty native PB patch input is admitted as real empty-list data and
+        // retains the original pure indexing panic. It is not fabricated NULL.
+        let serde_empty = nullable_values(&[]);
+        assert!(json_merge_patch_serde_args_valid(&serde_empty));
+        assert!(std::panic::catch_unwind(|| json_merge_patch_serde_native(&serde_empty)).is_err());
+    }
+
+    #[test]
+    fn fixed_json_merge_workers_reject_framing_before_semantic_null_folding() {
+        for packet in [Vec::new(), vec![0; 7], u64::MAX.to_le_bytes().to_vec()] {
+            assert!(!json_merge_patch_serde_args_valid(&packet));
+            assert!(!json_merge_patch_raw_legacy_args_valid(&packet));
+            assert!(json_merge_patch_serde_native(&packet).is_err());
+            assert!(json_merge_patch_raw_legacy(&packet).is_err());
+            assert!(json_merge_serde_native(&packet).is_err());
+        }
+        let mut flag = nullable_values(&[None]);
+        flag[8] = 2;
+        let mut extra = nullable_values(&[None]);
+        extra.push(0);
+        let mut too_long = nullable_values(&[Some(b"null")]);
+        too_long[9..17].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut truncated = nullable_values(&[Some(b"null")]);
+        truncated.pop();
+        for packet in [
+            flag,
+            extra,
+            too_long,
+            truncated,
+            nullable_values(&[Some(b"")]),
+            nullable_values(&[Some(&[255])]),
+            nullable_values(&[None, Some(b"[")]),
+        ] {
+            assert!(!json_merge_patch_serde_args_valid(&packet));
+            assert!(json_merge_patch_serde_native(&packet).is_err());
+        }
+        let raw_valid = values(&[&[JsonType::Literal as u8, 0]]);
+        let mut raw_extra = raw_valid.clone();
+        raw_extra.push(0);
+        let mut raw_length = raw_valid.clone();
+        raw_length[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut raw_short = raw_valid;
+        raw_short.pop();
+        for packet in [values(&[b""]), raw_extra, raw_length, raw_short] {
+            assert!(!json_merge_patch_raw_legacy_args_valid(&packet));
+            assert!(json_merge_patch_raw_legacy(&packet).is_err());
+        }
+        let invalid_preserve = values(&[b"null", b"["]);
+        assert!(!json_array_serde_args_valid(&invalid_preserve));
+        assert!(json_merge_serde_native(&invalid_preserve).is_err());
+        let sql_null = nullable_values(&[None]);
+        let json_null = nullable_values(&[Some(b"null")]);
+        assert!(json_merge_patch_serde_args_valid(&sql_null));
+        assert!(json_merge_patch_serde_args_valid(&json_null));
+        assert_eq!(json_merge_patch_serde_native(&sql_null).unwrap(), None);
+        assert_eq!(
+            json_merge_patch_serde_native(&json_null).unwrap(),
+            Some(b"null".to_vec())
+        );
+    }
 }
 
 #[cfg(test)]

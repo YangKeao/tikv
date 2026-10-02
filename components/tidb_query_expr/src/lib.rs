@@ -66,6 +66,9 @@ pub use native_json::{
 mod native_json_legacy;
 pub use native_json_legacy::{native_json_array_append_raw_legacy, native_json_replace_raw_legacy};
 
+mod native_json_merge;
+pub use native_json_merge::{native_json_merge_patch, native_json_merge_preserve};
+
 mod native_json_modify;
 pub use native_json_modify::{
     NativeJsonModifyMode, native_json_array_append, native_json_array_insert, native_json_modify,
@@ -129,17 +132,19 @@ pub use self::{
         json_keys_serde_native_fn_meta, json_length_path_serde_native_fn_meta,
         json_length_serde_native_fn_meta, json_member_binary_legacy_args_valid,
         json_member_of_binary_legacy_fn_meta, json_member_of_serde_native_fn_meta,
-        json_modify_serde_args_valid, json_object_serde_args_valid,
-        json_object_serde_native_fn_meta, json_output_null_native_fn_meta,
-        json_overlaps_serde_native_fn_meta, json_path_exists_serde_native_fn_meta,
-        json_predicate_missing_legacy_fn_meta, json_predicate_null_native_fn_meta,
-        json_pretty_serde_native_fn_meta, json_remove_serde_args_valid,
-        json_remove_serde_native_fn_meta, json_replace_raw_legacy_args_valid,
-        json_replace_raw_legacy_fn_meta, json_replace_serde_native_fn_meta,
-        json_serde_native_args_valid, json_set_serde_native_fn_meta,
-        json_unquote_binary_native_args_valid, json_unquote_binary_native_fn_meta,
-        json_unquote_text_native_args_valid, json_unquote_text_native_fn_meta,
-        json_value_absent_legacy_fn_meta,
+        json_merge_patch_raw_legacy_args_valid, json_merge_patch_raw_legacy_fn_meta,
+        json_merge_patch_serde_args_valid, json_merge_patch_serde_native_fn_meta,
+        json_merge_serde_native_fn_meta, json_modify_serde_args_valid,
+        json_object_serde_args_valid, json_object_serde_native_fn_meta,
+        json_output_null_native_fn_meta, json_overlaps_serde_native_fn_meta,
+        json_path_exists_serde_native_fn_meta, json_predicate_missing_legacy_fn_meta,
+        json_predicate_null_native_fn_meta, json_pretty_serde_native_fn_meta,
+        json_remove_serde_args_valid, json_remove_serde_native_fn_meta,
+        json_replace_raw_legacy_args_valid, json_replace_raw_legacy_fn_meta,
+        json_replace_serde_native_fn_meta, json_serde_native_args_valid,
+        json_set_serde_native_fn_meta, json_unquote_binary_native_args_valid,
+        json_unquote_binary_native_fn_meta, json_unquote_text_native_args_valid,
+        json_unquote_text_native_fn_meta, json_value_absent_legacy_fn_meta,
     },
     impl_miscellaneous::{
         GroupingFunction, GroupingMetadata, GroupingMetadataError, GroupingMode,

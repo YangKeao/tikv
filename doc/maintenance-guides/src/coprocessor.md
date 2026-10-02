@@ -394,6 +394,19 @@ short-circuit admission policy described above.
   poisons/retires its worker; no new catcher or NULL/error substitution exists.
   Resource refusal may prevent reaching that worker panic. SDK string helpers
   keep their distinct conditional second-unescape policy.
+  MERGE/PRESERVE and PATCH share the single generic node algorithms in datatype
+  `json/native_merge.rs`. Raw SDK wrappers retain ordered decode/merge/encode
+  stages and duplicate-key/opaque policies. Expression `native_json_merge.rs`
+  only bridges serde trees and retains the distinct nullable sequence/reset
+  policy; it does not duplicate recursive merge algorithms. Three fixed byte
+  workers consume actual ordered documents, nullable documents or raw documents.
+  SQL NULL presence is not JSON null, and the frontend never selects a reset
+  suffix or constructs a merge answer. Empty native PB PATCH retains its original
+  kernel panic; empty raw PATCH returns None. Legacy still stops at the first
+  absent child but demands every present child before codec work; only codec
+  errors become its computed None. Infrastructure failures remain errors. No
+  new PB/legacy admission or ordinary-wire policy change is introduced. Tree
+  conversion and key-search costs are not claimed to be performance-neutral.
   JSON predicate/path policies live in `native_json.rs`, with fixed Int
   workers in `impl_json.rs`. Actual prepared serde values remain separate
   from datatype `json/native_policy.rs` raw-binary predicates; their numeric,

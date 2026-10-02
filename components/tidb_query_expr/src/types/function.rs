@@ -459,6 +459,9 @@ pub enum LocalFunctionId {
     UtcTimeWithoutFspNative,
     UtcTimeWithFspNative,
     UtcTimeNullNative,
+    JsonMergeSerdeNative,
+    JsonMergePatchSerdeNative,
+    JsonMergePatchRawLegacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

@@ -63,6 +63,7 @@ mod constants;
 mod jcodec;
 mod modifier;
 mod native_codec;
+mod native_merge;
 mod native_path_ops;
 mod native_policy;
 mod native_text;
@@ -98,6 +99,10 @@ pub use self::{
     native_codec::{
         NativeBinaryJsonEncodeError, encode_native_binary_json_node,
         write_native_binary_json_header,
+    },
+    native_merge::{
+        merge_native_binary_json, merge_native_json_nodes, merge_patch_native_binary_json,
+        merge_patch_native_json_node,
     },
     native_path_ops::{
         NativeBinaryJsonArraySelection, NativeBinaryJsonModifyType, NativeBinaryJsonPathLeg,

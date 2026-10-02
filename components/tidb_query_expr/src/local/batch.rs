@@ -1466,6 +1466,9 @@ pub enum EvaluatedBytesOp {
     UtcTimeWithoutFspNative,
     UtcTimeWithFspNative,
     UtcTimeNullNative,
+    JsonMergeSerdeNative,
+    JsonMergePatchSerdeNative,
+    JsonMergePatchRawLegacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3047,6 +3050,21 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::UtcTimeNullNative,
                 );
             }
+            Self::JsonMergeSerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonMergeSerdeNative,
+                );
+            }
+            Self::JsonMergePatchSerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonMergePatchSerdeNative,
+                );
+            }
+            Self::JsonMergePatchRawLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonMergePatchRawLegacy,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -3129,6 +3147,9 @@ impl EvaluatedBytesOp {
                 | Self::JsonArrayAppendEmptyLegacy
                 | Self::JsonUnquoteTextNative
                 | Self::JsonUnquoteBinaryNative
+                | Self::JsonMergeSerdeNative
+                | Self::JsonMergePatchSerdeNative
+                | Self::JsonMergePatchRawLegacy
         )
     }
 
@@ -3137,13 +3158,22 @@ impl EvaluatedBytesOp {
             json_array_append_empty_legacy_args_valid, json_array_append_raw_legacy_args_valid,
             json_array_append_serde_args_valid, json_array_insert_serde_args_valid,
             json_array_serde_args_valid, json_extract_serde_args_valid,
+            json_merge_patch_raw_legacy_args_valid, json_merge_patch_serde_args_valid,
             json_modify_serde_args_valid, json_object_serde_args_valid,
             json_remove_serde_args_valid, json_replace_raw_legacy_args_valid,
             json_serde_native_args_valid, json_unquote_binary_native_args_valid,
             json_unquote_text_native_args_valid,
         };
         match (self, values) {
-            (Self::JsonArraySerdeNative, [Some(values)]) => json_array_serde_args_valid(values),
+            (Self::JsonArraySerdeNative | Self::JsonMergeSerdeNative, [Some(values)]) => {
+                json_array_serde_args_valid(values)
+            }
+            (Self::JsonMergePatchSerdeNative, [Some(values)]) => {
+                json_merge_patch_serde_args_valid(values)
+            }
+            (Self::JsonMergePatchRawLegacy, [Some(values)]) => {
+                json_merge_patch_raw_legacy_args_valid(values)
+            }
             (Self::JsonObjectSerdeNative, [Some(pairs)]) => json_object_serde_args_valid(pairs),
             (Self::JsonKeysSerdeNative | Self::JsonPrettySerdeNative, [Some(document)]) => {
                 json_serde_native_args_valid(document, None, None)
@@ -4011,6 +4041,13 @@ impl EvaluatedBytesOp {
             }
             Self::UtcTimeWithFspNative => crate::impl_time::utc_time_with_fsp_native_fn_meta(),
             Self::UtcTimeNullNative => crate::impl_time::utc_time_null_native_fn_meta(),
+            Self::JsonMergeSerdeNative => crate::impl_json::json_merge_serde_native_fn_meta(),
+            Self::JsonMergePatchSerdeNative => {
+                crate::impl_json::json_merge_patch_serde_native_fn_meta()
+            }
+            Self::JsonMergePatchRawLegacy => {
+                crate::impl_json::json_merge_patch_raw_legacy_fn_meta()
+            }
             Self::JsonUnquoteTextNative => crate::impl_json::json_unquote_text_native_fn_meta(),
             Self::JsonUnquoteBinaryNative => crate::impl_json::json_unquote_binary_native_fn_meta(),
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
@@ -4322,6 +4359,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::JsonMergeSerdeNative
+            | Self::JsonMergePatchSerdeNative
+            | Self::JsonMergePatchRawLegacy => EvalType::Bytes,
             Self::UtcDateNative
             | Self::UtcTimestampNative
             | Self::CurrentTimeWithoutFspNative
@@ -4725,6 +4765,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::JsonMergeSerdeNative
+            | Self::JsonMergePatchSerdeNative
+            | Self::JsonMergePatchRawLegacy => &[EvalType::Bytes],
             Self::UtcDateNative
             | Self::CurrentTimeWithoutFspNative
             | Self::UtcTimeWithoutFspNative => &[EvalType::Bytes],
@@ -5730,6 +5773,37 @@ pub fn prepare_json_raw_paths_values_args<'p, 'v>(
         Some(encoded_paths),
         Some(encoded_values),
     ]))
+}
+
+/// Packs actual nullable JSON operands in order. The presence byte
+/// distinguishes SQL NULL from Some(JSON null); no merge or NULL-revival policy
+/// runs here.
+pub fn prepare_json_nullable_values_args(
+    values: &[Option<serde_json::Value>],
+) -> LocalResult<EvaluatedArgs> {
+    let mut encoded = json_operand_list_buffer(values.len())?;
+    for value in values {
+        reserve_json_raw_operand(&mut encoded, 1)?;
+        encoded.push(u8::from(value.is_some()));
+        if let Some(value) = value {
+            let value = serde_json::to_vec(value).map_err(|error| {
+                LocalError::Evaluation(other_err!("JSON ready serialization failed: {}", error))
+            })?;
+            push_json_operand_bytes(&mut encoded, &value)?;
+        }
+    }
+    Ok(EvaluatedArgs::Bytes(Some(encoded)))
+}
+
+/// Packs ordered actual raw scalars, preserving every type and payload byte.
+/// Empty lists are real data, and semantic raw decoding belongs to the worker.
+pub fn prepare_json_raw_values_args(values: &[(u8, &[u8])]) -> LocalResult<EvaluatedArgs> {
+    let mut encoded = json_operand_list_buffer(values.len())?;
+    for &value in values {
+        let scalar = encode_json_raw_scalar(value)?;
+        push_json_operand_bytes(&mut encoded, &scalar)?;
+    }
+    Ok(EvaluatedArgs::Bytes(Some(encoded)))
 }
 
 /// Owned ready arguments and explicit demand markers for closed recipes. Int
@@ -8884,6 +8958,182 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn json_merge_profiles_pack_actual_nullable_raw_lists_and_reuse_workers() {
+        use crate::impl_json::*;
+        let nullable =
+            prepare_json_nullable_values_args(&[None, Some(serde_json::Value::Null)]).unwrap();
+        assert!(nullable.admission_matches(EvaluatedBytesOp::JsonMergePatchSerdeNative));
+        let EvaluatedArgs::Bytes(Some(nullable)) = nullable else {
+            panic!()
+        };
+        assert_eq!(&nullable[..8], &2_u64.to_le_bytes());
+        assert_eq!(&nullable[8..10], &[0, 1]);
+        assert_eq!(&nullable[10..18], &4_u64.to_le_bytes());
+        assert_eq!(&nullable[18..], b"null");
+        let raw = prepare_json_raw_values_args(&[(255, &[])]).unwrap();
+        assert!(raw.admission_matches(EvaluatedBytesOp::JsonMergePatchRawLegacy));
+        let EvaluatedArgs::Bytes(Some(raw)) = raw else {
+            panic!()
+        };
+        assert_eq!(&raw[8..16], &1_u64.to_le_bytes());
+        assert_eq!(&raw[16..], &[255]); // Unknown tag and empty payload stay actual data.
+        let one = 1_i64.to_le_bytes();
+        let two = 2_i64.to_le_bytes();
+        let mut raw_result = vec![9];
+        raw_result.extend_from_slice(&two);
+        for (operation, getter, args, empty, expected) in [
+            (
+                EvaluatedBytesOp::JsonMergeSerdeNative,
+                json_merge_serde_native_fn_meta(),
+                prepare_json_array_args(&[
+                    serde_json::json!({"a": 1}),
+                    serde_json::json!({"a": 2}),
+                ])
+                .unwrap(),
+                prepare_json_array_args(&[]).unwrap(),
+                br#"{"a": [1, 2]}"#.to_vec(),
+            ),
+            (
+                EvaluatedBytesOp::JsonMergePatchSerdeNative,
+                json_merge_patch_serde_native_fn_meta(),
+                prepare_json_nullable_values_args(&[
+                    Some(serde_json::json!({"a": 1})),
+                    Some(serde_json::json!({"a": null, "b": 2})),
+                ])
+                .unwrap(),
+                prepare_json_nullable_values_args(&[]).unwrap(),
+                br#"{"b": 2}"#.to_vec(),
+            ),
+            (
+                EvaluatedBytesOp::JsonMergePatchRawLegacy,
+                json_merge_patch_raw_legacy_fn_meta(),
+                prepare_json_raw_values_args(&[(9, one.as_slice()), (9, two.as_slice())]).unwrap(),
+                prepare_json_raw_values_args(&[]).unwrap(),
+                raw_result,
+            ),
+        ] {
+            // Empty lists remain structurally admissible. In particular,
+            // native PATCH's empty-list panic is not preempted by admission.
+            assert!(empty.admission_matches(operation));
+            let EvaluatedArgs::Bytes(Some(empty)) = empty else {
+                panic!()
+            };
+            assert_eq!(empty, 0_u64.to_le_bytes());
+            let EvaluatedArgs::Bytes(Some(packet)) = args else {
+                panic!()
+            };
+            assert_eq!(operation.input_types(), &[EvalType::Bytes]);
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            assert!(!operation.returns_json_report());
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), 2);
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[1]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, 1);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: vec![LocalExpr::InputSlot {
+                    slot: 0,
+                    field_type: program.schema[0].clone(),
+                }]
+                .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let malformed = if operation == EvaluatedBytesOp::JsonMergePatchSerdeNative {
+                let mut bytes = 1_u64.to_le_bytes().to_vec();
+                bytes.push(2);
+                bytes
+            } else {
+                vec![0; 7]
+            };
+            for invalid in [None, Some(malformed)] {
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes(invalid.clone())),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(
+                        [
+                            ScalarValue::Bytes(invalid),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None)
+                        ],
+                        1,
+                        &mut reported
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            for invalid in [EvaluatedArgs::NoArgs, EvaluatedArgs::NullWitness(None)] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            for calls in 1..=2 {
+                let ComputedValue::Bytes(output) = worker
+                    .eval_args(EvaluatedArgs::Bytes(Some(packet.clone())))
+                    .unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+                assert_eq!(output.value(), Some(expected.as_slice()));
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+            if operation == EvaluatedBytesOp::JsonMergePatchRawLegacy {
+                let ComputedValue::Bytes(output) =
+                    worker.eval_args(EvaluatedArgs::Bytes(Some(empty))).unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(output.value(), None);
+                assert_eq!(worker.kernel_invocations(), 3);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+        }
+    }
 
     #[test]
     fn clock_fixed_profiles_validate_actual_frames_and_reuse_owned_bytes() {
