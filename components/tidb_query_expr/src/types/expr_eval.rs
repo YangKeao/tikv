@@ -346,7 +346,8 @@ fn evaluated_ready_args_match(
             | EvaluatedBytesOp::RegexpMissingLegacyNative
             | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
-            | EvaluatedBytesOp::CompareMissingLegacy,
+            | EvaluatedBytesOp::CompareMissingLegacy
+            | EvaluatedBytesOp::JsonPredicateMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => types.is_empty() && operation.call_count() == 1,
         (
@@ -356,7 +357,8 @@ fn evaluated_ready_args_match(
             | EvaluatedBytesOp::RegexpMissingLegacyNative
             | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
-            | EvaluatedBytesOp::CompareMissingLegacy,
+            | EvaluatedBytesOp::CompareMissingLegacy
+            | EvaluatedBytesOp::JsonPredicateMissingLegacy,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,
@@ -379,6 +381,25 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (!operation.is_json_predicate_value()
+            || match values {
+                [ScalarValue::Bytes(first)] => {
+                    operation.json_predicate_args_valid(&[first.as_deref()])
+                }
+                [ScalarValue::Bytes(first), ScalarValue::Bytes(second)] => {
+                    operation.json_predicate_args_valid(&[first.as_deref(), second.as_deref()])
+                }
+                [
+                    ScalarValue::Bytes(first),
+                    ScalarValue::Bytes(second),
+                    ScalarValue::Bytes(third),
+                ] => operation.json_predicate_args_valid(&[
+                    first.as_deref(),
+                    second.as_deref(),
+                    third.as_deref(),
+                ]),
+                _ => false,
+            })
         && operation.grouping_mode().is_none_or(|mode| {
             matches!(values, [ScalarValue::Bytes(Some(gid)), ScalarValue::Bytes(Some(marks))]
                 if crate::impl_miscellaneous::grouping_native_args_valid(gid, marks, mode))
@@ -583,6 +604,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::BinaryArithmeticNullNative
                         | EvaluatedBytesOp::CompareNullNative
                         | EvaluatedBytesOp::GroupingNullNative
+                        | EvaluatedBytesOp::JsonPredicateNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
@@ -887,7 +909,8 @@ pub(crate) fn evaluated_bytes_shape(
             | EvaluatedBytesOp::RegexpMissingLegacyNative
             | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
-            | EvaluatedBytesOp::CompareMissingLegacy,
+            | EvaluatedBytesOp::CompareMissingLegacy
+            | EvaluatedBytesOp::JsonPredicateMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
         (
@@ -897,7 +920,8 @@ pub(crate) fn evaluated_bytes_shape(
             | EvaluatedBytesOp::RegexpMissingLegacyNative
             | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
-            | EvaluatedBytesOp::CompareMissingLegacy,
+            | EvaluatedBytesOp::CompareMissingLegacy
+            | EvaluatedBytesOp::JsonPredicateMissingLegacy,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,

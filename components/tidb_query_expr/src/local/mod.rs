@@ -177,7 +177,7 @@ pub use self::{
         ReadyBytesArg, ReadyConvBaseArg, ReadyDecimalArg, ReadyIeee754Arg, ReadyIntArg,
         ReadySubstringI128, ReportedEvaluatedFailure, UncompressOutcome, WorkerStorage,
         native_decimal_bridge_error, prepare_evaluated_ascii, prepare_evaluated_bytes,
-        prepare_grouping_args,
+        prepare_grouping_args, prepare_json_binary_pair_args, prepare_json_serde_args,
     },
     compile::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,

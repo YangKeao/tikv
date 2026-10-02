@@ -168,7 +168,8 @@ fn check_evaluated_bytes_source(
             | EvaluatedBytesOp::RegexpMissingLegacyNative
             | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
-            | EvaluatedBytesOp::CompareMissingLegacy,
+            | EvaluatedBytesOp::CompareMissingLegacy
+            | EvaluatedBytesOp::JsonPredicateMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
         (
@@ -178,7 +179,8 @@ fn check_evaluated_bytes_source(
             | EvaluatedBytesOp::RegexpMissingLegacyNative
             | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
-            | EvaluatedBytesOp::CompareMissingLegacy,
+            | EvaluatedBytesOp::CompareMissingLegacy
+            | EvaluatedBytesOp::JsonPredicateMissingLegacy,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,

@@ -423,6 +423,16 @@ pub enum LocalFunctionId {
     GroupingNumericCmpNative,
     GroupingNumericSetNative,
     GroupingNullNative,
+    JsonContainsSerdeNative,
+    JsonContainsPathSerdeNative,
+    JsonOverlapsSerdeNative,
+    JsonMemberOfSerdeNative,
+    JsonLengthSerdeNative,
+    JsonLengthPathSerdeNative,
+    JsonPathExistsSerdeNative,
+    JsonMemberOfBinaryLegacy,
+    JsonPredicateNullNative,
+    JsonPredicateMissingLegacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

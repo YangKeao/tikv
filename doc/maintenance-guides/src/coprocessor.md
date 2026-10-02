@@ -344,6 +344,17 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  JSON predicate/path policies live in `native_json.rs`, with fixed Int
+  workers in `impl_json.rs`. Actual prepared serde values remain separate
+  from datatype `json/native_policy.rs` raw-binary predicates; their numeric,
+  duplicate-key and error policies are not interchangeable. Native path
+  consumers use shared aliases. Contains-path executes one demanded path at
+  a time and returns the decisive/last worker result, preserving lazy path
+  coercion after eager child evaluation. Legacy MEMBER OF keeps its own raw
+  policy, first-NULL child demand, and full-array representation validation.
+  New value recipes use existing byte owners and fixed unit metadata; real
+  NULL/missing use distinct existing roles. NullEq composes existing presence,
+  comparison and IsTrue workers rather than adding an opcode/profile ladder.
   GROUPING's public mode/metadata/function types and unique bit/set algorithm
   live in `impl_miscellaneous.rs`. Three fixed mode kernels consume actual
   gid-LE8 and count-framed mark-set bytes; a separate genuine-NULL recipe does

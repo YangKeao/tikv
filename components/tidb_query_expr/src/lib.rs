@@ -45,6 +45,14 @@ pub mod impl_string;
 pub mod impl_time;
 pub mod impl_vec;
 
+mod native_json;
+pub use native_json::{
+    NativeJsonArraySelection, NativeJsonPath, NativeJsonPathError, NativeJsonPathLeg,
+    native_json_array_range, native_json_contains, native_json_equal, native_json_extract,
+    native_json_is_ecmascript_identifier, native_json_length, native_json_member_of,
+    native_json_overlaps, parse_native_json_path,
+};
+
 mod native_like;
 pub use native_like::{
     NativeCompiledIlikePattern, NativeCompiledLikePattern, NativeLikeInvocation, NativeLikeKind,
@@ -90,6 +98,14 @@ pub use self::{
     },
     impl_compare::ComparisonOp,
     impl_encryption::{NativeAesError, NativeAesOperation, NativeAesProfile},
+    impl_json::{
+        json_contains_path_serde_native_fn_meta, json_contains_serde_native_fn_meta,
+        json_length_path_serde_native_fn_meta, json_length_serde_native_fn_meta,
+        json_member_binary_legacy_args_valid, json_member_of_binary_legacy_fn_meta,
+        json_member_of_serde_native_fn_meta, json_overlaps_serde_native_fn_meta,
+        json_path_exists_serde_native_fn_meta, json_predicate_missing_legacy_fn_meta,
+        json_predicate_null_native_fn_meta, json_serde_native_args_valid,
+    },
     impl_miscellaneous::{
         GroupingFunction, GroupingMetadata, GroupingMetadataError, GroupingMode,
         NATIVE_UUID_EPOCH_100NS, format_uuid_native, grouping_native_args_valid,

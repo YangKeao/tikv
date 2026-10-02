@@ -140,6 +140,145 @@ fn json_quote_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
     native_quote(text).map(Some)
 }
 
+// These packets contain prepared serde values and original UTF-8 paths, not
+// binary JSON and not a frontend-computed predicate or path-match result.
+fn json_serde_native_value(bytes: &[u8]) -> Result<serde_json::Value> {
+    serde_json::from_slice(bytes)
+        .map_err(|error| other_err!("Invalid prepared serde JSON transport: {}", error))
+}
+
+fn json_serde_native_path(bytes: &[u8], allow_multiple: bool) -> Result<crate::NativeJsonPath> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| other_err!("Invalid native JSON path UTF-8 transport: {}", error))?;
+    let path = crate::parse_native_json_path(text).map_err(|error| {
+        other_err!(
+            "Invalid native JSON path transport at rune {}",
+            error.position
+        )
+    })?;
+    if !allow_multiple && path.could_match_multiple {
+        return Err(other_err!(
+            "Native JSON path transport must select a single value"
+        ));
+    }
+    Ok(path)
+}
+
+/// Validates actual prepared values/path transport for closed predicate calls.
+/// Callers separately validate each fixed role's arity and non-NULL presence.
+/// Only the path-existence profile permits multiple-match paths.
+pub fn json_serde_native_args_valid(
+    first: &[u8],
+    second: Option<&[u8]>,
+    path: Option<(&[u8], bool)>,
+) -> bool {
+    json_serde_native_value(first).is_ok()
+        && second.is_none_or(|bytes| json_serde_native_value(bytes).is_ok())
+        && path.is_none_or(|(bytes, multiple)| json_serde_native_path(bytes, multiple).is_ok())
+}
+
+/// Legacy member-of compares original binary payloads. Array documents must
+/// fully decode, exactly as native element_count/array_get did before lookup;
+/// non-array documents and the target retain the raw comparator's fallback.
+pub fn json_member_binary_legacy_args_valid(target: &[u8], document: &[u8]) -> bool {
+    let (Some(_), Some((&document_type, document_raw))) =
+        (target.split_first(), document.split_first())
+    else {
+        return false;
+    };
+    document_type != JsonType::Array as u8
+        || decode_native_binary_json_node(document_type, document_raw).is_ok()
+}
+
+#[rpn_fn]
+fn json_contains_serde_native(document: BytesRef, candidate: BytesRef) -> Result<Option<Int>> {
+    let document = json_serde_native_value(document)?;
+    let candidate = json_serde_native_value(candidate)?;
+    Ok(Some(Int::from(crate::native_json_contains(
+        &document, &candidate,
+    ))))
+}
+
+#[rpn_fn]
+fn json_contains_path_serde_native(
+    document: BytesRef,
+    candidate: BytesRef,
+    path: BytesRef,
+) -> Result<Option<Int>> {
+    let document = json_serde_native_value(document)?;
+    let candidate = json_serde_native_value(candidate)?;
+    let path = json_serde_native_path(path, false)?;
+    Ok(crate::native_json_extract(&document, &[path])
+        .map(|selected| Int::from(crate::native_json_contains(&selected, &candidate))))
+}
+
+#[rpn_fn]
+fn json_overlaps_serde_native(left: BytesRef, right: BytesRef) -> Result<Option<Int>> {
+    let left = json_serde_native_value(left)?;
+    let right = json_serde_native_value(right)?;
+    Ok(Some(Int::from(crate::native_json_overlaps(&left, &right))))
+}
+
+#[rpn_fn]
+fn json_member_of_serde_native(candidate: BytesRef, document: BytesRef) -> Result<Option<Int>> {
+    let candidate = json_serde_native_value(candidate)?;
+    let document = json_serde_native_value(document)?;
+    Ok(Some(Int::from(crate::native_json_member_of(
+        &candidate, &document,
+    ))))
+}
+
+#[rpn_fn]
+fn json_length_serde_native(document: BytesRef) -> Result<Option<Int>> {
+    let document = json_serde_native_value(document)?;
+    Ok(Some(crate::native_json_length(&document)))
+}
+
+#[rpn_fn]
+fn json_length_path_serde_native(document: BytesRef, path: BytesRef) -> Result<Option<Int>> {
+    let document = json_serde_native_value(document)?;
+    let path = json_serde_native_path(path, false)?;
+    Ok(crate::native_json_extract(&document, &[path])
+        .map(|selected| crate::native_json_length(&selected)))
+}
+
+#[rpn_fn]
+fn json_path_exists_serde_native(document: BytesRef, path: BytesRef) -> Result<Option<Int>> {
+    let document = json_serde_native_value(document)?;
+    let path = json_serde_native_path(path, true)?;
+    Ok(Some(Int::from(
+        crate::native_json_extract(&document, &[path]).is_some(),
+    )))
+}
+
+#[rpn_fn]
+fn json_member_of_binary_legacy(candidate: BytesRef, document: BytesRef) -> Result<Option<Int>> {
+    let (&candidate_type, candidate_raw) = candidate
+        .split_first()
+        .ok_or_else(|| other_err!("Legacy JSON member target transport has no type byte"))?;
+    let (&document_type, document_raw) = document
+        .split_first()
+        .ok_or_else(|| other_err!("Legacy JSON member document transport has no type byte"))?;
+    member_of_native_binary_json(candidate_type, candidate_raw, document_type, document_raw)
+        .map(|value| Some(Int::from(value)))
+        .map_err(|error| other_err!("Invalid legacy JSON member document transport: {:?}", error))
+}
+
+#[rpn_fn(nullable)]
+fn json_predicate_null_native(witness: Option<&Int>) -> Result<Option<Int>> {
+    if witness.is_some() {
+        return Err(other_err!(
+            "Native JSON predicate NULL witness contains a value"
+        ));
+    }
+    Ok(None)
+}
+
+#[rpn_fn]
+fn json_predicate_missing_legacy() -> Result<Option<Int>> {
+    Ok(None)
+}
+
 #[rpn_fn]
 #[inline]
 fn json_depth(arg: JsonRef) -> Result<Option<i64>> {
@@ -667,6 +806,248 @@ fn parse_json_path(path: Option<BytesRef>) -> Result<Option<PathExpression>> {
     }?;
 
     Ok(Some(parse_json_path_expr(json_path)?))
+}
+
+#[cfg(test)]
+mod native_json_predicate_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_native_json_predicates_keep_serde_values_and_path_results() {
+        let metadata = [
+            (
+                json_contains_serde_native_fn_meta(),
+                "json_contains_serde_native",
+            ),
+            (
+                json_contains_path_serde_native_fn_meta(),
+                "json_contains_path_serde_native",
+            ),
+            (
+                json_overlaps_serde_native_fn_meta(),
+                "json_overlaps_serde_native",
+            ),
+            (
+                json_member_of_serde_native_fn_meta(),
+                "json_member_of_serde_native",
+            ),
+            (
+                json_length_serde_native_fn_meta(),
+                "json_length_serde_native",
+            ),
+            (
+                json_length_path_serde_native_fn_meta(),
+                "json_length_path_serde_native",
+            ),
+            (
+                json_path_exists_serde_native_fn_meta(),
+                "json_path_exists_serde_native",
+            ),
+            (
+                json_member_of_binary_legacy_fn_meta(),
+                "json_member_of_binary_legacy",
+            ),
+            (
+                json_predicate_null_native_fn_meta(),
+                "json_predicate_null_native",
+            ),
+            (
+                json_predicate_missing_legacy_fn_meta(),
+                "json_predicate_missing_legacy",
+            ),
+        ];
+        for (meta, expected_name) in metadata {
+            assert_eq!(meta.name, expected_name);
+        }
+        // serde_json's test_roundtrip_f64 records this literal as an old
+        // non-float_roundtrip deserializer regression; prepared values must
+        // preserve its exact bits, not drift before predicate evaluation.
+        let exact = 51.24817837550540_4f64;
+        let prepared = serde_json::to_vec(&exact).unwrap();
+        assert_eq!(
+            json_serde_native_value(&prepared)
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            exact.to_bits()
+        );
+        assert_eq!(
+            json_contains_serde_native(br#"{"a":[1,2]}"#, br#"{"a":[2]}"#).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_contains_serde_native(b"[1]", b"[1,1]").unwrap(),
+            Some(1)
+        );
+        assert_eq!(json_contains_serde_native(b"0", b"1e-17").unwrap(), Some(0));
+        assert_eq!(
+            json_overlaps_serde_native(br#"{"k":1}"#, br#"{"k":1.0,"x":2}"#).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_overlaps_serde_native(b"[0]", b"[1e-17]").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            json_member_of_serde_native(br#""1""#, b"[1]").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            json_member_of_serde_native(b"1.0", b"[1]").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_member_of_serde_native(b"[1]", b"[[1],2]").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_member_of_serde_native(b"[1]", b"[1]").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            json_member_of_serde_native(b"18446744073709551615", b"[18446744073709551615]")
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_member_of_serde_native(b"9223372036854775808", b"[9223372036854775809]").unwrap(),
+            Some(0)
+        );
+        assert_eq!(json_length_serde_native(b"null").unwrap(), Some(1));
+        assert_eq!(json_length_serde_native(b"[]").unwrap(), Some(0));
+        assert_eq!(
+            json_length_serde_native(br#"{"a":1,"b":2}"#).unwrap(),
+            Some(2)
+        );
+        let document = br#"{"a":[1,2],"n":null}"#;
+        assert_eq!(
+            json_contains_path_serde_native(document, b"2", b"$.a").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_contains_path_serde_native(document, b"null", b"$.n").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_contains_path_serde_native(document, b"2", b"$.missing").unwrap(),
+            None
+        );
+        assert_eq!(
+            json_length_path_serde_native(document, b"$.a").unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            json_length_path_serde_native(document, b"$.a[last]").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_length_path_serde_native(document, b"$.missing").unwrap(),
+            None
+        );
+        assert_eq!(
+            json_path_exists_serde_native(document, b"$.n").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_path_exists_serde_native(document, b"$.a[*]").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_path_exists_serde_native(b"[]", b"$[*]").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            json_path_exists_serde_native(document, b"$.missing").unwrap(),
+            Some(0)
+        );
+        assert_eq!(json_predicate_null_native(None).unwrap(), None);
+        assert_eq!(json_predicate_missing_legacy().unwrap(), None);
+    }
+
+    #[test]
+    fn fixed_native_json_predicates_reject_transport_and_validate_whole_legacy_arrays() {
+        assert!(json_serde_native_args_valid(b"null", Some(b"1"), None));
+        assert!(!json_serde_native_args_valid(b"[", None, None));
+        assert!(!json_serde_native_args_valid(b"null", Some(b""), None));
+        assert!(!json_serde_native_args_valid(
+            b"null",
+            None,
+            Some((&[0xff], true))
+        ));
+        assert!(!json_serde_native_args_valid(
+            b"null",
+            None,
+            Some((b"not-a-path", true))
+        ));
+        assert!(!json_serde_native_args_valid(
+            b"[]",
+            None,
+            Some((b"$[*]", false))
+        ));
+        assert!(json_serde_native_args_valid(
+            b"[]",
+            None,
+            Some((b"$[*]", true))
+        ));
+        assert!(json_contains_serde_native(b"[", b"0").is_err());
+        assert!(json_contains_path_serde_native(b"[]", b"0", b"$[*]").is_err());
+        assert!(json_length_path_serde_native(b"[]", b"$[*]").is_err());
+        assert!(json_path_exists_serde_native(b"[]", b"not-a-path").is_err());
+        assert!(json_predicate_null_native(Some(&0)).is_err());
+
+        let mut zero = vec![JsonType::I64 as u8];
+        zero.extend_from_slice(&0i64.to_le_bytes());
+        let mut tiny = vec![JsonType::Double as u8];
+        tiny.extend_from_slice(&1e-17f64.to_le_bytes());
+        // One actual int64 array element: header8 + entry5 + payload8.
+        let mut array = vec![JsonType::Array as u8];
+        array.extend_from_slice(&1u32.to_le_bytes());
+        array.extend_from_slice(&21u32.to_le_bytes());
+        array.push(JsonType::I64 as u8);
+        array.extend_from_slice(&13u32.to_le_bytes());
+        array.extend_from_slice(&0i64.to_le_bytes());
+        assert!(json_member_binary_legacy_args_valid(&zero, &array));
+        assert_eq!(
+            json_member_of_binary_legacy(&zero, &array).unwrap(),
+            Some(1)
+        );
+        // Legacy's raw mixed-number epsilon is intentionally NOT serde equality.
+        assert_eq!(
+            json_member_of_binary_legacy(&tiny, &array).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            json_member_of_serde_native(b"1e-17", b"[0]").unwrap(),
+            Some(0)
+        );
+
+        // A matching first element must not hide an invalid later child. Native
+        // element_count decoded the entire node before even starting lookup.
+        let mut malformed = vec![JsonType::Array as u8];
+        malformed.extend_from_slice(&2u32.to_le_bytes());
+        malformed.extend_from_slice(&26u32.to_le_bytes());
+        malformed.push(JsonType::I64 as u8);
+        malformed.extend_from_slice(&18u32.to_le_bytes());
+        malformed.push(JsonType::I64 as u8);
+        malformed.extend_from_slice(&26u32.to_le_bytes());
+        malformed.extend_from_slice(&0i64.to_le_bytes());
+        assert!(!json_member_binary_legacy_args_valid(&zero, &malformed));
+        assert!(json_member_of_binary_legacy(&zero, &malformed).is_err());
+        assert!(!json_member_binary_legacy_args_valid(b"", &array));
+        assert!(!json_member_binary_legacy_args_valid(&zero, b""));
+        assert!(json_member_of_binary_legacy(b"", &array).is_err());
+        assert!(json_member_of_binary_legacy(&zero, b"").is_err());
+        let scalar_fallback = [JsonType::I64 as u8];
+        assert!(json_member_binary_legacy_args_valid(
+            &scalar_fallback,
+            &scalar_fallback
+        ));
+        assert_eq!(
+            json_member_of_binary_legacy(&scalar_fallback, &scalar_fallback).unwrap(),
+            Some(1)
+        );
+    }
 }
 
 #[cfg(test)]

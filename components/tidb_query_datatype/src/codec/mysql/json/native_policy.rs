@@ -323,6 +323,259 @@ fn compare_native_nodes(left: &NativeBinaryJsonNode, right: &NativeBinaryJsonNod
     }
 }
 
+/// Native SDK containment over lossless binary nodes, not serde-value policy.
+pub fn contains_native_binary_json(
+    object_type: u8,
+    object_raw: &[u8],
+    target_type: u8,
+    target_raw: &[u8],
+) -> Result<bool, NativeBinaryJsonError> {
+    let object = decode_native_binary_json_node(object_type, object_raw)?;
+    let target = decode_native_binary_json_node(target_type, target_raw)?;
+    native_contains_node(&object, &target)
+}
+
+/// Native SDK overlap retains fallible whole-value equality one level down.
+pub fn overlaps_native_binary_json(
+    object_type: u8,
+    object_raw: &[u8],
+    target_type: u8,
+    target_raw: &[u8],
+) -> Result<bool, NativeBinaryJsonError> {
+    let object = decode_native_binary_json_node(object_type, object_raw)?;
+    let target = decode_native_binary_json_node(target_type, target_raw)?;
+    native_overlaps_node(&object, &target)
+}
+
+fn native_contains_node(
+    object: &NativeBinaryJsonNode,
+    target: &NativeBinaryJsonNode,
+) -> Result<bool, NativeBinaryJsonError> {
+    Ok(match (object, target) {
+        (NativeJsonNode::Object(object), NativeJsonNode::Object(target)) => {
+            target.iter().all(|(key, target)| {
+                object
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .is_some_and(|(_, object)| {
+                        native_contains_node(object, target).unwrap_or(false)
+                    })
+            })
+        }
+        (NativeJsonNode::Array(object), NativeJsonNode::Array(target)) => {
+            target.iter().all(|target| {
+                object
+                    .iter()
+                    .any(|object| native_contains_node(object, target).unwrap_or(false))
+            })
+        }
+        (NativeJsonNode::Array(object), target) => object
+            .iter()
+            .any(|object| native_contains_node(object, target).unwrap_or(false)),
+        _ => native_predicate_nodes_equal(object, target)?,
+    })
+}
+
+fn native_overlaps_node(
+    left: &NativeBinaryJsonNode,
+    right: &NativeBinaryJsonNode,
+) -> Result<bool, NativeBinaryJsonError> {
+    let (object, target) = match (left, right) {
+        (
+            left @ (NativeJsonNode::Object(_) | NativeJsonNode::Scalar(_)),
+            right @ NativeJsonNode::Array(_),
+        ) => (right, left),
+        _ => (left, right),
+    };
+    Ok(match (object, target) {
+        (NativeJsonNode::Object(object), NativeJsonNode::Object(target)) => {
+            target.iter().try_fold(false, |found, (key, value)| {
+                if found {
+                    return Ok(true);
+                }
+                match object.iter().find(|(name, _)| name == key) {
+                    Some((_, existing)) => native_predicate_nodes_equal(existing, value),
+                    None => Ok(false),
+                }
+            })?
+        }
+        (NativeJsonNode::Object(_), _) => false,
+        (NativeJsonNode::Array(object), NativeJsonNode::Array(target)) => {
+            object.iter().try_fold(false, |found, element| {
+                if found {
+                    return Ok(true);
+                }
+                target.iter().try_fold(false, |found, other| {
+                    if found {
+                        return Ok(true);
+                    }
+                    native_predicate_nodes_equal(element, other)
+                })
+            })?
+        }
+        (NativeJsonNode::Array(object), target) => {
+            object.iter().try_fold(false, |found, element| {
+                if found {
+                    return Ok(true);
+                }
+                native_predicate_nodes_equal(element, target)
+            })?
+        }
+        (object, target) => native_predicate_nodes_equal(object, target)?,
+    })
+}
+
+fn native_predicate_nodes_equal(
+    left: &NativeBinaryJsonNode,
+    right: &NativeBinaryJsonNode,
+) -> Result<bool, NativeBinaryJsonError> {
+    let (left, _) = normalize_native_predicate_node(left, 0)?;
+    let (right, _) = normalize_native_predicate_node(right, 0)?;
+    Ok(compare_native_nodes(&left, &right).is_eq())
+}
+
+// The original SDK equality leaves called from_node before comparing. Preserve
+// its sorted (not deduplicated) objects and representability checks, but do not
+// emit binary bytes merely to decode them again. Overlapping source offsets can
+// expand on re-encoding, so successfully decoded input alone is not sufficient.
+fn normalize_native_predicate_node(
+    node: &NativeBinaryJsonNode,
+    depth: usize,
+) -> Result<(NativeBinaryJsonNode, usize), NativeBinaryJsonError> {
+    if depth > MAX_NATIVE_JSON_DEPTH {
+        return Err(NativeBinaryJsonError::TooDeep);
+    }
+    let invalid = || NativeBinaryJsonError::InvalidBinary;
+    let add = |left: usize, right: usize| left.checked_add(right).ok_or_else(invalid);
+    let finish_size = |size: usize| -> Result<usize, NativeBinaryJsonError> {
+        u32::try_from(size).map_err(|_| NativeBinaryJsonError::InvalidBinary)?;
+        Ok(size)
+    };
+    let out_of_line = |node: &NativeBinaryJsonNode, size| match node {
+        NativeJsonNode::Scalar((JSON_TYPE_CODE_LITERAL, _)) => 0,
+        _ => size,
+    };
+    match node {
+        NativeJsonNode::Scalar((kind, value)) => {
+            Ok((NativeJsonNode::Scalar((*kind, value.clone())), value.len()))
+        }
+        NativeJsonNode::Array(values) => {
+            // Source encode_node visits all children before encoding a header.
+            let children = values
+                .iter()
+                .map(|value| normalize_native_predicate_node(value, depth + 1))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut size = add(
+                HEADER_SIZE,
+                values
+                    .len()
+                    .checked_mul(VALUE_ENTRY_SIZE)
+                    .ok_or_else(invalid)?,
+            )?;
+            for (child, length) in &children {
+                size = add(size, out_of_line(child, *length))?;
+            }
+            u32::try_from(values.len()).map_err(|_| invalid())?;
+            let size = finish_size(size)?;
+            Ok((
+                NativeJsonNode::Array(children.into_iter().map(|(child, _)| child).collect()),
+                size,
+            ))
+        }
+        NativeJsonNode::Object(values) => {
+            let mut children = values
+                .iter()
+                .map(|(key, value)| {
+                    normalize_native_predicate_node(value, depth + 1)
+                        .map(|(value, length)| (key.clone(), value, length))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            children.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+            let mut size = add(
+                HEADER_SIZE,
+                values
+                    .len()
+                    .checked_mul(KEY_ENTRY_SIZE + VALUE_ENTRY_SIZE)
+                    .ok_or_else(invalid)?,
+            )?;
+            for (key, ..) in &children {
+                // The original decoder already restricts each key length to u16.
+                u16::try_from(key.len()).map_err(|_| invalid())?;
+                size = add(size, key.len())?;
+            }
+            for (_, child, length) in &children {
+                size = add(size, out_of_line(child, *length))?;
+            }
+            u32::try_from(values.len()).map_err(|_| invalid())?;
+            let size = finish_size(size)?;
+            Ok((
+                NativeJsonNode::Object(
+                    children
+                        .into_iter()
+                        .map(|(key, value, _)| (key, value))
+                        .collect(),
+                ),
+                size,
+            ))
+        }
+    }
+}
+
+/// Legacy MEMBER OF. The original element_count fully decoded the array before
+/// scanning it; each array_get then re-encoded a child and skipped its failure.
+/// Scalar documents instead take the original raw comparator's fallbacks.
+pub fn member_of_native_binary_json(
+    candidate_type: u8,
+    candidate_raw: &[u8],
+    document_type: u8,
+    document_raw: &[u8],
+) -> Result<bool, NativeBinaryJsonError> {
+    if document_type != JSON_TYPE_CODE_ARRAY {
+        return Ok(compare_native_binary_json(
+            document_type,
+            document_raw,
+            candidate_type,
+            candidate_raw,
+        )
+        .is_eq());
+    }
+    let NativeJsonNode::Array(values) =
+        decode_native_binary_json_node(document_type, document_raw)?
+    else {
+        unreachable!("array tag decoded to non-array node");
+    };
+    for value in &values {
+        let Ok((value, _)) = normalize_native_predicate_node(value, 0) else {
+            continue;
+        };
+        let ordering = match &value {
+            NativeJsonNode::Scalar((kind, raw)) => {
+                compare_native_binary_json(*kind, raw, candidate_type, candidate_raw)
+            }
+            NativeJsonNode::Array(_) | NativeJsonNode::Object(_) => {
+                let rank = if matches!(value, NativeJsonNode::Array(_)) {
+                    7
+                } else {
+                    6
+                };
+                let candidate_rank = native_json_precedence(candidate_type, candidate_raw);
+                if rank != candidate_rank {
+                    rank.cmp(&candidate_rank)
+                } else {
+                    match decode_native_binary_json_node(candidate_type, candidate_raw) {
+                        Ok(candidate) => compare_native_nodes(&value, &candidate),
+                        Err(_) => Ordering::Equal,
+                    }
+                }
+            }
+        };
+        if ordering.is_eq() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn native_json_precedence(type_code: u8, value: &[u8]) -> i8 {
     match type_code {
         JSON_TYPE_CODE_OPAQUE => match native_binary_json_type_name(type_code, value) {
@@ -803,6 +1056,196 @@ mod native_binary_tests {
         assert_eq!(
             compare_native_binary_json(0x03, &short_entry, 0x03, &[0, 0, 0, 0, 8, 0, 0, 0]),
             Ordering::Equal
+        );
+    }
+}
+
+#[cfg(test)]
+mod native_predicate_tests {
+    use super::*;
+
+    #[test]
+    fn raw_predicates_keep_epsilon_duplicates_temporal_and_malformed_policies() {
+        let integer = 1_i64.to_le_bytes();
+        let nearby = 1.000000005_f64.to_le_bytes();
+        assert_eq!(
+            contains_native_binary_json(
+                JSON_TYPE_CODE_INT64,
+                &integer,
+                JSON_TYPE_CODE_FLOAT64,
+                &nearby
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            overlaps_native_binary_json(
+                JSON_TYPE_CODE_INT64,
+                &integer,
+                JSON_TYPE_CODE_FLOAT64,
+                &nearby
+            ),
+            Ok(true)
+        );
+        let time = 0x1234_5678_0000_0000_u64.to_le_bytes();
+        let flags = 0x1234_5678_0000_000f_u64.to_le_bytes();
+        assert_eq!(
+            contains_native_binary_json(
+                JSON_TYPE_CODE_DATETIME,
+                &time,
+                JSON_TYPE_CODE_DATETIME,
+                &flags
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            overlaps_native_binary_json(JSON_TYPE_CODE_DATE, &time, JSON_TYPE_CODE_DATETIME, &time),
+            Ok(false)
+        );
+        assert_eq!(
+            contains_native_binary_json(JSON_TYPE_CODE_OPAQUE, &[], JSON_TYPE_CODE_OPAQUE, &[]),
+            Err(NativeBinaryJsonError::InvalidBinary)
+        );
+        assert_eq!(
+            member_of_native_binary_json(JSON_TYPE_CODE_OPAQUE, &[], JSON_TYPE_CODE_OPAQUE, &[]),
+            Ok(true)
+        );
+        let malformed_array = [
+            2,
+            0,
+            0,
+            0,
+            18,
+            0,
+            0,
+            0,
+            JSON_TYPE_CODE_LITERAL,
+            JSON_LITERAL_TRUE,
+            0,
+            0,
+            0,
+            0xff,
+            0,
+            0,
+            0,
+            0,
+        ];
+        // element_count used full decoding, so even an earlier match cannot
+        // bypass a malformed later array element.
+        assert_eq!(
+            member_of_native_binary_json(
+                JSON_TYPE_CODE_LITERAL,
+                &[JSON_LITERAL_TRUE],
+                JSON_TYPE_CODE_ARRAY,
+                &malformed_array
+            ),
+            Err(NativeBinaryJsonError::InvalidBinary)
+        );
+        let duplicate_object = [
+            2,
+            0,
+            0,
+            0,
+            32,
+            0,
+            0,
+            0,
+            30,
+            0,
+            0,
+            0,
+            1,
+            0,
+            31,
+            0,
+            0,
+            0,
+            1,
+            0,
+            JSON_TYPE_CODE_LITERAL,
+            JSON_LITERAL_TRUE,
+            0,
+            0,
+            0,
+            JSON_TYPE_CODE_LITERAL,
+            JSON_LITERAL_FALSE,
+            0,
+            0,
+            0,
+            b'a',
+            b'a',
+        ];
+        let last_key_value = [
+            1,
+            0,
+            0,
+            0,
+            20,
+            0,
+            0,
+            0,
+            19,
+            0,
+            0,
+            0,
+            1,
+            0,
+            JSON_TYPE_CODE_LITERAL,
+            JSON_LITERAL_FALSE,
+            0,
+            0,
+            0,
+            b'a',
+        ];
+        // Lossless SDK containment and overlap use the FIRST matching key,
+        // unlike the serde preparation's last-key-wins value map.
+        assert_eq!(
+            contains_native_binary_json(
+                JSON_TYPE_CODE_OBJECT,
+                &duplicate_object,
+                JSON_TYPE_CODE_OBJECT,
+                &last_key_value
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            overlaps_native_binary_json(
+                JSON_TYPE_CODE_OBJECT,
+                &duplicate_object,
+                JSON_TYPE_CODE_OBJECT,
+                &last_key_value
+            ),
+            Ok(false)
+        );
+        assert_eq!(
+            member_of_native_binary_json(
+                JSON_TYPE_CODE_OBJECT,
+                &last_key_value,
+                JSON_TYPE_CODE_OBJECT,
+                &duplicate_object
+            ),
+            Ok(false)
+        );
+        let mut object_array = vec![1, 0, 0, 0, 45, 0, 0, 0, JSON_TYPE_CODE_OBJECT, 13, 0, 0, 0];
+        object_array.extend_from_slice(&duplicate_object);
+        assert_eq!(
+            member_of_native_binary_json(
+                JSON_TYPE_CODE_OBJECT,
+                &duplicate_object,
+                JSON_TYPE_CODE_ARRAY,
+                &object_array
+            ),
+            Ok(true)
+        );
+        // A malformed equal-rank candidate retains the raw comparator's equal
+        // fallback; only the document's array is unconditionally decoded.
+        assert_eq!(
+            member_of_native_binary_json(
+                JSON_TYPE_CODE_OBJECT,
+                &[],
+                JSON_TYPE_CODE_ARRAY,
+                &object_array
+            ),
+            Ok(true)
         );
     }
 }

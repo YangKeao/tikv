@@ -373,7 +373,17 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::GroupingBitAndNative
         | LocalFunctionId::GroupingNumericCmpNative
         | LocalFunctionId::GroupingNumericSetNative
-        | LocalFunctionId::GroupingNullNative => Err(other_err!(
+        | LocalFunctionId::GroupingNullNative
+        | LocalFunctionId::JsonContainsSerdeNative
+        | LocalFunctionId::JsonContainsPathSerdeNative
+        | LocalFunctionId::JsonOverlapsSerdeNative
+        | LocalFunctionId::JsonMemberOfSerdeNative
+        | LocalFunctionId::JsonLengthSerdeNative
+        | LocalFunctionId::JsonLengthPathSerdeNative
+        | LocalFunctionId::JsonPathExistsSerdeNative
+        | LocalFunctionId::JsonMemberOfBinaryLegacy
+        | LocalFunctionId::JsonPredicateNullNative
+        | LocalFunctionId::JsonPredicateMissingLegacy => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),
