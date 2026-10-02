@@ -381,6 +381,16 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (!operation.is_json_output_value()
+            || match values {
+                [ScalarValue::Bytes(first)] => {
+                    operation.json_output_args_valid(&[first.as_deref()])
+                }
+                [ScalarValue::Bytes(first), ScalarValue::Bytes(second)] => {
+                    operation.json_output_args_valid(&[first.as_deref(), second.as_deref()])
+                }
+                _ => false,
+            })
         && (!operation.is_json_predicate_value()
             || match values {
                 [ScalarValue::Bytes(first)] => {
@@ -605,6 +615,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::CompareNullNative
                         | EvaluatedBytesOp::GroupingNullNative
                         | EvaluatedBytesOp::JsonPredicateNullNative
+                        | EvaluatedBytesOp::JsonOutputNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,

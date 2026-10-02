@@ -344,6 +344,16 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  ARRAY/OBJECT/KEYS/PRETTY use fixed byte-result workers and the shared
+  native formatter in `native_json.rs`. Constructor packets contain actual
+  ordered values/pairs, not preassembled results; a zero-count packet is the
+  real empty argument list. Workers own construction and duplicate-key
+  resolution. JSON outputs retain the old native parse/encoding boundary;
+  PRETTY is plain text, and SQL NULL is distinct from a JSON-null value.
+  The public raw SDK key algorithm delegates separately, retaining duplicate
+  keys and nonobject-empty-array behavior. Typed JSON dispatch forwards its
+  real context rather than taking a contextless constructor/pretty shortcut.
+  Raw EXTRACT and UNQUOTE policies remain outside this batch.
   JSON predicate/path policies live in `native_json.rs`, with fixed Int
   workers in `impl_json.rs`. Actual prepared serde values remain separate
   from datatype `json/native_policy.rs` raw-binary predicates; their numeric,

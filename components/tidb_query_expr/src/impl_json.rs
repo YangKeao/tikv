@@ -279,6 +279,137 @@ fn json_predicate_missing_legacy() -> Result<Option<Int>> {
     Ok(None)
 }
 
+fn json_serde_packet_word(remaining: &mut &[u8]) -> Result<usize> {
+    if remaining.len() < 8 {
+        return Err(other_err!("Truncated native JSON packet word"));
+    }
+    let (word, tail) = remaining.split_at(8);
+    *remaining = tail;
+    usize::try_from(u64::from_le_bytes(word.try_into().unwrap()))
+        .map_err(|_| other_err!("Native JSON packet extent does not fit usize"))
+}
+
+fn json_serde_packet_bytes<'a>(remaining: &mut &'a [u8]) -> Result<&'a [u8]> {
+    let length = json_serde_packet_word(remaining)?;
+    if length > remaining.len() {
+        return Err(other_err!("Truncated native JSON packet value"));
+    }
+    let (value, tail) = remaining.split_at(length);
+    *remaining = tail;
+    Ok(value)
+}
+
+// One bounded walker serves admission and execution. The fixed operation, not
+// any packet opcode, determines whether each entry also has an actual key.
+// The count is checked against physical framing before iteration or allocation.
+fn walk_json_serde_packet(
+    packet: &[u8],
+    object_pairs: bool,
+    mut consume: impl FnMut(Option<&str>, serde_json::Value) -> Result<()>,
+) -> Result<()> {
+    let mut remaining = packet;
+    let count = json_serde_packet_word(&mut remaining)?;
+    let minimum_entry_bytes = if object_pairs { 16 } else { 8 };
+    if count > remaining.len() / minimum_entry_bytes {
+        return Err(other_err!("Native JSON packet count exceeds its framing"));
+    }
+    for _ in 0..count {
+        let key = if object_pairs {
+            Some(
+                std::str::from_utf8(json_serde_packet_bytes(&mut remaining)?).map_err(|error| {
+                    other_err!("Invalid native JSON object key UTF-8: {}", error)
+                })?,
+            )
+        } else {
+            None
+        };
+        let value = json_serde_native_value(json_serde_packet_bytes(&mut remaining)?)?;
+        consume(key, value)?;
+    }
+    if !remaining.is_empty() {
+        return Err(other_err!("Native JSON packet has trailing bytes"));
+    }
+    Ok(())
+}
+
+/// An actual argument-list packet, including count zero, is not a JSON array
+/// prepared by the caller. Only the worker constructs the resulting array.
+pub fn json_array_serde_args_valid(packet: &[u8]) -> bool {
+    walk_json_serde_packet(packet, false, |_, _| Ok(())).is_ok()
+}
+
+/// Ordered actual key/value pairs; duplicates remain in order for worker-side
+/// last-wins construction, rather than a caller-precomputed JSON object.
+pub fn json_object_serde_args_valid(packet: &[u8]) -> bool {
+    walk_json_serde_packet(packet, true, |_, _| Ok(())).is_ok()
+}
+
+#[rpn_fn]
+fn json_array_serde_native(packet: BytesRef) -> Result<Option<Bytes>> {
+    let mut values = Vec::new();
+    walk_json_serde_packet(packet, false, |_, value| {
+        values.try_reserve(1).map_err(|error| {
+            other_err!("Unable to allocate native JSON array inputs: {}", error)
+        })?;
+        values.push(value);
+        Ok(())
+    })?;
+    let value = crate::native_json_array(values);
+    Ok(Some(crate::native_json_format(&value).into_bytes()))
+}
+
+#[rpn_fn]
+fn json_object_serde_native(packet: BytesRef) -> Result<Option<Bytes>> {
+    let mut pairs = Vec::new();
+    walk_json_serde_packet(packet, true, |key, value| {
+        let key = key.ok_or_else(|| other_err!("Native JSON object packet lacks a key"))?;
+        let mut owned_key = String::new();
+        owned_key
+            .try_reserve_exact(key.len())
+            .map_err(|error| other_err!("Unable to allocate native JSON object key: {}", error))?;
+        owned_key.push_str(key);
+        pairs.try_reserve(1).map_err(|error| {
+            other_err!("Unable to allocate native JSON object inputs: {}", error)
+        })?;
+        pairs.push((owned_key, value));
+        Ok(())
+    })?;
+    let value = crate::native_json_object(pairs);
+    Ok(Some(crate::native_json_format(&value).into_bytes()))
+}
+
+#[rpn_fn]
+fn json_keys_serde_native(document: BytesRef) -> Result<Option<Bytes>> {
+    let document = json_serde_native_value(document)?;
+    Ok(crate::native_json_keys(&document)
+        .map(|value| crate::native_json_format(&value).into_bytes()))
+}
+
+#[rpn_fn]
+fn json_keys_path_serde_native(document: BytesRef, path: BytesRef) -> Result<Option<Bytes>> {
+    let document = json_serde_native_value(document)?;
+    let path = json_serde_native_path(path, false)?;
+    Ok(crate::native_json_extract(&document, &[path])
+        .and_then(|value| crate::native_json_keys(&value))
+        .map(|value| crate::native_json_format(&value).into_bytes()))
+}
+
+#[rpn_fn]
+fn json_pretty_serde_native(document: BytesRef) -> Result<Option<Bytes>> {
+    let document = json_serde_native_value(document)?;
+    Ok(Some(crate::native_json_pretty(&document).into_bytes()))
+}
+
+#[rpn_fn(nullable)]
+fn json_output_null_native(witness: Option<&Int>) -> Result<Option<Bytes>> {
+    if witness.is_some() {
+        return Err(other_err!(
+            "Native JSON output NULL witness contains a value"
+        ));
+    }
+    Ok(None)
+}
+
 #[rpn_fn]
 #[inline]
 fn json_depth(arg: JsonRef) -> Result<Option<i64>> {
@@ -806,6 +937,175 @@ fn parse_json_path(path: Option<BytesRef>) -> Result<Option<PathExpression>> {
     }?;
 
     Ok(Some(parse_json_path_expr(json_path)?))
+}
+
+#[cfg(test)]
+mod native_json_output_tests {
+    use super::*;
+
+    fn array_packet(values: &[&[u8]]) -> Vec<u8> {
+        let mut packet = (values.len() as u64).to_le_bytes().to_vec();
+        for value in values {
+            packet.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            packet.extend_from_slice(value);
+        }
+        packet
+    }
+
+    fn object_packet(pairs: &[(&[u8], &[u8])]) -> Vec<u8> {
+        let mut packet = (pairs.len() as u64).to_le_bytes().to_vec();
+        for (key, value) in pairs {
+            packet.extend_from_slice(&(key.len() as u64).to_le_bytes());
+            packet.extend_from_slice(key);
+            packet.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            packet.extend_from_slice(value);
+        }
+        packet
+    }
+
+    #[test]
+    fn fixed_native_json_outputs_construct_ordered_values_and_exact_native_text() {
+        for (meta, name) in [
+            (json_array_serde_native_fn_meta(), "json_array_serde_native"),
+            (
+                json_object_serde_native_fn_meta(),
+                "json_object_serde_native",
+            ),
+            (json_keys_serde_native_fn_meta(), "json_keys_serde_native"),
+            (
+                json_keys_path_serde_native_fn_meta(),
+                "json_keys_path_serde_native",
+            ),
+            (
+                json_pretty_serde_native_fn_meta(),
+                "json_pretty_serde_native",
+            ),
+            (json_output_null_native_fn_meta(), "json_output_null_native"),
+        ] {
+            assert_eq!(meta.name, name);
+        }
+        let empty_array = array_packet(&[]);
+        let empty_object = object_packet(&[]);
+        assert!(json_array_serde_args_valid(&empty_array));
+        assert!(json_object_serde_args_valid(&empty_object));
+        assert_eq!(
+            json_array_serde_native(&empty_array).unwrap(),
+            Some(b"[]".to_vec())
+        );
+        assert_eq!(
+            json_object_serde_native(&empty_object).unwrap(),
+            Some(b"{}".to_vec())
+        );
+        let array = array_packet(&[
+            b"null",
+            b"1",
+            b"1.0",
+            b"-0.0",
+            b"1e15",
+            b"1e-16",
+            b"18446744073709551615",
+            br#"{"b":2,"a":[true,null]}"#,
+        ]);
+        assert!(json_array_serde_args_valid(&array));
+        assert_eq!(json_array_serde_native(&array).unwrap(), Some(
+            br#"[null, 1, 1.0, -0.0, 1e15, 1e-16, 18446744073709551615, {"a": [true, null], "b": 2}]"#.to_vec()
+        ));
+        let object = object_packet(&[
+            (b"z", b"1"),
+            (b"a", b"1.0"),
+            (b"z", b"null"),
+            (b"", br#""<>&""#),
+            (b"a", b"2"),
+        ]);
+        assert!(json_object_serde_args_valid(&object));
+        assert_eq!(
+            json_object_serde_native(&object).unwrap(),
+            Some(br#"{"": "<>&", "a": 2, "z": null}"#.to_vec())
+        );
+        assert_eq!(
+            json_keys_serde_native(br#"{"z":1,"a":2}"#).unwrap(),
+            Some(br#"["a", "z"]"#.to_vec())
+        );
+        assert_eq!(json_keys_serde_native(b"{}").unwrap(), Some(b"[]".to_vec()));
+        assert_eq!(json_keys_serde_native(b"[]").unwrap(), None);
+        assert_eq!(json_keys_serde_native(b"null").unwrap(), None);
+        let document = br#"{"a":{"y":2,"x":1},"n":null}"#;
+        assert_eq!(
+            json_keys_path_serde_native(document, b"$.a").unwrap(),
+            Some(br#"["x", "y"]"#.to_vec())
+        );
+        assert_eq!(
+            json_keys_path_serde_native(document, b"$.missing").unwrap(),
+            None
+        );
+        assert_eq!(json_keys_path_serde_native(document, b"$.n").unwrap(), None);
+        assert_eq!(
+            json_pretty_serde_native(br#"{"b":[1,2],"a":true}"#).unwrap(),
+            Some(b"{\n  \"a\": true,\n  \"b\": [\n    1,\n    2\n  ]\n}".to_vec())
+        );
+        assert_eq!(
+            json_pretty_serde_native(b"null").unwrap(),
+            Some(b"null".to_vec())
+        );
+        assert_eq!(
+            json_pretty_serde_native(b"1.0").unwrap(),
+            Some(b"1.0".to_vec())
+        );
+        assert_eq!(json_output_null_native(None).unwrap(), None);
+    }
+
+    #[test]
+    fn fixed_native_json_outputs_reject_malformed_packets_paths_and_false_nulls() {
+        for packet in [
+            Vec::new(),
+            vec![0; 7],
+            u64::MAX.to_le_bytes().to_vec(),
+            1u64.to_le_bytes().to_vec(),
+        ] {
+            assert!(!json_array_serde_args_valid(&packet));
+            assert!(!json_object_serde_args_valid(&packet));
+            assert!(json_array_serde_native(&packet).is_err());
+            assert!(json_object_serde_native(&packet).is_err());
+        }
+        let mut oversized_length = 1u64.to_le_bytes().to_vec();
+        oversized_length.extend_from_slice(&u64::MAX.to_le_bytes());
+        oversized_length.extend_from_slice(&0u64.to_le_bytes());
+        assert!(!json_array_serde_args_valid(&oversized_length));
+        assert!(!json_object_serde_args_valid(&oversized_length));
+        assert!(json_array_serde_native(&oversized_length).is_err());
+        assert!(json_object_serde_native(&oversized_length).is_err());
+        let mut extra = array_packet(&[]);
+        extra.push(0);
+        assert!(!json_array_serde_args_valid(&extra));
+        assert!(!json_object_serde_args_valid(&extra));
+        assert!(json_array_serde_native(&extra).is_err());
+        assert!(json_object_serde_native(&extra).is_err());
+        for value in [b"".as_slice(), b"[".as_slice(), &[0xff]] {
+            let array = array_packet(&[value]);
+            let object = object_packet(&[(b"k", value)]);
+            assert!(!json_array_serde_args_valid(&array));
+            assert!(!json_object_serde_args_valid(&object));
+            assert!(json_array_serde_native(&array).is_err());
+            assert!(json_object_serde_native(&object).is_err());
+        }
+        let invalid_key = object_packet(&[(&[0xff], b"1")]);
+        assert!(!json_object_serde_args_valid(&invalid_key));
+        assert!(json_object_serde_native(&invalid_key).is_err());
+        let mut truncated_array = array_packet(&[b"null"]);
+        truncated_array.pop();
+        let mut truncated_object = object_packet(&[(b"k", b"null")]);
+        truncated_object.pop();
+        assert!(!json_array_serde_args_valid(&truncated_array));
+        assert!(!json_object_serde_args_valid(&truncated_object));
+        assert!(json_array_serde_native(&truncated_array).is_err());
+        assert!(json_object_serde_native(&truncated_object).is_err());
+        assert!(json_keys_serde_native(b"[").is_err());
+        assert!(json_pretty_serde_native(b"[").is_err());
+        assert!(json_keys_path_serde_native(b"[{}]", b"$[*]").is_err());
+        assert!(json_keys_path_serde_native(b"{}", b"not-a-path").is_err());
+        assert!(json_keys_path_serde_native(b"{}", &[0xff]).is_err());
+        assert!(json_output_null_native(Some(&0)).is_err());
+    }
 }
 
 #[cfg(test)]

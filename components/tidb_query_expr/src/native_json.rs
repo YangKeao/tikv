@@ -3,7 +3,10 @@
 //! Native serde-value JSON predicates and paths. These deliberately do not use
 //! the binary JSON comparator's mixed-number epsilon or its lossless objects.
 
-use std::{cmp::Ordering, collections::HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashSet},
+};
 
 use serde_json::{Number, Value as Json};
 
@@ -324,6 +327,156 @@ fn select_non_array(selection: &ArraySelection) -> bool {
     }
 }
 
+/// Constructs a native JSON array from actual, already-coerced arguments.
+pub fn native_json_array(values: Vec<Json>) -> Json {
+    Json::Array(values)
+}
+
+/// Constructs a native object in input order; repeated keys keep the last
+/// value.
+pub fn native_json_object(pairs: Vec<(String, Json)>) -> Json {
+    let mut object = serde_json::Map::new();
+    for (key, value) in pairs {
+        object.insert(key, value);
+    }
+    Json::Object(object)
+}
+
+/// Native expression KEYS returns SQL NULL for a selected non-object value.
+pub fn native_json_keys(value: &Json) -> Option<Json> {
+    let Json::Object(object) = value else {
+        return None;
+    };
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    Some(Json::Array(
+        keys.into_iter()
+            .map(|key| Json::String(key.to_owned()))
+            .collect(),
+    ))
+}
+
+/// Native JSON_PRETTY preserves the original sorted-key, two-space layout and
+/// delegates scalar spelling to the same formatter as JSON result codecs.
+pub fn native_json_pretty(value: &Json) -> String {
+    format_json_pretty(value, 0)
+}
+
+fn format_json_pretty(value: &Json, level: usize) -> String {
+    let indent = |level: usize| "  ".repeat(level);
+    match value {
+        Json::Null | Json::Bool(_) | Json::Number(_) | Json::String(_) => native_json_format(value),
+        Json::Array(values) => {
+            if values.is_empty() {
+                return "[]".to_string();
+            }
+            let children = values
+                .iter()
+                .map(|value| {
+                    format!(
+                        "{}{}",
+                        indent(level + 1),
+                        format_json_pretty(value, level + 1)
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!("[\n{}\n{}]", children.join(",\n"), indent(level))
+        }
+        Json::Object(object) => {
+            if object.is_empty() {
+                return "{}".to_string();
+            }
+            let sorted: BTreeMap<&str, &Json> = object
+                .iter()
+                .map(|(key, value)| (key.as_str(), value))
+                .collect();
+            let children = sorted
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = serde_json::to_string(key).expect("string serialization cannot fail");
+                    format!(
+                        "{}{}: {}",
+                        indent(level + 1),
+                        key,
+                        format_json_pretty(value, level + 1)
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!("{{\n{}\n{}}}", children.join(",\n"), indent(level))
+        }
+    }
+}
+
+/// Original native JSON result text: spaces after separators, byte-sorted
+/// object keys, serde string escaping, and TiDB's floating-number spelling.
+pub fn native_json_format(value: &Json) -> String {
+    match value {
+        Json::Null => "null".to_string(),
+        Json::Bool(boolean) => boolean.to_string(),
+        Json::Number(number) => format_json_number(number),
+        Json::String(string) => {
+            serde_json::to_string(string).expect("string serialization cannot fail")
+        }
+        Json::Array(values) => {
+            let values = values.iter().map(native_json_format).collect::<Vec<_>>();
+            format!("[{}]", values.join(", "))
+        }
+        Json::Object(object) => {
+            let sorted: BTreeMap<&str, &Json> = object
+                .iter()
+                .map(|(key, value)| (key.as_str(), value))
+                .collect();
+            let values = sorted
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = serde_json::to_string(key).expect("string serialization cannot fail");
+                    format!("{key}: {}", native_json_format(value))
+                })
+                .collect::<Vec<_>>();
+            format!("{{{}}}", values.join(", "))
+        }
+    }
+}
+
+fn format_json_number(number: &Number) -> String {
+    if let Some(integer) = number.as_i64() {
+        return integer.to_string();
+    }
+    if let Some(integer) = number.as_u64() {
+        return integer.to_string();
+    }
+    let float = number
+        .as_f64()
+        .expect("serde JSON numbers are finite f64 here");
+    format_binary_json_float(float)
+}
+
+fn format_binary_json_float(value: f64) -> String {
+    let abs = value.abs();
+    if abs != 0.0 && !(1e-15..1e15).contains(&abs) {
+        let mut rendered = format!("{value:e}");
+        if let Some(exponent) = rendered.find('e') {
+            let exponent_part = &rendered[exponent + 1..];
+            let cleaned = exponent_part
+                .strip_prefix('+')
+                .unwrap_or(exponent_part)
+                .strip_prefix("-0")
+                .map_or_else(
+                    || exponent_part.trim_start_matches('+').to_string(),
+                    |rest| format!("-{rest}"),
+                );
+            rendered.truncate(exponent + 1);
+            rendered.push_str(&cleaned);
+        }
+        return rendered;
+    }
+    let mut rendered = value.to_string();
+    if !rendered.contains('.') {
+        rendered.push_str(".0");
+    }
+    rendered
+}
+
 /// Native structural containment on the already-coerced serde value domain.
 pub fn native_json_contains(document: &Json, candidate: &Json) -> bool {
     match document {
@@ -439,6 +592,49 @@ fn compare_signed_unsigned(left: i64, right: u64) -> Ordering {
         Ordering::Less
     } else {
         (left as u64).cmp(&right)
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn constructors_keys_and_formatting_preserve_native_output_policy() {
+        assert_eq!(native_json_format(&native_json_array(vec![])), "[]");
+        assert_eq!(native_json_pretty(&native_json_object(vec![])), "{}");
+        let object = native_json_object(vec![
+            ("z".to_owned(), json!([])),
+            (
+                "a".to_owned(),
+                native_json_array(vec![Json::Null, json!(-0.0), json!(1.0)]),
+            ),
+            ("z".to_owned(), json!(true)),
+        ]);
+        assert_eq!(native_json_keys(&object), Some(json!(["a", "z"])));
+        assert_eq!(native_json_keys(&json!({})), Some(json!([])));
+        assert_eq!(native_json_keys(&Json::Null), None);
+        assert_eq!(native_json_keys(&json!([])), None);
+        assert_eq!(
+            native_json_format(&object),
+            "{\"a\": [null, -0.0, 1.0], \"z\": true}"
+        );
+        assert_eq!(
+            native_json_pretty(&object),
+            "{\n  \"a\": [\n    null,\n    -0.0,\n    1.0\n  ],\n  \"z\": true\n}"
+        );
+        assert_eq!(
+            native_json_format(&json!([1e-16, 1e-15, 1e14, 1e15])),
+            "[1e-16, 0.000000000000001, 100000000000000.0, 1e15]"
+        );
+        let separators = format!("<>&{}{}", '\u{2028}', '\u{2029}');
+        assert_eq!(
+            native_json_format(&Json::String(separators.clone())),
+            format!("\"{separators}\"")
+        );
+        assert_eq!(native_json_pretty(&json!([[], {}])), "[\n  [],\n  {}\n]");
     }
 }
 

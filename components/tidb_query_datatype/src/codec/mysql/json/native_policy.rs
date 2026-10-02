@@ -171,6 +171,22 @@ pub enum NativeJsonNode<T> {
     Object(Vec<(String, NativeJsonNode<T>)>),
 }
 
+/// Native SDK KEYS preserves duplicate object keys and returns an empty list
+/// for non-objects. Scalar payloads are opaque to this structural operation.
+pub fn native_json_sorted_object_keys<T>(node: &NativeJsonNode<T>) -> Vec<String> {
+    match node {
+        NativeJsonNode::Object(values) => {
+            let mut keys = values
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            keys.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            keys
+        }
+        _ => Vec::new(),
+    }
+}
+
 type NativeBinaryJsonNode = NativeJsonNode<(u8, Vec<u8>)>;
 
 /// Decodes the original native lossless tree, preserving each scalar's tag and

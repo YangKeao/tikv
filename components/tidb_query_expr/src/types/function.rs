@@ -433,6 +433,12 @@ pub enum LocalFunctionId {
     JsonMemberOfBinaryLegacy,
     JsonPredicateNullNative,
     JsonPredicateMissingLegacy,
+    JsonArraySerdeNative,
+    JsonObjectSerdeNative,
+    JsonKeysSerdeNative,
+    JsonKeysPathSerdeNative,
+    JsonPrettySerdeNative,
+    JsonOutputNullNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

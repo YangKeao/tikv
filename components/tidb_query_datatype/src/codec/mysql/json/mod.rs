@@ -96,8 +96,9 @@ pub use self::{
         NativeBinaryJsonError, NativeJsonError, NativeJsonNode, compare_native_binary_json,
         contains_native_binary_json, decode_native_binary_json_node,
         decode_native_binary_json_value, decode_native_json_uvarint, member_of_native_binary_json,
-        native_binary_json_type_name, native_json_opaque, native_json_storage_size,
-        native_json_type_name, overlaps_native_binary_json, parse_native_json_document,
+        native_binary_json_type_name, native_json_opaque, native_json_sorted_object_keys,
+        native_json_storage_size, native_json_type_name, overlaps_native_binary_json,
+        parse_native_json_document,
     },
     path_expr::{PathExpression, parse_json_path_expr},
 };
