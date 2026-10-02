@@ -379,6 +379,10 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && operation.grouping_mode().is_none_or(|mode| {
+            matches!(values, [ScalarValue::Bytes(Some(gid)), ScalarValue::Bytes(Some(marks))]
+                if crate::impl_miscellaneous::grouping_native_args_valid(gid, marks, mode))
+        })
         && (operation.aes_profile().is_none()
             || values
                 .iter()
@@ -578,6 +582,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::UnaryNullNative
                         | EvaluatedBytesOp::BinaryArithmeticNullNative
                         | EvaluatedBytesOp::CompareNullNative
+                        | EvaluatedBytesOp::GroupingNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,

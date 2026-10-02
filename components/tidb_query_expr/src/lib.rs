@@ -90,7 +90,10 @@ pub use self::{
     },
     impl_compare::ComparisonOp,
     impl_encryption::{NativeAesError, NativeAesOperation, NativeAesProfile},
-    impl_miscellaneous::{NATIVE_UUID_EPOCH_100NS, format_uuid_native},
+    impl_miscellaneous::{
+        GroupingFunction, GroupingMetadata, GroupingMetadataError, GroupingMode,
+        NATIVE_UUID_EPOCH_100NS, format_uuid_native, grouping_native_args_valid,
+    },
     impl_op::NativeUnaryMinusError,
     types::*,
 };

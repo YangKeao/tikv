@@ -344,6 +344,17 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  GROUPING's public mode/metadata/function types and unique bit/set algorithm
+  live in `impl_miscellaneous.rs`. Three fixed mode kernels consume actual
+  gid-LE8 and count-framed mark-set bytes; a separate genuine-NULL recipe does
+  not fabricate metadata. Shared checked packing and the same allocation-free
+  envelope validator serve both readiness layers. Output retains unsigned
+  bits in the existing Int owner, including more-than-64-mark wrapping.
+  Native metadata helpers alias the shared types; scalar evaluation preserves
+  NULL-before-metadata demand. No driver, carrier, binding or wire admission
+  is added. BETWEEN uses the existing comparison/logical composition, not a
+  new kernel: AST eager bounds/one selector and rewritten lazy bounds/negated
+  disjunction remain distinct, including their existing NaN behavior.
   The six native comparison predicates now use 13 explicit domain/profile
   identities carrying a finite `ComparisonOp`. Their selectors choose 78
   distinct unit-metadata kernels in `impl_compare.rs`; no operation code is an

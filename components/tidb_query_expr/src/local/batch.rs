@@ -1426,6 +1426,10 @@ pub enum EvaluatedBytesOp {
     CompareJsonNative(crate::ComparisonOp),
     CompareNullNative,
     CompareMissingLegacy,
+    GroupingBitAndNative,
+    GroupingNumericCmpNative,
+    GroupingNumericSetNative,
+    GroupingNullNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -2809,6 +2813,26 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::CompareMissingLegacy,
                 );
             }
+            Self::GroupingBitAndNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::GroupingBitAndNative,
+                );
+            }
+            Self::GroupingNumericCmpNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::GroupingNumericCmpNative,
+                );
+            }
+            Self::GroupingNumericSetNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::GroupingNumericSetNative,
+                );
+            }
+            Self::GroupingNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::GroupingNullNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -2835,6 +2859,15 @@ impl EvaluatedBytesOp {
             Self::LikeNative => Some(NativeLikeKind::Like),
             Self::IlikeNative => Some(NativeLikeKind::Ilike),
             Self::LikeLegacyNative => Some(NativeLikeKind::Legacy),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn grouping_mode(self) -> Option<crate::GroupingMode> {
+        match self {
+            Self::GroupingBitAndNative => Some(crate::GroupingMode::BitAnd),
+            Self::GroupingNumericCmpNative => Some(crate::GroupingMode::NumericCmp),
+            Self::GroupingNumericSetNative => Some(crate::GroupingMode::NumericSet),
             _ => None,
         }
     }
@@ -2950,7 +2983,7 @@ impl EvaluatedBytesOp {
             Self::CompareBytesNative(_) => EvaluatedArgsRole::CollatedBytes2,
             Self::CompareVectorNative(_) => EvaluatedArgsRole::NativeVector2,
             Self::CompareTimeCoreNative(_) => EvaluatedArgsRole::TimeCoreBits2,
-            Self::CompareNullNative => EvaluatedArgsRole::NullWitness,
+            Self::CompareNullNative | Self::GroupingNullNative => EvaluatedArgsRole::NullWitness,
             Self::CompareMissingLegacy => EvaluatedArgsRole::NoArgs,
             Self::AesNullNative => EvaluatedArgsRole::NullWitness,
             Self::DivDecimalNative | Self::DivDecimalLegacy => EvaluatedArgsRole::DecimalDivision,
@@ -3531,6 +3564,16 @@ impl EvaluatedBytesOp {
             Self::CompareJsonNative(op) => crate::impl_compare::compare_json_native_fn_meta(op),
             Self::CompareNullNative => crate::impl_compare::compare_null_native_fn_meta(),
             Self::CompareMissingLegacy => crate::impl_compare::compare_missing_legacy_fn_meta(),
+            Self::GroupingBitAndNative => {
+                crate::impl_miscellaneous::grouping_bit_and_native_fn_meta()
+            }
+            Self::GroupingNumericCmpNative => {
+                crate::impl_miscellaneous::grouping_numeric_cmp_native_fn_meta()
+            }
+            Self::GroupingNumericSetNative => {
+                crate::impl_miscellaneous::grouping_numeric_set_native_fn_meta()
+            }
+            Self::GroupingNullNative => crate::impl_miscellaneous::grouping_null_native_fn_meta(),
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
             Self::UnaryPlusBitsNative => crate::impl_op::unary_plus_bits_native_fn_meta(),
             Self::UnaryPlusDecimalNative => crate::impl_op::unary_plus_decimal_native_fn_meta(),
@@ -3854,7 +3897,11 @@ impl EvaluatedBytesOp {
             | Self::CompareDurationNative(_)
             | Self::CompareJsonNative(_)
             | Self::CompareNullNative
-            | Self::CompareMissingLegacy => EvalType::Int,
+            | Self::CompareMissingLegacy
+            | Self::GroupingBitAndNative
+            | Self::GroupingNumericCmpNative
+            | Self::GroupingNumericSetNative
+            | Self::GroupingNullNative => EvalType::Int,
             Self::AesEncrypt128EcbNative
             | Self::AesEncrypt192EcbNative
             | Self::AesEncrypt256EcbNative
@@ -4216,8 +4263,11 @@ impl EvaluatedBytesOp {
             Self::CompareDecimalNative(_) => &[EvalType::Decimal, EvalType::Decimal, EvalType::Int],
             Self::CompareBytesNative(_) => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
             Self::CompareVectorNative(_) => &[EvalType::VectorFloat32, EvalType::VectorFloat32],
-            Self::CompareNullNative => &[EvalType::Int],
+            Self::CompareNullNative | Self::GroupingNullNative => &[EvalType::Int],
             Self::CompareMissingLegacy => &[],
+            Self::GroupingBitAndNative
+            | Self::GroupingNumericCmpNative
+            | Self::GroupingNumericSetNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::AesEncrypt128EcbNative
             | Self::AesEncrypt192EcbNative
             | Self::AesEncrypt256EcbNative
@@ -4736,6 +4786,46 @@ impl NativeSearchPolicy {
     }
 }
 
+/// Packs the actual grouping id and immutable ascending mark sets. This only
+/// builds the existing two-column carrier: mode selection and result evaluation
+/// remain outside this helper. Both owners and the complete envelope extent use
+/// fallible allocation, with no serialized opcode or precomputed result bits.
+pub fn prepare_grouping_args(
+    gid: u64,
+    metadata: &crate::GroupingMetadata,
+) -> LocalResult<EvaluatedArgs> {
+    let groups = metadata.grouping_marks();
+    let group_count =
+        u64::try_from(groups.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+    let words = groups.iter().try_fold(1usize, |words, marks| {
+        words
+            .checked_add(1)
+            .and_then(|words| words.checked_add(marks.len()))
+            .ok_or_else(evaluated_ascii_storage_overflow)
+    })?;
+    let bytes = words
+        .checked_mul(8)
+        .ok_or_else(evaluated_ascii_storage_overflow)?;
+    let mut gid_bytes = Vec::new();
+    gid_bytes
+        .try_reserve_exact(8)
+        .map_err(|_| LocalError::ResourceLimit("GROUPING id input allocation failed".into()))?;
+    gid_bytes.extend_from_slice(&gid.to_le_bytes());
+    let mut marks_bytes = Vec::new();
+    marks_bytes
+        .try_reserve_exact(bytes)
+        .map_err(|_| LocalError::ResourceLimit("GROUPING marks input allocation failed".into()))?;
+    marks_bytes.extend_from_slice(&group_count.to_le_bytes());
+    for marks in groups {
+        let count = u64::try_from(marks.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+        marks_bytes.extend_from_slice(&count.to_le_bytes());
+        for mark in marks {
+            marks_bytes.extend_from_slice(&mark.to_le_bytes());
+        }
+    }
+    Ok(EvaluatedArgs::Bytes2(Some(gid_bytes), Some(marks_bytes)))
+}
+
 /// Owned ready arguments and explicit demand markers for closed recipes. Int
 /// carries the original 64-bit pattern: callers may pass a u64 as i64 without
 /// numeric narrowing. Coercion, diagnostics, argument demand and text
@@ -5072,6 +5162,10 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if let Some(mode) = operation.grouping_mode() {
+            return matches!(self, Self::Bytes2(Some(gid), Some(marks))
+                if crate::impl_miscellaneous::grouping_native_args_valid(gid, marks, mode));
+        }
         if operation.comparison_op().is_some() {
             return matches!(
                 self,
@@ -5185,6 +5279,7 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::UnaryNullNative
                         | EvaluatedBytesOp::BinaryArithmeticNullNative
                         | EvaluatedBytesOp::CompareNullNative
+                        | EvaluatedBytesOp::GroupingNullNative
                 ) && value.is_none()
             }
             Self::ConvReady {
@@ -7845,6 +7940,298 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn grouping_closed_profiles_keep_unit_metadata_and_actual_null_terminal() {
+        use crate::impl_miscellaneous::*;
+        for (operation, getter) in [
+            (
+                EvaluatedBytesOp::GroupingBitAndNative,
+                grouping_bit_and_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::GroupingNumericCmpNative,
+                grouping_numeric_cmp_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::GroupingNumericSetNative,
+                grouping_numeric_set_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::GroupingNullNative,
+                grouping_null_native_fn_meta(),
+            ),
+        ] {
+            let terminal = operation == EvaluatedBytesOp::GroupingNullNative;
+            let arity = if terminal { 1 } else { 2 };
+            assert_eq!(operation.call_count(), 1);
+            assert_eq!(operation.eval_type(), EvalType::Int);
+            assert_eq!(
+                operation.input_types(),
+                if terminal {
+                    &[EvalType::Int][..]
+                } else {
+                    &[EvalType::Bytes, EvalType::Bytes][..]
+                }
+            );
+            assert_eq!(
+                operation.input_role(),
+                if terminal {
+                    EvaluatedArgsRole::NullWitness
+                } else {
+                    EvaluatedArgsRole::Values
+                }
+            );
+            assert!(matches!(
+                operation.kernel_kind(),
+                EvaluatedKernelKind::ClosedPrivate(_)
+            ));
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), arity + 1);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            if terminal {
+                for invalid in [
+                    EvaluatedArgs::NullWitness(Some(0)),
+                    EvaluatedArgs::Int(None),
+                    EvaluatedArgs::NoArgs,
+                ] {
+                    assert!(matches!(
+                        worker.eval_args(invalid),
+                        Err(LocalError::InvalidBatch(_))
+                    ));
+                }
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(
+                        [
+                            ScalarValue::Int(Some(0)),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                        ],
+                        1,
+                        &mut reported
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+                assert_eq!(worker.kernel_invocations(), 0);
+            }
+            let args = if let Some(mode) = operation.grouping_mode() {
+                let metadata = crate::GroupingMetadata::new(mode, Vec::new()).unwrap();
+                prepare_grouping_args(u64::MAX, &metadata).unwrap()
+            } else {
+                EvaluatedArgs::NullWitness(None)
+            };
+            let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+                panic!()
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.value(), if terminal { None } else { Some(0) });
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+        }
+    }
+
+    #[test]
+    fn grouping_checked_packing_malformed_roles_and_reused_owned_bits() {
+        use crate::{GroupingMetadata, GroupingMode};
+        let words = |values: &[u64]| {
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let metadata = GroupingMetadata::new(
+            GroupingMode::NumericSet,
+            vec![[9, 2, 5, 2].into_iter().collect()],
+        )
+        .unwrap();
+        let EvaluatedArgs::Bytes2(Some(gid), Some(marks)) =
+            prepare_grouping_args(u64::MAX, &metadata).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(gid, u64::MAX.to_le_bytes());
+        assert_eq!(marks, words(&[1, 3, 2, 5, 9]));
+        for (operation, gid, groups) in [
+            (
+                EvaluatedBytesOp::GroupingBitAndNative,
+                1_u64,
+                vec![vec![1_u64], vec![2], vec![4]],
+            ),
+            (
+                EvaluatedBytesOp::GroupingNumericCmpNative,
+                2,
+                vec![vec![1], vec![2], vec![3]],
+            ),
+            (
+                EvaluatedBytesOp::GroupingNumericSetNative,
+                2,
+                vec![vec![1, 2], vec![1, 3], vec![]],
+            ),
+        ] {
+            let mode = operation.grouping_mode().unwrap();
+            let metadata = GroupingMetadata::new(
+                mode,
+                groups
+                    .into_iter()
+                    .map(|group| group.into_iter().collect())
+                    .collect(),
+            )
+            .unwrap();
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let ComputedValue::Int(value) = worker
+                .eval_args(prepare_grouping_args(gid, &metadata).unwrap())
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.value(), Some(3));
+            for (gid, marks) in [
+                (None, Some(words(&[0]))),
+                (Some(words(&[1])), None),
+                (None, None),
+                (Some(vec![0; 7]), Some(words(&[0]))),
+                (Some(vec![0; 9]), Some(words(&[0]))),
+                (Some(words(&[1])), Some(Vec::new())),
+                (Some(words(&[1])), Some(words(&[1, 1]))),
+                (Some(words(&[1])), Some(words(&[0, 0]))),
+                (Some(words(&[1])), Some(words(&[u64::MAX]))),
+                (Some(words(&[1])), Some(words(&[1, u64::MAX]))),
+                (Some(words(&[1])), Some(words(&[1, 2, 1, 1]))),
+                (Some(words(&[1])), Some(words(&[1, 2, 2, 1]))),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes2(gid.clone(), marks.clone())),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(
+                        [
+                            ScalarValue::Bytes(gid),
+                            ScalarValue::Bytes(marks),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                        ],
+                        2,
+                        &mut reported
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            for invalid in [
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::Int2(Some(0), Some(0)),
+                EvaluatedArgs::Ieee754Bits2 {
+                    left: ReadyIeee754Arg::Value(Some(0)),
+                    right: ReadyIeee754Arg::Value(Some(0)),
+                },
+                EvaluatedArgs::Bytes3([Some(words(&[0])), Some(words(&[0])), Some(Vec::new())]),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            // All 64 output bits remain owned Int bits; no signed narrowing or
+            // frontend mask calculation substitutes for the generated wrapper.
+            let all_bits = GroupingMetadata::new(
+                mode,
+                (0..64).map(|_| [0_u64].into_iter().collect()).collect(),
+            )
+            .unwrap();
+            let gid = if mode == GroupingMode::NumericSet {
+                1
+            } else {
+                0
+            };
+            let ComputedValue::Int(value) = worker
+                .eval_args(prepare_grouping_args(gid, &all_bits).unwrap())
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.value(), Some(-1));
+            let empty = GroupingMetadata::new(mode, Vec::new()).unwrap();
+            let ComputedValue::Int(value) = worker
+                .eval_args(prepare_grouping_args(u64::MAX, &empty).unwrap())
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(value.value(), Some(0));
+            assert_eq!(worker.kernel_invocations(), 3);
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert!(worker.is_healthy());
+        }
+        assert!(
+            EvaluatedArgs::Bytes2(None, Some(Vec::new()))
+                .admission_matches(EvaluatedBytesOp::SqlEncodeNative)
+        );
+    }
 
     #[test]
     fn comparison_profiles_are_closed_unit_calls_with_strict_actual_roles() {

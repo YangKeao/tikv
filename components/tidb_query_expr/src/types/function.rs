@@ -419,6 +419,10 @@ pub enum LocalFunctionId {
     CompareJsonNative(crate::ComparisonOp),
     CompareNullNative,
     CompareMissingLegacy,
+    GroupingBitAndNative,
+    GroupingNumericCmpNative,
+    GroupingNumericSetNative,
+    GroupingNullNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

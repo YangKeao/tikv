@@ -369,7 +369,11 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::CompareDurationNative(_)
         | LocalFunctionId::CompareJsonNative(_)
         | LocalFunctionId::CompareNullNative
-        | LocalFunctionId::CompareMissingLegacy => Err(other_err!(
+        | LocalFunctionId::CompareMissingLegacy
+        | LocalFunctionId::GroupingBitAndNative
+        | LocalFunctionId::GroupingNumericCmpNative
+        | LocalFunctionId::GroupingNumericSetNative
+        | LocalFunctionId::GroupingNullNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),
