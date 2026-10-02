@@ -54,6 +54,9 @@ pub use native_json::{
     native_json_overlaps, native_json_pretty, parse_native_json_path,
 };
 
+mod native_json_legacy;
+pub use native_json_legacy::{native_json_array_append_raw_legacy, native_json_replace_raw_legacy};
+
 mod native_json_modify;
 pub use native_json_modify::{
     NativeJsonModifyMode, native_json_array_append, native_json_array_insert, native_json_modify,
@@ -106,6 +109,8 @@ pub use self::{
     impl_compare::ComparisonOp,
     impl_encryption::{NativeAesError, NativeAesOperation, NativeAesProfile},
     impl_json::{
+        json_array_append_empty_legacy_args_valid, json_array_append_empty_legacy_fn_meta,
+        json_array_append_raw_legacy_args_valid, json_array_append_raw_legacy_fn_meta,
         json_array_append_serde_args_valid, json_array_append_serde_native_fn_meta,
         json_array_insert_serde_args_valid, json_array_insert_serde_native_fn_meta,
         json_array_serde_args_valid, json_array_serde_native_fn_meta,
@@ -120,8 +125,10 @@ pub use self::{
         json_overlaps_serde_native_fn_meta, json_path_exists_serde_native_fn_meta,
         json_predicate_missing_legacy_fn_meta, json_predicate_null_native_fn_meta,
         json_pretty_serde_native_fn_meta, json_remove_serde_args_valid,
-        json_remove_serde_native_fn_meta, json_replace_serde_native_fn_meta,
+        json_remove_serde_native_fn_meta, json_replace_raw_legacy_args_valid,
+        json_replace_raw_legacy_fn_meta, json_replace_serde_native_fn_meta,
         json_serde_native_args_valid, json_set_serde_native_fn_meta,
+        json_value_absent_legacy_fn_meta,
     },
     impl_miscellaneous::{
         GroupingFunction, GroupingMetadata, GroupingMetadataError, GroupingMode,

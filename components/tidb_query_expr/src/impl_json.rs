@@ -662,6 +662,206 @@ fn json_array_insert_serde_native(
     Ok(Some(crate::native_json_format(&result).into_bytes()))
 }
 
+type JsonRawLegacyPaths = Vec<(Vec<NativeBinaryJsonPathLeg>, bool)>;
+
+struct JsonRawLegacyInputs<'a> {
+    document: (u8, &'a [u8]),
+    paths: JsonRawLegacyPaths,
+    values: Vec<(u8, &'a [u8])>,
+}
+
+fn json_raw_legacy_scalar(packet: &[u8]) -> Result<(u8, &[u8])> {
+    let (&kind, payload) = packet
+        .split_first()
+        .ok_or_else(|| other_err!("Legacy raw JSON transport lacks its actual type byte"))?;
+    // Unknown tags and malformed payloads are actual raw values. Their semantic
+    // None/identity behavior belongs to the shared legacy worker, not admission.
+    Ok((kind, payload))
+}
+
+// Raw SDK selectors are distinct from native serde selectors: a Key("*") and
+// its independently retained cached flag must not be reconstructed from syntax.
+fn json_raw_legacy_inputs<'a>(
+    document: &'a [u8],
+    path_packet: &[u8],
+    value_packet: &'a [u8],
+    one_pair: bool,
+) -> Result<JsonRawLegacyInputs<'a>> {
+    use NativeBinaryJsonArraySelection as Array;
+    use NativeBinaryJsonPathLeg as Leg;
+    let document = json_raw_legacy_scalar(document)?;
+    let mut remaining = path_packet;
+    let count = json_serde_packet_word(&mut remaining)?;
+    if count > remaining.len() / 9 || (one_pair && count != 1) {
+        return Err(other_err!(
+            "Legacy raw JSON path count violates framing or fixed arity"
+        ));
+    }
+    let mut paths = Vec::new();
+    for _ in 0..count {
+        let multiple = match json_serde_path_byte(&mut remaining)? {
+            0 => false,
+            1 => true,
+            _ => return Err(other_err!("Invalid legacy raw JSON path flag")),
+        };
+        let leg_count = json_serde_packet_word(&mut remaining)?;
+        if leg_count > remaining.len() {
+            return Err(other_err!("Legacy raw JSON leg count exceeds framing"));
+        }
+        let mut legs = Vec::new();
+        for _ in 0..leg_count {
+            let leg = match json_serde_path_byte(&mut remaining)? {
+                0 => {
+                    let key = std::str::from_utf8(json_serde_packet_bytes(&mut remaining)?)
+                        .map_err(|error| {
+                            other_err!("Invalid legacy raw JSON key UTF-8: {}", error)
+                        })?;
+                    let mut owned = String::new();
+                    owned.try_reserve_exact(key.len()).map_err(|error| {
+                        other_err!("Unable to allocate legacy JSON key: {}", error)
+                    })?;
+                    owned.push_str(key);
+                    Leg::Key(owned)
+                }
+                1 => Leg::Array(Array::Asterisk),
+                2 => Leg::Array(Array::Index(json_serde_path_index(&mut remaining)?)),
+                3 => Leg::Array(Array::Range {
+                    start: json_serde_path_index(&mut remaining)?,
+                    end: json_serde_path_index(&mut remaining)?,
+                }),
+                4 => Leg::DoubleAsterisk,
+                _ => return Err(other_err!("Invalid legacy raw JSON path leg tag")),
+            };
+            legs.try_reserve(1).map_err(|error| {
+                other_err!("Unable to allocate legacy JSON path legs: {}", error)
+            })?;
+            legs.push(leg);
+        }
+        paths
+            .try_reserve(1)
+            .map_err(|error| other_err!("Unable to allocate legacy JSON paths: {}", error))?;
+        paths.push((legs, multiple));
+    }
+    if !remaining.is_empty() {
+        return Err(other_err!("Legacy raw JSON path packet has trailing bytes"));
+    }
+    let mut remaining = value_packet;
+    let value_count = json_serde_packet_word(&mut remaining)?;
+    if value_count != count || value_count > remaining.len() / 9 {
+        return Err(other_err!(
+            "Legacy raw JSON value count violates framing or path count"
+        ));
+    }
+    let mut values = Vec::new();
+    for _ in 0..value_count {
+        let value = json_raw_legacy_scalar(json_serde_packet_bytes(&mut remaining)?)?;
+        values
+            .try_reserve(1)
+            .map_err(|error| other_err!("Unable to allocate legacy JSON values: {}", error))?;
+        values.push(value);
+    }
+    if !remaining.is_empty() {
+        return Err(other_err!(
+            "Legacy raw JSON value packet has trailing bytes"
+        ));
+    }
+    Ok(JsonRawLegacyInputs {
+        document,
+        paths,
+        values,
+    })
+}
+
+/// Only transport framing is checked; REPLACE's zero-pair codec and semantic
+/// failures are evaluated by its actual shared legacy implementation.
+pub fn json_replace_raw_legacy_args_valid(document: &[u8], paths: &[u8], values: &[u8]) -> bool {
+    json_raw_legacy_inputs(document, paths, values, false).is_ok()
+}
+
+/// One real append pair, without semantic raw decoding or multiple-path checks.
+pub fn json_array_append_raw_legacy_args_valid(
+    document: &[u8],
+    paths: &[u8],
+    values: &[u8],
+) -> bool {
+    json_raw_legacy_inputs(document, paths, values, true).is_ok()
+}
+
+/// Empty append is an identity over any actual nonempty raw scalar packet.
+pub fn json_array_append_empty_legacy_args_valid(document: &[u8]) -> bool {
+    json_raw_legacy_scalar(document).is_ok()
+}
+
+fn json_raw_legacy_output(value: Option<(u8, Vec<u8>)>) -> Result<Option<Bytes>> {
+    let Some((kind, payload)) = value else {
+        return Ok(None);
+    };
+    let length = payload
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| other_err!("Legacy raw JSON output extent overflow"))?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(length)
+        .map_err(|error| other_err!("Unable to allocate legacy raw JSON output: {}", error))?;
+    output.push(kind);
+    output.extend_from_slice(&payload);
+    Ok(Some(output))
+}
+
+#[rpn_fn]
+fn json_replace_raw_legacy(
+    document: BytesRef,
+    paths: BytesRef,
+    values: BytesRef,
+) -> Result<Option<Bytes>> {
+    let input = json_raw_legacy_inputs(document, paths, values, false)?;
+    let mut path_refs = Vec::new();
+    for (legs, multiple) in &input.paths {
+        path_refs.try_reserve(1).map_err(|error| {
+            other_err!("Unable to allocate legacy JSON path references: {}", error)
+        })?;
+        path_refs.push((legs.as_slice(), *multiple));
+    }
+    json_raw_legacy_output(crate::native_json_replace_raw_legacy(
+        input.document,
+        &path_refs,
+        &input.values,
+    ))
+}
+
+#[rpn_fn]
+fn json_array_append_raw_legacy(
+    document: BytesRef,
+    paths: BytesRef,
+    values: BytesRef,
+) -> Result<Option<Bytes>> {
+    let input = json_raw_legacy_inputs(document, paths, values, true)?;
+    let (legs, multiple) = &input.paths[0]; // Exactly one pair validated above.
+    json_raw_legacy_output(crate::native_json_array_append_raw_legacy(
+        input.document,
+        (legs.as_slice(), *multiple),
+        input.values[0],
+    ))
+}
+
+#[rpn_fn]
+fn json_array_append_empty_legacy(document: BytesRef) -> Result<Option<Bytes>> {
+    json_raw_legacy_scalar(document)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(document.len())
+        .map_err(|error| other_err!("Unable to allocate legacy JSON identity output: {}", error))?;
+    output.extend_from_slice(document);
+    Ok(Some(output))
+}
+
+#[rpn_fn]
+fn json_value_absent_legacy() -> Result<Option<Bytes>> {
+    // Actual observed legacy absence, not a fabricated nullable SQL operand.
+    Ok(None)
+}
+
 #[rpn_fn]
 #[inline]
 fn json_depth(arg: JsonRef) -> Result<Option<i64>> {
@@ -1189,6 +1389,271 @@ fn parse_json_path(path: Option<BytesRef>) -> Result<Option<PathExpression>> {
     }?;
 
     Ok(Some(parse_json_path_expr(json_path)?))
+}
+
+#[cfg(test)]
+mod native_json_raw_legacy_worker_tests {
+    use NativeBinaryJsonArraySelection as Array;
+    use NativeBinaryJsonPathLeg as Leg;
+
+    use super::*;
+
+    fn paths(paths: &[(Vec<Leg>, bool)]) -> Vec<u8> {
+        let mut packet = (paths.len() as u64).to_le_bytes().to_vec();
+        for (legs, multiple) in paths {
+            packet.push(u8::from(*multiple));
+            packet.extend_from_slice(&(legs.len() as u64).to_le_bytes());
+            for leg in legs {
+                match leg {
+                    Leg::Key(key) => {
+                        packet.push(0);
+                        packet.extend_from_slice(&(key.len() as u64).to_le_bytes());
+                        packet.extend_from_slice(key.as_bytes());
+                    }
+                    Leg::Array(Array::Asterisk) => packet.push(1),
+                    Leg::Array(Array::Index(index)) => {
+                        packet.push(2);
+                        packet.extend_from_slice(&index.to_le_bytes());
+                    }
+                    Leg::Array(Array::Range { start, end }) => {
+                        packet.push(3);
+                        packet.extend_from_slice(&start.to_le_bytes());
+                        packet.extend_from_slice(&end.to_le_bytes());
+                    }
+                    Leg::DoubleAsterisk => packet.push(4),
+                }
+            }
+        }
+        packet
+    }
+
+    fn values(values: &[&[u8]]) -> Vec<u8> {
+        let mut packet = (values.len() as u64).to_le_bytes().to_vec();
+        for value in values {
+            packet.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            packet.extend_from_slice(value);
+        }
+        packet
+    }
+
+    #[test]
+    fn fixed_raw_legacy_json_workers_preserve_bytes_codec_stages_and_absence() {
+        for (meta, name) in [
+            (json_replace_raw_legacy_fn_meta(), "json_replace_raw_legacy"),
+            (
+                json_array_append_raw_legacy_fn_meta(),
+                "json_array_append_raw_legacy",
+            ),
+            (
+                json_array_append_empty_legacy_fn_meta(),
+                "json_array_append_empty_legacy",
+            ),
+            (
+                json_value_absent_legacy_fn_meta(),
+                "json_value_absent_legacy",
+            ),
+        ] {
+            assert_eq!(meta.name, name);
+        }
+        let no_paths = paths(&[]);
+        let no_values = values(&[]);
+        // Original raw array codec layout: zero elements, size9, one unused byte.
+        let padded = [3, 0, 0, 0, 0, 9, 0, 0, 0, 77];
+        assert!(json_replace_raw_legacy_args_valid(
+            &padded, &no_paths, &no_values
+        ));
+        assert_eq!(
+            json_replace_raw_legacy(&padded, &no_paths, &no_values).unwrap(),
+            Some(vec![3, 0, 0, 0, 0, 8, 0, 0, 0])
+        );
+        assert_eq!(
+            json_array_append_empty_legacy(&padded).unwrap(),
+            Some(padded.to_vec())
+        );
+        let malformed = [3, 255];
+        assert!(json_replace_raw_legacy_args_valid(
+            &malformed, &no_paths, &no_values
+        ));
+        assert_eq!(
+            json_replace_raw_legacy(&malformed, &no_paths, &no_values).unwrap(),
+            None
+        );
+        assert_eq!(
+            json_array_append_empty_legacy(&malformed).unwrap(),
+            Some(malformed.to_vec())
+        );
+        let unknown = [255, 77, 0, 255];
+        assert!(json_replace_raw_legacy_args_valid(
+            &unknown, &no_paths, &no_values
+        ));
+        assert!(json_array_append_empty_legacy_args_valid(&unknown));
+        assert_eq!(
+            json_array_append_empty_legacy(&unknown).unwrap(),
+            Some(unknown.to_vec())
+        );
+        let root = paths(&[(vec![], false)]);
+        let root_multiple = paths(&[(vec![], true)]);
+        let mut one = vec![9];
+        one.extend_from_slice(&1i64.to_le_bytes());
+        let mut two = vec![9];
+        two.extend_from_slice(&2i64.to_le_bytes());
+        let one_value = values(&[&two]);
+        assert_eq!(
+            json_replace_raw_legacy(&one, &root, &one_value).unwrap(),
+            Some(two.clone())
+        );
+        assert!(json_replace_raw_legacy_args_valid(
+            &one,
+            &root_multiple,
+            &one_value
+        ));
+        assert!(json_array_append_raw_legacy_args_valid(
+            &one,
+            &root_multiple,
+            &one_value
+        ));
+        assert_eq!(
+            json_replace_raw_legacy(&one, &root_multiple, &one_value).unwrap(),
+            None
+        );
+        assert_eq!(
+            json_array_append_raw_legacy(&one, &root_multiple, &one_value).unwrap(),
+            None
+        );
+        // A selected scalar is absent, unlike native serde append's wrapping.
+        assert_eq!(
+            json_array_append_raw_legacy(&one, &root, &one_value).unwrap(),
+            None
+        );
+        // Failed extraction is identity even with a semantically invalid value.
+        assert_eq!(
+            json_array_append_raw_legacy(&malformed, &root, &values(&[&unknown])).unwrap(),
+            Some(malformed.to_vec())
+        );
+        let empty_array = [3, 0, 0, 0, 0, 8, 0, 0, 0];
+        let mut expected = vec![3, 1, 0, 0, 0, 21, 0, 0, 0, 9, 13, 0, 0, 0];
+        expected.extend_from_slice(&2i64.to_le_bytes());
+        assert_eq!(
+            json_array_append_raw_legacy(&empty_array, &root, &one_value).unwrap(),
+            Some(expected)
+        );
+        assert_eq!(json_value_absent_legacy().unwrap(), None);
+        // All original raw selector kinds and independent flags are data.
+        let legs = vec![
+            Leg::Key("*".to_owned()),
+            Leg::Array(Array::Asterisk),
+            Leg::Array(Array::Index(-1)),
+            Leg::Array(Array::Range {
+                start: i64::MIN,
+                end: i64::MAX,
+            }),
+            Leg::DoubleAsterisk,
+        ];
+        let packet = paths(&[(legs.clone(), false)]);
+        let decoded = json_raw_legacy_inputs(&unknown, &packet, &one_value, true).unwrap();
+        assert_eq!(decoded.paths[0].0, legs);
+        assert!(!decoded.paths[0].1);
+        assert_eq!(decoded.document, (255, &unknown[1..]));
+    }
+
+    #[test]
+    fn fixed_raw_legacy_json_workers_reject_only_framing_and_fixed_pair_counts() {
+        let document = [255]; // Unknown raw tags are valid transport, not JSON text.
+        let root = paths(&[(vec![], false)]);
+        let input = values(&[&document]);
+        let zero = paths(&[]);
+        assert!(!json_array_append_raw_legacy_args_valid(
+            &document,
+            &zero,
+            &values(&[])
+        ));
+        assert!(json_array_append_raw_legacy(&document, &zero, &values(&[])).is_err());
+        let two = paths(&[(vec![], false), (vec![], false)]);
+        let two_values = values(&[&document, &document]);
+        assert!(json_replace_raw_legacy_args_valid(
+            &document,
+            &two,
+            &two_values
+        ));
+        assert!(!json_array_append_raw_legacy_args_valid(
+            &document,
+            &two,
+            &two_values
+        ));
+        assert!(!json_replace_raw_legacy_args_valid(
+            &document,
+            &root,
+            &values(&[])
+        ));
+        assert!(!json_replace_raw_legacy_args_valid(b"", &root, &input));
+        assert!(!json_array_append_empty_legacy_args_valid(b""));
+        assert!(json_array_append_empty_legacy(b"").is_err());
+        let mut flag = root.clone();
+        flag[8] = 2;
+        let mut tag = paths(&[(vec![Leg::DoubleAsterisk], false)]);
+        tag[17] = 5;
+        let mut count = root.clone();
+        count[9..17].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut key = paths(&[(vec![Leg::Key("x".to_owned())], false)]);
+        *key.last_mut().unwrap() = 255;
+        let mut key_length = paths(&[(vec![Leg::Key("x".to_owned())], false)]);
+        key_length[18..26].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut trailing = root.clone();
+        trailing.push(0);
+        let mut truncated = paths(&[(vec![Leg::Array(Array::Index(-1))], false)]);
+        truncated.pop();
+        for packet in [
+            Vec::new(),
+            vec![0; 7],
+            u64::MAX.to_le_bytes().to_vec(),
+            flag,
+            tag,
+            count,
+            key,
+            key_length,
+            trailing,
+            truncated,
+        ] {
+            assert!(!json_replace_raw_legacy_args_valid(
+                &document, &packet, &input
+            ));
+            assert!(!json_array_append_raw_legacy_args_valid(
+                &document, &packet, &input
+            ));
+            assert!(json_replace_raw_legacy(&document, &packet, &input).is_err());
+        }
+        let mut extra = input.clone();
+        extra.push(0);
+        let mut too_long = input.clone();
+        too_long[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        for packet in [
+            Vec::new(),
+            u64::MAX.to_le_bytes().to_vec(),
+            values(&[b""]),
+            extra,
+            too_long,
+        ] {
+            assert!(!json_replace_raw_legacy_args_valid(
+                &document, &root, &packet
+            ));
+            assert!(!json_array_append_raw_legacy_args_valid(
+                &document, &root, &packet
+            ));
+            assert!(json_array_append_raw_legacy(&document, &root, &packet).is_err());
+        }
+        // A true multiple flag and wildcard/root selectors are NOT rejected by
+        // transport: the real legacy algorithm decides absence or identity.
+        assert!(json_replace_raw_legacy_args_valid(
+            &document,
+            &paths(&[(vec![Leg::DoubleAsterisk], true)]),
+            &input
+        ));
+        assert!(json_array_append_raw_legacy_args_valid(
+            &document,
+            &paths(&[(vec![Leg::Array(Array::Asterisk)], true)]),
+            &input
+        ));
+    }
 }
 
 #[cfg(test)]

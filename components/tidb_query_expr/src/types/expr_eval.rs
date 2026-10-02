@@ -347,7 +347,8 @@ fn evaluated_ready_args_match(
             | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
             | EvaluatedBytesOp::CompareMissingLegacy
-            | EvaluatedBytesOp::JsonPredicateMissingLegacy,
+            | EvaluatedBytesOp::JsonPredicateMissingLegacy
+            | EvaluatedBytesOp::JsonValueAbsentLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => types.is_empty() && operation.call_count() == 1,
         (
@@ -358,7 +359,8 @@ fn evaluated_ready_args_match(
             | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
             | EvaluatedBytesOp::CompareMissingLegacy
-            | EvaluatedBytesOp::JsonPredicateMissingLegacy,
+            | EvaluatedBytesOp::JsonPredicateMissingLegacy
+            | EvaluatedBytesOp::JsonValueAbsentLegacy,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,
@@ -930,7 +932,8 @@ pub(crate) fn evaluated_bytes_shape(
             | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
             | EvaluatedBytesOp::CompareMissingLegacy
-            | EvaluatedBytesOp::JsonPredicateMissingLegacy,
+            | EvaluatedBytesOp::JsonPredicateMissingLegacy
+            | EvaluatedBytesOp::JsonValueAbsentLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
         (
@@ -941,7 +944,8 @@ pub(crate) fn evaluated_bytes_shape(
             | EvaluatedBytesOp::LikeMissingLegacyNative
             | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
             | EvaluatedBytesOp::CompareMissingLegacy
-            | EvaluatedBytesOp::JsonPredicateMissingLegacy,
+            | EvaluatedBytesOp::JsonPredicateMissingLegacy
+            | EvaluatedBytesOp::JsonValueAbsentLegacy,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,

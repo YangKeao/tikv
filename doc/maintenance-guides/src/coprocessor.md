@@ -361,8 +361,16 @@ short-circuit admission policy described above.
   inside the guard, including actual NULL outcomes. The separate datatype
   `native_path_ops.rs` owns raw traversal and mutations; SDK codecs retain
   their original staged normalization/errors and deferred replacement demand.
-  Whole-family credit covers EXTRACT/INSERT/SET/REMOVE/ARRAY_INSERT only:
-  legacy REPLACE/ARRAY_APPEND evaluator routing and UNQUOTE remain open.
+  Legacy REPLACE/ARRAY_APPEND now have distinct raw-value workers as well.
+  `native_codec.rs` owns the original raw encoder; `native_json_legacy.rs`
+  retains full-pair REPLACE preparation versus per-pair APPEND demand and every
+  raw codec stage. APPEND extraction failure is an original-byte identity, not
+  NULL; zero-pair APPEND identity differs from zero-pair REPLACE re-encoding.
+  Actual legacy no-value observations use a separate NoArgs byte terminal,
+  never a fabricated SQL NULL witness. Existing by-value legacy preparation and
+  error classes remain outside the SDK's checked-transport guard; this does not
+  add a whole-call/root driver. UNQUOTE's separate text/raw-display policies
+  remain open.
   JSON predicate/path policies live in `native_json.rs`, with fixed Int
   workers in `impl_json.rs`. Actual prepared serde values remain separate
   from datatype `json/native_policy.rs` raw-binary predicates; their numeric,

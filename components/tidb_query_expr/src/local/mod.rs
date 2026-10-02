@@ -179,6 +179,7 @@ pub use self::{
         native_decimal_bridge_error, prepare_evaluated_ascii, prepare_evaluated_bytes,
         prepare_grouping_args, prepare_json_array_args, prepare_json_binary_pair_args,
         prepare_json_object_args, prepare_json_path_values_args, prepare_json_paths_args,
+        prepare_json_raw_identity_args, prepare_json_raw_paths_values_args,
         prepare_json_serde_args,
     },
     compile::{

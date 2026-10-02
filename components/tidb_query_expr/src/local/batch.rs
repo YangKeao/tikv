@@ -1453,6 +1453,10 @@ pub enum EvaluatedBytesOp {
     JsonRemoveSerdeNative,
     JsonArrayAppendSerdeNative,
     JsonArrayInsertSerdeNative,
+    JsonReplaceRawLegacy,
+    JsonArrayAppendRawLegacy,
+    JsonArrayAppendEmptyLegacy,
+    JsonValueAbsentLegacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -2971,6 +2975,26 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::JsonArrayInsertSerdeNative,
                 );
             }
+            Self::JsonReplaceRawLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonReplaceRawLegacy,
+                );
+            }
+            Self::JsonArrayAppendRawLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonArrayAppendRawLegacy,
+                );
+            }
+            Self::JsonArrayAppendEmptyLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonArrayAppendEmptyLegacy,
+                );
+            }
+            Self::JsonValueAbsentLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonValueAbsentLegacy,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -3016,15 +3040,20 @@ impl EvaluatedBytesOp {
                 | Self::JsonRemoveSerdeNative
                 | Self::JsonArrayAppendSerdeNative
                 | Self::JsonArrayInsertSerdeNative
+                | Self::JsonReplaceRawLegacy
+                | Self::JsonArrayAppendRawLegacy
+                | Self::JsonArrayAppendEmptyLegacy
         )
     }
 
     pub(crate) fn json_output_args_valid(self, values: &[Option<&[u8]>]) -> bool {
         use crate::impl_json::{
+            json_array_append_empty_legacy_args_valid, json_array_append_raw_legacy_args_valid,
             json_array_append_serde_args_valid, json_array_insert_serde_args_valid,
             json_array_serde_args_valid, json_extract_serde_args_valid,
             json_modify_serde_args_valid, json_object_serde_args_valid,
-            json_remove_serde_args_valid, json_serde_native_args_valid,
+            json_remove_serde_args_valid, json_replace_raw_legacy_args_valid,
+            json_serde_native_args_valid,
         };
         match (self, values) {
             (Self::JsonArraySerdeNative, [Some(values)]) => json_array_serde_args_valid(values),
@@ -3052,6 +3081,15 @@ impl EvaluatedBytesOp {
             }
             (Self::JsonArrayInsertSerdeNative, [Some(document), Some(paths), Some(values)]) => {
                 json_array_insert_serde_args_valid(document, paths, values)
+            }
+            (Self::JsonReplaceRawLegacy, [Some(document), Some(paths), Some(values)]) => {
+                json_replace_raw_legacy_args_valid(document, paths, values)
+            }
+            (Self::JsonArrayAppendRawLegacy, [Some(document), Some(paths), Some(values)]) => {
+                json_array_append_raw_legacy_args_valid(document, paths, values)
+            }
+            (Self::JsonArrayAppendEmptyLegacy, [Some(document)]) => {
+                json_array_append_empty_legacy_args_valid(document)
             }
             _ => false,
         }
@@ -3225,9 +3263,9 @@ impl EvaluatedBytesOp {
             | Self::GroupingNullNative
             | Self::JsonPredicateNullNative
             | Self::JsonOutputNullNative => EvaluatedArgsRole::NullWitness,
-            Self::CompareMissingLegacy | Self::JsonPredicateMissingLegacy => {
-                EvaluatedArgsRole::NoArgs
-            }
+            Self::CompareMissingLegacy
+            | Self::JsonPredicateMissingLegacy
+            | Self::JsonValueAbsentLegacy => EvaluatedArgsRole::NoArgs,
             Self::AesNullNative => EvaluatedArgsRole::NullWitness,
             Self::DivDecimalNative | Self::DivDecimalLegacy => EvaluatedArgsRole::DecimalDivision,
             Self::AddDecimalNative
@@ -3858,6 +3896,14 @@ impl EvaluatedBytesOp {
             Self::JsonArrayInsertSerdeNative => {
                 crate::impl_json::json_array_insert_serde_native_fn_meta()
             }
+            Self::JsonReplaceRawLegacy => crate::impl_json::json_replace_raw_legacy_fn_meta(),
+            Self::JsonArrayAppendRawLegacy => {
+                crate::impl_json::json_array_append_raw_legacy_fn_meta()
+            }
+            Self::JsonArrayAppendEmptyLegacy => {
+                crate::impl_json::json_array_append_empty_legacy_fn_meta()
+            }
+            Self::JsonValueAbsentLegacy => crate::impl_json::json_value_absent_legacy_fn_meta(),
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
             Self::UnaryPlusBitsNative => crate::impl_op::unary_plus_bits_native_fn_meta(),
             Self::UnaryPlusDecimalNative => crate::impl_op::unary_plus_decimal_native_fn_meta(),
@@ -4179,7 +4225,11 @@ impl EvaluatedBytesOp {
             | Self::JsonReplaceSerdeNative
             | Self::JsonRemoveSerdeNative
             | Self::JsonArrayAppendSerdeNative
-            | Self::JsonArrayInsertSerdeNative => EvalType::Bytes,
+            | Self::JsonArrayInsertSerdeNative
+            | Self::JsonReplaceRawLegacy
+            | Self::JsonArrayAppendRawLegacy
+            | Self::JsonArrayAppendEmptyLegacy
+            | Self::JsonValueAbsentLegacy => EvalType::Bytes,
             Self::CompareIntSsNative(_)
             | Self::CompareIntSuNative(_)
             | Self::CompareIntUsNative(_)
@@ -4557,6 +4607,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::JsonReplaceRawLegacy | Self::JsonArrayAppendRawLegacy => {
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
+            }
+            Self::JsonArrayAppendEmptyLegacy => &[EvalType::Bytes],
+            Self::JsonValueAbsentLegacy => &[],
             Self::JsonArraySerdeNative
             | Self::JsonObjectSerdeNative
             | Self::JsonKeysSerdeNative
@@ -5400,6 +5455,154 @@ pub fn prepare_json_path_values_args(
             "JSON operand packing changed its fixed shape".into(),
         )),
     }
+}
+
+fn reserve_json_raw_operand(encoded: &mut Vec<u8>, additional: usize) -> LocalResult<()> {
+    encoded
+        .len()
+        .checked_add(additional)
+        .ok_or_else(evaluated_ascii_storage_overflow)?;
+    encoded
+        .try_reserve(additional)
+        .map_err(|_| LocalError::ResourceLimit("raw JSON operand packet allocation failed".into()))
+}
+
+fn encode_json_raw_scalar((kind, raw): (u8, &[u8])) -> LocalResult<Vec<u8>> {
+    let extent = raw
+        .len()
+        .checked_add(1)
+        .ok_or_else(evaluated_ascii_storage_overflow)?;
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(extent)
+        .map_err(|_| LocalError::ResourceLimit("raw JSON document allocation failed".into()))?;
+    encoded.push(kind);
+    encoded.extend_from_slice(raw);
+    Ok(encoded)
+}
+
+/// Transports an actual legacy binary value without decoding, including an
+/// unknown tag or empty/malformed payload. Absence has a separate NoArgs
+/// recipe.
+pub fn prepare_json_raw_identity_args(document: (u8, &[u8])) -> LocalResult<EvaluatedArgs> {
+    Ok(EvaluatedArgs::Bytes(Some(encode_json_raw_scalar(
+        document,
+    )?)))
+}
+
+/// Packs only actual borrowed SDK legs, original multiple flags, and binary
+/// operands. Counts are checked against actual iterator consumption; this does
+/// not parse paths, derive flags, validate binary JSON, or select an operation.
+pub fn prepare_json_raw_paths_values_args<'p, 'v>(
+    document: (u8, &[u8]),
+    paths: impl ExactSizeIterator<
+        Item = (
+            &'p [tidb_query_datatype::codec::mysql::json::NativeBinaryJsonPathLeg],
+            bool,
+        ),
+    >,
+    values: impl ExactSizeIterator<Item = (u8, &'v [u8])>,
+) -> LocalResult<EvaluatedArgs> {
+    use tidb_query_datatype::codec::mysql::json::{
+        NativeBinaryJsonArraySelection as Array, NativeBinaryJsonPathLeg as Leg,
+    };
+    let count = paths.len();
+    if count != values.len() {
+        return Err(LocalError::InvalidBatch(
+            "raw JSON path/value operand counts differ".into(),
+        ));
+    }
+    let mut encoded_paths = json_operand_list_buffer(count)?;
+    let mut observed = 0usize;
+    for (legs, multiple) in paths {
+        if observed == count {
+            return Err(LocalError::InvalidBatch(
+                "raw JSON path iterator exceeds its count".into(),
+            ));
+        }
+        observed += 1;
+        let leg_count =
+            u64::try_from(legs.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+        let mut extent = 9usize;
+        for leg in legs {
+            let additional = match leg {
+                Leg::Key(key) => {
+                    u64::try_from(key.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+                    key.len()
+                        .checked_add(9)
+                        .ok_or_else(evaluated_ascii_storage_overflow)?
+                }
+                Leg::Array(Array::Index(_)) => 9,
+                Leg::Array(Array::Range { .. }) => 17,
+                Leg::Array(Array::Asterisk) | Leg::DoubleAsterisk => 1,
+            };
+            extent = extent
+                .checked_add(additional)
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+        }
+        reserve_json_raw_operand(&mut encoded_paths, extent)?;
+        encoded_paths.push(u8::from(multiple));
+        encoded_paths.extend_from_slice(&leg_count.to_le_bytes());
+        for leg in legs {
+            match leg {
+                Leg::Key(key) => {
+                    encoded_paths.push(0);
+                    let length =
+                        u64::try_from(key.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+                    encoded_paths.extend_from_slice(&length.to_le_bytes());
+                    encoded_paths.extend_from_slice(key.as_bytes());
+                }
+                Leg::Array(Array::Asterisk) => encoded_paths.push(1),
+                Leg::Array(Array::Index(index)) => {
+                    encoded_paths.push(2);
+                    encoded_paths.extend_from_slice(&index.to_le_bytes());
+                }
+                Leg::Array(Array::Range { start, end }) => {
+                    encoded_paths.push(3);
+                    encoded_paths.extend_from_slice(&start.to_le_bytes());
+                    encoded_paths.extend_from_slice(&end.to_le_bytes());
+                }
+                Leg::DoubleAsterisk => encoded_paths.push(4),
+            }
+        }
+    }
+    if observed != count {
+        return Err(LocalError::InvalidBatch(
+            "raw JSON path iterator ended before its count".into(),
+        ));
+    }
+    let mut encoded_values = json_operand_list_buffer(count)?;
+    observed = 0;
+    for (kind, raw) in values {
+        if observed == count {
+            return Err(LocalError::InvalidBatch(
+                "raw JSON value iterator exceeds its count".into(),
+            ));
+        }
+        observed += 1;
+        let length = raw
+            .len()
+            .checked_add(1)
+            .ok_or_else(evaluated_ascii_storage_overflow)?;
+        let word = u64::try_from(length).map_err(|_| evaluated_ascii_storage_overflow())?;
+        let additional = length
+            .checked_add(8)
+            .ok_or_else(evaluated_ascii_storage_overflow)?;
+        reserve_json_raw_operand(&mut encoded_values, additional)?;
+        encoded_values.extend_from_slice(&word.to_le_bytes());
+        encoded_values.push(kind);
+        encoded_values.extend_from_slice(raw);
+    }
+    if observed != count {
+        return Err(LocalError::InvalidBatch(
+            "raw JSON value iterator ended before its count".into(),
+        ));
+    }
+    Ok(EvaluatedArgs::Bytes3([
+        Some(encode_json_raw_scalar(document)?),
+        Some(encoded_paths),
+        Some(encoded_values),
+    ]))
 }
 
 /// Owned ready arguments and explicit demand markers for closed recipes. Int
@@ -8546,6 +8749,413 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn json_raw_legacy_profiles_preserve_codec_identity_and_real_absence() {
+        use tidb_query_datatype::codec::mysql::json::NativeBinaryJsonPathLeg as Leg;
+
+        use crate::impl_json::*;
+        let padded = [0, 0, 0, 0, 9, 0, 0, 0, 77];
+        let empty_array = [0, 0, 0, 0, 8, 0, 0, 0];
+        let value = 2_i64.to_le_bytes();
+        let root: &[Leg] = &[];
+        let mut appended = vec![3, 1, 0, 0, 0, 21, 0, 0, 0, 9, 13, 0, 0, 0];
+        appended.extend_from_slice(&value);
+        for (operation, getter, args, expected) in [
+            (
+                EvaluatedBytesOp::JsonReplaceRawLegacy,
+                json_replace_raw_legacy_fn_meta(),
+                prepare_json_raw_paths_values_args(
+                    (3, &padded),
+                    std::iter::empty(),
+                    std::iter::empty(),
+                )
+                .unwrap(),
+                Some(vec![3, 0, 0, 0, 0, 8, 0, 0, 0]),
+            ),
+            (
+                EvaluatedBytesOp::JsonArrayAppendRawLegacy,
+                json_array_append_raw_legacy_fn_meta(),
+                prepare_json_raw_paths_values_args(
+                    (3, &empty_array),
+                    std::iter::once((root, false)),
+                    std::iter::once((9, value.as_slice())),
+                )
+                .unwrap(),
+                Some(appended),
+            ),
+            (
+                EvaluatedBytesOp::JsonArrayAppendEmptyLegacy,
+                json_array_append_empty_legacy_fn_meta(),
+                prepare_json_raw_identity_args((255, &[77, 0, 255])).unwrap(),
+                Some(vec![255, 77, 0, 255]),
+            ),
+            (
+                EvaluatedBytesOp::JsonValueAbsentLegacy,
+                json_value_absent_legacy_fn_meta(),
+                EvaluatedArgs::NoArgs,
+                None,
+            ),
+        ] {
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            assert_eq!(operation.call_count(), 1);
+            assert!(!operation.returns_json_report());
+            assert_eq!(args.role(), operation.input_role());
+            assert_eq!(args.input_types(), operation.input_types());
+            let arity = operation.input_types().len();
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), arity + 1);
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::NullWitness(None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes(None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            if operation != EvaluatedBytesOp::JsonValueAbsentLegacy {
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::NoArgs),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            let ComputedValue::Bytes(output) = worker.eval_args(args).unwrap() else {
+                panic!()
+            };
+            assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(output.value(), expected.as_deref());
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert!(worker.is_healthy());
+        }
+    }
+
+    #[test]
+    fn json_raw_legacy_counted_packets_reject_framing_not_business_values() {
+        use tidb_query_datatype::codec::mysql::json::{
+            NativeBinaryJsonArraySelection as Array, NativeBinaryJsonPathLeg as Leg,
+        };
+        struct Counted<I>(I, usize);
+        impl<I: Iterator> Iterator for Counted<I> {
+            type Item = I::Item;
+            fn next(&mut self) -> Option<Self::Item> {
+                self.0.next()
+            }
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (self.1, Some(self.1))
+            }
+        }
+        impl<I: Iterator> ExactSizeIterator for Counted<I> {
+            fn len(&self) -> usize {
+                self.1
+            }
+        }
+        let root: &[Leg] = &[];
+        let raw: &[u8] = &[];
+        assert!(matches!(
+            prepare_json_raw_paths_values_args(
+                (255, raw),
+                Counted(std::iter::once((root, false)), 0),
+                std::iter::empty()
+            ),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert!(matches!(
+            prepare_json_raw_paths_values_args(
+                (255, raw),
+                Counted(std::iter::empty(), 1),
+                std::iter::once((255, raw))
+            ),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert!(matches!(
+            prepare_json_raw_paths_values_args(
+                (255, raw),
+                std::iter::empty(),
+                Counted(std::iter::once((255, raw)), 0)
+            ),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert!(matches!(
+            prepare_json_raw_paths_values_args(
+                (255, raw),
+                std::iter::once((root, false)),
+                Counted(std::iter::empty(), 1)
+            ),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        let legs = [
+            Leg::Key("*".into()),
+            Leg::Array(Array::Asterisk),
+            Leg::Array(Array::Index(i64::MIN)),
+            Leg::Array(Array::Range {
+                start: -2,
+                end: i64::MAX,
+            }),
+            Leg::DoubleAsterisk,
+        ];
+        for multiple in [false, true] {
+            let args = prepare_json_raw_paths_values_args(
+                (254, &[0, 255]),
+                std::iter::once((legs.as_slice(), multiple)),
+                std::iter::once((255, raw)),
+            )
+            .unwrap();
+            assert!(args.admission_matches(EvaluatedBytesOp::JsonReplaceRawLegacy));
+            assert!(args.admission_matches(EvaluatedBytesOp::JsonArrayAppendRawLegacy));
+            let EvaluatedArgs::Bytes3([Some(document), Some(paths), Some(values)]) = args else {
+                panic!()
+            };
+            assert_eq!(document, [254, 0, 255]);
+            assert_eq!(paths[8], u8::from(multiple));
+            assert_eq!(paths[17], 0);
+            assert_eq!(paths[26], b'*');
+            assert_eq!(paths[27], 1);
+            assert_eq!(paths[28], 2);
+            assert_eq!(&paths[29..37], &i64::MIN.to_le_bytes());
+            assert_eq!(paths[37], 3);
+            assert_eq!(&paths[38..46], &(-2_i64).to_le_bytes());
+            assert_eq!(&paths[46..54], &i64::MAX.to_le_bytes());
+            assert_eq!(paths[54], 4);
+            assert_eq!(&values[..8], &1_u64.to_le_bytes());
+            assert_eq!(&values[8..16], &1_u64.to_le_bytes());
+            assert_eq!(values[16], 255);
+        }
+        let one = 1_i64.to_le_bytes();
+        let two = 2_i64.to_le_bytes();
+        for operation in [
+            EvaluatedBytesOp::JsonReplaceRawLegacy,
+            EvaluatedBytesOp::JsonArrayAppendRawLegacy,
+        ] {
+            let EvaluatedArgs::Bytes3(valid) = prepare_json_raw_paths_values_args(
+                (9, &one),
+                std::iter::once((root, false)),
+                std::iter::once((9, two.as_slice())),
+            )
+            .unwrap() else {
+                panic!()
+            };
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let mut invalid_cases = Vec::new();
+            for slot in 0..3 {
+                let mut absent = valid.clone();
+                absent[slot] = None;
+                invalid_cases.push(absent);
+                let mut empty = valid.clone();
+                empty[slot] = Some(Vec::new());
+                invalid_cases.push(empty);
+            }
+            for packet in [
+                u64::MAX.to_le_bytes().to_vec(),
+                vec![0; 7],
+                [0_u64.to_le_bytes(), 0_u64.to_le_bytes()].concat(),
+            ] {
+                let mut invalid = valid.clone();
+                invalid[1] = Some(packet);
+                invalid_cases.push(invalid);
+            }
+            let mut flag = valid.clone();
+            flag[1].as_mut().unwrap()[8] = 2;
+            invalid_cases.push(flag);
+            let mut unknown_leg = 1_u64.to_le_bytes().to_vec();
+            unknown_leg.push(0);
+            unknown_leg.extend_from_slice(&1_u64.to_le_bytes());
+            unknown_leg.push(5);
+            let mut bad_key = unknown_leg.clone();
+            *bad_key.last_mut().unwrap() = 0;
+            bad_key.extend_from_slice(&1_u64.to_le_bytes());
+            bad_key.push(255);
+            for paths in [unknown_leg, bad_key] {
+                let mut invalid = valid.clone();
+                invalid[1] = Some(paths);
+                invalid_cases.push(invalid);
+            }
+            for packet in [
+                0_u64.to_le_bytes().to_vec(),
+                [1_u64.to_le_bytes(), 0_u64.to_le_bytes()].concat(),
+                [1_u64.to_le_bytes(), u64::MAX.to_le_bytes()].concat(),
+            ] {
+                let mut invalid = valid.clone();
+                invalid[2] = Some(packet);
+                invalid_cases.push(invalid);
+            }
+            if operation == EvaluatedBytesOp::JsonArrayAppendRawLegacy {
+                let mut zero = valid.clone();
+                zero[1] = Some(0_u64.to_le_bytes().to_vec());
+                zero[2] = Some(0_u64.to_le_bytes().to_vec());
+                invalid_cases.push(zero);
+            }
+            for invalid in invalid_cases {
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes3(invalid.clone())),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let [document, paths, values] = invalid;
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(
+                        [
+                            ScalarValue::Bytes(document),
+                            ScalarValue::Bytes(paths),
+                            ScalarValue::Bytes(values),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None)
+                        ],
+                        3,
+                        &mut reported
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            // All raw values and actual flags reach the real kernel. Their
+            // business None/identity outcomes are not transport rejections.
+            let multiple = prepare_json_raw_paths_values_args(
+                (9, &one),
+                std::iter::once((root, true)),
+                std::iter::once((9, two.as_slice())),
+            )
+            .unwrap();
+            let ComputedValue::Bytes(output) = worker.eval_args(multiple).unwrap() else {
+                panic!()
+            };
+            assert_eq!(output.value(), None);
+            let malformed = prepare_json_raw_paths_values_args(
+                (3, &[255]),
+                std::iter::once((root, false)),
+                std::iter::once((255, raw)),
+            )
+            .unwrap();
+            let ComputedValue::Bytes(output) = worker.eval_args(malformed).unwrap() else {
+                panic!()
+            };
+            assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(
+                output.value(),
+                if operation == EvaluatedBytesOp::JsonReplaceRawLegacy {
+                    None
+                } else {
+                    Some([3, 255].as_slice())
+                }
+            );
+            assert_eq!(worker.kernel_invocations(), 2);
+            if operation == EvaluatedBytesOp::JsonArrayAppendRawLegacy {
+                let zero = prepare_json_raw_paths_values_args(
+                    (9, &one),
+                    std::iter::empty(),
+                    std::iter::empty(),
+                )
+                .unwrap();
+                assert!(matches!(
+                    worker.eval_args(zero),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert!(worker.is_healthy());
+        }
+        let mut identity = prepare_evaluated_bytes(
+            EvaluatedBytesOp::JsonArrayAppendEmptyLegacy,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Bytes(Some(Vec::new())),
+            EvaluatedArgs::NoArgs,
+        ] {
+            assert!(matches!(
+                identity.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+        }
+        for invalid in [None, Some(Vec::new())] {
+            let mut reported = None;
+            assert!(matches!(
+                identity.eval_ready(
+                    [
+                        ScalarValue::Bytes(invalid),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None)
+                    ],
+                    1,
+                    &mut reported
+                ),
+                Err(LocalError::InvalidSpec(_))
+            ));
+            assert_eq!(reported, None);
+        }
+        assert_eq!(identity.kernel_invocations(), 0);
+        let ComputedValue::Bytes(output) = identity
+            .eval_args(prepare_json_raw_identity_args((255, raw)).unwrap())
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(output.value(), Some([255].as_slice()));
+        assert_eq!(identity.kernel_invocations(), 1);
+    }
 
     #[test]
     fn json_path_unit_profiles_dispatch_borrowed_selectors_and_owned_bytes() {
