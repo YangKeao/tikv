@@ -404,6 +404,21 @@ pub enum LocalFunctionId {
     AesDecrypt192CfbNative,
     AesDecrypt256CfbNative,
     AesNullNative,
+    CompareIntSsNative(crate::ComparisonOp),
+    CompareIntSuNative(crate::ComparisonOp),
+    CompareIntUsNative(crate::ComparisonOp),
+    CompareIntUuNative(crate::ComparisonOp),
+    CompareInt128Legacy(crate::ComparisonOp),
+    CompareRealNative(crate::ComparisonOp),
+    CompareRealLegacy(crate::ComparisonOp),
+    CompareDecimalNative(crate::ComparisonOp),
+    CompareBytesNative(crate::ComparisonOp),
+    CompareVectorNative(crate::ComparisonOp),
+    CompareTimeCoreNative(crate::ComparisonOp),
+    CompareDurationNative(crate::ComparisonOp),
+    CompareJsonNative(crate::ComparisonOp),
+    CompareNullNative,
+    CompareMissingLegacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

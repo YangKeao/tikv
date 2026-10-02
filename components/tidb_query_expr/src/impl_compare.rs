@@ -8,9 +8,285 @@ use std::{
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::{
-    codec::{Error, collation::Collator, data_type::*, mysql::Time},
+    codec::{
+        Error,
+        collation::{Collator, native::NativeCollation},
+        data_type::*,
+        mysql::{Time, json::compare_native_binary_json},
+    },
     expr::EvalContext,
 };
+
+use crate::{RpnFnMeta, impl_math::native_decimal_budget};
+
+/// Closed comparison identity used only to select a fixed generated kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ComparisonOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+trait NativeComparisonPredicate: CmpOp {
+    fn ieee(left: f64, right: f64) -> bool;
+}
+
+macro_rules! ieee_comparison_predicate {
+    ($predicate:ty, $operator:tt) => {
+        impl NativeComparisonPredicate for $predicate {
+            fn ieee(left: f64, right: f64) -> bool {
+                left $operator right
+            }
+        }
+    };
+}
+
+ieee_comparison_predicate!(CmpOpEq, ==);
+ieee_comparison_predicate!(CmpOpNe, !=);
+ieee_comparison_predicate!(CmpOpLt, <);
+ieee_comparison_predicate!(CmpOpLe, <=);
+ieee_comparison_predicate!(CmpOpGt, >);
+ieee_comparison_predicate!(CmpOpGe, >=);
+
+fn native_compare_int_ss<F: CmpOp>(left: &Int, right: &Int) -> Result<Option<Int>> {
+    BasicComparer::<Int, F>::compare(Some(left), Some(right))
+}
+
+fn native_compare_int_su<F: CmpOp>(left: &Int, right: &Int) -> Result<Option<Int>> {
+    IntUintComparer::<F>::compare(Some(left), Some(right))
+}
+
+fn native_compare_int_us<F: CmpOp>(left: &Int, right: &Int) -> Result<Option<Int>> {
+    UintIntComparer::<F>::compare(Some(left), Some(right))
+}
+
+fn native_compare_int_uu<F: CmpOp>(left: &Int, right: &Int) -> Result<Option<Int>> {
+    UintUintComparer::<F>::compare(Some(left), Some(right))
+}
+
+fn comparison_raw<const N: usize>(raw: BytesRef) -> Result<[u8; N]> {
+    raw.try_into()
+        .map_err(|_| other_err!("Comparison transport requires exactly {} bytes", N))
+}
+
+fn legacy_compare_int128<F: CmpOp>(left: BytesRef, right: BytesRef) -> Result<Option<Int>> {
+    let left = i128::from_le_bytes(comparison_raw(left)?);
+    let right = i128::from_le_bytes(comparison_raw(right)?);
+    Ok(Some(Int::from(F::compare_order(left.cmp(&right)))))
+}
+
+fn native_compare_real<F: NativeComparisonPredicate>(
+    left: BytesRef,
+    right: BytesRef,
+) -> Result<Option<Int>> {
+    let left = f64::from_bits(u64::from_le_bytes(comparison_raw(left)?));
+    let right = f64::from_bits(u64::from_le_bytes(comparison_raw(right)?));
+    Ok(Some(Int::from(F::ieee(left, right))))
+}
+
+fn legacy_compare_real<F: CmpOp>(left: BytesRef, right: BytesRef) -> Result<Option<Int>> {
+    let left = f64::from_bits(u64::from_le_bytes(comparison_raw(left)?));
+    let right = f64::from_bits(u64::from_le_bytes(comparison_raw(right)?));
+    Ok(Some(Int::from(F::compare_order(left.total_cmp(&right)))))
+}
+
+fn native_compare_decimal<F: CmpOp>(
+    left: &Decimal,
+    right: &Decimal,
+    budget: &Int,
+) -> Result<Option<Int>> {
+    // Decimal2 supplies its actual remaining budget. Grow Ord borrows all words
+    // without scratch allocation; it must not round to the wire nine-word limit.
+    let _budget = native_decimal_budget(budget)?;
+    BasicComparer::<Decimal, F>::compare(Some(left), Some(right))
+}
+
+fn native_compare_bytes<F: CmpOp>(
+    left: BytesRef,
+    right: BytesRef,
+    tag: &Int,
+) -> Result<Option<Int>> {
+    let collation = NativeCollation::from_tag(*tag)
+        .ok_or_else(|| other_err!("Invalid native comparison collation policy {}", tag))?;
+    Ok(Some(Int::from(F::compare_order(
+        collation.compare(left, right)?,
+    ))))
+}
+
+fn native_compare_vector<F: CmpOp>(
+    left: VectorFloat32Ref,
+    right: VectorFloat32Ref,
+) -> Result<Option<Int>> {
+    compare_vector_float32::<F>(Some(left), Some(right))
+}
+
+fn native_compare_time_core<F: CmpOp>(left: BytesRef, right: BytesRef) -> Result<Option<Int>> {
+    let left = u64::from_le_bytes(comparison_raw(left)?);
+    let right = u64::from_le_bytes(comparison_raw(right)?);
+    Ok(Some(Int::from(F::compare_order(
+        Time::native_core_compare(left, right),
+    ))))
+}
+
+fn native_compare_json<F: CmpOp>(left: BytesRef, right: BytesRef) -> Result<Option<Int>> {
+    // The leading type byte is transport, not a parsed/canonicalized JSON value.
+    // Malformed payload policy belongs exclusively to the shared native helper.
+    let (&left_type, left_raw) = left
+        .split_first()
+        .ok_or_else(|| other_err!("Native JSON comparison transport has no type byte"))?;
+    let (&right_type, right_raw) = right
+        .split_first()
+        .ok_or_else(|| other_err!("Native JSON comparison transport has no type byte"))?;
+    Ok(Some(Int::from(F::compare_order(
+        compare_native_binary_json(left_type, left_raw, right_type, right_raw),
+    ))))
+}
+
+// Each branch has a distinct generated unit kernel. ComparisonOp is never an
+// operand or call metadata and cannot turn the worker into an arbitrary
+// program.
+macro_rules! fixed_comparison_recipe {
+    ($function:ident, $helper:ident, $predicate:ty, ($($arg:ident: $arg_type:ty),+)) => {
+        #[rpn_fn]
+        fn $function($($arg: $arg_type),+) -> Result<Option<Int>> {
+            $helper::<$predicate>($($arg),+)
+        }
+    };
+}
+
+macro_rules! fixed_comparison_profile {
+    ($selector:ident, $helper:ident, $args:tt,
+        $($variant:ident => ($function:ident, $getter:ident, $predicate:ty)),+ $(,)?) => {
+        $(fixed_comparison_recipe!($function, $helper, $predicate, $args);)+
+
+        pub fn $selector(operation: ComparisonOp) -> RpnFnMeta {
+            match operation {
+                $(ComparisonOp::$variant => $getter(),)+
+            }
+        }
+    };
+}
+
+fixed_comparison_profile!(compare_int_ss_native_fn_meta, native_compare_int_ss, (left: &Int, right: &Int),
+    Eq => (compare_eq_int_ss_native, compare_eq_int_ss_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_int_ss_native, compare_ne_int_ss_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_int_ss_native, compare_lt_int_ss_native_fn_meta, CmpOpLt),
+    Le => (compare_le_int_ss_native, compare_le_int_ss_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_int_ss_native, compare_gt_int_ss_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_int_ss_native, compare_ge_int_ss_native_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_int_su_native_fn_meta, native_compare_int_su, (left: &Int, right: &Int),
+    Eq => (compare_eq_int_su_native, compare_eq_int_su_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_int_su_native, compare_ne_int_su_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_int_su_native, compare_lt_int_su_native_fn_meta, CmpOpLt),
+    Le => (compare_le_int_su_native, compare_le_int_su_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_int_su_native, compare_gt_int_su_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_int_su_native, compare_ge_int_su_native_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_int_us_native_fn_meta, native_compare_int_us, (left: &Int, right: &Int),
+    Eq => (compare_eq_int_us_native, compare_eq_int_us_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_int_us_native, compare_ne_int_us_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_int_us_native, compare_lt_int_us_native_fn_meta, CmpOpLt),
+    Le => (compare_le_int_us_native, compare_le_int_us_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_int_us_native, compare_gt_int_us_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_int_us_native, compare_ge_int_us_native_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_int_uu_native_fn_meta, native_compare_int_uu, (left: &Int, right: &Int),
+    Eq => (compare_eq_int_uu_native, compare_eq_int_uu_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_int_uu_native, compare_ne_int_uu_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_int_uu_native, compare_lt_int_uu_native_fn_meta, CmpOpLt),
+    Le => (compare_le_int_uu_native, compare_le_int_uu_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_int_uu_native, compare_gt_int_uu_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_int_uu_native, compare_ge_int_uu_native_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_int128_legacy_fn_meta, legacy_compare_int128, (left: BytesRef, right: BytesRef),
+    Eq => (compare_eq_int128_legacy, compare_eq_int128_legacy_fn_meta, CmpOpEq),
+    Ne => (compare_ne_int128_legacy, compare_ne_int128_legacy_fn_meta, CmpOpNe),
+    Lt => (compare_lt_int128_legacy, compare_lt_int128_legacy_fn_meta, CmpOpLt),
+    Le => (compare_le_int128_legacy, compare_le_int128_legacy_fn_meta, CmpOpLe),
+    Gt => (compare_gt_int128_legacy, compare_gt_int128_legacy_fn_meta, CmpOpGt),
+    Ge => (compare_ge_int128_legacy, compare_ge_int128_legacy_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_real_native_fn_meta, native_compare_real, (left: BytesRef, right: BytesRef),
+    Eq => (compare_eq_real_native, compare_eq_real_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_real_native, compare_ne_real_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_real_native, compare_lt_real_native_fn_meta, CmpOpLt),
+    Le => (compare_le_real_native, compare_le_real_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_real_native, compare_gt_real_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_real_native, compare_ge_real_native_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_real_legacy_fn_meta, legacy_compare_real, (left: BytesRef, right: BytesRef),
+    Eq => (compare_eq_real_legacy, compare_eq_real_legacy_fn_meta, CmpOpEq),
+    Ne => (compare_ne_real_legacy, compare_ne_real_legacy_fn_meta, CmpOpNe),
+    Lt => (compare_lt_real_legacy, compare_lt_real_legacy_fn_meta, CmpOpLt),
+    Le => (compare_le_real_legacy, compare_le_real_legacy_fn_meta, CmpOpLe),
+    Gt => (compare_gt_real_legacy, compare_gt_real_legacy_fn_meta, CmpOpGt),
+    Ge => (compare_ge_real_legacy, compare_ge_real_legacy_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_decimal_native_fn_meta, native_compare_decimal, (left: &Decimal, right: &Decimal, budget: &Int),
+    Eq => (compare_eq_decimal_native, compare_eq_decimal_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_decimal_native, compare_ne_decimal_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_decimal_native, compare_lt_decimal_native_fn_meta, CmpOpLt),
+    Le => (compare_le_decimal_native, compare_le_decimal_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_decimal_native, compare_gt_decimal_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_decimal_native, compare_ge_decimal_native_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_bytes_native_fn_meta, native_compare_bytes, (left: BytesRef, right: BytesRef, tag: &Int),
+    Eq => (compare_eq_bytes_native, compare_eq_bytes_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_bytes_native, compare_ne_bytes_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_bytes_native, compare_lt_bytes_native_fn_meta, CmpOpLt),
+    Le => (compare_le_bytes_native, compare_le_bytes_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_bytes_native, compare_gt_bytes_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_bytes_native, compare_ge_bytes_native_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_vector_native_fn_meta, native_compare_vector, (left: VectorFloat32Ref, right: VectorFloat32Ref),
+    Eq => (compare_eq_vector_native, compare_eq_vector_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_vector_native, compare_ne_vector_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_vector_native, compare_lt_vector_native_fn_meta, CmpOpLt),
+    Le => (compare_le_vector_native, compare_le_vector_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_vector_native, compare_gt_vector_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_vector_native, compare_ge_vector_native_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_time_core_native_fn_meta, native_compare_time_core, (left: BytesRef, right: BytesRef),
+    Eq => (compare_eq_time_core_native, compare_eq_time_core_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_time_core_native, compare_ne_time_core_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_time_core_native, compare_lt_time_core_native_fn_meta, CmpOpLt),
+    Le => (compare_le_time_core_native, compare_le_time_core_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_time_core_native, compare_gt_time_core_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_time_core_native, compare_ge_time_core_native_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_duration_native_fn_meta, native_compare_int_ss, (left: &Int, right: &Int),
+    Eq => (compare_eq_duration_native, compare_eq_duration_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_duration_native, compare_ne_duration_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_duration_native, compare_lt_duration_native_fn_meta, CmpOpLt),
+    Le => (compare_le_duration_native, compare_le_duration_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_duration_native, compare_gt_duration_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_duration_native, compare_ge_duration_native_fn_meta, CmpOpGe),
+);
+fixed_comparison_profile!(compare_json_native_fn_meta, native_compare_json, (left: BytesRef, right: BytesRef),
+    Eq => (compare_eq_json_native, compare_eq_json_native_fn_meta, CmpOpEq),
+    Ne => (compare_ne_json_native, compare_ne_json_native_fn_meta, CmpOpNe),
+    Lt => (compare_lt_json_native, compare_lt_json_native_fn_meta, CmpOpLt),
+    Le => (compare_le_json_native, compare_le_json_native_fn_meta, CmpOpLe),
+    Gt => (compare_gt_json_native, compare_gt_json_native_fn_meta, CmpOpGt),
+    Ge => (compare_ge_json_native, compare_ge_json_native_fn_meta, CmpOpGe),
+);
+
+#[rpn_fn(nullable)]
+fn compare_null_native(witness: Option<&Int>) -> Result<Option<Int>> {
+    match witness {
+        None => Ok(None),
+        Some(_) => Err(other_err!("Comparison NULL witness must be an actual NULL")),
+    }
+}
+
+#[rpn_fn]
+fn compare_missing_legacy() -> Result<Option<Int>> {
+    Ok(None)
+}
 
 #[rpn_fn(nullable)]
 #[inline]
@@ -544,6 +820,168 @@ where
             }
             Ok(Some(res.to_owned()))
         }
+    }
+}
+
+#[cfg(test)]
+mod native_comparison_tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn fixed_comparison_metadata_covers_all_78_identities() {
+        let profiles: [(&str, fn(ComparisonOp) -> RpnFnMeta); 13] = [
+            ("int_ss_native", compare_int_ss_native_fn_meta),
+            ("int_su_native", compare_int_su_native_fn_meta),
+            ("int_us_native", compare_int_us_native_fn_meta),
+            ("int_uu_native", compare_int_uu_native_fn_meta),
+            ("int128_legacy", compare_int128_legacy_fn_meta),
+            ("real_native", compare_real_native_fn_meta),
+            ("real_legacy", compare_real_legacy_fn_meta),
+            ("decimal_native", compare_decimal_native_fn_meta),
+            ("bytes_native", compare_bytes_native_fn_meta),
+            ("vector_native", compare_vector_native_fn_meta),
+            ("time_core_native", compare_time_core_native_fn_meta),
+            ("duration_native", compare_duration_native_fn_meta),
+            ("json_native", compare_json_native_fn_meta),
+        ];
+        let mut names = HashSet::new();
+        for (profile, select) in profiles {
+            for (operation, name) in [
+                (ComparisonOp::Eq, "eq"),
+                (ComparisonOp::Ne, "ne"),
+                (ComparisonOp::Lt, "lt"),
+                (ComparisonOp::Le, "le"),
+                (ComparisonOp::Gt, "gt"),
+                (ComparisonOp::Ge, "ge"),
+            ] {
+                let meta = select(operation);
+                assert_eq!(meta.name, format!("compare_{name}_{profile}"));
+                assert!(names.insert(meta.name));
+            }
+        }
+        assert_eq!(names.len(), 78);
+        assert_eq!(compare_null_native(None).unwrap(), None);
+        assert!(compare_null_native(Some(&0)).is_err());
+        assert_eq!(compare_missing_legacy().unwrap(), None);
+    }
+
+    #[test]
+    fn fixed_comparison_ieee_integer_and_legacy_profiles() {
+        type RawRecipe = fn(BytesRef, BytesRef) -> Result<Option<Int>>;
+        let native: [RawRecipe; 6] = [
+            compare_eq_real_native,
+            compare_ne_real_native,
+            compare_lt_real_native,
+            compare_le_real_native,
+            compare_gt_real_native,
+            compare_ge_real_native,
+        ];
+        let legacy: [RawRecipe; 6] = [
+            compare_eq_real_legacy,
+            compare_ne_real_legacy,
+            compare_lt_real_legacy,
+            compare_le_real_legacy,
+            compare_gt_real_legacy,
+            compare_ge_real_legacy,
+        ];
+        let nan = f64::from_bits(0x7ff8_0000_0000_0042);
+        for (left, right, native_expected, legacy_expected) in [
+            (-0.0, 0.0, [1, 0, 0, 1, 0, 1], [0, 1, 1, 1, 0, 0]),
+            (nan, nan, [0, 1, 0, 0, 0, 0], [1, 0, 0, 1, 0, 1]),
+            (nan, f64::INFINITY, [0, 1, 0, 0, 0, 0], [0, 1, 0, 0, 1, 1]),
+            (
+                f64::NEG_INFINITY,
+                1.0,
+                [0, 1, 1, 1, 0, 0],
+                [0, 1, 1, 1, 0, 0],
+            ),
+        ] {
+            let left = left.to_bits().to_le_bytes();
+            let right = right.to_bits().to_le_bytes();
+            for i in 0..6 {
+                assert_eq!(native[i](&left, &right).unwrap(), Some(native_expected[i]));
+                assert_eq!(legacy[i](&left, &right).unwrap(), Some(legacy_expected[i]));
+                assert!(native[i](b"short", &right).is_err());
+                assert!(legacy[i](&left, b"short").is_err());
+            }
+        }
+        assert_eq!(
+            compare_lt_int_ss_native(&i64::MIN, &i64::MAX).unwrap(),
+            Some(1)
+        );
+        assert_eq!(compare_lt_int_su_native(&-1, &0).unwrap(), Some(1));
+        assert_eq!(compare_lt_int_su_native(&i64::MAX, &-1).unwrap(), Some(1));
+        assert_eq!(compare_gt_int_us_native(&-1, &i64::MAX).unwrap(), Some(1));
+        assert_eq!(compare_gt_int_us_native(&0, &-1).unwrap(), Some(1));
+        assert_eq!(compare_gt_int_uu_native(&-1, &i64::MIN).unwrap(), Some(1));
+        assert_eq!(compare_eq_int_su_native(&7, &7).unwrap(), Some(1));
+        assert_eq!(
+            compare_lt_duration_native(&i64::MIN, &i64::MAX).unwrap(),
+            Some(1)
+        );
+        let wide = (1_i128 << 100).to_le_bytes();
+        let wider = ((1_i128 << 100) + 1).to_le_bytes();
+        assert_eq!(compare_lt_int128_legacy(&wide, &wider).unwrap(), Some(1));
+        assert_eq!(compare_ne_int128_legacy(&wide, &wider).unwrap(), Some(1));
+        assert!(compare_eq_int128_legacy(b"short", &wide).is_err());
+    }
+
+    #[test]
+    fn fixed_comparison_shared_domains_and_raw_envelopes() {
+        let left =
+            Decimal::try_from_native_digits(false, "9".repeat(90).as_bytes(), 0, 0, 4096).unwrap();
+        let right_digits = format!("{}8", "9".repeat(89));
+        let right =
+            Decimal::try_from_native_digits(false, right_digits.as_bytes(), 0, 0, 4096).unwrap();
+        assert_eq!(
+            compare_gt_decimal_native(&left, &right, &4096).unwrap(),
+            Some(1)
+        );
+        assert!(compare_eq_decimal_native(&left, &right, &-1).is_err());
+        let padded = NativeCollation::Utf8Mb4Bin.tag();
+        let binary = NativeCollation::Binary.tag();
+        assert_eq!(
+            compare_eq_bytes_native(b"a", b"a ", &padded).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            compare_ne_bytes_native(b"a", b"a ", &binary).unwrap(),
+            Some(1)
+        );
+        assert!(compare_eq_bytes_native(b"a", b"a", &i64::MAX).is_err());
+        let left_vector = 1.0_f32.to_le_bytes();
+        let right_vector = 2.0_f32.to_le_bytes();
+        assert_eq!(
+            compare_lt_vector_native(
+                VectorFloat32Ref::new(&left_vector).unwrap(),
+                VectorFloat32Ref::new(&right_vector).unwrap(),
+            )
+            .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            compare_eq_time_core_native(&16_u64.to_le_bytes(), &31_u64.to_le_bytes(),).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            compare_gt_time_core_native(&u64::MAX.to_le_bytes(), &0_u64.to_le_bytes(),).unwrap(),
+            Some(1)
+        );
+        assert!(compare_eq_time_core_native(b"short", &0_u64.to_le_bytes()).is_err());
+        // Equal-rank malformed containers retain the native equal fallback;
+        // a missing transport type byte is an infrastructure error instead.
+        assert_eq!(
+            compare_eq_json_native(&[0x03], &[0x03, 255]).unwrap(),
+            Some(1)
+        );
+        assert!(compare_eq_json_native(&[], &[0x03]).is_err());
+        let mut ten = vec![0x09];
+        ten.extend_from_slice(&10_i64.to_le_bytes());
+        let mut near = vec![0x0b];
+        near.extend_from_slice(&(10.0_f64 + 5e-9).to_le_bytes());
+        assert_eq!(compare_eq_json_native(&ten, &near).unwrap(), Some(1));
     }
 }
 

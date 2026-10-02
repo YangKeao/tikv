@@ -344,8 +344,21 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
-  Native comparison preparation has a shared datatype substrate before the
-  six predicate evaluators migrate. `json/native_policy.rs` owns the native raw
+  The six native comparison predicates now use 13 explicit domain/profile
+  identities carrying a finite `ComparisonOp`. Their selectors choose 78
+  distinct unit-metadata kernels in `impl_compare.rs`; no operation code is an
+  SQL operand or runtime metadata. Results are owned signed0/1, with separate
+  actual-NULL and missing-child terminals. Native IEEE and legacy total float
+  order are distinct profiles. Existing argument roles, input budgets and
+  collation tags are reused, with strict nonnull admission only for the new
+  value profiles. No driver, carrier, binding or ordinary PB/legacy admission
+  is added. Native typed/batch/PB/legacy paths submit real values; row predicates
+  compose scalar outputs and shared NOT. Row preparation explicitly activates
+  statement truncation/date-mode/timezone/warning context previously lost to
+  NoColumns; this is a compatibility change, not old-context equivalence.
+  Default row collation/precision and NaN Eq-then-Lt/NOT behavior are retained;
+  empty-row identities remain structural and NullEq is a separate family.
+  The preceding shared datatype substrate remains the comparison foundation. `json/native_policy.rs` owns the native raw
   comparator and its serde/lossless decoder closure, with a data-only generic
   node and separate InvalidBinary/TooDeep error. Native duplicate-key vectors,
   count-before-key ordering, exact double versus mixed-number epsilon rules,
@@ -357,10 +370,10 @@ short-circuit admission policy described above.
   Borrowed `NativeDecimalCmpParts` and `native_decimal_cmp` retain the native
   coefficient-storage policy without allocating an owned Decimal bridge or
   changing word-backed wire ordering. These helpers add no evaluator family,
-  driver, result carrier, call binding or PB admission by themselves. Runtime
-  comparison demand, bool production and batch/legacy routing remain a separate
-  integration step; physical-heap/OOM and complete type-domain claims remain
-  outside this checkpoint.
+  driver, result carrier, call binding or PB admission by themselves. The
+  evaluator integration above is separate from that substrate ownership move;
+  physical-heap/OOM, broader request-root closure and complete type-domain
+  equivalence remain outside this checkpoint.
   AES adds 24 unit-metadata value profiles (two directions, three key widths,
   four SQL modes) and one genuine NULL witness. ECB uses the existing two Bytes
   inputs; CBC/OFB/CFB use three, with full passwords and IVs retained until the

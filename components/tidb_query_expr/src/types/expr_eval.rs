@@ -345,7 +345,8 @@ fn evaluated_ready_args_match(
             | EvaluatedBytesOp::DateFormatMissingNative
             | EvaluatedBytesOp::RegexpMissingLegacyNative
             | EvaluatedBytesOp::LikeMissingLegacyNative
-            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
+            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
+            | EvaluatedBytesOp::CompareMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => types.is_empty() && operation.call_count() == 1,
         (
@@ -354,7 +355,8 @@ fn evaluated_ready_args_match(
             | EvaluatedBytesOp::DateFormatMissingNative
             | EvaluatedBytesOp::RegexpMissingLegacyNative
             | EvaluatedBytesOp::LikeMissingLegacyNative
-            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
+            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
+            | EvaluatedBytesOp::CompareMissingLegacy,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,
@@ -381,13 +383,16 @@ fn evaluated_ready_args_match(
             || values
                 .iter()
                 .all(|value| matches!(value, ScalarValue::Bytes(Some(_)))))
-        && (!(operation.is_modulo_value() || operation.is_division_value())
+        && (!(operation.is_modulo_value()
+            || operation.is_division_value()
+            || operation.comparison_op().is_some())
             || values.iter().take(2).all(|value| {
                 matches!(
                     value,
                     ScalarValue::Int(Some(_))
                         | ScalarValue::Bytes(Some(_))
                         | ScalarValue::Decimal(Some(_))
+                        | ScalarValue::VectorFloat32(Some(_))
                 )
             }))
         && values.iter().zip(types).all(|(value, eval_type)| {
@@ -448,6 +453,7 @@ fn evaluated_ready_args_match(
                                 | EvaluatedBytesOp::AddVectorNative
                                 | EvaluatedBytesOp::SubVectorNative
                                 | EvaluatedBytesOp::MulVectorNative
+                                | EvaluatedBytesOp::CompareVectorNative(_)
                         ) && values.len() == 2
                     }
                     _ => unreachable!(),
@@ -492,12 +498,14 @@ fn evaluated_ready_args_match(
                         if usize::try_from(*raw_budget as u64).is_ok_and(|budget| budget != usize::MAX))
             }
             EvaluatedArgsRole::DecimalBinary => {
-                operation.is_binary_decimal()
+                (operation.is_binary_decimal()
+                    || matches!(operation, EvaluatedBytesOp::CompareDecimalNative(_)))
                     && matches!(values, [ScalarValue::Decimal(_), ScalarValue::Decimal(_), ScalarValue::Int(Some(raw_budget))]
                         if usize::try_from(*raw_budget as u64).is_ok_and(|budget| budget != usize::MAX))
             }
             EvaluatedArgsRole::Int1282 => {
-                operation.is_binary_int128()
+                (operation.is_binary_int128()
+                    || matches!(operation, EvaluatedBytesOp::CompareInt128Legacy(_)))
                     && values.len() == 2
                     && values.iter().all(|value| {
                         matches!(value, ScalarValue::Bytes(bits)
@@ -569,6 +577,7 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::RegexpNullBytesNative
                         | EvaluatedBytesOp::UnaryNullNative
                         | EvaluatedBytesOp::BinaryArithmeticNullNative
+                        | EvaluatedBytesOp::CompareNullNative
                 ) && matches!(values, [ScalarValue::Int(None)])
             }
             EvaluatedArgsRole::ReadyBytesInt => operation == EvaluatedBytesOp::Sha2Native,
@@ -616,7 +625,9 @@ fn evaluated_ready_args_match(
             EvaluatedArgsRole::CollatedBytes2 => {
                 matches!(
                     operation,
-                    EvaluatedBytesOp::StrcmpNative | EvaluatedBytesOp::FindInSetNative
+                    EvaluatedBytesOp::StrcmpNative
+                        | EvaluatedBytesOp::FindInSetNative
+                        | EvaluatedBytesOp::CompareBytesNative(_)
                 ) && matches!(values.last(), Some(ScalarValue::Int(Some(tag)))
                         if NativeCollation::from_tag(*tag).is_some())
             }
@@ -672,8 +683,11 @@ fn evaluated_ready_args_match(
                         if core.len() == 8)
             }
             EvaluatedArgsRole::TimeCoreBits2 => {
-                operation == EvaluatedBytesOp::DateDiffCoreNative
-                    && values.len() == 2
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::DateDiffCoreNative
+                        | EvaluatedBytesOp::CompareTimeCoreNative(_)
+                ) && values.len() == 2
                     && values.iter().all(|value| match value {
                         ScalarValue::Bytes(None) => true,
                         ScalarValue::Bytes(Some(bytes)) => bytes.len() == 8,
@@ -697,6 +711,8 @@ fn evaluated_ready_args_match(
                         | EvaluatedBytesOp::ModRealLegacy
                         | EvaluatedBytesOp::DivRealNative
                         | EvaluatedBytesOp::DivRealLegacy
+                        | EvaluatedBytesOp::CompareRealNative(_)
+                        | EvaluatedBytesOp::CompareRealLegacy(_)
                 ) && values.len() == 2
                     && values.iter().all(|value| match value {
                         ScalarValue::Bytes(None) => true,
@@ -865,7 +881,8 @@ pub(crate) fn evaluated_bytes_shape(
             | EvaluatedBytesOp::DateFormatMissingNative
             | EvaluatedBytesOp::RegexpMissingLegacyNative
             | EvaluatedBytesOp::LikeMissingLegacyNative
-            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
+            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
+            | EvaluatedBytesOp::CompareMissingLegacy,
             EvaluatedArgsRole::NoArgs,
         ) => arity == 0 && calls == 1,
         (
@@ -874,7 +891,8 @@ pub(crate) fn evaluated_bytes_shape(
             | EvaluatedBytesOp::DateFormatMissingNative
             | EvaluatedBytesOp::RegexpMissingLegacyNative
             | EvaluatedBytesOp::LikeMissingLegacyNative
-            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy,
+            | EvaluatedBytesOp::BinaryArithmeticMissingLegacy
+            | EvaluatedBytesOp::CompareMissingLegacy,
             _,
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,

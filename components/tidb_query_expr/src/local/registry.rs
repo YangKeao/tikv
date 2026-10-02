@@ -354,7 +354,22 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::AesDecrypt128CfbNative
         | LocalFunctionId::AesDecrypt192CfbNative
         | LocalFunctionId::AesDecrypt256CfbNative
-        | LocalFunctionId::AesNullNative => Err(other_err!(
+        | LocalFunctionId::AesNullNative
+        | LocalFunctionId::CompareIntSsNative(_)
+        | LocalFunctionId::CompareIntSuNative(_)
+        | LocalFunctionId::CompareIntUsNative(_)
+        | LocalFunctionId::CompareIntUuNative(_)
+        | LocalFunctionId::CompareInt128Legacy(_)
+        | LocalFunctionId::CompareRealNative(_)
+        | LocalFunctionId::CompareRealLegacy(_)
+        | LocalFunctionId::CompareDecimalNative(_)
+        | LocalFunctionId::CompareBytesNative(_)
+        | LocalFunctionId::CompareVectorNative(_)
+        | LocalFunctionId::CompareTimeCoreNative(_)
+        | LocalFunctionId::CompareDurationNative(_)
+        | LocalFunctionId::CompareJsonNative(_)
+        | LocalFunctionId::CompareNullNative
+        | LocalFunctionId::CompareMissingLegacy => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

@@ -1411,6 +1411,21 @@ pub enum EvaluatedBytesOp {
     AesDecrypt192CfbNative,
     AesDecrypt256CfbNative,
     AesNullNative,
+    CompareIntSsNative(crate::ComparisonOp),
+    CompareIntSuNative(crate::ComparisonOp),
+    CompareIntUsNative(crate::ComparisonOp),
+    CompareIntUuNative(crate::ComparisonOp),
+    CompareInt128Legacy(crate::ComparisonOp),
+    CompareRealNative(crate::ComparisonOp),
+    CompareRealLegacy(crate::ComparisonOp),
+    CompareDecimalNative(crate::ComparisonOp),
+    CompareBytesNative(crate::ComparisonOp),
+    CompareVectorNative(crate::ComparisonOp),
+    CompareTimeCoreNative(crate::ComparisonOp),
+    CompareDurationNative(crate::ComparisonOp),
+    CompareJsonNative(crate::ComparisonOp),
+    CompareNullNative,
+    CompareMissingLegacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -2719,6 +2734,81 @@ impl EvaluatedBytesOp {
             Self::AesNullNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AesNullNative);
             }
+            Self::CompareIntSsNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareIntSsNative(op),
+                );
+            }
+            Self::CompareIntSuNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareIntSuNative(op),
+                );
+            }
+            Self::CompareIntUsNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareIntUsNative(op),
+                );
+            }
+            Self::CompareIntUuNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareIntUuNative(op),
+                );
+            }
+            Self::CompareInt128Legacy(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareInt128Legacy(op),
+                );
+            }
+            Self::CompareRealNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareRealNative(op),
+                );
+            }
+            Self::CompareRealLegacy(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareRealLegacy(op),
+                );
+            }
+            Self::CompareDecimalNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareDecimalNative(op),
+                );
+            }
+            Self::CompareBytesNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareBytesNative(op),
+                );
+            }
+            Self::CompareVectorNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareVectorNative(op),
+                );
+            }
+            Self::CompareTimeCoreNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareTimeCoreNative(op),
+                );
+            }
+            Self::CompareDurationNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareDurationNative(op),
+                );
+            }
+            Self::CompareJsonNative(op) => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareJsonNative(op),
+                );
+            }
+            Self::CompareNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareNullNative,
+                );
+            }
+            Self::CompareMissingLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CompareMissingLegacy,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -2745,6 +2835,25 @@ impl EvaluatedBytesOp {
             Self::LikeNative => Some(NativeLikeKind::Like),
             Self::IlikeNative => Some(NativeLikeKind::Ilike),
             Self::LikeLegacyNative => Some(NativeLikeKind::Legacy),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn comparison_op(self) -> Option<crate::ComparisonOp> {
+        match self {
+            Self::CompareIntSsNative(op)
+            | Self::CompareIntSuNative(op)
+            | Self::CompareIntUsNative(op)
+            | Self::CompareIntUuNative(op)
+            | Self::CompareInt128Legacy(op)
+            | Self::CompareRealNative(op)
+            | Self::CompareRealLegacy(op)
+            | Self::CompareDecimalNative(op)
+            | Self::CompareBytesNative(op)
+            | Self::CompareVectorNative(op)
+            | Self::CompareTimeCoreNative(op)
+            | Self::CompareDurationNative(op)
+            | Self::CompareJsonNative(op) => Some(op),
             _ => None,
         }
     }
@@ -2833,6 +2942,16 @@ impl EvaluatedBytesOp {
         // A private identity does not determine its carrier or packet policy.
         // In particular, value-only FROM_BASE64 keeps the ordinary Bytes role.
         match self {
+            Self::CompareInt128Legacy(_) => EvaluatedArgsRole::Int1282,
+            Self::CompareRealNative(_) | Self::CompareRealLegacy(_) => {
+                EvaluatedArgsRole::Ieee754Bits2
+            }
+            Self::CompareDecimalNative(_) => EvaluatedArgsRole::DecimalBinary,
+            Self::CompareBytesNative(_) => EvaluatedArgsRole::CollatedBytes2,
+            Self::CompareVectorNative(_) => EvaluatedArgsRole::NativeVector2,
+            Self::CompareTimeCoreNative(_) => EvaluatedArgsRole::TimeCoreBits2,
+            Self::CompareNullNative => EvaluatedArgsRole::NullWitness,
+            Self::CompareMissingLegacy => EvaluatedArgsRole::NoArgs,
             Self::AesNullNative => EvaluatedArgsRole::NullWitness,
             Self::DivDecimalNative | Self::DivDecimalLegacy => EvaluatedArgsRole::DecimalDivision,
             Self::AddDecimalNative
@@ -3391,6 +3510,27 @@ impl EvaluatedBytesOp {
                 crate::impl_encryption::aes_decrypt_256_cfb_native_fn_meta()
             }
             Self::AesNullNative => crate::impl_encryption::aes_null_native_fn_meta(),
+            Self::CompareIntSsNative(op) => crate::impl_compare::compare_int_ss_native_fn_meta(op),
+            Self::CompareIntSuNative(op) => crate::impl_compare::compare_int_su_native_fn_meta(op),
+            Self::CompareIntUsNative(op) => crate::impl_compare::compare_int_us_native_fn_meta(op),
+            Self::CompareIntUuNative(op) => crate::impl_compare::compare_int_uu_native_fn_meta(op),
+            Self::CompareInt128Legacy(op) => crate::impl_compare::compare_int128_legacy_fn_meta(op),
+            Self::CompareRealNative(op) => crate::impl_compare::compare_real_native_fn_meta(op),
+            Self::CompareRealLegacy(op) => crate::impl_compare::compare_real_legacy_fn_meta(op),
+            Self::CompareDecimalNative(op) => {
+                crate::impl_compare::compare_decimal_native_fn_meta(op)
+            }
+            Self::CompareBytesNative(op) => crate::impl_compare::compare_bytes_native_fn_meta(op),
+            Self::CompareVectorNative(op) => crate::impl_compare::compare_vector_native_fn_meta(op),
+            Self::CompareTimeCoreNative(op) => {
+                crate::impl_compare::compare_time_core_native_fn_meta(op)
+            }
+            Self::CompareDurationNative(op) => {
+                crate::impl_compare::compare_duration_native_fn_meta(op)
+            }
+            Self::CompareJsonNative(op) => crate::impl_compare::compare_json_native_fn_meta(op),
+            Self::CompareNullNative => crate::impl_compare::compare_null_native_fn_meta(),
+            Self::CompareMissingLegacy => crate::impl_compare::compare_missing_legacy_fn_meta(),
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
             Self::UnaryPlusBitsNative => crate::impl_op::unary_plus_bits_native_fn_meta(),
             Self::UnaryPlusDecimalNative => crate::impl_op::unary_plus_decimal_native_fn_meta(),
@@ -3700,6 +3840,21 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::CompareIntSsNative(_)
+            | Self::CompareIntSuNative(_)
+            | Self::CompareIntUsNative(_)
+            | Self::CompareIntUuNative(_)
+            | Self::CompareInt128Legacy(_)
+            | Self::CompareRealNative(_)
+            | Self::CompareRealLegacy(_)
+            | Self::CompareDecimalNative(_)
+            | Self::CompareBytesNative(_)
+            | Self::CompareVectorNative(_)
+            | Self::CompareTimeCoreNative(_)
+            | Self::CompareDurationNative(_)
+            | Self::CompareJsonNative(_)
+            | Self::CompareNullNative
+            | Self::CompareMissingLegacy => EvalType::Int,
             Self::AesEncrypt128EcbNative
             | Self::AesEncrypt192EcbNative
             | Self::AesEncrypt256EcbNative
@@ -4048,6 +4203,21 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::CompareIntSsNative(_)
+            | Self::CompareIntSuNative(_)
+            | Self::CompareIntUsNative(_)
+            | Self::CompareIntUuNative(_)
+            | Self::CompareDurationNative(_) => &[EvalType::Int, EvalType::Int],
+            Self::CompareInt128Legacy(_)
+            | Self::CompareRealNative(_)
+            | Self::CompareRealLegacy(_)
+            | Self::CompareTimeCoreNative(_)
+            | Self::CompareJsonNative(_) => &[EvalType::Bytes, EvalType::Bytes],
+            Self::CompareDecimalNative(_) => &[EvalType::Decimal, EvalType::Decimal, EvalType::Int],
+            Self::CompareBytesNative(_) => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
+            Self::CompareVectorNative(_) => &[EvalType::VectorFloat32, EvalType::VectorFloat32],
+            Self::CompareNullNative => &[EvalType::Int],
+            Self::CompareMissingLegacy => &[],
             Self::AesEncrypt128EcbNative
             | Self::AesEncrypt192EcbNative
             | Self::AesEncrypt256EcbNative
@@ -4902,6 +5072,29 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation.comparison_op().is_some() {
+            return matches!(
+                self,
+                Self::Int2(Some(_), Some(_))
+                    | Self::Int1282(Some(_), Some(_))
+                    | Self::Bytes2(Some(_), Some(_))
+                    | Self::TimeCoreBits2(Some(_), Some(_))
+                    | Self::NativeVector2(Some(_), Some(_))
+                    | Self::Ieee754Bits2 {
+                        left: ReadyIeee754Arg::Value(Some(_)),
+                        right: ReadyIeee754Arg::Value(Some(_)),
+                    }
+                    | Self::Decimal2 {
+                        left: Some(_),
+                        right: Some(_)
+                    }
+                    | Self::CollatedBytes2 {
+                        left: Some(_),
+                        right: Some(_),
+                        ..
+                    }
+            );
+        }
         if operation.aes_profile().is_some() {
             return matches!(
                 self,
@@ -4991,6 +5184,7 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::RegexpNullBytesNative
                         | EvaluatedBytesOp::UnaryNullNative
                         | EvaluatedBytesOp::BinaryArithmeticNullNative
+                        | EvaluatedBytesOp::CompareNullNative
                 ) && value.is_none()
             }
             Self::ConvReady {
@@ -7651,6 +7845,457 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn comparison_profiles_are_closed_unit_calls_with_strict_actual_roles() {
+        use crate::{ComparisonOp, impl_compare::*};
+        let mut identities: Vec<(EvaluatedBytesOp, crate::FunctionRef, &str)> = Vec::new();
+        for predicate in [
+            ComparisonOp::Eq,
+            ComparisonOp::Ne,
+            ComparisonOp::Lt,
+            ComparisonOp::Le,
+            ComparisonOp::Gt,
+            ComparisonOp::Ge,
+        ] {
+            let profiles = [
+                (
+                    EvaluatedBytesOp::CompareIntSsNative(predicate),
+                    compare_int_ss_native_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareIntSuNative(predicate),
+                    compare_int_su_native_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareIntUsNative(predicate),
+                    compare_int_us_native_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareIntUuNative(predicate),
+                    compare_int_uu_native_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareInt128Legacy(predicate),
+                    compare_int128_legacy_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareRealNative(predicate),
+                    compare_real_native_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareRealLegacy(predicate),
+                    compare_real_legacy_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareDecimalNative(predicate),
+                    compare_decimal_native_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareBytesNative(predicate),
+                    compare_bytes_native_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareVectorNative(predicate),
+                    compare_vector_native_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareTimeCoreNative(predicate),
+                    compare_time_core_native_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareDurationNative(predicate),
+                    compare_duration_native_fn_meta(predicate),
+                ),
+                (
+                    EvaluatedBytesOp::CompareJsonNative(predicate),
+                    compare_json_native_fn_meta(predicate),
+                ),
+            ];
+            for (operation, getter) in profiles {
+                for (prior, function, name) in &identities {
+                    assert_ne!(*prior, operation);
+                    assert_ne!(*function, operation.function_ref());
+                    assert_ne!(*name, getter.name);
+                }
+                identities.push((operation, operation.function_ref(), getter.name));
+                assert_eq!(operation.comparison_op(), Some(predicate));
+                assert_eq!(operation.call_count(), 1);
+                assert_eq!(operation.eval_type(), EvalType::Int);
+                assert!(matches!(
+                    operation.kernel_kind(),
+                    EvaluatedKernelKind::ClosedPrivate(_)
+                ));
+                let program =
+                    compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+                let arity = operation.input_types().len();
+                assert_eq!(program.expression.len(), arity + 1);
+                assert!(program.check_entry(ProgramEntry::Row).is_err());
+                let RpnExpressionNode::FnCall {
+                    func_meta,
+                    metadata,
+                    args_len,
+                    ..
+                } = &program.expression[arity]
+                else {
+                    panic!("missing comparison wrapper")
+                };
+                assert_eq!(*args_len, arity);
+                assert!(metadata.is::<()>());
+                assert_eq!(func_meta.name, getter.name);
+                assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+                assert!(std::ptr::fn_addr_eq(
+                    func_meta.validator_ptr,
+                    getter.validator_ptr
+                ));
+                assert!(std::ptr::fn_addr_eq(
+                    func_meta.metadata_ptr,
+                    getter.metadata_ptr
+                ));
+                let spec = LocalExpr::Call {
+                    function: operation.function_ref(),
+                    args: program
+                        .schema
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, field_type)| LocalExpr::InputSlot {
+                            slot,
+                            field_type: field_type.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                    return_type: operation.return_type(),
+                    metadata: crate::CallMetadata::None,
+                };
+                assert!(
+                    compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err()
+                );
+                let args = |null_slot: Option<usize>| {
+                    let left = null_slot != Some(0);
+                    let right = null_slot != Some(1);
+                    match operation {
+                        EvaluatedBytesOp::CompareIntSsNative(_)
+                        | EvaluatedBytesOp::CompareIntSuNative(_)
+                        | EvaluatedBytesOp::CompareIntUsNative(_)
+                        | EvaluatedBytesOp::CompareIntUuNative(_)
+                        | EvaluatedBytesOp::CompareDurationNative(_) => {
+                            EvaluatedArgs::Int2(left.then_some(7), right.then_some(7))
+                        }
+                        EvaluatedBytesOp::CompareInt128Legacy(_) => EvaluatedArgs::Int1282(
+                            left.then_some(i128::MAX),
+                            right.then_some(i128::MAX),
+                        ),
+                        EvaluatedBytesOp::CompareRealNative(_)
+                        | EvaluatedBytesOp::CompareRealLegacy(_) => EvaluatedArgs::Ieee754Bits2 {
+                            left: ReadyIeee754Arg::Value(left.then_some(1.0_f64.to_bits())),
+                            right: ReadyIeee754Arg::Value(right.then_some(1.0_f64.to_bits())),
+                        },
+                        EvaluatedBytesOp::CompareDecimalNative(_) => EvaluatedArgs::Decimal2 {
+                            left: left.then(|| "1.50".parse().unwrap()),
+                            right: right.then(|| "1.5".parse().unwrap()),
+                        },
+                        EvaluatedBytesOp::CompareBytesNative(_) => EvaluatedArgs::CollatedBytes2 {
+                            left: left.then(|| b"a".to_vec()),
+                            right: right.then(|| b"a".to_vec()),
+                            collation: NativeCollation::Binary,
+                        },
+                        EvaluatedBytesOp::CompareVectorNative(_) => EvaluatedArgs::NativeVector2(
+                            left.then(|| NativeVectorFloat32::must_create(vec![1.0])),
+                            right.then(|| NativeVectorFloat32::must_create(vec![1.0])),
+                        ),
+                        EvaluatedBytesOp::CompareTimeCoreNative(_) => {
+                            EvaluatedArgs::TimeCoreBits2(left.then_some(0), right.then_some(0))
+                        }
+                        // Binary JSON null is an actual value, not SQL NULL.
+                        EvaluatedBytesOp::CompareJsonNative(_) => EvaluatedArgs::Bytes2(
+                            left.then(|| vec![0x04, 0x00]),
+                            right.then(|| vec![0x04, 0x00]),
+                        ),
+                        _ => unreachable!(),
+                    }
+                };
+                assert_eq!(args(None).role(), operation.input_role());
+                assert_eq!(args(None).input_types(), operation.input_types());
+                let mut worker = prepare_evaluated_bytes(
+                    operation,
+                    LocalCompileContext::default(),
+                    ExecutionLimits::default(),
+                    usize::MAX,
+                )
+                .unwrap();
+                let storage = worker.retained_storage().unwrap();
+                for null_slot in 0..2 {
+                    assert!(matches!(
+                        worker.eval_args(args(Some(null_slot))),
+                        Err(LocalError::InvalidBatch(_))
+                    ));
+                    let (ready, ready_arity, invocation) =
+                        args(Some(null_slot)).into_values(4096).unwrap();
+                    assert!(invocation.is_none());
+                    let mut reported = None;
+                    assert!(matches!(
+                        worker.eval_ready(ready, ready_arity, &mut reported),
+                        Err(LocalError::InvalidSpec(_))
+                    ));
+                    assert_eq!(reported, None);
+                }
+                if matches!(
+                    operation,
+                    EvaluatedBytesOp::CompareRealNative(_) | EvaluatedBytesOp::CompareRealLegacy(_)
+                ) {
+                    for (left, right) in [
+                        (ReadyIeee754Arg::Undemanded, ReadyIeee754Arg::Value(Some(0))),
+                        (ReadyIeee754Arg::Value(Some(0)), ReadyIeee754Arg::Undemanded),
+                    ] {
+                        assert!(matches!(
+                            worker.eval_args(EvaluatedArgs::Ieee754Bits2 { left, right }),
+                            Err(LocalError::InvalidBatch(_))
+                        ));
+                    }
+                }
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::NullWitness(None)),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let wrong_role = if matches!(operation, EvaluatedBytesOp::CompareJsonNative(_)) {
+                    EvaluatedArgs::Int2(Some(1), Some(1))
+                } else {
+                    EvaluatedArgs::Bytes2(Some(vec![0; 8]), Some(vec![0; 8]))
+                };
+                assert!(matches!(
+                    worker.eval_args(wrong_role),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+                let ComputedValue::Int(value) = worker.eval_args(args(None)).unwrap() else {
+                    panic!("comparison must return an owned integer")
+                };
+                assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+                assert_eq!(
+                    value.value(),
+                    Some(i64::from(matches!(
+                        predicate,
+                        ComparisonOp::Eq | ComparisonOp::Le | ComparisonOp::Ge
+                    )))
+                );
+                assert_eq!(worker.kernel_invocations(), 1);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+        }
+        assert_eq!(identities.len(), 78);
+        for (operation, args, getter) in [
+            (
+                EvaluatedBytesOp::CompareNullNative,
+                EvaluatedArgs::NullWitness(None),
+                compare_null_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::CompareMissingLegacy,
+                EvaluatedArgs::NoArgs,
+                compare_missing_legacy_fn_meta(),
+            ),
+        ] {
+            assert_eq!(operation.comparison_op(), None);
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            let arity = operation.input_types().len();
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!("missing comparison terminal")
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            for invalid in [
+                EvaluatedArgs::Int(None),
+                EvaluatedArgs::NullWitness(Some(0)),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            let opposite_terminal = if operation == EvaluatedBytesOp::CompareNullNative {
+                EvaluatedArgs::NoArgs
+            } else {
+                EvaluatedArgs::NullWitness(None)
+            };
+            assert!(matches!(
+                worker.eval_args(opposite_terminal),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+                panic!()
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.value(), None);
+            assert_eq!(worker.kernel_invocations(), 1);
+        }
+        // Do not narrow the pre-existing nullable value recipes.
+        assert!(
+            EvaluatedArgs::Int2(None, Some(1)).admission_matches(EvaluatedBytesOp::AddIntSsNative)
+        );
+        assert!(
+            EvaluatedArgs::Decimal2 {
+                left: None,
+                right: Some("1".parse().unwrap())
+            }
+            .admission_matches(EvaluatedBytesOp::AddDecimalNative)
+        );
+        assert!(
+            EvaluatedArgs::Bytes2(None, Some(Vec::new()))
+                .admission_matches(EvaluatedBytesOp::SqlEncodeNative)
+        );
+    }
+
+    #[test]
+    fn comparison_actual_bits_profiles_and_owned_boolean_results() {
+        use crate::ComparisonOp;
+        let run = |operation, args, expected| {
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let ComputedValue::Int(value) = worker.eval_args(args).unwrap() else {
+                panic!()
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.value(), Some(expected));
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+        };
+        for (predicate, less, equal, greater, unordered) in [
+            (ComparisonOp::Eq, 0, 1, 0, 0),
+            (ComparisonOp::Ne, 1, 0, 1, 1),
+            (ComparisonOp::Lt, 1, 0, 0, 0),
+            (ComparisonOp::Le, 1, 1, 0, 0),
+            (ComparisonOp::Gt, 0, 0, 1, 0),
+            (ComparisonOp::Ge, 0, 1, 1, 0),
+        ] {
+            run(
+                EvaluatedBytesOp::CompareIntSsNative(predicate),
+                EvaluatedArgs::Int2(Some(-1), Some(1)),
+                less,
+            );
+            run(
+                EvaluatedBytesOp::CompareIntSuNative(predicate),
+                EvaluatedArgs::Int2(Some(-1), Some(1)),
+                less,
+            );
+            run(
+                EvaluatedBytesOp::CompareIntUsNative(predicate),
+                EvaluatedArgs::Int2(Some(-1), Some(1)),
+                greater,
+            );
+            run(
+                EvaluatedBytesOp::CompareIntUuNative(predicate),
+                EvaluatedArgs::Int2(Some(-1), Some(-2)),
+                greater,
+            );
+            run(
+                EvaluatedBytesOp::CompareInt128Legacy(predicate),
+                EvaluatedArgs::Int1282(Some(i128::MAX), Some(i128::MIN)),
+                greater,
+            );
+            let real = |left: f64, right: f64| EvaluatedArgs::Ieee754Bits2 {
+                left: ReadyIeee754Arg::Value(Some(left.to_bits())),
+                right: ReadyIeee754Arg::Value(Some(right.to_bits())),
+            };
+            run(
+                EvaluatedBytesOp::CompareRealNative(predicate),
+                real(f64::NAN, f64::NAN),
+                unordered,
+            );
+            run(
+                EvaluatedBytesOp::CompareRealLegacy(predicate),
+                real(f64::NAN, f64::NAN),
+                equal,
+            );
+            run(
+                EvaluatedBytesOp::CompareRealNative(predicate),
+                real(-0.0, 0.0),
+                equal,
+            );
+            run(
+                EvaluatedBytesOp::CompareRealLegacy(predicate),
+                real(-0.0, 0.0),
+                less,
+            );
+            run(EvaluatedBytesOp::CompareDecimalNative(predicate), EvaluatedArgs::Decimal2 {
+                left: Some(Decimal::try_from_native_digits(false, b"100000000000000000000000000000000000000000000000000000000000000000000000000000000001", 0, 0, 4096).unwrap()),
+                right: Some(Decimal::try_from_native_digits(false, b"100000000000000000000000000000000000000000000000000000000000000000000000000000000000", 0, 0, 4096).unwrap()),
+            }, greater);
+            run(
+                EvaluatedBytesOp::CompareBytesNative(predicate),
+                EvaluatedArgs::CollatedBytes2 {
+                    left: Some(b"a".to_vec()),
+                    right: Some(b"A".to_vec()),
+                    collation: NativeCollation::Binary,
+                },
+                greater,
+            );
+            run(
+                EvaluatedBytesOp::CompareVectorNative(predicate),
+                EvaluatedArgs::NativeVector2(
+                    Some(NativeVectorFloat32::must_create(vec![1.0, 2.0])),
+                    Some(NativeVectorFloat32::must_create(vec![1.0, 3.0])),
+                ),
+                less,
+            );
+            run(
+                EvaluatedBytesOp::CompareTimeCoreNative(predicate),
+                EvaluatedArgs::TimeCoreBits2(Some(1), Some(15)),
+                equal,
+            );
+            run(
+                EvaluatedBytesOp::CompareDurationNative(predicate),
+                EvaluatedArgs::Int2(Some(i64::MIN), Some(i64::MAX)),
+                less,
+            );
+            run(
+                EvaluatedBytesOp::CompareJsonNative(predicate),
+                EvaluatedArgs::Bytes2(
+                    Some(vec![0x09, 1, 0, 0, 0, 0, 0, 0, 0]),
+                    Some(vec![0x09, 2, 0, 0, 0, 0, 0, 0, 0]),
+                ),
+                less,
+            );
+        }
+    }
 
     #[test]
     fn aes_dispatch_all_private_unit_profiles_and_nonnull_roles() {
