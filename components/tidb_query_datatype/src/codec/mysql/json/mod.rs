@@ -62,6 +62,7 @@ mod comparison;
 mod constants;
 mod jcodec;
 mod modifier;
+mod native_path_ops;
 mod native_policy;
 mod path_expr;
 mod serde;
@@ -92,6 +93,11 @@ pub use self::{
     jcodec::{JsonDatumPayloadChunkEncoder, JsonDecoder, JsonEncoder},
     json_depth::{native_json_depth, native_json_depth_from_children},
     json_modify::ModifyType,
+    native_path_ops::{
+        NativeBinaryJsonArraySelection, NativeBinaryJsonModifyType, NativeBinaryJsonPathLeg,
+        extract_native_json_node, insert_native_json_array_node, modify_native_json_node,
+        native_json_array_insert_index, remove_native_json_node, select_native_json_nodes,
+    },
     native_policy::{
         NativeBinaryJsonError, NativeJsonError, NativeJsonNode, compare_native_binary_json,
         contains_native_binary_json, decode_native_binary_json_node,

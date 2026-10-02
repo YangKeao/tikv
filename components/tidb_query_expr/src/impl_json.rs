@@ -410,6 +410,258 @@ fn json_output_null_native(witness: Option<&Int>) -> Result<Option<Bytes>> {
     Ok(None)
 }
 
+#[derive(Clone, Copy)]
+enum JsonSerdePathUse {
+    Extract,
+    Remove,
+    Modify,
+    Append,
+    ArrayInsert,
+}
+
+fn json_serde_path_byte(remaining: &mut &[u8]) -> Result<u8> {
+    let (&byte, tail) = remaining
+        .split_first()
+        .ok_or_else(|| other_err!("Truncated native JSON path byte"))?;
+    *remaining = tail;
+    Ok(byte)
+}
+
+fn json_serde_path_index(remaining: &mut &[u8]) -> Result<i64> {
+    if remaining.len() < 8 {
+        return Err(other_err!("Truncated native JSON path index"));
+    }
+    let (bytes, tail) = remaining.split_at(8);
+    *remaining = tail;
+    Ok(i64::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+// The packet transports original selector/cache data, including the independent
+// could_match_multiple flag. Leg tags describe that data, never a runtime
+// mutation program. The fixed kernel alone selects the operation and policy.
+fn json_serde_native_paths(
+    packet: &[u8],
+    usage: JsonSerdePathUse,
+) -> Result<Vec<crate::NativeJsonPath>> {
+    use crate::{NativeJsonArraySelection as Array, NativeJsonPathLeg as Leg};
+    let mut remaining = packet;
+    let count = json_serde_packet_word(&mut remaining)?;
+    if count > remaining.len() / 9 {
+        return Err(other_err!("Native JSON path count exceeds its framing"));
+    }
+    let mut paths = Vec::new();
+    for _ in 0..count {
+        let could_match_multiple = match json_serde_path_byte(&mut remaining)? {
+            0 => false,
+            1 => true,
+            _ => return Err(other_err!("Invalid native JSON path multiple flag")),
+        };
+        let leg_count = json_serde_packet_word(&mut remaining)?;
+        if leg_count > remaining.len() {
+            return Err(other_err!("Native JSON leg count exceeds its framing"));
+        }
+        let mut legs = Vec::new();
+        for _ in 0..leg_count {
+            let leg = match json_serde_path_byte(&mut remaining)? {
+                0 => {
+                    let key = std::str::from_utf8(json_serde_packet_bytes(&mut remaining)?)
+                        .map_err(|error| {
+                            other_err!("Invalid native JSON path key UTF-8: {}", error)
+                        })?;
+                    let mut owned = String::new();
+                    owned.try_reserve_exact(key.len()).map_err(|error| {
+                        other_err!("Unable to allocate native JSON path key: {}", error)
+                    })?;
+                    owned.push_str(key);
+                    Leg::Key(owned)
+                }
+                1 => Leg::KeyWildcard,
+                2 => Leg::Array(Array::All),
+                3 => Leg::Array(Array::Index(json_serde_path_index(&mut remaining)?)),
+                4 => Leg::Array(Array::Range(
+                    json_serde_path_index(&mut remaining)?,
+                    json_serde_path_index(&mut remaining)?,
+                )),
+                5 => Leg::Recursive,
+                _ => return Err(other_err!("Invalid native JSON path leg tag")),
+            };
+            legs.try_reserve(1).map_err(|error| {
+                other_err!("Unable to allocate native JSON path legs: {}", error)
+            })?;
+            legs.push(leg);
+        }
+        let exact = legs
+            .iter()
+            .all(|leg| matches!(leg, Leg::Key(_) | Leg::Array(Array::Index(_))));
+        let valid = match usage {
+            JsonSerdePathUse::Extract => true,
+            JsonSerdePathUse::Remove => !legs.is_empty() && exact,
+            JsonSerdePathUse::Modify => !could_match_multiple && exact,
+            JsonSerdePathUse::Append => !could_match_multiple,
+            JsonSerdePathUse::ArrayInsert => {
+                !could_match_multiple
+                    && exact
+                    && matches!(legs.last(), Some(Leg::Array(Array::Index(_))))
+            }
+        };
+        if !valid {
+            return Err(other_err!(
+                "Native JSON path violates the fixed operation's input role"
+            ));
+        }
+        paths
+            .try_reserve(1)
+            .map_err(|error| other_err!("Unable to allocate native JSON paths: {}", error))?;
+        paths.push(crate::NativeJsonPath {
+            legs,
+            could_match_multiple,
+        });
+    }
+    if !remaining.is_empty() {
+        return Err(other_err!("Native JSON path packet has trailing bytes"));
+    }
+    Ok(paths)
+}
+
+fn json_serde_update_inputs(
+    document: &[u8],
+    paths: &[u8],
+    values: &[u8],
+    usage: JsonSerdePathUse,
+) -> Result<(
+    serde_json::Value,
+    Vec<crate::NativeJsonPath>,
+    Vec<serde_json::Value>,
+)> {
+    let document = json_serde_native_value(document)?;
+    let paths = json_serde_native_paths(paths, usage)?;
+    let mut decoded_values = Vec::new();
+    walk_json_serde_packet(values, false, |_, value| {
+        decoded_values.try_reserve(1).map_err(|error| {
+            other_err!("Unable to allocate native JSON update values: {}", error)
+        })?;
+        decoded_values.push(value);
+        Ok(())
+    })?;
+    if paths.len() != decoded_values.len() {
+        return Err(other_err!("Native JSON path and value counts differ"));
+    }
+    Ok((document, paths, decoded_values))
+}
+
+/// Validates actual document and parsed selector/cache data, not a path
+/// program.
+pub fn json_extract_serde_args_valid(document: &[u8], paths: &[u8]) -> bool {
+    json_serde_native_value(document).is_ok()
+        && json_serde_native_paths(paths, JsonSerdePathUse::Extract).is_ok()
+}
+
+/// Removal preserves exact non-root selectors, independently of the cached
+/// flag.
+pub fn json_remove_serde_args_valid(document: &[u8], paths: &[u8]) -> bool {
+    json_serde_native_value(document).is_ok()
+        && json_serde_native_paths(paths, JsonSerdePathUse::Remove).is_ok()
+}
+
+/// SET/INSERT/REPLACE share exact selectors and equal actual value counts.
+pub fn json_modify_serde_args_valid(document: &[u8], paths: &[u8], values: &[u8]) -> bool {
+    json_serde_update_inputs(document, paths, values, JsonSerdePathUse::Modify).is_ok()
+}
+
+/// Append uses the original cached multiple-selection flag as its constraint.
+pub fn json_array_append_serde_args_valid(document: &[u8], paths: &[u8], values: &[u8]) -> bool {
+    json_serde_update_inputs(document, paths, values, JsonSerdePathUse::Append).is_ok()
+}
+
+/// Array insertion additionally requires an exact final array-cell selector.
+pub fn json_array_insert_serde_args_valid(document: &[u8], paths: &[u8], values: &[u8]) -> bool {
+    json_serde_update_inputs(document, paths, values, JsonSerdePathUse::ArrayInsert).is_ok()
+}
+
+#[rpn_fn]
+fn json_extract_serde_native(document: BytesRef, paths: BytesRef) -> Result<Option<Bytes>> {
+    let document = json_serde_native_value(document)?;
+    let paths = json_serde_native_paths(paths, JsonSerdePathUse::Extract)?;
+    Ok(crate::native_json_extract(&document, &paths)
+        .map(|value| crate::native_json_format(&value).into_bytes()))
+}
+
+fn json_modify_serde_output(
+    document: &[u8],
+    paths: &[u8],
+    values: &[u8],
+    mode: crate::NativeJsonModifyMode,
+) -> Result<Option<Bytes>> {
+    let (document, paths, values) =
+        json_serde_update_inputs(document, paths, values, JsonSerdePathUse::Modify)?;
+    let result = crate::native_json_modify(document, &paths, values, mode);
+    Ok(Some(crate::native_json_format(&result).into_bytes()))
+}
+
+#[rpn_fn]
+fn json_insert_serde_native(
+    document: BytesRef,
+    paths: BytesRef,
+    values: BytesRef,
+) -> Result<Option<Bytes>> {
+    json_modify_serde_output(document, paths, values, crate::NativeJsonModifyMode::Insert)
+}
+
+#[rpn_fn]
+fn json_set_serde_native(
+    document: BytesRef,
+    paths: BytesRef,
+    values: BytesRef,
+) -> Result<Option<Bytes>> {
+    json_modify_serde_output(document, paths, values, crate::NativeJsonModifyMode::Set)
+}
+
+#[rpn_fn]
+fn json_replace_serde_native(
+    document: BytesRef,
+    paths: BytesRef,
+    values: BytesRef,
+) -> Result<Option<Bytes>> {
+    json_modify_serde_output(
+        document,
+        paths,
+        values,
+        crate::NativeJsonModifyMode::Replace,
+    )
+}
+
+#[rpn_fn]
+fn json_remove_serde_native(document: BytesRef, paths: BytesRef) -> Result<Option<Bytes>> {
+    let document = json_serde_native_value(document)?;
+    let paths = json_serde_native_paths(paths, JsonSerdePathUse::Remove)?;
+    let result = crate::native_json_remove(document, &paths);
+    Ok(Some(crate::native_json_format(&result).into_bytes()))
+}
+
+#[rpn_fn]
+fn json_array_append_serde_native(
+    document: BytesRef,
+    paths: BytesRef,
+    values: BytesRef,
+) -> Result<Option<Bytes>> {
+    let (document, paths, values) =
+        json_serde_update_inputs(document, paths, values, JsonSerdePathUse::Append)?;
+    let result = crate::native_json_array_append(document, &paths, values);
+    Ok(Some(crate::native_json_format(&result).into_bytes()))
+}
+
+#[rpn_fn]
+fn json_array_insert_serde_native(
+    document: BytesRef,
+    paths: BytesRef,
+    values: BytesRef,
+) -> Result<Option<Bytes>> {
+    let (document, paths, values) =
+        json_serde_update_inputs(document, paths, values, JsonSerdePathUse::ArrayInsert)?;
+    let result = crate::native_json_array_insert(document, &paths, values);
+    Ok(Some(crate::native_json_format(&result).into_bytes()))
+}
+
 #[rpn_fn]
 #[inline]
 fn json_depth(arg: JsonRef) -> Result<Option<i64>> {
@@ -937,6 +1189,310 @@ fn parse_json_path(path: Option<BytesRef>) -> Result<Option<PathExpression>> {
     }?;
 
     Ok(Some(parse_json_path_expr(json_path)?))
+}
+
+#[cfg(test)]
+mod native_json_path_worker_tests {
+    use super::*;
+    use crate::{
+        NativeJsonArraySelection as Array, NativeJsonPath as Path, NativeJsonPathLeg as Leg,
+    };
+
+    fn path_packet(paths: &[Path]) -> Vec<u8> {
+        let mut packet = (paths.len() as u64).to_le_bytes().to_vec();
+        for path in paths {
+            packet.push(u8::from(path.could_match_multiple));
+            packet.extend_from_slice(&(path.legs.len() as u64).to_le_bytes());
+            for leg in &path.legs {
+                match leg {
+                    Leg::Key(key) => {
+                        packet.push(0);
+                        packet.extend_from_slice(&(key.len() as u64).to_le_bytes());
+                        packet.extend_from_slice(key.as_bytes());
+                    }
+                    Leg::KeyWildcard => packet.push(1),
+                    Leg::Array(Array::All) => packet.push(2),
+                    Leg::Array(Array::Index(index)) => {
+                        packet.push(3);
+                        packet.extend_from_slice(&index.to_le_bytes());
+                    }
+                    Leg::Array(Array::Range(start, end)) => {
+                        packet.push(4);
+                        packet.extend_from_slice(&start.to_le_bytes());
+                        packet.extend_from_slice(&end.to_le_bytes());
+                    }
+                    Leg::Recursive => packet.push(5),
+                }
+            }
+        }
+        packet
+    }
+
+    fn paths(paths: &[&str]) -> Vec<u8> {
+        path_packet(
+            &paths
+                .iter()
+                .map(|path| crate::parse_native_json_path(path).unwrap())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn values(values: &[&[u8]]) -> Vec<u8> {
+        let mut packet = (values.len() as u64).to_le_bytes().to_vec();
+        for value in values {
+            packet.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            packet.extend_from_slice(value);
+        }
+        packet
+    }
+
+    #[test]
+    fn fixed_native_json_path_workers_preserve_selectors_and_sequential_mutations() {
+        for (meta, name) in [
+            (
+                json_extract_serde_native_fn_meta(),
+                "json_extract_serde_native",
+            ),
+            (
+                json_insert_serde_native_fn_meta(),
+                "json_insert_serde_native",
+            ),
+            (json_set_serde_native_fn_meta(), "json_set_serde_native"),
+            (
+                json_replace_serde_native_fn_meta(),
+                "json_replace_serde_native",
+            ),
+            (
+                json_remove_serde_native_fn_meta(),
+                "json_remove_serde_native",
+            ),
+            (
+                json_array_append_serde_native_fn_meta(),
+                "json_array_append_serde_native",
+            ),
+            (
+                json_array_insert_serde_native_fn_meta(),
+                "json_array_insert_serde_native",
+            ),
+        ] {
+            assert_eq!(meta.name, name);
+        }
+        assert_eq!(
+            json_extract_serde_native(br#"{"a":1}"#, &paths(&["$.a", "$.a"])).unwrap(),
+            Some(b"[1, 1]".to_vec())
+        );
+        assert_eq!(
+            json_extract_serde_native(b"[1,2,3]", &paths(&["$[last - 1 to last]"])).unwrap(),
+            Some(b"[2, 3]".to_vec())
+        );
+        assert_eq!(
+            json_extract_serde_native(b"{}", &paths(&["$.missing"])).unwrap(),
+            None
+        );
+        let literal = path_packet(&[Path {
+            legs: vec![Leg::Key("*".to_owned())],
+            could_match_multiple: false,
+        }]);
+        let flagged_literal = path_packet(&[Path {
+            legs: vec![Leg::Key("*".to_owned())],
+            could_match_multiple: true,
+        }]);
+        assert_eq!(
+            json_extract_serde_native(br#"{"*":1}"#, &literal).unwrap(),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(
+            json_extract_serde_native(br#"{"*":1}"#, &flagged_literal).unwrap(),
+            Some(b"[1]".to_vec())
+        );
+        assert_eq!(
+            json_extract_serde_native(br#"{"*":1}"#, &paths(&["$.*"])).unwrap(),
+            Some(b"[1]".to_vec())
+        );
+        assert_eq!(
+            json_set_serde_native(b"{}", &paths(&["$.a", "$.a.b"]), &values(&[b"{}", b"2"]))
+                .unwrap(),
+            Some(br#"{"a": {"b": 2}}"#.to_vec())
+        );
+        let exact = paths(&["$.a", "$.b"]);
+        let inputs = values(&[b"2", b"3"]);
+        assert_eq!(
+            json_insert_serde_native(br#"{"a":1}"#, &exact, &inputs).unwrap(),
+            Some(br#"{"a": 1, "b": 3}"#.to_vec())
+        );
+        assert_eq!(
+            json_replace_serde_native(br#"{"a":1}"#, &exact, &inputs).unwrap(),
+            Some(br#"{"a": 2}"#.to_vec())
+        );
+        assert_eq!(
+            json_set_serde_native(b"1", &paths(&["$[1]"]), &values(&[b"2"])).unwrap(),
+            Some(b"[1, 2]".to_vec())
+        );
+        assert_eq!(
+            json_set_serde_native(b"1", &paths(&["$"]), &values(&[b"2"])).unwrap(),
+            Some(b"2".to_vec())
+        );
+        assert_eq!(
+            json_insert_serde_native(b"1", &paths(&["$"]), &values(&[b"2"])).unwrap(),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(
+            json_remove_serde_native(b"[0,1,2]", &paths(&["$[0]", "$[1]"])).unwrap(),
+            Some(b"[1]".to_vec())
+        );
+        assert_eq!(
+            json_array_append_serde_native(b"1", &paths(&["$", "$"]), &values(&[b"2", b"3"]))
+                .unwrap(),
+            Some(b"[1, 2, 3]".to_vec())
+        );
+        assert_eq!(
+            json_array_insert_serde_native(
+                b"[1,2]",
+                &paths(&["$[last]", "$[99]"]),
+                &values(&[b"3", b"4"])
+            )
+            .unwrap(),
+            Some(b"[1, 3, 2, 4]".to_vec())
+        );
+        assert_eq!(
+            json_array_insert_serde_native(b"1", &paths(&["$[0]"]), &values(&[b"2"])).unwrap(),
+            Some(b"1".to_vec())
+        );
+        let empty = paths(&[]);
+        let no_values = values(&[]);
+        assert_eq!(json_extract_serde_native(b"1", &empty).unwrap(), None);
+        assert_eq!(
+            json_remove_serde_native(b"1", &empty).unwrap(),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(
+            json_set_serde_native(b"1", &empty, &no_values).unwrap(),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(
+            json_array_append_serde_native(b"1", &empty, &no_values).unwrap(),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(
+            json_array_insert_serde_native(b"1", &empty, &no_values).unwrap(),
+            Some(b"1".to_vec())
+        );
+        // Every leg tag and both signed endpoints survive framing unchanged.
+        let all = path_packet(&[Path {
+            could_match_multiple: false,
+            legs: vec![
+                Leg::Key("*".to_owned()),
+                Leg::KeyWildcard,
+                Leg::Array(Array::All),
+                Leg::Array(Array::Index(i64::MIN)),
+                Leg::Array(Array::Range(i64::MIN, i64::MAX)),
+                Leg::Recursive,
+            ],
+        }]);
+        let decoded = json_serde_native_paths(&all, JsonSerdePathUse::Extract).unwrap();
+        assert!(!decoded[0].could_match_multiple);
+        assert_eq!(decoded[0].legs.len(), 6);
+        assert!(matches!(
+            decoded[0].legs[3],
+            Leg::Array(Array::Index(i64::MIN))
+        ));
+        assert!(matches!(
+            decoded[0].legs[4],
+            Leg::Array(Array::Range(i64::MIN, i64::MAX))
+        ));
+    }
+
+    #[test]
+    fn fixed_native_json_path_workers_reject_bad_frames_and_keep_role_constraints() {
+        let root = paths(&["$"]);
+        let exact = paths(&["$.a"]);
+        let input = values(&[b"1"]);
+        let mut invalid_flag = root.clone();
+        invalid_flag[8] = 2;
+        let mut invalid_tag = paths(&["$.*"]);
+        invalid_tag[17] = 6;
+        let mut excessive_legs = root.clone();
+        excessive_legs[9..17].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut bad_key = exact.clone();
+        *bad_key.last_mut().unwrap() = 0xff;
+        let mut key_extent = exact.clone();
+        key_extent[18..26].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut trailing = root.clone();
+        trailing.push(0);
+        let mut truncated = paths(&["$[last]"]);
+        truncated.pop();
+        for bad in [
+            Vec::new(),
+            vec![0; 7],
+            u64::MAX.to_le_bytes().to_vec(),
+            invalid_flag,
+            invalid_tag,
+            excessive_legs,
+            bad_key,
+            key_extent,
+            trailing,
+            truncated,
+        ] {
+            assert!(!json_extract_serde_args_valid(b"null", &bad));
+            assert!(json_extract_serde_native(b"null", &bad).is_err());
+        }
+        assert!(!json_extract_serde_args_valid(b"[", &root));
+        assert!(!json_modify_serde_args_valid(b"{}", &exact, &values(&[])));
+        assert!(json_set_serde_native(b"{}", &exact, &values(&[])).is_err());
+        assert!(!json_modify_serde_args_valid(
+            b"{}",
+            &exact,
+            &values(&[b"["])
+        ));
+        assert!(json_set_serde_native(b"{}", &exact, &values(&[b"["])).is_err());
+        assert!(!json_remove_serde_args_valid(b"{}", &root));
+        assert!(json_remove_serde_native(b"{}", &root).is_err());
+        assert!(!json_array_insert_serde_args_valid(b"{}", &root, &input));
+        assert!(!json_array_insert_serde_args_valid(b"{}", &exact, &input));
+        let wildcard_false = path_packet(&[Path {
+            legs: vec![Leg::KeyWildcard],
+            could_match_multiple: false,
+        }]);
+        let literal_true = path_packet(&[Path {
+            legs: vec![Leg::Key("a".to_owned())],
+            could_match_multiple: true,
+        }]);
+        assert!(!json_modify_serde_args_valid(
+            b"{}",
+            &wildcard_false,
+            &input
+        ));
+        assert!(!json_remove_serde_args_valid(b"{}", &wildcard_false));
+        assert!(!json_array_insert_serde_args_valid(
+            b"{}",
+            &wildcard_false,
+            &input
+        ));
+        assert!(!json_modify_serde_args_valid(b"{}", &literal_true, &input));
+        assert!(!json_array_append_serde_args_valid(
+            b"{}",
+            &literal_true,
+            &input
+        ));
+        assert!(json_remove_serde_args_valid(br#"{"a":1}"#, &literal_true));
+        assert_eq!(
+            json_remove_serde_native(br#"{"a":1}"#, &literal_true).unwrap(),
+            Some(b"{}".to_vec())
+        );
+        // Append's old contract checks only the actual multiple flag. Do not
+        // infer it from legs or silently broaden its admission predicate.
+        assert!(json_array_append_serde_args_valid(
+            b"{}",
+            &wildcard_false,
+            &input
+        ));
+        assert_eq!(
+            json_array_append_serde_native(b"{}", &wildcard_false, &input).unwrap(),
+            Some(b"{}".to_vec())
+        );
+        assert!(json_output_null_native(Some(&0)).is_err());
+        assert_eq!(json_output_null_native(None).unwrap(), None);
+    }
 }
 
 #[cfg(test)]

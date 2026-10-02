@@ -353,7 +353,16 @@ short-circuit admission policy described above.
   The public raw SDK key algorithm delegates separately, retaining duplicate
   keys and nonobject-empty-array behavior. Typed JSON dispatch forwards its
   real context rather than taking a contextless constructor/pretty shortcut.
-  Raw EXTRACT and UNQUOTE policies remain outside this batch.
+  Parsed-path operations use actual cached selector AST packets, including
+  their original multiple-selection flag, never reconstructed path text or
+  transported action opcodes. Seven native identities reuse shared extraction
+  and the serde mutation closure in `native_json_modify.rs`, serializing only the final
+  value. Cached scalar/PB preparation remains document-before-context/cache,
+  inside the guard, including actual NULL outcomes. The separate datatype
+  `native_path_ops.rs` owns raw traversal and mutations; SDK codecs retain
+  their original staged normalization/errors and deferred replacement demand.
+  Whole-family credit covers EXTRACT/INSERT/SET/REMOVE/ARRAY_INSERT only:
+  legacy REPLACE/ARRAY_APPEND evaluator routing and UNQUOTE remain open.
   JSON predicate/path policies live in `native_json.rs`, with fixed Int
   workers in `impl_json.rs`. Actual prepared serde values remain separate
   from datatype `json/native_policy.rs` raw-binary predicates; their numeric,

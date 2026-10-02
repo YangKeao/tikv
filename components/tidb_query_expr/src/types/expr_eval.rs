@@ -389,6 +389,15 @@ fn evaluated_ready_args_match(
                 [ScalarValue::Bytes(first), ScalarValue::Bytes(second)] => {
                     operation.json_output_args_valid(&[first.as_deref(), second.as_deref()])
                 }
+                [
+                    ScalarValue::Bytes(first),
+                    ScalarValue::Bytes(second),
+                    ScalarValue::Bytes(third),
+                ] => operation.json_output_args_valid(&[
+                    first.as_deref(),
+                    second.as_deref(),
+                    third.as_deref(),
+                ]),
                 _ => false,
             })
         && (!operation.is_json_predicate_value()

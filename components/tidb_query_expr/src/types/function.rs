@@ -439,6 +439,13 @@ pub enum LocalFunctionId {
     JsonKeysPathSerdeNative,
     JsonPrettySerdeNative,
     JsonOutputNullNative,
+    JsonExtractSerdeNative,
+    JsonInsertSerdeNative,
+    JsonSetSerdeNative,
+    JsonReplaceSerdeNative,
+    JsonRemoveSerdeNative,
+    JsonArrayAppendSerdeNative,
+    JsonArrayInsertSerdeNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

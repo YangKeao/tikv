@@ -1446,6 +1446,13 @@ pub enum EvaluatedBytesOp {
     JsonKeysPathSerdeNative,
     JsonPrettySerdeNative,
     JsonOutputNullNative,
+    JsonExtractSerdeNative,
+    JsonInsertSerdeNative,
+    JsonSetSerdeNative,
+    JsonReplaceSerdeNative,
+    JsonRemoveSerdeNative,
+    JsonArrayAppendSerdeNative,
+    JsonArrayInsertSerdeNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -2929,6 +2936,41 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::JsonOutputNullNative,
                 );
             }
+            Self::JsonExtractSerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonExtractSerdeNative,
+                );
+            }
+            Self::JsonInsertSerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonInsertSerdeNative,
+                );
+            }
+            Self::JsonSetSerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonSetSerdeNative,
+                );
+            }
+            Self::JsonReplaceSerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonReplaceSerdeNative,
+                );
+            }
+            Self::JsonRemoveSerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonRemoveSerdeNative,
+                );
+            }
+            Self::JsonArrayAppendSerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonArrayAppendSerdeNative,
+                );
+            }
+            Self::JsonArrayInsertSerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonArrayInsertSerdeNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -2967,12 +3009,22 @@ impl EvaluatedBytesOp {
                 | Self::JsonKeysSerdeNative
                 | Self::JsonKeysPathSerdeNative
                 | Self::JsonPrettySerdeNative
+                | Self::JsonExtractSerdeNative
+                | Self::JsonInsertSerdeNative
+                | Self::JsonSetSerdeNative
+                | Self::JsonReplaceSerdeNative
+                | Self::JsonRemoveSerdeNative
+                | Self::JsonArrayAppendSerdeNative
+                | Self::JsonArrayInsertSerdeNative
         )
     }
 
     pub(crate) fn json_output_args_valid(self, values: &[Option<&[u8]>]) -> bool {
         use crate::impl_json::{
-            json_array_serde_args_valid, json_object_serde_args_valid, json_serde_native_args_valid,
+            json_array_append_serde_args_valid, json_array_insert_serde_args_valid,
+            json_array_serde_args_valid, json_extract_serde_args_valid,
+            json_modify_serde_args_valid, json_object_serde_args_valid,
+            json_remove_serde_args_valid, json_serde_native_args_valid,
         };
         match (self, values) {
             (Self::JsonArraySerdeNative, [Some(values)]) => json_array_serde_args_valid(values),
@@ -2982,6 +3034,24 @@ impl EvaluatedBytesOp {
             }
             (Self::JsonKeysPathSerdeNative, [Some(document), Some(path)]) => {
                 json_serde_native_args_valid(document, None, Some((path, false)))
+            }
+            (Self::JsonExtractSerdeNative, [Some(document), Some(paths)]) => {
+                json_extract_serde_args_valid(document, paths)
+            }
+            (Self::JsonRemoveSerdeNative, [Some(document), Some(paths)]) => {
+                json_remove_serde_args_valid(document, paths)
+            }
+            (
+                Self::JsonInsertSerdeNative
+                | Self::JsonSetSerdeNative
+                | Self::JsonReplaceSerdeNative,
+                [Some(document), Some(paths), Some(values)],
+            ) => json_modify_serde_args_valid(document, paths, values),
+            (Self::JsonArrayAppendSerdeNative, [Some(document), Some(paths), Some(values)]) => {
+                json_array_append_serde_args_valid(document, paths, values)
+            }
+            (Self::JsonArrayInsertSerdeNative, [Some(document), Some(paths), Some(values)]) => {
+                json_array_insert_serde_args_valid(document, paths, values)
             }
             _ => false,
         }
@@ -3777,6 +3847,17 @@ impl EvaluatedBytesOp {
             }
             Self::JsonPrettySerdeNative => crate::impl_json::json_pretty_serde_native_fn_meta(),
             Self::JsonOutputNullNative => crate::impl_json::json_output_null_native_fn_meta(),
+            Self::JsonExtractSerdeNative => crate::impl_json::json_extract_serde_native_fn_meta(),
+            Self::JsonInsertSerdeNative => crate::impl_json::json_insert_serde_native_fn_meta(),
+            Self::JsonSetSerdeNative => crate::impl_json::json_set_serde_native_fn_meta(),
+            Self::JsonReplaceSerdeNative => crate::impl_json::json_replace_serde_native_fn_meta(),
+            Self::JsonRemoveSerdeNative => crate::impl_json::json_remove_serde_native_fn_meta(),
+            Self::JsonArrayAppendSerdeNative => {
+                crate::impl_json::json_array_append_serde_native_fn_meta()
+            }
+            Self::JsonArrayInsertSerdeNative => {
+                crate::impl_json::json_array_insert_serde_native_fn_meta()
+            }
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
             Self::UnaryPlusBitsNative => crate::impl_op::unary_plus_bits_native_fn_meta(),
             Self::UnaryPlusDecimalNative => crate::impl_op::unary_plus_decimal_native_fn_meta(),
@@ -4091,7 +4172,14 @@ impl EvaluatedBytesOp {
             | Self::JsonKeysSerdeNative
             | Self::JsonKeysPathSerdeNative
             | Self::JsonPrettySerdeNative
-            | Self::JsonOutputNullNative => EvalType::Bytes,
+            | Self::JsonOutputNullNative
+            | Self::JsonExtractSerdeNative
+            | Self::JsonInsertSerdeNative
+            | Self::JsonSetSerdeNative
+            | Self::JsonReplaceSerdeNative
+            | Self::JsonRemoveSerdeNative
+            | Self::JsonArrayAppendSerdeNative
+            | Self::JsonArrayInsertSerdeNative => EvalType::Bytes,
             Self::CompareIntSsNative(_)
             | Self::CompareIntSuNative(_)
             | Self::CompareIntUsNative(_)
@@ -4473,7 +4561,16 @@ impl EvaluatedBytesOp {
             | Self::JsonObjectSerdeNative
             | Self::JsonKeysSerdeNative
             | Self::JsonPrettySerdeNative => &[EvalType::Bytes],
-            Self::JsonKeysPathSerdeNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::JsonKeysPathSerdeNative
+            | Self::JsonExtractSerdeNative
+            | Self::JsonRemoveSerdeNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::JsonInsertSerdeNative
+            | Self::JsonSetSerdeNative
+            | Self::JsonReplaceSerdeNative
+            | Self::JsonArrayAppendSerdeNative
+            | Self::JsonArrayInsertSerdeNative => {
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
+            }
             Self::JsonOutputNullNative => &[EvalType::Int],
             Self::CompareIntSsNative(_)
             | Self::CompareIntSuNative(_)
@@ -5193,6 +5290,118 @@ pub fn prepare_json_object_args(
     Ok(EvaluatedArgs::Bytes(Some(encoded)))
 }
 
+fn encode_json_paths(paths: &[crate::NativeJsonPath]) -> LocalResult<Vec<u8>> {
+    use crate::{NativeJsonArraySelection as Array, NativeJsonPathLeg as Leg};
+    let count = u64::try_from(paths.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+    let mut extent = 8usize;
+    for path in paths {
+        u64::try_from(path.legs.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+        extent = extent
+            .checked_add(9)
+            .ok_or_else(evaluated_ascii_storage_overflow)?;
+        for leg in &path.legs {
+            let additional = match leg {
+                Leg::Key(key) => {
+                    u64::try_from(key.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+                    key.len()
+                        .checked_add(9)
+                        .ok_or_else(evaluated_ascii_storage_overflow)?
+                }
+                Leg::Array(Array::Index(_)) => 9,
+                Leg::Array(Array::Range(..)) => 17,
+                Leg::KeyWildcard | Leg::Array(Array::All) | Leg::Recursive => 1,
+            };
+            extent = extent
+                .checked_add(additional)
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+        }
+    }
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(extent)
+        .map_err(|_| LocalError::ResourceLimit("JSON path list allocation failed".into()))?;
+    encoded.extend_from_slice(&count.to_le_bytes());
+    for path in paths {
+        // Preserve the actual cached flag, including its distinction from the
+        // selector legs. Never reconstruct text or infer it from wildcard tags.
+        encoded.push(u8::from(path.could_match_multiple));
+        let count =
+            u64::try_from(path.legs.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+        encoded.extend_from_slice(&count.to_le_bytes());
+        for leg in &path.legs {
+            match leg {
+                Leg::Key(key) => {
+                    encoded.push(0);
+                    let length =
+                        u64::try_from(key.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+                    encoded.extend_from_slice(&length.to_le_bytes());
+                    encoded.extend_from_slice(key.as_bytes());
+                }
+                Leg::KeyWildcard => encoded.push(1),
+                Leg::Array(Array::All) => encoded.push(2),
+                Leg::Array(Array::Index(index)) => {
+                    encoded.push(3);
+                    encoded.extend_from_slice(&index.to_le_bytes());
+                }
+                Leg::Array(Array::Range(start, end)) => {
+                    encoded.push(4);
+                    encoded.extend_from_slice(&start.to_le_bytes());
+                    encoded.extend_from_slice(&end.to_le_bytes());
+                }
+                Leg::Recursive => encoded.push(5),
+            }
+        }
+    }
+    Ok(encoded)
+}
+
+/// Packs the actual document and borrowed selector ASTs from the existing path
+/// cache. Zero paths is real data; this neither changes SQL arity admission nor
+/// reparses selectors, chooses an operation, or evaluates a path.
+pub fn prepare_json_paths_args(
+    document: &serde_json::Value,
+    paths: &[crate::NativeJsonPath],
+) -> LocalResult<EvaluatedArgs> {
+    let document = serde_json::to_vec(document).map_err(|error| {
+        LocalError::Evaluation(other_err!("JSON ready serialization failed: {}", error))
+    })?;
+    Ok(EvaluatedArgs::Bytes2(
+        Some(document),
+        Some(encode_json_paths(paths)?),
+    ))
+}
+
+/// Adds actual ordered value operands using the existing ARRAY operand framing,
+/// not an ARRAY kernel or a constructed array result. Frontends preserve their
+/// original zip policy by supplying the effective matching prefix here.
+pub fn prepare_json_path_values_args(
+    document: &serde_json::Value,
+    paths: &[crate::NativeJsonPath],
+    values: &[serde_json::Value],
+) -> LocalResult<EvaluatedArgs> {
+    if paths.len() != values.len() {
+        return Err(LocalError::InvalidBatch(
+            "JSON path/value operand counts differ".into(),
+        ));
+    }
+    match (
+        prepare_json_paths_args(document, paths)?,
+        prepare_json_array_args(values)?,
+    ) {
+        (
+            EvaluatedArgs::Bytes2(Some(document), Some(paths)),
+            EvaluatedArgs::Bytes(Some(values)),
+        ) => Ok(EvaluatedArgs::Bytes3([
+            Some(document),
+            Some(paths),
+            Some(values),
+        ])),
+        _ => Err(LocalError::InvalidSpec(
+            "JSON operand packing changed its fixed shape".into(),
+        )),
+    }
+}
+
 /// Owned ready arguments and explicit demand markers for closed recipes. Int
 /// carries the original 64-bit pattern: callers may pass a u64 as i64 without
 /// numeric narrowing. Coercion, diagnostics, argument demand and text
@@ -5535,6 +5744,11 @@ impl EvaluatedArgs {
                 Self::Bytes2(first, second) => {
                     operation.json_output_args_valid(&[first.as_deref(), second.as_deref()])
                 }
+                Self::Bytes3([first, second, third]) => operation.json_output_args_valid(&[
+                    first.as_deref(),
+                    second.as_deref(),
+                    third.as_deref(),
+                ]),
                 _ => false,
             };
         }
@@ -8332,6 +8546,321 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn json_path_unit_profiles_dispatch_borrowed_selectors_and_owned_bytes() {
+        use crate::impl_json::*;
+        for (operation, getter, document, path, expected) in [
+            (
+                EvaluatedBytesOp::JsonExtractSerdeNative,
+                json_extract_serde_native_fn_meta(),
+                serde_json::json!({"a": [1, 2]}),
+                "$.a[1]",
+                "2",
+            ),
+            (
+                EvaluatedBytesOp::JsonInsertSerdeNative,
+                json_insert_serde_native_fn_meta(),
+                serde_json::json!({"a": 1}),
+                "$.b",
+                r#"{"a": 1, "b": 2}"#,
+            ),
+            (
+                EvaluatedBytesOp::JsonSetSerdeNative,
+                json_set_serde_native_fn_meta(),
+                serde_json::json!({"a": 1}),
+                "$.a",
+                r#"{"a": 2}"#,
+            ),
+            (
+                EvaluatedBytesOp::JsonReplaceSerdeNative,
+                json_replace_serde_native_fn_meta(),
+                serde_json::json!({"a": 1}),
+                "$.a",
+                r#"{"a": 2}"#,
+            ),
+            (
+                EvaluatedBytesOp::JsonRemoveSerdeNative,
+                json_remove_serde_native_fn_meta(),
+                serde_json::json!({"a": 1, "b": 2}),
+                "$.a",
+                r#"{"b": 2}"#,
+            ),
+            (
+                EvaluatedBytesOp::JsonArrayAppendSerdeNative,
+                json_array_append_serde_native_fn_meta(),
+                serde_json::json!({"a": [1]}),
+                "$.a",
+                r#"{"a": [1, 2]}"#,
+            ),
+            (
+                EvaluatedBytesOp::JsonArrayInsertSerdeNative,
+                json_array_insert_serde_native_fn_meta(),
+                serde_json::json!({"a": [1, 3]}),
+                "$.a[1]",
+                r#"{"a": [1, 2, 3]}"#,
+            ),
+        ] {
+            let paths = [crate::parse_native_json_path(path).unwrap()];
+            let arity = operation.input_types().len();
+            let args = if arity == 2 {
+                prepare_json_paths_args(&document, &paths).unwrap()
+            } else {
+                prepare_json_path_values_args(&document, &paths, &[serde_json::json!(2)]).unwrap()
+            };
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+            assert_eq!(operation.call_count(), 1);
+            assert!(!operation.returns_json_report());
+            assert_eq!(args.input_types(), operation.input_types());
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), arity + 1);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!()
+            };
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.value(), Some(expected.as_bytes()));
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert!(worker.is_healthy());
+        }
+    }
+
+    #[test]
+    fn json_path_packets_preserve_flags_and_reject_invalid_ready_shapes() {
+        let document = serde_json::json!({"a": 1});
+        let all_legs = ["$.a", "$.*", "$[*]", "$[last]", "$[1 to last]", "$**.a"]
+            .into_iter()
+            .map(|path| crate::parse_native_json_path(path).unwrap())
+            .collect::<Vec<_>>();
+        let args = prepare_json_paths_args(&document, &all_legs).unwrap();
+        assert!(args.admission_matches(EvaluatedBytesOp::JsonExtractSerdeNative));
+        let mut quoted = crate::parse_native_json_path(r#"$."*""#).unwrap();
+        let original = encode_json_paths(std::slice::from_ref(&quoted)).unwrap();
+        assert_eq!(&original[..8], &1_u64.to_le_bytes());
+        assert_eq!(original[8], u8::from(quoted.could_match_multiple));
+        assert_eq!(original[17], 0); // Quoted star is an actual Key, not KeyWildcard.
+        assert_eq!(&original[18..26], &1_u64.to_le_bytes());
+        assert_eq!(original[26], b'*');
+        quoted.could_match_multiple = !quoted.could_match_multiple;
+        let changed = encode_json_paths(std::slice::from_ref(&quoted)).unwrap();
+        assert_eq!(changed[8], u8::from(quoted.could_match_multiple));
+        assert_eq!(&changed[9..], &original[9..]);
+        assert!(matches!(
+            prepare_json_path_values_args(&document, std::slice::from_ref(&quoted), &[]),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        let root_packet = || {
+            let mut packet = 1_u64.to_le_bytes().to_vec();
+            packet.push(0);
+            packet.extend_from_slice(&0_u64.to_le_bytes());
+            packet
+        };
+        let mut bad_flag = root_packet();
+        bad_flag[8] = 2;
+        let mut bad_leg_count = root_packet();
+        bad_leg_count[9..17].copy_from_slice(&u64::MAX.to_le_bytes());
+        let leg_packet = |tag: u8, payload: &[u8]| {
+            let mut packet = 1_u64.to_le_bytes().to_vec();
+            packet.push(0);
+            packet.extend_from_slice(&1_u64.to_le_bytes());
+            packet.push(tag);
+            packet.extend_from_slice(payload);
+            packet
+        };
+        let mut bad_key = 1_u64.to_le_bytes().to_vec();
+        bad_key.push(0xff);
+        let bad_paths = [
+            Vec::new(),
+            vec![0; 7],
+            u64::MAX.to_le_bytes().to_vec(),
+            [0_u64.to_le_bytes(), 0_u64.to_le_bytes()].concat(),
+            bad_flag,
+            bad_leg_count,
+            leg_packet(6, &[]),
+            leg_packet(0, &bad_key),
+            leg_packet(0, &u64::MAX.to_le_bytes()),
+            leg_packet(3, &[]),
+            leg_packet(4, &0_i64.to_le_bytes()),
+        ];
+        let make_args = |values: &[Option<Vec<u8>>]| match values {
+            [first] => EvaluatedArgs::Bytes(first.clone()),
+            [first, second] => EvaluatedArgs::Bytes2(first.clone(), second.clone()),
+            [first, second, third] => {
+                EvaluatedArgs::Bytes3([first.clone(), second.clone(), third.clone()])
+            }
+            _ => unreachable!(),
+        };
+        for operation in [
+            EvaluatedBytesOp::JsonExtractSerdeNative,
+            EvaluatedBytesOp::JsonInsertSerdeNative,
+            EvaluatedBytesOp::JsonSetSerdeNative,
+            EvaluatedBytesOp::JsonReplaceSerdeNative,
+            EvaluatedBytesOp::JsonRemoveSerdeNative,
+            EvaluatedBytesOp::JsonArrayAppendSerdeNative,
+            EvaluatedBytesOp::JsonArrayInsertSerdeNative,
+        ] {
+            let arity = operation.input_types().len();
+            let args = if arity == 2 {
+                prepare_json_paths_args(&document, &[]).unwrap()
+            } else {
+                prepare_json_path_values_args(&document, &[], &[]).unwrap()
+            };
+            let values = match args {
+                EvaluatedArgs::Bytes2(first, paths) => vec![first, paths],
+                EvaluatedArgs::Bytes3(parts) => parts.into_iter().collect(),
+                _ => panic!(),
+            };
+            assert_eq!(values[1].as_deref(), Some(0_u64.to_le_bytes().as_slice()));
+            if arity == 3 {
+                assert_eq!(values[2].as_deref(), Some(0_u64.to_le_bytes().as_slice()));
+            }
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let expected = if operation == EvaluatedBytesOp::JsonExtractSerdeNative {
+                None
+            } else {
+                Some(br#"{"a": 1}"#.as_slice())
+            };
+            let ComputedValue::Bytes(value) = worker.eval_args(make_args(&values)).unwrap() else {
+                panic!()
+            };
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.value(), expected);
+            let mut invalid_cases = Vec::new();
+            for slot in 0..arity {
+                let mut absent = values.clone();
+                absent[slot] = None;
+                invalid_cases.push(absent);
+            }
+            for paths in &bad_paths {
+                let mut invalid = values.clone();
+                invalid[1] = Some(paths.clone());
+                invalid_cases.push(invalid);
+            }
+            let mut wrong_slot = values.clone();
+            wrong_slot.swap(0, 1);
+            invalid_cases.push(wrong_slot);
+            if arity == 3 {
+                let EvaluatedArgs::Bytes(packet) =
+                    prepare_json_array_args(&[serde_json::Value::Null]).unwrap()
+                else {
+                    panic!()
+                };
+                let mut count_mismatch = values.clone();
+                count_mismatch[2] = packet;
+                invalid_cases.push(count_mismatch);
+            }
+            for invalid in invalid_cases {
+                assert!(matches!(
+                    worker.eval_args(make_args(&invalid)),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let ready = std::array::from_fn(|slot| {
+                    if slot < arity {
+                        ScalarValue::Bytes(invalid[slot].clone())
+                    } else {
+                        ScalarValue::Int(None)
+                    }
+                });
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(ready, arity, &mut reported),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            assert!(matches!(
+                worker.eval_args(make_args(&values[..arity - 1])),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            for invalid in [
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::Int2(Some(0), Some(0)),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            let ComputedValue::Bytes(value) = worker.eval_args(make_args(&values)).unwrap() else {
+                panic!()
+            };
+            assert_eq!(value.value(), expected);
+            assert_eq!(worker.kernel_invocations(), 2);
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert!(worker.is_healthy());
+        }
+        let mut null = prepare_evaluated_bytes(
+            EvaluatedBytesOp::JsonOutputNullNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        let ComputedValue::Bytes(value) = null.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(value.value(), None);
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(null.kernel_invocations(), 1);
+    }
 
     #[test]
     fn json_output_unit_profiles_dispatch_actual_owned_bytes() {

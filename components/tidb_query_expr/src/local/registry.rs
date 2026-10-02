@@ -389,7 +389,14 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::JsonKeysSerdeNative
         | LocalFunctionId::JsonKeysPathSerdeNative
         | LocalFunctionId::JsonPrettySerdeNative
-        | LocalFunctionId::JsonOutputNullNative => Err(other_err!(
+        | LocalFunctionId::JsonOutputNullNative
+        | LocalFunctionId::JsonExtractSerdeNative
+        | LocalFunctionId::JsonInsertSerdeNative
+        | LocalFunctionId::JsonSetSerdeNative
+        | LocalFunctionId::JsonReplaceSerdeNative
+        | LocalFunctionId::JsonRemoveSerdeNative
+        | LocalFunctionId::JsonArrayAppendSerdeNative
+        | LocalFunctionId::JsonArrayInsertSerdeNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),
