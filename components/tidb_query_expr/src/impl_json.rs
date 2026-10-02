@@ -140,6 +140,45 @@ fn json_quote_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
     native_quote(text).map(Some)
 }
 
+/// Validates the actual text input without computing an unquoted answer.
+/// Strict JSON string syntax applies only to fully double-quote-bound inputs.
+pub fn json_unquote_text_native_args_valid(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes)
+        .is_ok_and(|text| crate::validate_native_json_unquote_text(text).is_ok())
+}
+
+/// A binary input retains its actual type and all payload bytes, including
+/// malformed non-string values. Only projected string UTF-8 is validated here;
+/// admission must not format or decode the whole raw document.
+pub fn json_unquote_binary_native_args_valid(bytes: &[u8]) -> bool {
+    bytes.split_first().is_some_and(|(&kind, payload)| {
+        crate::validate_native_json_unquote_binary_sql(kind, payload).is_ok()
+    })
+}
+
+#[rpn_fn]
+fn json_unquote_text_native(bytes: BytesRef) -> Result<Option<Bytes>> {
+    let text = std::str::from_utf8(bytes).map_err(|error| {
+        other_err!(
+            "Invalid native JSON_UNQUOTE text UTF-8 transport: {}",
+            error
+        )
+    })?;
+    crate::native_json_unquote_text(text)
+        .map(|value| Some(value.into_bytes()))
+        .map_err(|error| other_err!("Invalid native JSON_UNQUOTE text transport: {:?}", error))
+}
+
+#[rpn_fn]
+fn json_unquote_binary_native(bytes: BytesRef) -> Result<Option<Bytes>> {
+    let (&kind, payload) = bytes
+        .split_first()
+        .ok_or_else(|| other_err!("Native JSON_UNQUOTE binary transport lacks a type byte"))?;
+    crate::native_json_unquote_binary_sql(kind, payload)
+        .map(|value| Some(value.into_bytes()))
+        .map_err(|error| other_err!("Invalid native JSON_UNQUOTE binary transport: {:?}", error))
+}
+
 // These packets contain prepared serde values and original UTF-8 paths, not
 // binary JSON and not a frontend-computed predicate or path-match result.
 fn json_serde_native_value(bytes: &[u8]) -> Result<serde_json::Value> {
@@ -1389,6 +1428,133 @@ fn parse_json_path(path: Option<BytesRef>) -> Result<Option<PathExpression>> {
     }?;
 
     Ok(Some(parse_json_path_expr(json_path)?))
+}
+
+#[cfg(test)]
+mod native_json_unquote_worker_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_native_unquote_workers_keep_text_and_binary_sql_policies_distinct() {
+        assert_eq!(
+            json_unquote_text_native_fn_meta().name,
+            "json_unquote_text_native"
+        );
+        assert_eq!(
+            json_unquote_binary_native_fn_meta().name,
+            "json_unquote_binary_native"
+        );
+        for text in [
+            b"".as_slice(),
+            b"plain",
+            b"\"",
+            b"\"unfinished",
+            b" \"x\" ",
+            b"null",
+            b"[1,2]",
+        ] {
+            assert!(json_unquote_text_native_args_valid(text));
+            assert_eq!(json_unquote_text_native(text).unwrap(), Some(text.to_vec()));
+        }
+        assert_eq!(
+            json_unquote_text_native(br#""a\tb\n\u0041""#).unwrap(),
+            Some(b"a\tb\nA".to_vec())
+        );
+        let surrogate_pair = br#""\uD83D\uDE00""#;
+        assert!(json_unquote_text_native_args_valid(surrogate_pair));
+        assert_eq!(
+            json_unquote_text_native(surrogate_pair).unwrap(),
+            Some(vec![0xf0, 0x9f, 0x98, 0x80])
+        );
+        // The ordinary TiKV unquoter's existing per-u16 decoder rejects the
+        // surrogate; the native strict serde policy accepts the complete pair.
+        assert!(json_unquote(surrogate_pair).is_err());
+        let four_bytes = br#""\n""#;
+        assert_eq!(four_bytes.len(), 4);
+        assert_eq!(
+            json_unquote_text_native(four_bytes).unwrap(),
+            Some(vec![b'\n'])
+        );
+        assert_eq!(json_unquote(four_bytes).unwrap(), Some(vec![b'\n']));
+        // Native SQL typed JSON returns these four string-content bytes VERBATIM,
+        // rather than invoking either text policy or the direct SDK's unquote.
+        let mut binary = vec![JsonType::String as u8, 4];
+        binary.extend_from_slice(four_bytes);
+        assert!(json_unquote_binary_native_args_valid(&binary));
+        assert_eq!(
+            json_unquote_binary_native(&binary).unwrap(),
+            Some(four_bytes.to_vec())
+        );
+        // Bytes outside the source string projection are retained in transport
+        // but never newly validated as UTF-8 or fed to a second unescape pass.
+        binary.push(0xff);
+        assert!(json_unquote_binary_native_args_valid(&binary));
+        assert_eq!(
+            json_unquote_binary_native(&binary).unwrap(),
+            Some(four_bytes.to_vec())
+        );
+        let mut integer = vec![JsonType::I64 as u8];
+        integer.extend_from_slice(&17i64.to_le_bytes());
+        assert_eq!(
+            json_unquote_binary_native(&integer).unwrap(),
+            Some(b"17".to_vec())
+        );
+        let mut double = vec![JsonType::Double as u8];
+        double.extend_from_slice(&1.0f64.to_le_bytes());
+        assert_eq!(
+            json_unquote_binary_native(&double).unwrap(),
+            Some(b"1.0".to_vec())
+        );
+        assert_eq!(
+            json_unquote_binary_native(&[JsonType::String as u8, 0]).unwrap(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn fixed_native_unquote_admission_rejects_only_actual_policy_failures() {
+        for text in [
+            br#""\q""#.as_slice(),
+            br#""\uD800""#,
+            br#""a" "b""#,
+            &[0xff],
+        ] {
+            assert!(!json_unquote_text_native_args_valid(text));
+            assert!(json_unquote_text_native(text).is_err());
+        }
+        assert!(!json_unquote_binary_native_args_valid(b""));
+        assert!(json_unquote_binary_native(b"").is_err());
+        let invalid_utf8 = [JsonType::String as u8, 1, 0xff];
+        assert!(!json_unquote_binary_native_args_valid(&invalid_utf8));
+        assert!(json_unquote_binary_native(&invalid_utf8).is_err());
+        let invalid_text_but_valid_content = [JsonType::String as u8, 4, b'"', b'\\', b'q', b'"'];
+        assert!(json_unquote_binary_native_args_valid(
+            &invalid_text_but_valid_content
+        ));
+        assert_eq!(
+            json_unquote_binary_native(&invalid_text_but_valid_content).unwrap(),
+            Some(br#""\q""#.to_vec())
+        );
+        for malformed in [
+            vec![JsonType::Array as u8],
+            vec![JsonType::String as u8, 0x80],
+            vec![0xff, 0xff],
+        ] {
+            assert!(json_unquote_binary_native_args_valid(&malformed));
+            assert_eq!(
+                json_unquote_binary_native(&malformed).unwrap(),
+                Some(Vec::new())
+            );
+        }
+        // Validation must not evaluate raw Display. Its existing root-NaN
+        // failure remains a propagated worker panic, not SQL NULL or new cause.
+        let mut nan = vec![JsonType::Double as u8];
+        nan.extend_from_slice(&f64::NAN.to_le_bytes());
+        assert!(json_unquote_binary_native_args_valid(&nan));
+        assert!(std::panic::catch_unwind(|| json_unquote_binary_native(&nan)).is_err());
+        assert_eq!(json_output_null_native(None).unwrap(), None);
+        assert!(json_output_null_native(Some(&0)).is_err());
+    }
 }
 
 #[cfg(test)]

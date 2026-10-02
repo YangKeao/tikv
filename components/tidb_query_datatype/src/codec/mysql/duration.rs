@@ -314,6 +314,35 @@ impl Default for Duration {
 }
 
 impl Duration {
+    /// Write the native signed-nanosecond display without range checks or
+    /// rounding. Nonpositive FSP omits the fraction; positive FSP retains the
+    /// original six-digit prefix slice, including its invalid-FSP panic.
+    pub fn write_native_display<W: fmt::Write + ?Sized>(
+        nanos: i64,
+        fsp: i64,
+        out: &mut W,
+    ) -> fmt::Result {
+        if nanos < 0 {
+            out.write_str("-")?;
+        }
+        write!(
+            out,
+            "{:02}:{:02}:{:02}",
+            Self::hours_from_nanos(nanos),
+            Self::minutes_from_nanos(nanos),
+            Self::secs_from_nanos(nanos)
+        )?;
+        if fsp > 0 {
+            let fraction = format!("{:06}", Self::micro_secs_from_nanos(nanos));
+            write!(
+                out,
+                ".{}",
+                &fraction[..usize::try_from(fsp).expect("positive duration FSP")]
+            )?;
+        }
+        Ok(())
+    }
+
     #[inline]
     pub fn is_neg(self) -> bool {
         self.nanos < 0
@@ -756,6 +785,39 @@ mod tests {
         codec::{data_type::DateTime, mysql::UNSPECIFIED_FSP},
         expr::{EvalConfig, EvalContext, Flag},
     };
+
+    #[test]
+    fn test_native_duration_display_raw_nanos_and_fsp() {
+        let render = |nanos, fsp| {
+            let mut output = String::new();
+            let sink: &mut dyn fmt::Write = &mut output;
+            Duration::write_native_display(nanos, fsp, sink).unwrap();
+            output
+        };
+        for (nanos, fsp, expected) in [
+            (0, 0, "00:00:00"),
+            (0, 6, "00:00:00.000000"),
+            (-1, 6, "-00:00:00.000000"),
+            (3_723_987_654_999, 3, "01:02:03.987"),
+            (-3_723_987_654_999, 6, "-01:02:03.987654"),
+            (3_241_815_123_456_789, 6, "900:30:15.123456"),
+            (i64::MIN, 6, "-2562047:47:16.854775"),
+            (3_723_987_654_999, -1, "01:02:03"),
+            (i64::MAX, i64::MIN, "2562047:47:16"),
+        ] {
+            assert_eq!(render(nanos, fsp), expected);
+        }
+        for fsp in [7, i64::MAX] {
+            assert!(std::panic::catch_unwind(|| render(0, fsp)).is_err());
+        }
+        struct Reject;
+        impl fmt::Write for Reject {
+            fn write_str(&mut self, _: &str) -> fmt::Result {
+                Err(fmt::Error)
+            }
+        }
+        assert!(Duration::write_native_display(-1, 7, &mut Reject).is_err());
+    }
 
     #[test]
     fn test_raw_nanos_projections() {

@@ -450,6 +450,8 @@ pub enum LocalFunctionId {
     JsonArrayAppendRawLegacy,
     JsonArrayAppendEmptyLegacy,
     JsonValueAbsentLegacy,
+    JsonUnquoteTextNative,
+    JsonUnquoteBinaryNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

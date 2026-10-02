@@ -625,6 +625,42 @@ impl From<TimeType> for FieldTypeTp {
 
 // The common set of methods for `date/time`
 impl Time {
+    /// Write the native CoreTime display without validating or normalizing raw
+    /// fields. Unlike the wire Display policy, fractional digits are a prefix
+    /// of the minimum-six-digit microsecond spelling, even for seven-digit raw
+    /// microseconds. FSP beyond that spelling retains the original slicing
+    /// panic.
+    pub fn write_native_core_display<W: std::fmt::Write + ?Sized>(
+        raw: u64,
+        is_date: bool,
+        fsp: u8,
+        out: &mut W,
+    ) -> std::fmt::Result {
+        let core = Self(raw);
+        write!(
+            out,
+            "{:04}-{:02}-{:02}",
+            core.year(),
+            core.month(),
+            core.day()
+        )?;
+        if is_date {
+            return Ok(());
+        }
+        write!(
+            out,
+            " {:02}:{:02}:{:02}",
+            core.hour(),
+            core.minute(),
+            core.second()
+        )?;
+        if fsp > 0 {
+            let fraction = format!("{:06}", core.micro());
+            write!(out, ".{}", &fraction[..usize::from(fsp)])?;
+        }
+        Ok(())
+    }
+
     /// Native public CoreTime weekday normalization, including incomplete or
     /// invalid month/day fields; evaluated only when a caller needs a weekday.
     pub fn native_core_weekday_sunday_index(raw: u64) -> u32 {
@@ -3802,6 +3838,54 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn test_native_core_display_raw_fields_and_fraction_prefix() {
+        let render = |raw, is_date, fsp| {
+            let mut output = String::new();
+            let sink: &mut dyn std::fmt::Write = &mut output;
+            Time::write_native_core_display(raw, is_date, fsp, sink).unwrap();
+            output
+        };
+        let raw = (2026_u64 << 50)
+            | (8 << 46)
+            | (14 << 41)
+            | (12 << 36)
+            | (34 << 30)
+            | (56 << 24)
+            | (123456 << 4);
+        for low_metadata in 0..16 {
+            assert_eq!(render(raw | low_metadata, false, 0), "2026-08-14 12:34:56");
+            assert_eq!(
+                render(raw | low_metadata, false, 3),
+                "2026-08-14 12:34:56.123"
+            );
+            assert_eq!(
+                render(raw | low_metadata, false, 6),
+                "2026-08-14 12:34:56.123456"
+            );
+            // Date formatting returns before consulting even invalid FSP.
+            assert_eq!(render(raw | low_metadata, true, u8::MAX), "2026-08-14");
+        }
+        assert_eq!(render(0, false, 6), "0000-00-00 00:00:00.000000");
+        assert_eq!(render(0, true, u8::MAX), "0000-00-00");
+        let high_micro = (raw & !(0x0f_ffff_u64 << 4)) | (0x0f_ffff_u64 << 4);
+        assert_eq!(render(high_micro, false, 6), "2026-08-14 12:34:56.104857");
+        assert_eq!(render(high_micro, false, 7), "2026-08-14 12:34:56.1048575");
+        assert_eq!(render(u64::MAX, false, 6), "16383-15-31 31:63:63.104857");
+        assert_eq!(render(u64::MAX, true, u8::MAX), "16383-15-31");
+        for fsp in [7, u8::MAX] {
+            assert!(std::panic::catch_unwind(|| render(raw, false, fsp)).is_err());
+        }
+        assert!(std::panic::catch_unwind(|| render(high_micro, false, 8)).is_err());
+        struct Reject;
+        impl std::fmt::Write for Reject {
+            fn write_str(&mut self, _: &str) -> std::fmt::Result {
+                Err(std::fmt::Error)
+            }
+        }
+        assert!(Time::write_native_core_display(raw, false, u8::MAX, &mut Reject).is_err());
+    }
 
     #[test]
     fn test_native_core_compare_raw_fields() {

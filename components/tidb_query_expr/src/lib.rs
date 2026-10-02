@@ -51,7 +51,9 @@ pub use native_json::{
     native_json_array, native_json_array_range, native_json_contains, native_json_equal,
     native_json_extract, native_json_format, native_json_is_ecmascript_identifier,
     native_json_keys, native_json_length, native_json_member_of, native_json_object,
-    native_json_overlaps, native_json_pretty, parse_native_json_path,
+    native_json_overlaps, native_json_pretty, native_json_unquote_binary_sql,
+    native_json_unquote_text, parse_native_json_path, validate_native_json_unquote_binary_sql,
+    validate_native_json_unquote_text,
 };
 
 mod native_json_legacy;
@@ -128,6 +130,8 @@ pub use self::{
         json_remove_serde_native_fn_meta, json_replace_raw_legacy_args_valid,
         json_replace_raw_legacy_fn_meta, json_replace_serde_native_fn_meta,
         json_serde_native_args_valid, json_set_serde_native_fn_meta,
+        json_unquote_binary_native_args_valid, json_unquote_binary_native_fn_meta,
+        json_unquote_text_native_args_valid, json_unquote_text_native_fn_meta,
         json_value_absent_legacy_fn_meta,
     },
     impl_miscellaneous::{

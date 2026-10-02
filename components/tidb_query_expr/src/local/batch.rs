@@ -1457,6 +1457,8 @@ pub enum EvaluatedBytesOp {
     JsonArrayAppendRawLegacy,
     JsonArrayAppendEmptyLegacy,
     JsonValueAbsentLegacy,
+    JsonUnquoteTextNative,
+    JsonUnquoteBinaryNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -2995,6 +2997,16 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::JsonValueAbsentLegacy,
                 );
             }
+            Self::JsonUnquoteTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonUnquoteTextNative,
+                );
+            }
+            Self::JsonUnquoteBinaryNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonUnquoteBinaryNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -3043,6 +3055,8 @@ impl EvaluatedBytesOp {
                 | Self::JsonReplaceRawLegacy
                 | Self::JsonArrayAppendRawLegacy
                 | Self::JsonArrayAppendEmptyLegacy
+                | Self::JsonUnquoteTextNative
+                | Self::JsonUnquoteBinaryNative
         )
     }
 
@@ -3053,7 +3067,8 @@ impl EvaluatedBytesOp {
             json_array_serde_args_valid, json_extract_serde_args_valid,
             json_modify_serde_args_valid, json_object_serde_args_valid,
             json_remove_serde_args_valid, json_replace_raw_legacy_args_valid,
-            json_serde_native_args_valid,
+            json_serde_native_args_valid, json_unquote_binary_native_args_valid,
+            json_unquote_text_native_args_valid,
         };
         match (self, values) {
             (Self::JsonArraySerdeNative, [Some(values)]) => json_array_serde_args_valid(values),
@@ -3090,6 +3105,12 @@ impl EvaluatedBytesOp {
             }
             (Self::JsonArrayAppendEmptyLegacy, [Some(document)]) => {
                 json_array_append_empty_legacy_args_valid(document)
+            }
+            (Self::JsonUnquoteTextNative, [Some(text)]) => {
+                json_unquote_text_native_args_valid(text)
+            }
+            (Self::JsonUnquoteBinaryNative, [Some(raw)]) => {
+                json_unquote_binary_native_args_valid(raw)
             }
             _ => false,
         }
@@ -3904,6 +3925,8 @@ impl EvaluatedBytesOp {
                 crate::impl_json::json_array_append_empty_legacy_fn_meta()
             }
             Self::JsonValueAbsentLegacy => crate::impl_json::json_value_absent_legacy_fn_meta(),
+            Self::JsonUnquoteTextNative => crate::impl_json::json_unquote_text_native_fn_meta(),
+            Self::JsonUnquoteBinaryNative => crate::impl_json::json_unquote_binary_native_fn_meta(),
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
             Self::UnaryPlusBitsNative => crate::impl_op::unary_plus_bits_native_fn_meta(),
             Self::UnaryPlusDecimalNative => crate::impl_op::unary_plus_decimal_native_fn_meta(),
@@ -4229,7 +4252,9 @@ impl EvaluatedBytesOp {
             | Self::JsonReplaceRawLegacy
             | Self::JsonArrayAppendRawLegacy
             | Self::JsonArrayAppendEmptyLegacy
-            | Self::JsonValueAbsentLegacy => EvalType::Bytes,
+            | Self::JsonValueAbsentLegacy
+            | Self::JsonUnquoteTextNative
+            | Self::JsonUnquoteBinaryNative => EvalType::Bytes,
             Self::CompareIntSsNative(_)
             | Self::CompareIntSuNative(_)
             | Self::CompareIntUsNative(_)
@@ -4610,7 +4635,9 @@ impl EvaluatedBytesOp {
             Self::JsonReplaceRawLegacy | Self::JsonArrayAppendRawLegacy => {
                 &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
             }
-            Self::JsonArrayAppendEmptyLegacy => &[EvalType::Bytes],
+            Self::JsonArrayAppendEmptyLegacy
+            | Self::JsonUnquoteTextNative
+            | Self::JsonUnquoteBinaryNative => &[EvalType::Bytes],
             Self::JsonValueAbsentLegacy => &[],
             Self::JsonArraySerdeNative
             | Self::JsonObjectSerdeNative
@@ -8749,6 +8776,148 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn json_unquote_fixed_profiles_keep_text_binary_and_null_distinct() {
+        for (operation, getter, args, expected) in [
+            (
+                EvaluatedBytesOp::JsonUnquoteTextNative,
+                crate::impl_json::json_unquote_text_native_fn_meta(),
+                EvaluatedArgs::Bytes(Some(b"\"\\n\"".to_vec())),
+                b"\n".as_slice(),
+            ),
+            (
+                EvaluatedBytesOp::JsonUnquoteBinaryNative,
+                crate::impl_json::json_unquote_binary_native_fn_meta(),
+                prepare_json_raw_identity_args((12, &[4, b'"', b'\\', b'n', b'"'])).unwrap(),
+                b"\"\\n\"".as_slice(),
+            ),
+        ] {
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            assert_eq!(operation.input_types(), &[EvalType::Bytes]);
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+            assert!(!operation.returns_json_report());
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), 2);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[1]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, 1);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: vec![LocalExpr::InputSlot {
+                    slot: 0,
+                    field_type: program.schema[0].clone(),
+                }]
+                .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            for invalid in [
+                EvaluatedArgs::Bytes(None),
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::Int(Some(0)),
+                EvaluatedArgs::Bytes2(Some(Vec::new()), Some(Vec::new())),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            let bad_utf8 = if operation == EvaluatedBytesOp::JsonUnquoteTextNative {
+                vec![255]
+            } else {
+                vec![12, 1, 255]
+            };
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes(Some(bad_utf8.clone()))),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            let mut reported = None;
+            assert!(matches!(
+                worker.eval_ready(
+                    [
+                        ScalarValue::Bytes(Some(bad_utf8)),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None)
+                    ],
+                    1,
+                    &mut reported
+                ),
+                Err(LocalError::InvalidSpec(_))
+            ));
+            assert_eq!(reported, None);
+            assert_eq!(worker.kernel_invocations(), 0);
+            let ComputedValue::Bytes(output) = worker.eval_args(args).unwrap() else {
+                panic!()
+            };
+            assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(output.value(), Some(expected));
+            assert_eq!(worker.kernel_invocations(), 1);
+            if operation == EvaluatedBytesOp::JsonUnquoteBinaryNative {
+                // Malformed raw containers retain the old Display empty-string
+                // policy. This is Some(empty STRING bytes), not JSON or NULL.
+                let ComputedValue::Bytes(output) = worker
+                    .eval_args(prepare_json_raw_identity_args((3, &[255])).unwrap())
+                    .unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(output.value(), Some(b"".as_slice()));
+                assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+                assert_eq!(worker.kernel_invocations(), 2);
+            }
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert!(worker.is_healthy());
+        }
+        let mut null = prepare_evaluated_bytes(
+            EvaluatedBytesOp::JsonOutputNullNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        let ComputedValue::Bytes(output) =
+            null.eval_args(EvaluatedArgs::NullWitness(None)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(output.value(), None);
+        assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+        assert_eq!(null.kernel_invocations(), 1);
+    }
 
     #[test]
     fn json_raw_legacy_profiles_preserve_codec_identity_and_real_absence() {

@@ -369,8 +369,16 @@ short-circuit admission policy described above.
   Actual legacy no-value observations use a separate NoArgs byte terminal,
   never a fabricated SQL NULL witness. Existing by-value legacy preparation and
   error classes remain outside the SDK's checked-transport guard; this does not
-  add a whole-call/root driver. UNQUOTE's separate text/raw-display policies
-  remain open.
+  add a whole-call/root driver. UNQUOTE uses separate fixed text/raw-binary
+  string-result workers. Strict quote-bounded text validation returns unit;
+  typed raw strings retain their decoded contents without a second unescape.
+  Datatype `native_text.rs` owns raw Display and SDK escape policies. General
+  native Time/Duration Display bodies are shared separately from unchanged
+  wire formatters. Malformed raw fallback stays empty text; root nonfinite
+  formatting errors still panic. The existing driver propagates unwind and
+  poisons/retires its worker; no new catcher or NULL/error substitution exists.
+  Resource refusal may prevent reaching that worker panic. SDK string helpers
+  keep their distinct conditional second-unescape policy.
   JSON predicate/path policies live in `native_json.rs`, with fixed Int
   workers in `impl_json.rs`. Actual prepared serde values remain separate
   from datatype `json/native_policy.rs` raw-binary predicates; their numeric,

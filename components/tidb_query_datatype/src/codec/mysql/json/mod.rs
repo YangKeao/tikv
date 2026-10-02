@@ -65,6 +65,7 @@ mod modifier;
 mod native_codec;
 mod native_path_ops;
 mod native_policy;
+mod native_text;
 mod path_expr;
 mod serde;
 // json functions
@@ -110,6 +111,11 @@ pub use self::{
         native_binary_json_type_name, native_json_opaque, native_json_sorted_object_keys,
         native_json_storage_size, native_json_type_name, overlaps_native_binary_json,
         parse_native_json_document,
+    },
+    native_text::{
+        decode_native_json_escaped_unicode, native_binary_json_string_bytes,
+        quote_native_json_string, unquote_native_json_escaped_string, unquote_native_json_string,
+        write_native_binary_json_text,
     },
     path_expr::{PathExpression, parse_json_path_expr},
 };

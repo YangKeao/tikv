@@ -8,7 +8,99 @@ use std::{
     collections::{BTreeMap, HashSet},
 };
 
+use serde::de::{Deserialize, Deserializer, Visitor};
 use serde_json::{Number, Value as Json};
+use tidb_query_datatype::codec::mysql::json::{
+    NativeJsonError, native_binary_json_string_bytes, write_native_binary_json_text,
+};
+
+/// Unquotes native text only when both outer bytes are double quotes. The
+/// enclosed document must be one complete, strictly decoded JSON string.
+pub fn native_json_unquote_text(text: &str) -> Result<String, NativeJsonError> {
+    match parse_native_json_unquote_text::<String>(text)? {
+        Some(unquoted) => Ok(unquoted),
+        None => Ok(text.to_owned()),
+    }
+}
+
+/// Validates the native text policy without constructing its owned answer.
+pub fn validate_native_json_unquote_text(text: &str) -> Result<(), NativeJsonError> {
+    parse_native_json_unquote_text::<ValidatedJsonString>(text).map(|_| ())
+}
+
+fn parse_native_json_unquote_text<'de, T: Deserialize<'de>>(
+    text: &'de str,
+) -> Result<Option<T>, NativeJsonError> {
+    if text.len() < 2 || !text.starts_with('"') || !text.ends_with('"') {
+        return Ok(None);
+    }
+    serde_json::from_str(text)
+        .map(Some)
+        .map_err(|_| NativeJsonError::InvalidText)
+}
+
+struct ValidatedJsonString;
+
+impl<'de> Deserialize<'de> for ValidatedJsonString {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct StringValidationVisitor;
+
+        impl<'de> Visitor<'de> for StringValidationVisitor {
+            type Value = ();
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(())
+            }
+
+            fn visit_string<E: serde::de::Error>(self, _: String) -> Result<Self::Value, E> {
+                Ok(())
+            }
+        }
+
+        // Unlike IgnoredAny, string deserialization rejects invalid Unicode
+        // escapes. Serde's temporary escape buffer is not an owned SQL answer.
+        deserializer
+            .deserialize_string(StringValidationVisitor)
+            .map(|()| ValidatedJsonString)
+    }
+}
+
+/// Returns a raw JSON string's UTF-8 content verbatim, or the original native
+/// raw Display text for every other shape. Display failures retain their panic.
+pub fn native_json_unquote_binary_sql(
+    type_code: u8,
+    payload: &[u8],
+) -> Result<String, NativeJsonError> {
+    if let Some(text) = native_json_unquote_binary_string(type_code, payload)? {
+        return Ok(text.to_owned());
+    }
+    let mut output = String::new();
+    write_native_binary_json_text(&mut output, type_code, payload)
+        .expect("a Display implementation returned an error unexpectedly");
+    Ok(output)
+}
+
+/// Checks only a projected raw string's UTF-8, not raw document validity or its
+/// eventual Display result. Malformed string headers take the Display route.
+pub fn validate_native_json_unquote_binary_sql(
+    type_code: u8,
+    payload: &[u8],
+) -> Result<(), NativeJsonError> {
+    native_json_unquote_binary_string(type_code, payload).map(|_| ())
+}
+
+fn native_json_unquote_binary_string(
+    type_code: u8,
+    payload: &[u8],
+) -> Result<Option<&str>, NativeJsonError> {
+    native_binary_json_string_bytes(type_code, payload)
+        .map(|bytes| std::str::from_utf8(bytes).map_err(|_| NativeJsonError::InvalidBinary))
+        .transpose()
+}
 
 /// Original native parser's rune position, without a frontend SQL error type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -592,6 +684,97 @@ fn compare_signed_unsigned(left: i64, right: u64) -> Ordering {
         Ordering::Less
     } else {
         (left as u64).cmp(&right)
+    }
+}
+
+#[cfg(test)]
+mod unquote_tests {
+    use super::*;
+
+    #[test]
+    fn native_unquote_text_is_strict_but_raw_string_is_verbatim() {
+        for text in ["", "\"", "null", " \"x\"", "\"x\" ", "\"x\" false"] {
+            assert_eq!(validate_native_json_unquote_text(text), Ok(()));
+            assert_eq!(native_json_unquote_text(text), Ok(text.to_owned()));
+        }
+        for (text, expected) in [
+            (r#""""#, ""),
+            (r#""a\n""#, "a\n"),
+            (r#""\uD834\uDD1E""#, "𝄞"),
+        ] {
+            assert_eq!(validate_native_json_unquote_text(text), Ok(()));
+            assert_eq!(native_json_unquote_text(text), Ok(expected.to_owned()));
+        }
+        for text in [
+            r#""\q""#,
+            r#""\uD800""#,
+            r#""\uDC00""#,
+            r#""a" "b""#,
+            "\"a\nb\"",
+        ] {
+            assert_eq!(
+                validate_native_json_unquote_text(text),
+                Err(NativeJsonError::InvalidText),
+            );
+            assert_eq!(
+                native_json_unquote_text(text),
+                Err(NativeJsonError::InvalidText)
+            );
+        }
+
+        // Actual raw STRING bytes contain both the quotes and the backslash.
+        // A byte beyond the length prefix is ignored by the original projection.
+        let raw = [5, b'"', b'a', b'\\', b'n', b'"', 255];
+        assert_eq!(validate_native_json_unquote_binary_sql(0x0c, &raw), Ok(()));
+        assert_eq!(
+            native_json_unquote_binary_sql(0x0c, &raw),
+            Ok(r#""a\n""#.to_owned())
+        );
+        let unknown_escape = [4, b'"', b'\\', b'q', b'"'];
+        assert_eq!(
+            native_json_unquote_binary_sql(0x0c, &unknown_escape),
+            Ok(r#""\q""#.to_owned()),
+        );
+    }
+
+    #[test]
+    fn native_unquote_binary_keeps_utf8_empty_and_display_panic_boundaries() {
+        assert_eq!(
+            validate_native_json_unquote_binary_sql(0x0c, &[1, 255]),
+            Err(NativeJsonError::InvalidBinary),
+        );
+        assert_eq!(
+            native_json_unquote_binary_sql(0x0c, &[1, 255]),
+            Err(NativeJsonError::InvalidBinary),
+        );
+        for (tag, raw) in [(0x0c, &[0x80][..]), (0x03, &[255][..]), (255, &[][..])] {
+            assert_eq!(validate_native_json_unquote_binary_sql(tag, raw), Ok(()));
+            assert_eq!(native_json_unquote_binary_sql(tag, raw), Ok(String::new()));
+        }
+        assert_eq!(
+            native_json_unquote_binary_sql(0x04, &[0]),
+            Ok("null".to_owned())
+        );
+        assert_eq!(
+            native_json_unquote_binary_sql(0x0b, &1.0_f64.to_le_bytes()),
+            Ok("1.0".to_owned()),
+        );
+
+        // Root NaN is a Display error, while a NaN inside a container fails the
+        // raw tree decode and retains the old empty Display text.
+        let nan = f64::NAN.to_le_bytes();
+        assert_eq!(validate_native_json_unquote_binary_sql(0x0b, &nan), Ok(()));
+        assert!(std::panic::catch_unwind(|| native_json_unquote_binary_sql(0x0b, &nan)).is_err());
+        let mut nested_nan = vec![1, 0, 0, 0, 21, 0, 0, 0, 0x0b, 13, 0, 0, 0];
+        nested_nan.extend_from_slice(&nan);
+        assert_eq!(
+            validate_native_json_unquote_binary_sql(0x03, &nested_nan),
+            Ok(())
+        );
+        assert_eq!(
+            native_json_unquote_binary_sql(0x03, &nested_nan),
+            Ok(String::new())
+        );
     }
 }
 
