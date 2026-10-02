@@ -45,6 +45,13 @@ pub mod impl_string;
 pub mod impl_time;
 pub mod impl_vec;
 
+mod native_clock;
+pub use native_clock::{
+    NativeClockInput, native_current_time_with_fsp, native_current_time_without_fsp,
+    native_format_clock_date, native_format_clock_datetime, native_utc_date,
+    native_utc_time_with_fsp, native_utc_time_without_fsp, native_utc_timestamp,
+};
+
 mod native_json;
 pub use native_json::{
     NativeJsonArraySelection, NativeJsonPath, NativeJsonPathError, NativeJsonPathLeg,
@@ -139,6 +146,12 @@ pub use self::{
         NATIVE_UUID_EPOCH_100NS, format_uuid_native, grouping_native_args_valid,
     },
     impl_op::NativeUnaryMinusError,
+    impl_time::{
+        current_time_with_fsp_native_fn_meta, current_time_without_fsp_native_fn_meta,
+        native_clock_args_valid, native_clock_fsp_args_valid, utc_date_native_fn_meta,
+        utc_time_null_native_fn_meta, utc_time_with_fsp_native_fn_meta,
+        utc_time_without_fsp_native_fn_meta, utc_timestamp_native_fn_meta,
+    },
     types::*,
 };
 

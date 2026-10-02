@@ -452,6 +452,13 @@ pub enum LocalFunctionId {
     JsonValueAbsentLegacy,
     JsonUnquoteTextNative,
     JsonUnquoteBinaryNative,
+    UtcDateNative,
+    UtcTimestampNative,
+    CurrentTimeWithoutFspNative,
+    CurrentTimeWithFspNative,
+    UtcTimeWithoutFspNative,
+    UtcTimeWithFspNative,
+    UtcTimeNullNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

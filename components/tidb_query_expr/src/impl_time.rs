@@ -27,6 +27,93 @@ use tidb_query_datatype::{
 
 use crate::RpnFnCallExtra;
 
+/// Only the actual clock tuple's transport width is constrained. Raw nanos and
+/// timestamp/offset domains retain the original pure clock implementation's
+/// arithmetic and panic behavior rather than being normalized by admission.
+pub fn native_clock_args_valid(bytes: &[u8]) -> bool {
+    bytes.len() == 16
+}
+
+/// The second operand is the caller's actual parsed fractional precision.
+pub fn native_clock_fsp_args_valid(bytes: &[u8], fsp: i64) -> bool {
+    native_clock_args_valid(bytes) && (0..=6).contains(&fsp)
+}
+
+fn decode_native_clock(bytes: &[u8]) -> Result<crate::NativeClockInput> {
+    if !native_clock_args_valid(bytes) {
+        return Err(other_err!(
+            "Native clock transport requires exactly 16 bytes"
+        ));
+    }
+    Ok(crate::NativeClockInput {
+        utc_secs: i64::from_le_bytes(bytes[..8].try_into().unwrap()),
+        nanos: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+        tz_offset: i32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+    })
+}
+
+fn decode_native_clock_fsp(bytes: &[u8], fsp: &Int) -> Result<(crate::NativeClockInput, u32)> {
+    if !native_clock_fsp_args_valid(bytes, *fsp) {
+        return Err(other_err!(
+            "Native clock FSP transport requires 16 bytes and precision 0 through 6"
+        ));
+    }
+    Ok((decode_native_clock(bytes)?, *fsp as u32))
+}
+
+#[rpn_fn]
+fn utc_date_native(bytes: BytesRef) -> Result<Option<Bytes>> {
+    Ok(Some(
+        crate::native_utc_date(decode_native_clock(bytes)?).into_bytes(),
+    ))
+}
+
+#[rpn_fn]
+fn utc_timestamp_native(bytes: BytesRef, fsp: &Int) -> Result<Option<Bytes>> {
+    let (clock, fsp) = decode_native_clock_fsp(bytes, fsp)?;
+    Ok(Some(crate::native_utc_timestamp(clock, fsp).into_bytes()))
+}
+
+#[rpn_fn]
+fn current_time_without_fsp_native(bytes: BytesRef) -> Result<Option<Bytes>> {
+    Ok(Some(
+        crate::native_current_time_without_fsp(decode_native_clock(bytes)?).into_bytes(),
+    ))
+}
+
+#[rpn_fn]
+fn current_time_with_fsp_native(bytes: BytesRef, fsp: &Int) -> Result<Option<Bytes>> {
+    let (clock, fsp) = decode_native_clock_fsp(bytes, fsp)?;
+    Ok(Some(
+        crate::native_current_time_with_fsp(clock, fsp).into_bytes(),
+    ))
+}
+
+#[rpn_fn]
+fn utc_time_without_fsp_native(bytes: BytesRef) -> Result<Option<Bytes>> {
+    Ok(Some(
+        crate::native_utc_time_without_fsp(decode_native_clock(bytes)?).into_bytes(),
+    ))
+}
+
+#[rpn_fn]
+fn utc_time_with_fsp_native(bytes: BytesRef, fsp: &Int) -> Result<Option<Bytes>> {
+    let (clock, fsp) = decode_native_clock_fsp(bytes, fsp)?;
+    Ok(Some(
+        crate::native_utc_time_with_fsp(clock, fsp).into_bytes(),
+    ))
+}
+
+#[rpn_fn(nullable)]
+fn utc_time_null_native(witness: Option<&Int>) -> Result<Option<Bytes>> {
+    if witness.is_some() {
+        return Err(other_err!(
+            "UTC_TIME NULL transport contains a non-NULL witness"
+        ));
+    }
+    Ok(None)
+}
+
 // TimeCoreBits is a field-projection carrier, not a validated DateTime or a
 // packed-Time conversion. Only transport width is checked here.
 fn decode_time_core_native(bytes: BytesRef) -> Result<u64> {
@@ -2475,6 +2562,145 @@ pub fn str_to_date_duration(
     t.set_fsp(extra.ret_field_type.get_decimal() as u8);
     let duration: Duration = t.convert(ctx)?;
     Ok(Some(duration))
+}
+
+#[cfg(test)]
+mod native_clock_worker_tests {
+    use super::*;
+
+    fn clock_packet(secs: i64, nanos: u32, offset: i32) -> [u8; 16] {
+        let mut packet = [0; 16];
+        packet[..8].copy_from_slice(&secs.to_le_bytes());
+        packet[8..12].copy_from_slice(&nanos.to_le_bytes());
+        packet[12..16].copy_from_slice(&offset.to_le_bytes());
+        packet
+    }
+
+    #[test]
+    fn fixed_native_clock_workers_keep_rounding_offset_and_null_policies() {
+        for (meta, name) in [
+            (utc_date_native_fn_meta(), "utc_date_native"),
+            (utc_timestamp_native_fn_meta(), "utc_timestamp_native"),
+            (
+                current_time_without_fsp_native_fn_meta(),
+                "current_time_without_fsp_native",
+            ),
+            (
+                current_time_with_fsp_native_fn_meta(),
+                "current_time_with_fsp_native",
+            ),
+            (
+                utc_time_without_fsp_native_fn_meta(),
+                "utc_time_without_fsp_native",
+            ),
+            (
+                utc_time_with_fsp_native_fn_meta(),
+                "utc_time_with_fsp_native",
+            ),
+            (utc_time_null_native_fn_meta(), "utc_time_null_native"),
+        ] {
+            assert_eq!(meta.name, name);
+        }
+        // UTC lies just before midnight, whereas the actual offset has already
+        // advanced the local date. Explicit time signatures truncate to micros
+        // first; UTC_TIMESTAMP rounds the original nanos directly.
+        let packet = clock_packet(86_399, 999_999_600, 3_600);
+        assert!(native_clock_args_valid(&packet));
+        assert_eq!(
+            utc_date_native(&packet).unwrap(),
+            Some(b"1970-01-01".to_vec())
+        );
+        assert_eq!(
+            utc_timestamp_native(&packet, &6).unwrap(),
+            Some(b"1970-01-02 00:00:00.000000".to_vec())
+        );
+        assert_eq!(
+            current_time_without_fsp_native(&packet).unwrap(),
+            Some(b"00:59:59".to_vec())
+        );
+        assert_eq!(
+            current_time_with_fsp_native(&packet, &0).unwrap(),
+            Some(b"01:00:00".to_vec())
+        );
+        assert_eq!(
+            current_time_with_fsp_native(&packet, &6).unwrap(),
+            Some(b"00:59:59.999999".to_vec())
+        );
+        assert_eq!(
+            utc_time_without_fsp_native(&packet).unwrap(),
+            Some(b"23:59:59".to_vec())
+        );
+        assert_eq!(
+            utc_time_with_fsp_native(&packet, &0).unwrap(),
+            Some(b"00:00:00".to_vec())
+        );
+        assert_eq!(
+            utc_time_with_fsp_native(&packet, &6).unwrap(),
+            Some(b"23:59:59.999999".to_vec())
+        );
+        let negative = clock_packet(-1, 0, -3_600);
+        assert_eq!(
+            utc_date_native(&negative).unwrap(),
+            Some(b"1969-12-31".to_vec())
+        );
+        assert_eq!(
+            utc_timestamp_native(&negative, &0).unwrap(),
+            Some(b"1969-12-31 23:59:59".to_vec())
+        );
+        assert_eq!(
+            current_time_without_fsp_native(&negative).unwrap(),
+            Some(b"22:59:59".to_vec())
+        );
+        assert_eq!(
+            utc_time_without_fsp_native(&negative).unwrap(),
+            Some(b"23:59:59".to_vec())
+        );
+        assert_eq!(utc_time_null_native(None).unwrap(), None);
+        assert!(utc_time_null_native(Some(&0)).is_err());
+    }
+
+    #[test]
+    fn fixed_native_clock_workers_validate_only_framing_and_fsp() {
+        for packet in [Vec::new(), vec![0; 15], vec![0; 17]] {
+            assert!(!native_clock_args_valid(&packet));
+            assert!(!native_clock_fsp_args_valid(&packet, 0));
+            assert!(utc_date_native(&packet).is_err());
+            assert!(utc_timestamp_native(&packet, &0).is_err());
+            assert!(current_time_without_fsp_native(&packet).is_err());
+            assert!(current_time_with_fsp_native(&packet, &0).is_err());
+            assert!(utc_time_without_fsp_native(&packet).is_err());
+            assert!(utc_time_with_fsp_native(&packet, &0).is_err());
+        }
+        let packet = clock_packet(0, 0, 0);
+        for fsp in [-1, 7, i64::MIN, i64::MAX] {
+            assert!(!native_clock_fsp_args_valid(&packet, fsp));
+            assert!(utc_timestamp_native(&packet, &fsp).is_err());
+            assert!(current_time_with_fsp_native(&packet, &fsp).is_err());
+            assert!(utc_time_with_fsp_native(&packet, &fsp).is_err());
+        }
+        // Admission must not invent clock-domain errors or normalize source
+        // fields. Any later arithmetic panic belongs to the real pure worker.
+        let extreme = clock_packet(i64::MAX, u32::MAX, i32::MAX);
+        assert!(native_clock_args_valid(&extreme));
+        assert!(native_clock_fsp_args_valid(&extreme, 0));
+        assert!(native_clock_fsp_args_valid(&extreme, 6));
+        let decoded = decode_native_clock(&extreme).unwrap();
+        assert_eq!(decoded.utc_secs, i64::MAX);
+        assert_eq!(decoded.nanos, u32::MAX);
+        assert_eq!(decoded.tz_offset, i32::MAX);
+        let negative = decode_native_clock(&clock_packet(i64::MIN, u32::MAX, i32::MIN)).unwrap();
+        assert_eq!(negative.utc_secs, i64::MIN);
+        assert_eq!(negative.tz_offset, i32::MIN);
+        let raw_nanos = clock_packet(0, u32::MAX, i32::MAX);
+        assert_eq!(
+            utc_date_native(&raw_nanos).unwrap(),
+            Some(b"1970-01-01".to_vec())
+        );
+        assert_eq!(
+            utc_time_without_fsp_native(&raw_nanos).unwrap(),
+            Some(b"00:00:00".to_vec())
+        );
+    }
 }
 
 #[cfg(test)]

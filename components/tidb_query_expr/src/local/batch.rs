@@ -1459,6 +1459,13 @@ pub enum EvaluatedBytesOp {
     JsonValueAbsentLegacy,
     JsonUnquoteTextNative,
     JsonUnquoteBinaryNative,
+    UtcDateNative,
+    UtcTimestampNative,
+    CurrentTimeWithoutFspNative,
+    CurrentTimeWithFspNative,
+    UtcTimeWithoutFspNative,
+    UtcTimeWithFspNative,
+    UtcTimeNullNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3007,6 +3014,39 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::JsonUnquoteBinaryNative,
                 );
             }
+            Self::UtcDateNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::UtcDateNative);
+            }
+            Self::UtcTimestampNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UtcTimestampNative,
+                );
+            }
+            Self::CurrentTimeWithoutFspNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CurrentTimeWithoutFspNative,
+                );
+            }
+            Self::CurrentTimeWithFspNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CurrentTimeWithFspNative,
+                );
+            }
+            Self::UtcTimeWithoutFspNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UtcTimeWithoutFspNative,
+                );
+            }
+            Self::UtcTimeWithFspNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UtcTimeWithFspNative,
+                );
+            }
+            Self::UtcTimeNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UtcTimeNullNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -3034,6 +3074,38 @@ impl EvaluatedBytesOp {
             Self::IlikeNative => Some(NativeLikeKind::Ilike),
             Self::LikeLegacyNative => Some(NativeLikeKind::Legacy),
             _ => None,
+        }
+    }
+
+    pub(crate) fn is_clock_value(self) -> bool {
+        matches!(
+            self,
+            Self::UtcDateNative
+                | Self::UtcTimestampNative
+                | Self::CurrentTimeWithoutFspNative
+                | Self::CurrentTimeWithFspNative
+                | Self::UtcTimeWithoutFspNative
+                | Self::UtcTimeWithFspNative
+        )
+    }
+
+    pub(crate) fn clock_args_valid(self, clock: Option<&[u8]>, fsp: Option<i64>) -> bool {
+        match (self, clock, fsp) {
+            (
+                Self::UtcDateNative
+                | Self::CurrentTimeWithoutFspNative
+                | Self::UtcTimeWithoutFspNative,
+                Some(clock),
+                None,
+            ) => crate::impl_time::native_clock_args_valid(clock),
+            (
+                Self::UtcTimestampNative
+                | Self::CurrentTimeWithFspNative
+                | Self::UtcTimeWithFspNative,
+                Some(clock),
+                Some(fsp),
+            ) => crate::impl_time::native_clock_fsp_args_valid(clock, fsp),
+            _ => false,
         }
     }
 
@@ -3283,7 +3355,8 @@ impl EvaluatedBytesOp {
             Self::CompareNullNative
             | Self::GroupingNullNative
             | Self::JsonPredicateNullNative
-            | Self::JsonOutputNullNative => EvaluatedArgsRole::NullWitness,
+            | Self::JsonOutputNullNative
+            | Self::UtcTimeNullNative => EvaluatedArgsRole::NullWitness,
             Self::CompareMissingLegacy
             | Self::JsonPredicateMissingLegacy
             | Self::JsonValueAbsentLegacy => EvaluatedArgsRole::NoArgs,
@@ -3925,6 +3998,19 @@ impl EvaluatedBytesOp {
                 crate::impl_json::json_array_append_empty_legacy_fn_meta()
             }
             Self::JsonValueAbsentLegacy => crate::impl_json::json_value_absent_legacy_fn_meta(),
+            Self::UtcDateNative => crate::impl_time::utc_date_native_fn_meta(),
+            Self::UtcTimestampNative => crate::impl_time::utc_timestamp_native_fn_meta(),
+            Self::CurrentTimeWithoutFspNative => {
+                crate::impl_time::current_time_without_fsp_native_fn_meta()
+            }
+            Self::CurrentTimeWithFspNative => {
+                crate::impl_time::current_time_with_fsp_native_fn_meta()
+            }
+            Self::UtcTimeWithoutFspNative => {
+                crate::impl_time::utc_time_without_fsp_native_fn_meta()
+            }
+            Self::UtcTimeWithFspNative => crate::impl_time::utc_time_with_fsp_native_fn_meta(),
+            Self::UtcTimeNullNative => crate::impl_time::utc_time_null_native_fn_meta(),
             Self::JsonUnquoteTextNative => crate::impl_json::json_unquote_text_native_fn_meta(),
             Self::JsonUnquoteBinaryNative => crate::impl_json::json_unquote_binary_native_fn_meta(),
             Self::UnaryPlusIntNative => crate::impl_op::unary_plus_int_native_fn_meta(),
@@ -4236,6 +4322,13 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::UtcDateNative
+            | Self::UtcTimestampNative
+            | Self::CurrentTimeWithoutFspNative
+            | Self::CurrentTimeWithFspNative
+            | Self::UtcTimeWithoutFspNative
+            | Self::UtcTimeWithFspNative
+            | Self::UtcTimeNullNative => EvalType::Bytes,
             Self::JsonArraySerdeNative
             | Self::JsonObjectSerdeNative
             | Self::JsonKeysSerdeNative
@@ -4632,6 +4725,13 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::UtcDateNative
+            | Self::CurrentTimeWithoutFspNative
+            | Self::UtcTimeWithoutFspNative => &[EvalType::Bytes],
+            Self::UtcTimestampNative
+            | Self::CurrentTimeWithFspNative
+            | Self::UtcTimeWithFspNative => &[EvalType::Bytes, EvalType::Int],
+            Self::UtcTimeNullNative => &[EvalType::Int],
             Self::JsonReplaceRawLegacy | Self::JsonArrayAppendRawLegacy => {
                 &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
             }
@@ -5968,6 +6068,13 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation.is_clock_value() {
+            return match self {
+                Self::Bytes(clock) => operation.clock_args_valid(clock.as_deref(), None),
+                Self::BytesInt(clock, fsp) => operation.clock_args_valid(clock.as_deref(), *fsp),
+                _ => false,
+            };
+        }
         if operation.is_json_output_value() {
             return match self {
                 Self::Bytes(first) => operation.json_output_args_valid(&[first.as_deref()]),
@@ -6116,6 +6223,7 @@ impl EvaluatedArgs {
                         | EvaluatedBytesOp::GroupingNullNative
                         | EvaluatedBytesOp::JsonPredicateNullNative
                         | EvaluatedBytesOp::JsonOutputNullNative
+                        | EvaluatedBytesOp::UtcTimeNullNative
                 ) && value.is_none()
             }
             Self::ConvReady {
@@ -8776,6 +8884,193 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn clock_fixed_profiles_validate_actual_frames_and_reuse_owned_bytes() {
+        use crate::impl_time::*;
+        let mut clock = 0_i64.to_le_bytes().to_vec();
+        clock.extend_from_slice(&123_456_789_u32.to_le_bytes());
+        clock.extend_from_slice(&3600_i32.to_le_bytes());
+        for (operation, getter, expected) in [
+            (
+                EvaluatedBytesOp::UtcDateNative,
+                utc_date_native_fn_meta(),
+                Some("1970-01-01"),
+            ),
+            (
+                EvaluatedBytesOp::UtcTimestampNative,
+                utc_timestamp_native_fn_meta(),
+                Some("1970-01-01 00:00:00.123"),
+            ),
+            (
+                EvaluatedBytesOp::CurrentTimeWithoutFspNative,
+                current_time_without_fsp_native_fn_meta(),
+                Some("01:00:00"),
+            ),
+            (
+                EvaluatedBytesOp::CurrentTimeWithFspNative,
+                current_time_with_fsp_native_fn_meta(),
+                Some("01:00:00.123"),
+            ),
+            (
+                EvaluatedBytesOp::UtcTimeWithoutFspNative,
+                utc_time_without_fsp_native_fn_meta(),
+                Some("00:00:00"),
+            ),
+            (
+                EvaluatedBytesOp::UtcTimeWithFspNative,
+                utc_time_with_fsp_native_fn_meta(),
+                Some("00:00:00.123"),
+            ),
+            (
+                EvaluatedBytesOp::UtcTimeNullNative,
+                utc_time_null_native_fn_meta(),
+                None,
+            ),
+        ] {
+            let arity = operation.input_types().len();
+            let args = || {
+                if operation == EvaluatedBytesOp::UtcTimeNullNative {
+                    EvaluatedArgs::NullWitness(None)
+                } else if arity == 2 {
+                    EvaluatedArgs::BytesInt(Some(clock.clone()), Some(3))
+                } else {
+                    EvaluatedArgs::Bytes(Some(clock.clone()))
+                }
+            };
+            let bad = if operation == EvaluatedBytesOp::UtcTimeNullNative {
+                vec![EvaluatedArgs::NullWitness(Some(0))]
+            } else if arity == 2 {
+                vec![
+                    EvaluatedArgs::BytesInt(Some(vec![0; 15]), Some(3)),
+                    EvaluatedArgs::BytesInt(None, Some(3)),
+                    EvaluatedArgs::BytesInt(Some(clock.clone()), None),
+                    EvaluatedArgs::BytesInt(Some(clock.clone()), Some(-1)),
+                    EvaluatedArgs::BytesInt(Some(clock.clone()), Some(7)),
+                ]
+            } else {
+                vec![
+                    EvaluatedArgs::Bytes(Some(vec![0; 15])),
+                    EvaluatedArgs::Bytes(None),
+                ]
+            };
+            // Admission can be checked before constructing the reusable factory.
+            for invalid in &bad {
+                assert!(!invalid.admission_matches(operation));
+            }
+            if operation.is_clock_value() {
+                let unrestricted = vec![255; 16];
+                assert!(operation.clock_args_valid(
+                    Some(&unrestricted),
+                    if arity == 2 { Some(6) } else { None }
+                ));
+                if arity == 2 {
+                    for fsp in [0, 1] {
+                        assert!(operation.clock_args_valid(Some(&clock), Some(fsp)));
+                    }
+                }
+            }
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            assert_eq!(operation.call_count(), 1);
+            assert_eq!(args().role(), operation.input_role());
+            assert_eq!(args().input_types(), operation.input_types());
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), arity + 1);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, arity); // BytesInt is two actual wire columns.
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            for invalid in bad {
+                let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+                match &invalid {
+                    EvaluatedArgs::Bytes(clock) => ready[0] = ScalarValue::Bytes(clock.clone()),
+                    EvaluatedArgs::BytesInt(clock, fsp) => {
+                        ready[0] = ScalarValue::Bytes(clock.clone());
+                        ready[1] = ScalarValue::Int(*fsp);
+                    }
+                    EvaluatedArgs::NullWitness(witness) => ready[0] = ScalarValue::Int(*witness),
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(ready, arity, &mut reported),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::NoArgs),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            let wrong_role = if operation == EvaluatedBytesOp::UtcTimeNullNative {
+                EvaluatedArgs::Bytes(None)
+            } else {
+                EvaluatedArgs::NullWitness(None)
+            };
+            assert!(matches!(
+                worker.eval_args(wrong_role),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            for calls in 1..=2 {
+                let ComputedValue::Bytes(output) = worker.eval_args(args()).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+                assert_eq!(output.value(), expected.map(str::as_bytes));
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+        }
+    }
 
     #[test]
     fn json_unquote_fixed_profiles_keep_text_binary_and_null_distinct() {

@@ -344,6 +344,21 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  Native CURTIME/CURRENT_TIME, UTC_TIME, UTC_DATE and UTC_TIMESTAMP use seven
+  fixed byte-result workers in `impl_time.rs`. Inputs are the actual 16-byte
+  clock tuple plus a separate precision operand where required; a genuine
+  UTC_TIME NULL value-entry uses its own NULL witness without a clock read.
+  SQL still admits only integer-literal precision, not UTC_TIME(NULL).
+  `native_clock.rs`
+  owns local-offset arithmetic, microsecond truncation, half-up carry and wide
+  calendar formatting. Zero-argument time truncates, explicit time precision
+  truncates to microseconds before rounding, and UTC_TIMESTAMP rounds original
+  nanoseconds directly. Both closed boundaries share width/FSP validators;
+  arbitrary raw clock integers are not normalized or rejected early. Existing
+  arithmetic panic behavior remains, with no new catch or SQL-NULL substitute.
+  Native NOW/CURDATE/SYSDATE share only formatter aliases and remain uncredited;
+  wire SYSDATE's chrono/timezone/warning policy is unchanged. No new carrier,
+  driver or native PB/legacy admission is introduced.
   ARRAY/OBJECT/KEYS/PRETTY use fixed byte-result workers and the shared
   native formatter in `native_json.rs`. Constructor packets contain actual
   ordered values/pairs, not preassembled results; a zero-count packet is the
