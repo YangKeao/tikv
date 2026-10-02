@@ -62,6 +62,25 @@ fn decode_native_clock_fsp(bytes: &[u8], fsp: &Int) -> Result<(crate::NativeCloc
 }
 
 #[rpn_fn]
+fn now_native(bytes: BytesRef, fsp: &Int) -> Result<Option<Bytes>> {
+    let (clock, fsp) = decode_native_clock_fsp(bytes, fsp)?;
+    Ok(Some(crate::native_now(clock, fsp).into_bytes()))
+}
+
+#[rpn_fn]
+fn current_date_native(bytes: BytesRef) -> Result<Option<Bytes>> {
+    Ok(Some(
+        crate::native_current_date(decode_native_clock(bytes)?).into_bytes(),
+    ))
+}
+
+#[rpn_fn]
+fn sysdate_native(bytes: BytesRef, fsp: &Int) -> Result<Option<Bytes>> {
+    let (clock, fsp) = decode_native_clock_fsp(bytes, fsp)?;
+    Ok(Some(crate::native_sysdate(clock, fsp).into_bytes()))
+}
+
+#[rpn_fn]
 fn utc_date_native(bytes: BytesRef) -> Result<Option<Bytes>> {
     Ok(Some(
         crate::native_utc_date(decode_native_clock(bytes)?).into_bytes(),
@@ -2574,6 +2593,92 @@ mod native_clock_worker_tests {
         packet[8..12].copy_from_slice(&nanos.to_le_bytes());
         packet[12..16].copy_from_slice(&offset.to_le_bytes());
         packet
+    }
+
+    #[test]
+    fn fixed_now_current_date_sysdate_workers_preserve_clock_policies() {
+        for (meta, name) in [
+            (now_native_fn_meta(), "now_native"),
+            (current_date_native_fn_meta(), "current_date_native"),
+            (sysdate_native_fn_meta(), "sysdate_native"),
+        ] {
+            assert_eq!(meta.name, name);
+        }
+        let packet = clock_packet(86_399, 999_999_600, 3_600);
+        assert_eq!(
+            now_native(&packet, &0).unwrap(),
+            Some(b"1970-01-02 00:59:59".to_vec())
+        );
+        assert_eq!(
+            now_native(&packet, &6).unwrap(),
+            Some(b"1970-01-02 00:59:59.999999".to_vec())
+        );
+        assert_eq!(
+            current_date_native(&packet).unwrap(),
+            Some(b"1970-01-02".to_vec())
+        );
+        // SYSDATE's actual pure policy rounds, unlike NOW's truncation. The
+        // sysdate_is_now caller selects the NOW profile rather than changing
+        // this kernel or injecting an operation/rounding flag into its frame.
+        assert_eq!(
+            sysdate_native(&packet, &0).unwrap(),
+            Some(b"1970-01-02 01:00:00".to_vec())
+        );
+        assert_eq!(
+            sysdate_native(&packet, &6).unwrap(),
+            Some(b"1970-01-02 01:00:00.000000".to_vec())
+        );
+        let negative = clock_packet(-1, 123_456_789, -3_600);
+        assert_eq!(
+            now_native(&negative, &6).unwrap(),
+            Some(b"1969-12-31 22:59:59.123456".to_vec())
+        );
+        assert_eq!(
+            current_date_native(&negative).unwrap(),
+            Some(b"1969-12-31".to_vec())
+        );
+        assert_eq!(
+            sysdate_native(&negative, &6).unwrap(),
+            Some(b"1969-12-31 22:59:59.123457".to_vec())
+        );
+        assert_eq!(
+            current_date_native(&clock_packet(0, 0, -1)).unwrap(),
+            Some(b"1969-12-31".to_vec())
+        );
+    }
+
+    #[test]
+    fn fixed_now_current_date_sysdate_workers_keep_frame_fsp_boundaries() {
+        for packet in [Vec::new(), vec![0; 15], vec![0; 17]] {
+            assert!(now_native(&packet, &0).is_err());
+            assert!(current_date_native(&packet).is_err());
+            assert!(sysdate_native(&packet, &0).is_err());
+        }
+        let packet = clock_packet(0, 0, 0);
+        for fsp in [-1, 7, i64::MIN, i64::MAX] {
+            assert!(now_native(&packet, &fsp).is_err());
+            assert!(sysdate_native(&packet, &fsp).is_err());
+        }
+        // These are the old raw nanos policies, not a newly validated physical
+        // timestamp domain. NOW can render more than six fraction digits when
+        // handed that original raw field; CURDATE ignores it completely.
+        let raw = clock_packet(0, u32::MAX, 0);
+        assert!(native_clock_fsp_args_valid(&raw, 6));
+        assert_eq!(
+            now_native(&raw, &6).unwrap(),
+            Some(b"1970-01-01 00:00:00.4294967".to_vec())
+        );
+        assert_eq!(
+            current_date_native(&raw).unwrap(),
+            Some(b"1970-01-01".to_vec())
+        );
+        assert_eq!(
+            sysdate_native(&clock_packet(0, 1_500_000_000, 0), &0).unwrap(),
+            Some(b"1970-01-01 00:00:01".to_vec())
+        );
+        let extreme = clock_packet(i64::MAX, u32::MAX, i32::MAX);
+        assert!(native_clock_args_valid(&extreme));
+        assert!(native_clock_fsp_args_valid(&extreme, 0));
     }
 
     #[test]

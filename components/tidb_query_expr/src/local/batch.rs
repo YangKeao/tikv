@@ -1469,6 +1469,9 @@ pub enum EvaluatedBytesOp {
     JsonMergeSerdeNative,
     JsonMergePatchSerdeNative,
     JsonMergePatchRawLegacy,
+    NowNative,
+    CurrentDateNative,
+    SysdateNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3065,6 +3068,17 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::JsonMergePatchRawLegacy,
                 );
             }
+            Self::NowNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::NowNative);
+            }
+            Self::CurrentDateNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CurrentDateNative,
+                );
+            }
+            Self::SysdateNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SysdateNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -3104,6 +3118,9 @@ impl EvaluatedBytesOp {
                 | Self::CurrentTimeWithFspNative
                 | Self::UtcTimeWithoutFspNative
                 | Self::UtcTimeWithFspNative
+                | Self::NowNative
+                | Self::CurrentDateNative
+                | Self::SysdateNative
         )
     }
 
@@ -3112,14 +3129,17 @@ impl EvaluatedBytesOp {
             (
                 Self::UtcDateNative
                 | Self::CurrentTimeWithoutFspNative
-                | Self::UtcTimeWithoutFspNative,
+                | Self::UtcTimeWithoutFspNative
+                | Self::CurrentDateNative,
                 Some(clock),
                 None,
             ) => crate::impl_time::native_clock_args_valid(clock),
             (
                 Self::UtcTimestampNative
                 | Self::CurrentTimeWithFspNative
-                | Self::UtcTimeWithFspNative,
+                | Self::UtcTimeWithFspNative
+                | Self::NowNative
+                | Self::SysdateNative,
                 Some(clock),
                 Some(fsp),
             ) => crate::impl_time::native_clock_fsp_args_valid(clock, fsp),
@@ -4041,6 +4061,9 @@ impl EvaluatedBytesOp {
             }
             Self::UtcTimeWithFspNative => crate::impl_time::utc_time_with_fsp_native_fn_meta(),
             Self::UtcTimeNullNative => crate::impl_time::utc_time_null_native_fn_meta(),
+            Self::NowNative => crate::impl_time::now_native_fn_meta(),
+            Self::CurrentDateNative => crate::impl_time::current_date_native_fn_meta(),
+            Self::SysdateNative => crate::impl_time::sysdate_native_fn_meta(),
             Self::JsonMergeSerdeNative => crate::impl_json::json_merge_serde_native_fn_meta(),
             Self::JsonMergePatchSerdeNative => {
                 crate::impl_json::json_merge_patch_serde_native_fn_meta()
@@ -4359,6 +4382,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::NowNative | Self::CurrentDateNative | Self::SysdateNative => EvalType::Bytes,
             Self::JsonMergeSerdeNative
             | Self::JsonMergePatchSerdeNative
             | Self::JsonMergePatchRawLegacy => EvalType::Bytes,
@@ -4765,6 +4789,8 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::NowNative | Self::SysdateNative => &[EvalType::Bytes, EvalType::Int],
+            Self::CurrentDateNative => &[EvalType::Bytes],
             Self::JsonMergeSerdeNative
             | Self::JsonMergePatchSerdeNative
             | Self::JsonMergePatchRawLegacy => &[EvalType::Bytes],
@@ -8958,6 +8984,149 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn local_clock_profiles_use_actual_inputs_and_reuse_fixed_metadata() {
+        use crate::impl_time::*;
+        let mut clock = 86_399_i64.to_le_bytes().to_vec();
+        clock.extend_from_slice(&999_600_000_u32.to_le_bytes());
+        clock.extend_from_slice(&3600_i32.to_le_bytes());
+        for (operation, getter, first, second) in [
+            (
+                EvaluatedBytesOp::NowNative,
+                now_native_fn_meta(),
+                "1970-01-02 00:59:59.999",
+                "1970-01-01 00:00:00.000",
+            ),
+            (
+                EvaluatedBytesOp::CurrentDateNative,
+                current_date_native_fn_meta(),
+                "1970-01-02",
+                "1970-01-01",
+            ),
+            (
+                EvaluatedBytesOp::SysdateNative,
+                sysdate_native_fn_meta(),
+                "1970-01-02 01:00:00.000",
+                "1970-01-01 00:00:00.000",
+            ),
+        ] {
+            let arity = operation.input_types().len();
+            let args = |clock: Vec<u8>| {
+                if arity == 2 {
+                    EvaluatedArgs::BytesInt(Some(clock), Some(3))
+                } else {
+                    EvaluatedArgs::Bytes(Some(clock))
+                }
+            };
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            assert_eq!(operation.call_count(), 1);
+            assert_eq!(args(clock.clone()).input_types(), operation.input_types());
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), arity + 1);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let invalid = if arity == 2 {
+                vec![
+                    EvaluatedArgs::BytesInt(Some(vec![0; 15]), Some(3)),
+                    EvaluatedArgs::BytesInt(None, Some(3)),
+                    EvaluatedArgs::BytesInt(Some(clock.clone()), None),
+                    EvaluatedArgs::BytesInt(Some(clock.clone()), Some(7)),
+                ]
+            } else {
+                vec![
+                    EvaluatedArgs::Bytes(Some(vec![0; 15])),
+                    EvaluatedArgs::Bytes(None),
+                ]
+            };
+            for invalid in invalid {
+                let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+                match &invalid {
+                    EvaluatedArgs::Bytes(bytes) => ready[0] = ScalarValue::Bytes(bytes.clone()),
+                    EvaluatedArgs::BytesInt(bytes, fsp) => {
+                        ready[0] = ScalarValue::Bytes(bytes.clone());
+                        ready[1] = ScalarValue::Int(*fsp);
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(ready, arity, &mut reported),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            for invalid in [EvaluatedArgs::NoArgs, EvaluatedArgs::NullWitness(None)] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            for (calls, (clock, expected)) in
+                (1_u64..=2).zip([(clock.clone(), first), (vec![0; 16], second)])
+            {
+                let ComputedValue::Bytes(output) = worker.eval_args(args(clock)).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+                assert_eq!(output.value(), Some(expected.as_bytes()));
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+        }
+    }
 
     #[test]
     fn json_merge_profiles_pack_actual_nullable_raw_lists_and_reuse_workers() {

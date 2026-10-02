@@ -79,6 +79,33 @@ fn format_clock_time_only(secs: i64, nanos: u32, fsp: u32, round: bool) -> Strin
     )
 }
 
+/// NOW/CURRENT_TIMESTAMP truncates the original statement-clock fraction in
+/// the local zone. Frontends retain FSP parsing and statement-clock selection.
+pub fn native_now(clock: NativeClockInput, fsp: u32) -> String {
+    native_format_clock_datetime(
+        clock.utc_secs + i64::from(clock.tz_offset),
+        clock.nanos,
+        fsp,
+        false,
+    )
+}
+
+/// CURDATE/CURRENT_DATE ignores the fraction but applies the statement offset.
+pub fn native_current_date(clock: NativeClockInput) -> String {
+    native_format_clock_date(clock.utc_secs + i64::from(clock.tz_offset))
+}
+
+/// Live SYSDATE rounds its captured fraction in the frozen session zone. The
+/// sysdate-is-now rewrite instead selects NOW and its truncating policy.
+pub fn native_sysdate(clock: NativeClockInput, fsp: u32) -> String {
+    native_format_clock_datetime(
+        clock.utc_secs + i64::from(clock.tz_offset),
+        clock.nanos,
+        fsp,
+        true,
+    )
+}
+
 /// UTC_DATE ignores both the fractional field and the session offset.
 pub fn native_utc_date(clock: NativeClockInput) -> String {
     native_format_clock_date(clock.utc_secs)
@@ -124,6 +151,48 @@ pub fn native_utc_time_with_fsp(clock: NativeClockInput, fsp: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_local_date_now_and_live_sysdate_keep_distinct_fractions() {
+        let clock = NativeClockInput {
+            utc_secs: 1_700_000_000,
+            nanos: 654_320_955,
+            tz_offset: 19_800,
+        };
+        assert_eq!(native_current_date(clock), "2023-11-15");
+        assert_eq!(native_now(clock, 0), "2023-11-15 03:43:20");
+        assert_eq!(native_sysdate(clock, 0), "2023-11-15 03:43:21");
+        assert_eq!(native_now(clock, 6), "2023-11-15 03:43:20.654320");
+        assert_eq!(native_sysdate(clock, 6), "2023-11-15 03:43:20.654321");
+
+        let end_of_day = NativeClockInput {
+            utc_secs: 86_399,
+            nanos: 999_999_500,
+            tz_offset: 0,
+        };
+        assert_eq!(native_current_date(end_of_day), "1970-01-01");
+        assert_eq!(native_now(end_of_day, 6), "1970-01-01 23:59:59.999999");
+        assert_eq!(native_sysdate(end_of_day, 6), "1970-01-02 00:00:00.000000");
+    }
+
+    #[test]
+    fn native_local_clock_keeps_raw_nanoseconds_and_negative_offset() {
+        let raw = NativeClockInput {
+            utc_secs: 0,
+            nanos: 1_234_567_890,
+            tz_offset: -1,
+        };
+        assert_eq!(native_current_date(raw), "1969-12-31");
+        assert_eq!(native_now(raw, 6), "1969-12-31 23:59:59.1234567");
+        assert_eq!(native_sysdate(raw, 6), "1970-01-01 00:00:00.000000");
+        let wide = NativeClockInput {
+            nanos: u32::MAX,
+            ..raw
+        };
+        assert_eq!(native_current_date(wide), "1969-12-31");
+        assert_eq!(native_now(wide, 0), "1969-12-31 23:59:59");
+        assert_eq!(native_now(wide, 6), "1969-12-31 23:59:59.4294967");
+    }
 
     #[test]
     fn native_clock_fixed_family_literal_policies() {

@@ -356,9 +356,20 @@ short-circuit admission policy described above.
   nanoseconds directly. Both closed boundaries share width/FSP validators;
   arbitrary raw clock integers are not normalized or rejected early. Existing
   arithmetic panic behavior remains, with no new catch or SQL-NULL substitute.
-  Native NOW/CURDATE/SYSDATE share only formatter aliases and remain uncredited;
-  wire SYSDATE's chrono/timezone/warning policy is unchanged. No new carrier,
-  driver or native PB/legacy admission is introduced.
+  NOW/CURDATE/SYSDATE now use three additional fixed clock workers. NOW truncates;
+  live SYSDATE rounds original nanoseconds and combines its actual SystemTime
+  capture with the frozen statement offset. Its true `sysdate_is_now` branch
+  selects NOW using a nonexecuting shared preparation helper, not nested guards.
+  Source flag/FSP/clock demand remains native preparation. The distinct public
+  GetTimeValue raw-sentinel SDK uses `native_typed_clock.rs`: UTC validation
+  precedes its second zone getter, then the actual generic session zone drives
+  shared calendar projection/truncation. Date-only projection follows a complete
+  checked native Time construction so it cannot erase leap-microsecond errors.
+  Native Time/TimeType/SessionTimeZone are not wire aliases; their unchanged
+  constructor is the final representation/bit-width codec, not a wire-calendar
+  substitute. Marker-string and non-sentinel paths remain unchanged, and this
+  previously pure SDK does not acquire worker admission. Wire SYSDATE's separate
+  policy is unchanged. No new carrier, driver or native PB/legacy admission.
   ARRAY/OBJECT/KEYS/PRETTY use fixed byte-result workers and the shared
   native formatter in `native_json.rs`. Constructor packets contain actual
   ordered values/pairs, not preassembled results; a zero-count packet is the

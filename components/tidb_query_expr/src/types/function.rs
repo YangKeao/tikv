@@ -462,6 +462,9 @@ pub enum LocalFunctionId {
     JsonMergeSerdeNative,
     JsonMergePatchSerdeNative,
     JsonMergePatchRawLegacy,
+    NowNative,
+    CurrentDateNative,
+    SysdateNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

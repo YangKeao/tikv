@@ -47,9 +47,10 @@ pub mod impl_vec;
 
 mod native_clock;
 pub use native_clock::{
-    NativeClockInput, native_current_time_with_fsp, native_current_time_without_fsp,
-    native_format_clock_date, native_format_clock_datetime, native_utc_date,
-    native_utc_time_with_fsp, native_utc_time_without_fsp, native_utc_timestamp,
+    NativeClockInput, native_current_date, native_current_time_with_fsp,
+    native_current_time_without_fsp, native_format_clock_date, native_format_clock_datetime,
+    native_now, native_sysdate, native_utc_date, native_utc_time_with_fsp,
+    native_utc_time_without_fsp, native_utc_timestamp,
 };
 
 mod native_json;
@@ -85,6 +86,11 @@ mod native_regexp;
 pub use native_regexp::{
     NativeCachedRegexp, NativeContextCache, NativeRegexpCompileError, NativeRegexpError,
     NativeRegexpInvocation, compile_native_regexp, regexp_match_bin_collation_native,
+};
+
+mod native_typed_clock;
+pub use native_typed_clock::{
+    native_typed_clock_fields, native_typed_clock_utc, native_typed_date_fields,
 };
 
 mod regexp_policy;
@@ -152,9 +158,10 @@ pub use self::{
     },
     impl_op::NativeUnaryMinusError,
     impl_time::{
-        current_time_with_fsp_native_fn_meta, current_time_without_fsp_native_fn_meta,
-        native_clock_args_valid, native_clock_fsp_args_valid, utc_date_native_fn_meta,
-        utc_time_null_native_fn_meta, utc_time_with_fsp_native_fn_meta,
+        current_date_native_fn_meta, current_time_with_fsp_native_fn_meta,
+        current_time_without_fsp_native_fn_meta, native_clock_args_valid,
+        native_clock_fsp_args_valid, now_native_fn_meta, sysdate_native_fn_meta,
+        utc_date_native_fn_meta, utc_time_null_native_fn_meta, utc_time_with_fsp_native_fn_meta,
         utc_time_without_fsp_native_fn_meta, utc_timestamp_native_fn_meta,
     },
     types::*,
