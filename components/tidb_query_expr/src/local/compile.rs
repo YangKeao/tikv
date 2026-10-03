@@ -187,6 +187,11 @@ fn check_evaluated_bytes_source(
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
+        (
+            EvaluatedBytesOp::IntDivDecimalSignedNative
+            | EvaluatedBytesOp::IntDivDecimalUnsignedNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 5 && calls == 1,
         (_, EvaluatedArgsRole::Values) if operation.is_insert() => arity == 4 && calls == 1,
         (_, EvaluatedArgsRole::NativeSearch) if operation.is_locate3_native() => {
             arity == 4 && calls == 1

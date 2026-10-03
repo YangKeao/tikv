@@ -367,6 +367,11 @@ fn evaluated_ready_args_match(
         (_, EvaluatedArgsRole::PadPacket) => {
             operation.is_pad_native() && types.len() == 4 && operation.call_count() == 1
         }
+        (
+            EvaluatedBytesOp::IntDivDecimalSignedNative
+            | EvaluatedBytesOp::IntDivDecimalUnsignedNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 5 && operation.call_count() == 1,
         (_, EvaluatedArgsRole::Values) if operation.is_insert() => {
             types.len() == 4 && operation.call_count() == 1
         }
@@ -383,6 +388,38 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::IntDivDecimalLegacy
+            || match values {
+                [
+                    ScalarValue::Bytes(left),
+                    ScalarValue::Bytes(right),
+                    ScalarValue::Int(Some(raw_budget)),
+                ] => {
+                    crate::native_intdiv_legacy_args_valid(left.as_deref(), right.as_deref())
+                        && usize::try_from(*raw_budget as u64)
+                            .is_ok_and(|budget| budget != usize::MAX)
+                }
+                _ => false,
+            })
+        && (!operation.is_native_decimal_int_div()
+            || match values {
+                [
+                    ScalarValue::Bytes(left),
+                    ScalarValue::Int(probe),
+                    ScalarValue::Int(fallback),
+                    ScalarValue::Bytes(right),
+                    ScalarValue::Int(Some(raw_budget)),
+                ] => {
+                    crate::native_intdiv_args_valid(
+                        left.as_deref(),
+                        *probe,
+                        *fallback,
+                        right.as_deref(),
+                    ) && usize::try_from(*raw_budget as u64)
+                        .is_ok_and(|budget| budget != usize::MAX)
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::TidbParseTsoNative
             || match values {
                 [ScalarValue::Int(tso), ScalarValue::Int(offset)] => {
@@ -1007,6 +1044,11 @@ pub(crate) fn evaluated_bytes_shape(
         )
         | (_, EvaluatedArgsRole::NoArgs) => false,
         (_, EvaluatedArgsRole::PadPacket) => operation.is_pad_native() && arity == 4 && calls == 1,
+        (
+            EvaluatedBytesOp::IntDivDecimalSignedNative
+            | EvaluatedBytesOp::IntDivDecimalUnsignedNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 5 && calls == 1,
         (_, EvaluatedArgsRole::Values) if operation.is_insert() => arity == 4 && calls == 1,
         (_, EvaluatedArgsRole::NativeSearch) if operation.is_locate3_native() => {
             arity == 4 && calls == 1

@@ -431,7 +431,10 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::IntDivIntUsNative
         | LocalFunctionId::IntDivIntSuNative
         | LocalFunctionId::IntDivIntUuNative
-        | LocalFunctionId::IntDivInt128Legacy => Err(other_err!(
+        | LocalFunctionId::IntDivInt128Legacy
+        | LocalFunctionId::IntDivDecimalSignedNative
+        | LocalFunctionId::IntDivDecimalUnsignedNative
+        | LocalFunctionId::IntDivDecimalLegacy => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

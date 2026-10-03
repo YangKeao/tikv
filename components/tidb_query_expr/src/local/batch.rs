@@ -1488,6 +1488,9 @@ pub enum EvaluatedBytesOp {
     IntDivIntSuNative,
     IntDivIntUuNative,
     IntDivInt128Legacy,
+    IntDivDecimalSignedNative,
+    IntDivDecimalUnsignedNative,
+    IntDivDecimalLegacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3169,6 +3172,21 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::IntDivInt128Legacy,
                 );
             }
+            Self::IntDivDecimalSignedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntDivDecimalSignedNative,
+                );
+            }
+            Self::IntDivDecimalUnsignedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntDivDecimalUnsignedNative,
+                );
+            }
+            Self::IntDivDecimalLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntDivDecimalLegacy,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -3815,6 +3833,17 @@ impl EvaluatedBytesOp {
         })
     }
 
+    fn is_decimal_int_div_budgeted(self) -> bool {
+        self.is_native_decimal_int_div() || self == Self::IntDivDecimalLegacy
+    }
+
+    pub(crate) fn is_native_decimal_int_div(self) -> bool {
+        matches!(
+            self,
+            Self::IntDivDecimalSignedNative | Self::IntDivDecimalUnsignedNative
+        )
+    }
+
     pub(crate) fn is_integer_division_value(self) -> bool {
         matches!(
             self,
@@ -4028,6 +4057,13 @@ impl EvaluatedBytesOp {
             Self::AddDecimalFastNative => crate::impl_arithmetic::add_decimal_fast_native_fn_meta(),
             Self::SubDecimalFastNative => crate::impl_arithmetic::sub_decimal_fast_native_fn_meta(),
             Self::MulDecimalFastNative => crate::impl_arithmetic::mul_decimal_fast_native_fn_meta(),
+            Self::IntDivDecimalSignedNative => {
+                crate::impl_arithmetic::int_div_decimal_signed_native_fn_meta()
+            }
+            Self::IntDivDecimalUnsignedNative => {
+                crate::impl_arithmetic::int_div_decimal_unsigned_native_fn_meta()
+            }
+            Self::IntDivDecimalLegacy => crate::impl_arithmetic::int_div_decimal_legacy_fn_meta(),
             Self::IntDivIntSsNative => crate::impl_arithmetic::int_div_int_ss_native_fn_meta(),
             Self::IntDivIntUsNative => crate::impl_arithmetic::int_div_int_us_native_fn_meta(),
             Self::IntDivIntSuNative => crate::impl_arithmetic::int_div_int_su_native_fn_meta(),
@@ -4548,6 +4584,8 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::IntDivDecimalSignedNative | Self::IntDivDecimalUnsignedNative => EvalType::Bytes,
+            Self::IntDivDecimalLegacy => EvalType::Int,
             Self::IntDivIntSsNative
             | Self::IntDivIntUsNative
             | Self::IntDivIntSuNative
@@ -4968,6 +5006,14 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::IntDivDecimalSignedNative | Self::IntDivDecimalUnsignedNative => &[
+                EvalType::Bytes,
+                EvalType::Int,
+                EvalType::Int,
+                EvalType::Bytes,
+                EvalType::Int,
+            ],
+            Self::IntDivDecimalLegacy => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
             Self::IntDivIntSsNative
             | Self::IntDivIntUsNative
             | Self::IntDivIntSuNative
@@ -6362,6 +6408,27 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation.is_native_decimal_int_div() {
+            return match self {
+                Self::BytesIntIntBytes(left, probe, fallback, right) => {
+                    crate::native_intdiv_args_valid(
+                        left.as_deref(),
+                        *probe,
+                        *fallback,
+                        right.as_deref(),
+                    )
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::IntDivDecimalLegacy {
+            return match self {
+                Self::Bytes2(left, right) => {
+                    crate::native_intdiv_legacy_args_valid(left.as_deref(), right.as_deref())
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::TidbParseTsoNative {
             return match self {
                 Self::Int2(tso, offset) => crate::native_tso_args_valid(*tso, *offset),
@@ -6840,6 +6907,42 @@ impl EvaluatedArgs {
             ready[slot] = ScalarValue::VectorFloat32(value);
         }
         Ok((ready, arity))
+    }
+
+    fn into_values_for_operation(
+        self,
+        operation: EvaluatedBytesOp,
+        available: usize,
+    ) -> LocalResult<([ScalarValue; 6], usize, Option<NativeRegexpInvocation>)> {
+        if !operation.is_decimal_int_div_budgeted() {
+            return self.into_values(available);
+        }
+        let (left, right) = match &self {
+            Self::BytesIntIntBytes(Some(left), _, _, Some(right))
+                if operation.is_native_decimal_int_div() =>
+            {
+                (left, right)
+            }
+            Self::Bytes2(Some(left), Some(right))
+                if operation == EvaluatedBytesOp::IntDivDecimalLegacy =>
+            {
+                (left, right)
+            }
+            _ => {
+                return Err(LocalError::InvalidBatch(
+                    "Decimal DIV requires actual operand frames".into(),
+                ));
+            }
+        };
+        let remaining = available
+            .checked_sub(left.capacity())
+            .and_then(|remaining| remaining.checked_sub(right.capacity()))
+            .ok_or_else(evaluated_ascii_storage_overflow)?;
+        let limit = Self::decimal_materialization_budget(None, remaining)?;
+        let (mut ready, arity, invocation) = self.into_values(available)?;
+        debug_assert_eq!(arity + 1, operation.input_types().len());
+        ready[arity] = ScalarValue::Int(Some(limit));
+        Ok((ready, arity + 1, invocation))
     }
 
     fn into_values(
@@ -8601,8 +8704,13 @@ impl EvaluatedBytesWorker {
     ) -> Result<ComputedValue, ReportedEvaluatedFailure> {
         // Preserve the semantic tag until after refusal. In particular, even
         // NULL or an eight-byte ordinary Bytes value cannot enter raw math.
+        let source_types = if self.operation.is_decimal_int_div_budgeted() {
+            &self.operation.input_types()[..self.operation.input_types().len() - 1]
+        } else {
+            self.operation.input_types()
+        };
         if args.role() != self.operation.input_role()
-            || args.input_types() != self.operation.input_types()
+            || args.input_types() != source_types
             || !args.admission_matches(self.operation)
         {
             return Err(ReportedEvaluatedFailure::unreported(
@@ -8623,7 +8731,8 @@ impl EvaluatedBytesWorker {
                     | EvaluatedArgsRole::DecimalInt
                     | EvaluatedArgsRole::NativeVector
                     | EvaluatedArgsRole::NativeVector2
-            ) {
+            ) || self.operation.is_decimal_int_div_budgeted()
+            {
                 // A real retained owner is already present even for inline or
                 // NULL Decimal/vector input. Subtract it, not a guessed packet/scale
                 // cap; a caller's usize::MAX limit still leaves finite room.
@@ -8645,7 +8754,8 @@ impl EvaluatedBytesWorker {
                 EvaluatedArgs::DecimalDivision { frac_increment, .. } => Some(*frac_increment),
                 _ => None,
             };
-            let (ready, arity, invocation) = args.into_values(materialization_available)?;
+            let (ready, arity, invocation) =
+                args.into_values_for_operation(self.operation, materialization_available)?;
             if let Some(increment) = division_increment {
                 let guard = DecimalDivisionBindingGuard { worker: self };
                 guard.worker.decimal_division_metadata()?.bind(increment)?;
@@ -9181,6 +9291,13 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation.is_native_decimal_int_div()
+                    && !value.is_some_and(crate::native_intdiv_result_valid)
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native Decimal DIV returned an invalid complete report".into(),
+                    ));
+                }
                 let value = match value {
                     None => None,
                     Some(source) => {
@@ -9226,6 +9343,381 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn native_decimal_division_profiles_keep_precision_receipts_and_complete_reports() {
+        use crate::{
+            NativeIntDivOutcome as Outcome, NativeIntDivReport, decode_native_intdiv_report,
+        };
+        let frame = |coefficient: &[u8], scale| {
+            crate::encode_native_identity(crate::NativeIdentityRef::Decimal {
+                negative: false,
+                scale,
+                storage_scale: scale,
+                declared_shape: None,
+                coefficient,
+            })
+            .unwrap()
+        };
+        let wide = format!("1{}", "0".repeat(70));
+        let warning = format!(
+            "Truncated incorrect DECIMAL value: '{}.{}'",
+            "3".repeat(70),
+            "3".repeat(9)
+        );
+        for operation in [
+            EvaluatedBytesOp::IntDivDecimalSignedNative,
+            EvaluatedBytesOp::IntDivDecimalUnsignedNative,
+        ] {
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            for (probe, fallback) in [
+                (None, None),
+                (Some(4), Some(8)),
+                (Some(31), None),
+                (Some(-1), None),
+                (Some(31), Some(i64::from(u32::MAX) + 1)),
+            ] {
+                let left = frame(b"13", 0);
+                let right = frame(b"5", 0);
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::BytesIntIntBytes(
+                        Some(left.clone()),
+                        probe,
+                        fallback,
+                        Some(right.clone())
+                    )),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let ready = [
+                    ScalarValue::Bytes(Some(left)),
+                    ScalarValue::Int(probe),
+                    ScalarValue::Int(fallback),
+                    ScalarValue::Bytes(Some(right)),
+                    ScalarValue::Int(Some(4096)),
+                    ScalarValue::Int(None),
+                ];
+                assert!(matches!(
+                    worker.eval_ready(ready, 5, &mut None),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+            }
+            for invalid in [
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::Bytes2(Some(frame(b"13", 0)), Some(frame(b"5", 0))),
+                EvaluatedArgs::BytesIntIntBytes(None, Some(4), None, Some(frame(b"5", 0))),
+                EvaluatedArgs::BytesIntIntBytes(
+                    Some(frame(b"13", 0)),
+                    Some(4),
+                    None,
+                    Some(frame(b"0", 0)),
+                ),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            for (budget, arity) in [(None, 5), (Some(-1), 5), (Some(4096), 4)] {
+                let ready = [
+                    ScalarValue::Bytes(Some(frame(b"13", 0))),
+                    ScalarValue::Int(Some(0)),
+                    ScalarValue::Int(None),
+                    ScalarValue::Bytes(Some(frame(b"5", 0))),
+                    ScalarValue::Int(budget),
+                    ScalarValue::Int(None),
+                ];
+                assert!(matches!(
+                    worker.eval_ready(ready, arity, &mut None),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+            }
+            let left = frame(b"13", 0);
+            let right = frame(b"5", 0);
+            worker.state.limits.max_retained_bytes =
+                storage.total_bytes() + left.capacity() + right.capacity() - 1;
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::BytesIntIntBytes(
+                    Some(left),
+                    Some(0),
+                    None,
+                    Some(right)
+                )),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            worker.state.limits = ExecutionLimits::default();
+            let cases = vec![
+                (
+                    frame(&[255], 0),
+                    None,
+                    None,
+                    frame(b"000", 0),
+                    Outcome::ZeroDivisor,
+                    None,
+                ),
+                (
+                    frame(b"13", 0),
+                    Some(0),
+                    None,
+                    frame(b"5", 0),
+                    Outcome::Value(2),
+                    None,
+                ),
+                (
+                    frame(b"13", 0),
+                    Some(31),
+                    Some(2),
+                    frame(b"5", 0),
+                    Outcome::Value(2),
+                    None,
+                ),
+                (
+                    frame(b"130000", 4),
+                    None,
+                    Some(7),
+                    frame(b"5", 0),
+                    Outcome::Value(2),
+                    None,
+                ),
+                (
+                    frame(b"18446744073709551615", 0),
+                    Some(4),
+                    None,
+                    frame(b"1", 0),
+                    if operation == EvaluatedBytesOp::IntDivDecimalUnsignedNative {
+                        Outcome::Value(-1)
+                    } else {
+                        Outcome::IntOverflow
+                    },
+                    None,
+                ),
+                (
+                    frame(wide.as_bytes(), 0),
+                    Some(4),
+                    Some(30),
+                    frame(b"3", 0),
+                    Outcome::IntOverflow,
+                    Some(warning.as_str()),
+                ),
+                (
+                    frame(b"13", 0),
+                    Some(0),
+                    None,
+                    frame(b"5", 0),
+                    Outcome::Value(2),
+                    None,
+                ),
+            ];
+            for (calls, (left, probe, fallback, right, outcome, warning)) in (1_u64..).zip(cases) {
+                let args =
+                    EvaluatedArgs::BytesIntIntBytes(Some(left), probe, fallback, Some(right));
+                assert!(args.admission_matches(operation));
+                let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+                let bytes = value
+                    .value()
+                    .expect("business NULL/overflow must retain the complete report");
+                assert!(crate::native_intdiv_result_valid(bytes));
+                assert_eq!(
+                    decode_native_intdiv_report(bytes),
+                    Some(NativeIntDivReport { warning, outcome })
+                );
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+        }
+        assert!(!crate::native_intdiv_result_valid(&[]));
+        assert!(!crate::native_intdiv_result_valid(&[0, 1]));
+    }
+
+    #[test]
+    fn decimal_division_profiles_project_only_actual_finite_budgets_and_keep_legacy_zero() {
+        let frame = |coefficient: &[u8]| {
+            crate::encode_native_identity(crate::NativeIdentityRef::Decimal {
+                negative: false,
+                scale: 0,
+                storage_scale: 0,
+                declared_shape: None,
+                coefficient,
+            })
+            .unwrap()
+        };
+        for (operation, getter) in [
+            (
+                EvaluatedBytesOp::IntDivDecimalSignedNative,
+                crate::impl_arithmetic::int_div_decimal_signed_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::IntDivDecimalUnsignedNative,
+                crate::impl_arithmetic::int_div_decimal_unsigned_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::IntDivDecimalLegacy,
+                crate::impl_arithmetic::int_div_decimal_legacy_fn_meta(),
+            ),
+        ] {
+            let native = operation.is_native_decimal_int_div();
+            let arity = if native { 5 } else { 3 };
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+            assert_eq!(operation.input_types().len(), arity);
+            assert_eq!(
+                operation.eval_type(),
+                if native {
+                    EvalType::Bytes
+                } else {
+                    EvalType::Int
+                }
+            );
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), arity + 1);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let operands = || {
+                let mut left = frame(b"13");
+                let mut right = frame(b"0");
+                left.reserve(37);
+                right.reserve(73);
+                let live = left.capacity() + right.capacity();
+                let args = if native {
+                    EvaluatedArgs::BytesIntIntBytes(Some(left), None, None, Some(right))
+                } else {
+                    EvaluatedArgs::Bytes2(Some(left), Some(right))
+                };
+                (args, live)
+            };
+            let (args, live) = operands();
+            assert_eq!(args.input_types(), &operation.input_types()[..arity - 1]);
+            let (ready, physical, invocation) = args
+                .into_values_for_operation(operation, live + 1234)
+                .unwrap();
+            assert_eq!(physical, arity);
+            assert!(invocation.is_none());
+            assert!(matches!(ready[arity - 1], ScalarValue::Int(Some(1234))));
+            assert!(matches!(&ready[0], ScalarValue::Bytes(Some(bytes)) if bytes == &frame(b"13")));
+            assert!(
+                matches!(&ready[arity - 2], ScalarValue::Bytes(Some(bytes)) if bytes == &frame(b"0"))
+            );
+            let (args, live) = operands();
+            assert!(matches!(
+                args.into_values_for_operation(operation, live - 1),
+                Err(LocalError::ResourceLimit(_))
+            ));
+        }
+        // Ordinary INSERT retains its original four physical operands and no budget
+        // slot.
+        let (ready, arity, _) = EvaluatedArgs::BytesIntIntBytes(
+            Some(b"abc".to_vec()),
+            Some(1),
+            Some(2),
+            Some(b"x".to_vec()),
+        )
+        .into_values_for_operation(EvaluatedBytesOp::InsertUtf8Native, 0)
+        .unwrap();
+        assert_eq!(arity, 4);
+        assert!(matches!(ready[4], ScalarValue::Int(None)));
+        let mut worker = prepare_evaluated_bytes(
+            EvaluatedBytesOp::IntDivDecimalLegacy,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        let storage = worker.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::NoArgs,
+            EvaluatedArgs::NullWitness(None),
+            EvaluatedArgs::Decimal2 {
+                left: Some(Decimal::from(13_i64)),
+                right: Some(Decimal::from(5_i64)),
+            },
+            EvaluatedArgs::Bytes2(None, Some(frame(b"5"))),
+            EvaluatedArgs::Bytes2(Some(vec![0]), Some(frame(b"5"))),
+        ] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+        }
+        for budget in [None, Some(-1)] {
+            let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+            ready[0] = ScalarValue::Bytes(Some(frame(b"13")));
+            ready[1] = ScalarValue::Bytes(Some(frame(b"5")));
+            ready[2] = ScalarValue::Int(budget);
+            assert!(matches!(
+                worker.eval_ready(ready, 3, &mut None),
+                Err(LocalError::InvalidSpec(_))
+            ));
+        }
+        assert_eq!(worker.kernel_invocations(), 0);
+        for (calls, left, right, expected) in [
+            (1, b"13".as_slice(), b"5".as_slice(), Some(2)),
+            (2, &[255], b"000", None), /* Actual zero divisor wins before invalid left numeric
+                                        * bytes. */
+            (3, b"9223372036854775808", b"1", None),
+            (4, b"13", b"5", Some(2)),
+        ] {
+            let ComputedValue::Int(value) = worker
+                .eval_args(EvaluatedArgs::Bytes2(Some(frame(left)), Some(frame(right))))
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+            assert_eq!(value.value(), expected);
+            assert_eq!(worker.kernel_invocations(), calls);
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert!(worker.is_healthy());
+        }
+    }
 
     #[test]
     fn integer_division_profiles_preserve_signedness_width_zero_and_reuse() {

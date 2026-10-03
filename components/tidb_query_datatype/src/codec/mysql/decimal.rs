@@ -2381,6 +2381,56 @@ impl Decimal {
             .map_err(NativeDecimalError::Core)
     }
 
+    /// Exact native integer quotient and remainder over the admitted native
+    /// arithmetic domain. The quotient has zero storage and visible scales;
+    /// the remainder retains the maximum operand storage and visible scales.
+    /// This SDK entry has no caller-supplied live scratch budget. Only an
+    /// actual zero divisor returns None; invalid shape and allocation
+    /// failures are errors.
+    pub fn try_native_div_rem_exact(
+        &self,
+        rhs: &Self,
+    ) -> std::result::Result<Option<(Self, Self)>, NativeDecimalError> {
+        self.check_native_math_value(usize::MAX)?;
+        rhs.check_native_math_value(usize::MAX)?;
+        self.try_div_rem_exact(rhs)
+            .map_err(NativeDecimalError::Core)
+    }
+
+    /// Exact integer quotient, truncated toward zero with both scales zero.
+    /// Discarding a nonzero remainder is not a bounded truncation disposition.
+    /// As for native single-output division, `limit` bounds live scratch/output
+    /// word bytes, not borrowed operands or SQL precision. None means zero
+    /// divisor.
+    pub fn try_native_integer_quotient(
+        &self,
+        rhs: &Self,
+        limit: usize,
+    ) -> std::result::Result<Option<Self>, NativeDecimalError> {
+        self.check_native_math_value(limit)?;
+        rhs.check_native_math_value(limit)?;
+        let Some(output) = divide_with_limit_and_budget(
+            self,
+            rhs,
+            DivisionRequest::RetainedQuotient { frac_words: 0 },
+            WordLimit::Grow,
+            Some(0),
+            Some(limit),
+        )
+        .map_err(NativeDecimalError::Core)?
+        else {
+            return Ok(None);
+        };
+        let quotient = output.quotient.ok_or_else(|| {
+            NativeDecimalError::Core(decimal_resource_error(
+                "missing requested native integer quotient",
+            ))
+        })?;
+        Self::try_finish_exact(quotient, 0)
+            .map(Some)
+            .map_err(NativeDecimalError::Core)
+    }
+
     /// Native MySQL `/`, including the original u32 scale arithmetic and
     /// nine-word result disposition. None means an actual zero divisor, not a
     /// shape/count/resource refusal. `limit` covers the simultaneously live
@@ -5333,6 +5383,84 @@ mod native_decimal_cmp_tests {
             assert_eq!(native_decimal_cmp(lhs, rhs), expected);
             assert_eq!(native_decimal_cmp(rhs, lhs), expected.reverse());
             assert_eq!(native_decimal_cmp(lhs, lhs), Equal);
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_exact_integer_division_tests {
+    use super::{Decimal, NativeDecimalError, Res};
+    use crate::codec::convert::ToStringValue;
+
+    #[test]
+    fn exact_pair_and_budgeted_quotient_keep_signs_and_independent_scales() {
+        // ToStringValue exposes storage fraction, unlike Display's result-scale
+        // presentation.
+        for (left_negative, right_negative, expected_q, expected_r) in [
+            (false, false, 2, "1.250"),
+            (true, false, -2, "-1.250"),
+            (false, true, -2, "1.250"),
+            (true, true, 2, "-1.250"),
+        ] {
+            let left = Decimal::try_from_native_digits(left_negative, b"5250", 3, 1, 512).unwrap();
+            let right = Decimal::try_from_native_digits(right_negative, b"200", 2, 2, 512).unwrap();
+            let (quotient, remainder) = left.try_native_div_rem_exact(&right).unwrap().unwrap();
+            assert_eq!(quotient.as_i64(), Res::Ok(expected_q));
+            assert_eq!((quotient.storage_scale(), quotient.result_scale()), (0, 0));
+            assert_eq!(remainder.to_string_value(), expected_r);
+            assert_eq!(
+                (remainder.storage_scale(), remainder.result_scale()),
+                (3, 2)
+            );
+            let quotient = left
+                .try_native_integer_quotient(&right, 512)
+                .unwrap()
+                .unwrap();
+            assert_eq!(quotient.as_i64(), Res::Ok(expected_q));
+            assert_eq!((quotient.storage_scale(), quotient.result_scale()), (0, 0));
+        }
+    }
+
+    #[test]
+    fn exact_integer_division_keeps_large_quotients_zero_and_budget_refusals() {
+        let one = Decimal::from(1i64);
+        let zero = Decimal::try_from_native_digits(true, b"0000", 3, 2, 512).unwrap();
+        let (quotient, remainder) = zero.try_native_div_rem_exact(&one).unwrap().unwrap();
+        assert_eq!(quotient.as_i64(), Res::Ok(0));
+        assert!(!quotient.is_negative() && !remainder.is_negative());
+        assert_eq!(
+            (remainder.storage_scale(), remainder.result_scale()),
+            (3, 2)
+        );
+        let quotient = zero
+            .try_native_integer_quotient(&one, 512)
+            .unwrap()
+            .unwrap();
+        assert_eq!(quotient.as_i64(), Res::Ok(0));
+        assert_eq!((quotient.storage_scale(), quotient.result_scale()), (0, 0));
+        assert!(!quotient.is_negative());
+        assert!(one.try_native_div_rem_exact(&zero).unwrap().is_none());
+        assert!(
+            one.try_native_integer_quotient(&zero, 512)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            one.try_native_integer_quotient(&one, 35),
+            Err(NativeDecimalError::Resource(_))
+        ));
+        for (negative, expected) in [(true, Res::Ok(i64::MIN)), (false, Res::Overflow(i64::MAX))] {
+            let left = Decimal::try_from_native_digits(negative, b"9223372036854775808", 0, 0, 512)
+                .unwrap();
+            let (quotient, remainder) = left.try_native_div_rem_exact(&one).unwrap().unwrap();
+            assert_eq!(quotient.as_i64(), expected);
+            assert!(remainder.is_zero());
+            let quotient = left
+                .try_native_integer_quotient(&one, 512)
+                .unwrap()
+                .unwrap();
+            assert_eq!(quotient.as_i64(), expected);
+            assert_eq!((quotient.storage_scale(), quotient.result_scale()), (0, 0));
         }
     }
 }

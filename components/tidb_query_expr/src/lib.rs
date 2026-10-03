@@ -53,6 +53,13 @@ pub use native_clock::{
     native_utc_time_without_fsp, native_utc_timestamp,
 };
 
+mod native_decimal_int_div;
+pub use native_decimal_int_div::{
+    NativeIntDivOutcome, NativeIntDivReport, decode_native_intdiv_report, native_intdiv_args_valid,
+    native_intdiv_legacy_args_valid, native_intdiv_needs_fallback, native_intdiv_needs_probe,
+    native_intdiv_result_valid,
+};
+
 mod native_format;
 
 mod native_identity;
@@ -143,6 +150,8 @@ pub use self::{
     impl_arithmetic::{
         BinaryArithmeticErrorKind, BinaryArithmeticOperation, LegacyBinaryArithmeticError,
         NativeBinaryArithmeticError, NativeDecimalFastOutcome, NativeDecimalFastValue,
+        int_div_decimal_legacy_fn_meta, int_div_decimal_signed_native_fn_meta,
+        int_div_decimal_unsigned_native_fn_meta,
     },
     impl_compare::ComparisonOp,
     impl_encryption::{NativeAesError, NativeAesOperation, NativeAesProfile},

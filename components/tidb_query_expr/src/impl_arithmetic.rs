@@ -637,6 +637,58 @@ fn int_div_int128_legacy(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> 
     Ok(Some((lhs / rhs).to_le_bytes().to_vec()))
 }
 
+// Native decimal DIV returns the shared outcome report, including any warning
+// that must be handled before an integer overflow. No SQL outcome is raised
+// here.
+#[rpn_fn(nullable)]
+fn int_div_decimal_signed_native(
+    lhs: Option<BytesRef>,
+    probe: Option<&Int>,
+    fallback: Option<&Int>,
+    rhs: Option<BytesRef>,
+    budget: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    let budget = budget.ok_or_else(|| other_err!("Native decimal DIV requires a kernel budget"))?;
+    crate::native_decimal_int_div::evaluate_native_intdiv(
+        lhs,
+        probe.copied(),
+        fallback.copied(),
+        rhs,
+        false,
+        native_decimal_budget(budget)?,
+    )
+    .map(Some)
+}
+
+#[rpn_fn(nullable)]
+fn int_div_decimal_unsigned_native(
+    lhs: Option<BytesRef>,
+    probe: Option<&Int>,
+    fallback: Option<&Int>,
+    rhs: Option<BytesRef>,
+    budget: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    let budget = budget.ok_or_else(|| other_err!("Native decimal DIV requires a kernel budget"))?;
+    crate::native_decimal_int_div::evaluate_native_intdiv(
+        lhs,
+        probe.copied(),
+        fallback.copied(),
+        rhs,
+        true,
+        native_decimal_budget(budget)?,
+    )
+    .map(Some)
+}
+
+#[rpn_fn]
+fn int_div_decimal_legacy(lhs: BytesRef, rhs: BytesRef, budget: &Int) -> Result<Option<Int>> {
+    crate::native_decimal_int_div::evaluate_legacy_decimal_intdiv(
+        lhs,
+        rhs,
+        native_decimal_budget(budget)?,
+    )
+}
+
 // Closed MOD value recipes accept non-NULL operands. The frontend owns NULL
 // witnesses, result signedness, and warnings after a successful zero divisor.
 #[rpn_fn]
@@ -1384,6 +1436,114 @@ impl ArithmeticOpWithCtx for RealDivide {
                 Some(result)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod decimal_integer_division_wrapper_tests {
+    use super::*;
+    use crate::{
+        NativeIdentityRef, NativeIntDivOutcome, decode_native_intdiv_report, encode_native_identity,
+    };
+
+    #[test]
+    fn native_decimal_div_wrappers_keep_outcomes_and_require_finite_budget() {
+        assert_eq!(
+            int_div_decimal_signed_native_fn_meta().name,
+            "int_div_decimal_signed_native"
+        );
+        assert_eq!(
+            int_div_decimal_unsigned_native_fn_meta().name,
+            "int_div_decimal_unsigned_native"
+        );
+        let frame = |negative, coefficient| {
+            encode_native_identity(NativeIdentityRef::Decimal {
+                negative,
+                scale: 0,
+                storage_scale: 0,
+                declared_shape: None,
+                coefficient,
+            })
+            .unwrap()
+        };
+        let left = frame(true, b"7");
+        let right = frame(false, b"2");
+        let signed =
+            int_div_decimal_signed_native(Some(&left), Some(&4), None, Some(&right), Some(&4096))
+                .unwrap()
+                .unwrap();
+        let report = decode_native_intdiv_report(&signed).unwrap();
+        assert!(report.warning.is_none());
+        assert!(matches!(report.outcome, NativeIntDivOutcome::Value(-3)));
+        let unsigned =
+            int_div_decimal_unsigned_native(Some(&left), Some(&4), None, Some(&right), Some(&4096))
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            decode_native_intdiv_report(&unsigned).unwrap().outcome,
+            NativeIntDivOutcome::IntOverflow
+        ));
+        let zero = frame(false, b"0");
+        let report =
+            int_div_decimal_signed_native(Some(&left), None, None, Some(&zero), Some(&4096))
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            decode_native_intdiv_report(&report).unwrap().outcome,
+            NativeIntDivOutcome::ZeroDivisor
+        ));
+        assert!(
+            int_div_decimal_signed_native(Some(&left), Some(&4), None, Some(&right), None).is_err()
+        );
+        assert!(
+            int_div_decimal_unsigned_native(Some(&left), Some(&4), None, Some(&right), Some(&-1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_decimal_div_wrapper_uses_exact_quotient_and_null_overflow() {
+        assert_eq!(
+            int_div_decimal_legacy_fn_meta().name,
+            "int_div_decimal_legacy"
+        );
+        let frame = |negative, coefficient: &[u8]| {
+            encode_native_identity(NativeIdentityRef::Decimal {
+                negative,
+                scale: 0,
+                storage_scale: 0,
+                declared_shape: None,
+                coefficient,
+            })
+            .unwrap()
+        };
+        let one = frame(false, b"1");
+        let two = frame(false, b"2");
+        let seven = frame(false, b"7");
+        let negative = frame(true, b"7");
+        let minimum = frame(true, b"9223372036854775808");
+        let wide = frame(false, b"18446744073709551615");
+        let zero = frame(false, b"0");
+        let invalid_math = frame(false, &[255]);
+        assert_eq!(
+            int_div_decimal_legacy(&seven, &two, &4096).unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            int_div_decimal_legacy(&negative, &two, &4096).unwrap(),
+            Some(-3)
+        );
+        assert_eq!(
+            int_div_decimal_legacy(&minimum, &one, &4096).unwrap(),
+            Some(i64::MIN)
+        );
+        assert_eq!(int_div_decimal_legacy(&one, &zero, &4096).unwrap(), None);
+        assert_eq!(
+            int_div_decimal_legacy(&invalid_math, &zero, &4096).unwrap(),
+            None
+        );
+        assert_eq!(int_div_decimal_legacy(&wide, &one, &4096).unwrap(), None);
+        assert!(int_div_decimal_legacy(&one, &one, &-1).is_err());
     }
 }
 

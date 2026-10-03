@@ -361,8 +361,26 @@ short-circuit admission policy described above.
   The existing arithmetic-operation enum distinguishes IntDivide/DIV from Divide/`/`;
   other real/Decimal arithmetic SDKs reject the new operation. No new carrier,
   binding, result kind, cause type, driver or wire admission is involved.
-  Native bounded Decimal, legacy exact Decimal and exact div/rem SDK closure
-  remain pending; this partial slice does not establish whole INTDIV migration.
+  Decimal DIV uses the dedicated native_decimal_int_div module rather than the
+  generic `/` policy. Borrowed raw identity views classify the original0/1/2
+  precision reads before frontend frame allocation; actual optional reads and
+  frames enter two fixed BytesIntIntBytes profiles. A narrow projection appends
+  the existing finite budget as physical operand5, after observed storage and
+  actual frame-capacity accounting. Only those profiles receive the arity5
+  whitelist; old carriers and the driver are unchanged. A strict OwnBytes report
+  contains computed warning text and integer outcome, replayed warning-first by
+  native code without quotient/ToInt computation.
+  Legacy exact Decimal DIV uses raw Bytes2 plus physical budget3 to preserve RHS
+  zero before invalid-LHS math conversion. It reuses the datatype retained-
+  quotient core and returns an actual nullable signed integer. Public exact
+  div/rem delegates to the existing IntegerPair core, not a second long divider.
+  Invalid raw arithmetic parity is explicitly limited: empty coefficient lhs /1
+  formerly yielded zero but the shared math bridge now rejects it (SDK panic,
+  evaluated infrastructure failure). Valid arithmetic and hidden storage remain
+  the contract; raw identity transport and zero-before-invalid-lhs are preserved.
+  Per-buffer and documented scratch/output bounds are not aggregate heap/peak
+  or allocator-fault certification. No new carrier, binding, result kind or
+  runtime cause type is introduced by these Decimal profiles.
   Codec diagnostic string allocation is not claimed allocation-equivalent to
   the old native error structure.
   Native TIDB_PARSE_TSO uses a fixed nullable Int2 profile: original TSO plus
