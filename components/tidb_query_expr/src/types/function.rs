@@ -474,6 +474,8 @@ pub enum LocalFunctionId {
     FormatLocaleNative,
     AnyValueNative,
     NameConstNative,
+    TidbParseTsoNative,
+    TimeDiffTextNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

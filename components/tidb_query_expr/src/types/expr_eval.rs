@@ -383,6 +383,20 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::TidbParseTsoNative
+            || match values {
+                [ScalarValue::Int(tso), ScalarValue::Int(offset)] => {
+                    crate::native_tso_args_valid(*tso, *offset)
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::TimeDiffTextNative
+            || match values {
+                [ScalarValue::Bytes(left), ScalarValue::Bytes(right)] => {
+                    crate::native_time_diff_args_valid(left.as_deref(), right.as_deref())
+                }
+                _ => false,
+            })
         && (!matches!(
             operation,
             EvaluatedBytesOp::AnyValueNative | EvaluatedBytesOp::NameConstNative

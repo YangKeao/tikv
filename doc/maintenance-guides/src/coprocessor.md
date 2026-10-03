@@ -344,6 +344,29 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  Native TIDB_PARSE_TSO uses a fixed nullable Int2 profile: original TSO plus
+  actual offset, with offset absent only for NULL/nonpositive input. Positive
+  inputs demand the native zone once; named/local offset lookup uses the shared
+  TSO-to-UTC helper without sending a ready clock/Time answer. Fixed offsets
+  retain the entire raw i32 domain, unlike a FixedOffset/SessionTimeZone clamp.
+  The worker recomputes the local core and emits the existing Time identity
+  frame (DateTime/FSP6). Native CoreTime::from_date also delegates to its unique
+  shared const field packer. TSO SQL metadata FSP0 is deliberately not changed.
+  TIMEDIFF uses fixed nullable Bytes2, with original UTF8 text and conditional
+  right presence checked by the same shared parser at both boundaries. NULL or
+  invalid left makes absent right explicitly undemanded; valid left permits a
+  real SQL NULL right. Invalid left text is never replaced with a NULL answer.
+  Its worker owns the distinct checked-i64 grammar, type matching, maximum FSP,
+  saturating subtraction, silent +/-838:59:59 clamp and formatting. Datetime
+  long fractions and duration long fractions retain different policies. The
+  shared formatter also serves native GoDuration, but no other duration parser
+  is migrated. Frontend children remain eager; only right coercion is suppressed.
+  Native typed Duration result casting, including its NULL timezone getter,
+  remains outside this core. There is no new carrier, result kind, binding,
+  driver, ordinary wire or PB admission. Encoding a TSO result frame can fail
+  through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
+  or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
+  allocation are not claims of performance neutrality or full heap accounting.
   Native ANY_VALUE/NAME_CONST use two fixed one-Bytes profiles, both bound to
   the existing nullable `any_value_bytes` worker. The private boundary fixes
   arity at one; the ordinary wire leaf's empty/multiple-argument behavior is

@@ -96,9 +96,15 @@ pub use native_regexp::{
     NativeRegexpInvocation, compile_native_regexp, regexp_match_bin_collation_native,
 };
 
+mod native_time_diff;
+pub use native_time_diff::{
+    native_format_time_diff, native_time_diff, native_time_diff_needs_right,
+};
+
 mod native_typed_clock;
 pub use native_typed_clock::{
-    native_typed_clock_fields, native_typed_clock_utc, native_typed_date_fields,
+    native_tso_core, native_tso_utc, native_typed_clock_fields, native_typed_clock_utc,
+    native_typed_date_fields,
 };
 
 mod native_weight_string;
@@ -180,8 +186,9 @@ pub use self::{
         current_date_native_fn_meta, current_time_with_fsp_native_fn_meta,
         current_time_without_fsp_native_fn_meta, date_core_native_args_valid,
         date_core_native_fn_meta, date_core_predicate_legacy_fn_meta, native_clock_args_valid,
-        native_clock_fsp_args_valid, now_native_fn_meta, sysdate_native_fn_meta,
-        utc_date_native_fn_meta, utc_time_null_native_fn_meta, utc_time_with_fsp_native_fn_meta,
+        native_clock_fsp_args_valid, native_time_diff_args_valid, native_tso_args_valid,
+        now_native_fn_meta, sysdate_native_fn_meta, utc_date_native_fn_meta,
+        utc_time_null_native_fn_meta, utc_time_with_fsp_native_fn_meta,
         utc_time_without_fsp_native_fn_meta, utc_timestamp_native_fn_meta,
     },
     types::*,

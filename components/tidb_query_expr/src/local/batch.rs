@@ -1481,6 +1481,8 @@ pub enum EvaluatedBytesOp {
     FormatLocaleNative,
     AnyValueNative,
     NameConstNative,
+    TidbParseTsoNative,
+    TimeDiffTextNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3127,6 +3129,16 @@ impl EvaluatedBytesOp {
             Self::NameConstNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::NameConstNative);
             }
+            Self::TidbParseTsoNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TidbParseTsoNative,
+                );
+            }
+            Self::TimeDiffTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TimeDiffTextNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -4147,6 +4159,8 @@ impl EvaluatedBytesOp {
             }
             Self::UtcTimeWithFspNative => crate::impl_time::utc_time_with_fsp_native_fn_meta(),
             Self::UtcTimeNullNative => crate::impl_time::utc_time_null_native_fn_meta(),
+            Self::TidbParseTsoNative => crate::impl_time::tidb_parse_tso_native_fn_meta(),
+            Self::TimeDiffTextNative => crate::impl_time::time_diff_text_native_fn_meta(),
             Self::AnyValueNative | Self::NameConstNative => {
                 crate::impl_miscellaneous::any_value_bytes_fn_meta()
             }
@@ -4482,6 +4496,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::TidbParseTsoNative | Self::TimeDiffTextNative => EvalType::Bytes,
             Self::AnyValueNative | Self::NameConstNative => EvalType::Bytes,
             Self::WeightStringNative
             | Self::WeightStringCharNative
@@ -4896,6 +4911,8 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::TidbParseTsoNative => &[EvalType::Int, EvalType::Int],
+            Self::TimeDiffTextNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::AnyValueNative | Self::NameConstNative => &[EvalType::Bytes],
             Self::WeightStringNative
             | Self::WeightStringCharNative
@@ -6283,6 +6300,20 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::TidbParseTsoNative {
+            return match self {
+                Self::Int2(tso, offset) => crate::native_tso_args_valid(*tso, *offset),
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::TimeDiffTextNative {
+            return match self {
+                Self::Bytes2(left, right) => {
+                    crate::native_time_diff_args_valid(left.as_deref(), right.as_deref())
+                }
+                _ => false,
+            };
+        }
         if matches!(
             operation,
             EvaluatedBytesOp::AnyValueNative | EvaluatedBytesOp::NameConstNative
@@ -9127,6 +9158,202 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn tso_and_timediff_profiles_preserve_conditional_inputs_and_reuse() {
+        use tidb_query_datatype::codec::mysql::Time;
+        let tso = 1001_i64 << 18;
+        let text = |left: Option<&str>, right: Option<&str>| {
+            EvaluatedArgs::Bytes2(
+                left.map(|value| value.as_bytes().to_vec()),
+                right.map(|value| value.as_bytes().to_vec()),
+            )
+        };
+        for (operation, getter) in [
+            (
+                EvaluatedBytesOp::TidbParseTsoNative,
+                crate::impl_time::tidb_parse_tso_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::TimeDiffTextNative,
+                crate::impl_time::time_diff_text_native_fn_meta(),
+            ),
+        ] {
+            assert_eq!(operation.input_types().len(), 2);
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            assert_eq!(operation.call_count(), 1);
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), 3);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[2]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, 2);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let invalid = if operation == EvaluatedBytesOp::TidbParseTsoNative {
+                vec![
+                    EvaluatedArgs::Int2(None, Some(0)),
+                    EvaluatedArgs::Int2(Some(-1), Some(0)),
+                    EvaluatedArgs::Int2(Some(tso), None),
+                    EvaluatedArgs::Int2(Some(tso), Some(i64::from(i32::MAX) + 1)),
+                ]
+            } else {
+                vec![
+                    text(None, Some("00:00:00")),
+                    text(Some("2023-02-29"), Some("00:00:00")),
+                    EvaluatedArgs::Bytes2(Some(vec![255]), None),
+                    EvaluatedArgs::Bytes2(Some(b"01:00:00".to_vec()), Some(vec![255])),
+                ]
+            };
+            for invalid in invalid {
+                let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+                match &invalid {
+                    EvaluatedArgs::Int2(left, right) => {
+                        ready[0] = ScalarValue::Int(*left);
+                        ready[1] = ScalarValue::Int(*right);
+                    }
+                    EvaluatedArgs::Bytes2(left, right) => {
+                        ready[0] = ScalarValue::Bytes(left.clone());
+                        ready[1] = ScalarValue::Bytes(right.clone());
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(ready, 2, &mut reported),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            let wrong = if operation == EvaluatedBytesOp::TidbParseTsoNative {
+                text(None, None)
+            } else {
+                EvaluatedArgs::Int2(None, None)
+            };
+            for invalid in [
+                wrong,
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::Bytes(None),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            let cases: Vec<(EvaluatedArgs, Option<u64>, Option<&[u8]>)> =
+                if operation == EvaluatedBytesOp::TidbParseTsoNative {
+                    vec![
+                        (EvaluatedArgs::Int2(None, None), None, None),
+                        (EvaluatedArgs::Int2(Some(-1), None), None, None),
+                        (EvaluatedArgs::Int2(Some(0), None), None, None),
+                        (
+                            EvaluatedArgs::Int2(Some(tso), Some(0)),
+                            Some(Time::native_core_from_fields(1970, 1, 1, 0, 0, 1, 1000)),
+                            None,
+                        ),
+                        (
+                            EvaluatedArgs::Int2(Some(tso), Some(i64::from(i32::MAX))),
+                            Some(Time::native_core_from_fields(2038, 1, 19, 3, 14, 8, 1000)),
+                            None,
+                        ),
+                        (
+                            EvaluatedArgs::Int2(Some(tso), Some(i64::from(i32::MIN))),
+                            Some(Time::native_core_from_fields(
+                                1901, 12, 13, 20, 45, 53, 1000,
+                            )),
+                            None,
+                        ),
+                    ]
+                } else {
+                    vec![
+                        (text(None, None), None, None),
+                        (text(Some("2023-02-29"), None), None, None),
+                        (text(Some("01:00:00"), None), None, None),
+                        (
+                            text(Some("2020-01-01 00:00:01"), Some("00:00:00")),
+                            None,
+                            None,
+                        ),
+                        (
+                            text(Some("02:03:04.500000"), Some("01:02:03.250000")),
+                            None,
+                            Some(b"01:01:01.250000".as_slice()),
+                        ),
+                    ]
+                };
+            for (calls, (args, core, expected)) in (1_u64..).zip(cases) {
+                assert_eq!(args.input_types(), operation.input_types());
+                assert!(args.admission_matches(operation));
+                let ComputedValue::Bytes(output) = worker.eval_args(args).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+                if let Some(core) = core {
+                    assert_eq!(
+                        crate::decode_native_identity(output.value().unwrap()).unwrap(),
+                        crate::NativeIdentityRef::Time {
+                            core,
+                            kind: 1,
+                            fsp: 6
+                        }
+                    );
+                } else {
+                    assert_eq!(output.value(), expected);
+                }
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+        }
+    }
 
     #[test]
     fn identity_profiles_share_leaf_but_keep_fixed_arity_and_actual_frames() {

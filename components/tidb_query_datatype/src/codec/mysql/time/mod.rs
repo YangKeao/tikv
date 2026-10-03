@@ -1158,6 +1158,28 @@ impl Time {
         }
     }
 
+    /// Packs the exact native CoreTime representation, masking each field to
+    /// its storage width without calendar validation or clock normalization.
+    /// The low four reserved bits remain zero; type and FSP are not core
+    /// fields.
+    pub const fn native_core_from_fields(
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        microsecond: u32,
+    ) -> u64 {
+        ((year as u64 & 0x3fff) << 50)
+            | ((month as u64 & 0x0f) << 46)
+            | ((day as u64 & 0x1f) << 41)
+            | ((hour as u64 & 0x1f) << 36)
+            | ((minute as u64 & 0x3f) << 30)
+            | ((second as u64 & 0x3f) << 24)
+            | ((microsecond as u64 & 0x0f_ffff) << 4)
+    }
+
     /// Projects the stored year from shared CoreTime calendar bits without
     /// validation. This is a field projection, not a full Time conversion:
     /// type/FSP and clock bits have no effect on this result.
@@ -3878,6 +3900,30 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn test_native_core_from_fields_exact_masked_layout() {
+        const NORMAL: u64 = Time::native_core_from_fields(1, 2, 3, 4, 5, 6, 7);
+        const MASKED: u64 =
+            Time::native_core_from_fields(0x4001, 0x12, 0x23, 0x24, 0x45, 0x46, 0x10_0007);
+        const MAXIMUM: u64 = Time::native_core_from_fields(
+            u16::MAX,
+            u8::MAX,
+            u8::MAX,
+            u8::MAX,
+            u8::MAX,
+            u8::MAX,
+            u32::MAX,
+        );
+        const HIGH_ONLY: u64 =
+            Time::native_core_from_fields(0xc000, 0xf0, 0xe0, 0xe0, 0xc0, 0xc0, 0xfff0_0000);
+        // Hand-derived field positions; no calendar or FSP policy participates.
+        assert_eq!(NORMAL, 0x0004_8641_4600_0070);
+        assert_eq!(MASKED, 0x0004_8641_4600_0070);
+        assert_eq!(MAXIMUM, 0xffff_ffff_ffff_fff0);
+        assert_eq!(HIGH_ONLY, 0);
+        assert_eq!(Time::native_core_from_fields(0, 0, 0, 0, 0, 0, 0), 0);
+    }
 
     #[test]
     fn test_native_core_display_raw_fields_and_fraction_prefix() {

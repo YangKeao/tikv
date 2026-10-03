@@ -515,6 +515,73 @@ fn to_seconds_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
     })
 }
 
+/// A positive actual TSO demands the caller's actual timezone offset. NULL and
+/// nonpositive TSOs retain their own values and must not demand that metadata.
+pub fn native_tso_args_valid(tso: Option<i64>, offset: Option<i64>) -> bool {
+    match tso {
+        Some(tso) if tso > 0 => offset.is_some_and(|value| i32::try_from(value).is_ok()),
+        _ => offset.is_none(),
+    }
+}
+
+#[rpn_fn(nullable)]
+fn tidb_parse_tso_native(tso: Option<&Int>, offset: Option<&Int>) -> Result<Option<Bytes>> {
+    if !native_tso_args_valid(tso.copied(), offset.copied()) {
+        return Err(other_err!(
+            "Native TSO offset transport contradicts actual TSO demand or exceeds i32"
+        ));
+    }
+    let Some(tso) = tso.filter(|value| **value > 0) else {
+        return Ok(None);
+    };
+    let Some(core) = crate::native_tso_core(*tso, *offset.unwrap() as i32) else {
+        return Ok(None);
+    };
+    // Preserve the original codec failure in the existing RPN evaluation-error
+    // channel. Capacity is not SQL NULL, SQL overflow, or a fabricated pool
+    // resource limit (nor the host identity codec's separate error category).
+    crate::encode_native_identity(crate::NativeIdentityRef::Time {
+        core,
+        kind: 1,
+        fsp: 6,
+    })
+    .map(Some)
+    .map_err(|error| other_err!("Unable to encode native TSO identity output: {:?}", error))
+}
+
+fn native_time_diff_inputs<'a>(
+    left: Option<&'a [u8]>,
+    right: Option<&'a [u8]>,
+) -> Result<(Option<&'a str>, Option<&'a str>)> {
+    let left = left
+        .map(from_utf8)
+        .transpose()
+        .map_err(|error| other_err!("Invalid native TIMEDIFF left UTF-8 transport: {}", error))?;
+    if !crate::native_time_diff_needs_right(left) && right.is_some() {
+        return Err(other_err!(
+            "Native TIMEDIFF transport contains an undemanded right operand"
+        ));
+    }
+    let right = right
+        .map(from_utf8)
+        .transpose()
+        .map_err(|error| other_err!("Invalid native TIMEDIFF right UTF-8 transport: {}", error))?;
+    Ok((left, right))
+}
+
+/// Retains the actual left text even when its pure classifier rejects it. Only
+/// the undemanded right slot is absent; valid left text permits actual SQL NULL
+/// on the right. The shared pure parser, not a second parser here, owns demand.
+pub fn native_time_diff_args_valid(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
+    native_time_diff_inputs(left, right).is_ok()
+}
+
+#[rpn_fn(nullable)]
+fn time_diff_text_native(left: Option<BytesRef>, right: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let (left, right) = native_time_diff_inputs(left, right)?;
+    Ok(crate::native_time_diff(left, right).map(String::into_bytes))
+}
+
 #[rpn_fn(nullable)]
 fn tso_logical_native(arg: Option<&Int>) -> Result<Option<Int>> {
     Ok(arg.and_then(|tso| {
@@ -2612,6 +2679,121 @@ pub fn str_to_date_duration(
     t.set_fsp(extra.ret_field_type.get_decimal() as u8);
     let duration: Duration = t.convert(ctx)?;
     Ok(Some(duration))
+}
+
+#[cfg(test)]
+mod native_tso_time_diff_worker_tests {
+    use super::*;
+    use crate::{NativeIdentityRef, decode_native_identity};
+
+    #[test]
+    fn native_tso_time_diff_workers_preserve_data_demand_and_fixed_outputs() {
+        assert_eq!(
+            tidb_parse_tso_native_fn_meta().name,
+            "tidb_parse_tso_native"
+        );
+        assert_eq!(
+            time_diff_text_native_fn_meta().name,
+            "time_diff_text_native"
+        );
+        let tso = (1234i64 << 18) | 37;
+        let output = tidb_parse_tso_native(Some(&tso), Some(&3600))
+            .unwrap()
+            .unwrap();
+        // Physical milliseconds are 1970-01-01 00:00:01.234000 UTC. The
+        // actual +3600 offset and full microseconds are computed in the worker.
+        let date = (1970u64 << 50) | (1u64 << 46) | (1u64 << 41);
+        let core = date | (1u64 << 36) | (1u64 << 24) | (234_000u64 << 4);
+        assert_eq!(
+            decode_native_identity(&output),
+            Ok(NativeIdentityRef::Time {
+                core,
+                kind: 1,
+                fsp: 6
+            })
+        );
+        let epoch = tidb_parse_tso_native(Some(&1), Some(&0)).unwrap().unwrap();
+        assert_eq!(
+            decode_native_identity(&epoch),
+            Ok(NativeIdentityRef::Time {
+                core: date,
+                kind: 1,
+                fsp: 6
+            })
+        );
+        // Raw fixed offsets are added directly, not revalidated as FixedOffset.
+        let raw_fixed = tidb_parse_tso_native(Some(&1), Some(&90_000))
+            .unwrap()
+            .unwrap();
+        let next_day = (1970u64 << 50) | (1u64 << 46) | (2u64 << 41) | (1u64 << 36);
+        assert_eq!(
+            decode_native_identity(&raw_fixed),
+            Ok(NativeIdentityRef::Time {
+                core: next_day,
+                kind: 1,
+                fsp: 6
+            })
+        );
+        for tso in [None, Some(0), Some(-1), Some(i64::MIN)] {
+            assert!(native_tso_args_valid(tso, None));
+            assert_eq!(tidb_parse_tso_native(tso.as_ref(), None).unwrap(), None);
+            assert!(!native_tso_args_valid(tso, Some(0)));
+            assert!(tidb_parse_tso_native(tso.as_ref(), Some(&0)).is_err());
+        }
+        assert!(!native_tso_args_valid(Some(1), None));
+        assert!(tidb_parse_tso_native(Some(&1), None).is_err());
+        for offset in [i64::from(i32::MIN), i64::from(i32::MAX)] {
+            assert!(native_tso_args_valid(Some(1), Some(offset)));
+        }
+        for offset in [i64::from(i32::MIN) - 1, i64::from(i32::MAX) + 1] {
+            assert!(!native_tso_args_valid(Some(1), Some(offset)));
+            assert!(tidb_parse_tso_native(Some(&1), Some(&offset)).is_err());
+        }
+        assert_eq!(
+            time_diff_text_native(Some(b"10:10:10"), Some(b"10:9:0")).unwrap(),
+            Some(b"00:01:10".to_vec())
+        );
+        assert_eq!(
+            time_diff_text_native(
+                Some(b"2000:01:01 00:00:00"),
+                Some(b"2000:01:01 00:00:00.000001")
+            )
+            .unwrap(),
+            Some(b"-00:00:00.000001".to_vec())
+        );
+        assert_eq!(
+            time_diff_text_native(Some(b"2016-12-00 12:00:00"), Some(b"2016-12-01 12:00:00"))
+                .unwrap(),
+            Some(b"-24:00:00".to_vec())
+        );
+        assert_eq!(
+            time_diff_text_native(Some(b"2016-12-00 12:00:00"), Some(b"10:9:0")).unwrap(),
+            None
+        );
+        assert!(native_time_diff_args_valid(Some(b"10:10:10"), Some(b"bad")));
+        assert_eq!(
+            time_diff_text_native(Some(b"10:10:10"), Some(b"bad")).unwrap(),
+            None
+        );
+        assert!(native_time_diff_args_valid(Some(b"10:10:10"), None));
+        assert_eq!(
+            time_diff_text_native(Some(b"10:10:10"), None).unwrap(),
+            None
+        );
+        for left in [None, Some(b"".as_slice()), Some(b"bad".as_slice())] {
+            assert!(native_time_diff_args_valid(left, None));
+            assert_eq!(time_diff_text_native(left, None).unwrap(), None);
+            assert!(!native_time_diff_args_valid(left, Some(b"00:00:00")));
+            assert!(time_diff_text_native(left, Some(b"00:00:00")).is_err());
+        }
+        assert!(!native_time_diff_args_valid(Some(&[255]), None));
+        assert!(time_diff_text_native(Some(&[255]), None).is_err());
+        assert!(!native_time_diff_args_valid(
+            Some(b"00:00:00"),
+            Some(&[255])
+        ));
+        assert!(time_diff_text_native(Some(b"00:00:00"), Some(&[255])).is_err());
+    }
 }
 
 #[cfg(test)]
