@@ -31,6 +31,7 @@ pub mod decimal;
 pub mod duration;
 pub mod enums;
 pub mod json;
+pub mod locale;
 pub mod set;
 pub mod time;
 pub mod vector;

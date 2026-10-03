@@ -467,6 +467,11 @@ pub enum LocalFunctionId {
     SysdateNative,
     DateCoreNative,
     DateCorePredicateLegacy,
+    WeightStringNative,
+    WeightStringCharNative,
+    WeightStringBinaryNative,
+    WeightStringNumericNative,
+    FormatLocaleNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

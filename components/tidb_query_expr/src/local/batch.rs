@@ -1474,6 +1474,11 @@ pub enum EvaluatedBytesOp {
     SysdateNative,
     DateCoreNative,
     DateCorePredicateLegacy,
+    WeightStringNative,
+    WeightStringCharNative,
+    WeightStringBinaryNative,
+    WeightStringNumericNative,
+    FormatLocaleNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3089,6 +3094,31 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::DateCorePredicateLegacy,
                 );
             }
+            Self::WeightStringNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::WeightStringNative,
+                );
+            }
+            Self::WeightStringCharNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::WeightStringCharNative,
+                );
+            }
+            Self::WeightStringBinaryNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::WeightStringBinaryNative,
+                );
+            }
+            Self::WeightStringNumericNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::WeightStringNumericNative,
+                );
+            }
+            Self::FormatLocaleNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FormatLocaleNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -3116,6 +3146,43 @@ impl EvaluatedBytesOp {
             Self::IlikeNative => Some(NativeLikeKind::Ilike),
             Self::LikeLegacyNative => Some(NativeLikeKind::Legacy),
             _ => None,
+        }
+    }
+
+    pub(crate) fn is_weight_or_format_native(self) -> bool {
+        matches!(
+            self,
+            Self::WeightStringNative
+                | Self::WeightStringCharNative
+                | Self::WeightStringBinaryNative
+                | Self::WeightStringNumericNative
+                | Self::FormatLocaleNative
+        )
+    }
+
+    pub(crate) fn weight_or_format_args_valid(
+        self,
+        first: Option<&[u8]>,
+        second: Option<&[u8]>,
+        number: Option<i64>,
+    ) -> bool {
+        match (self, first, second, number) {
+            (Self::WeightStringNative, input, metadata, None) => {
+                crate::native_weight_string_args_valid(input, metadata)
+            }
+            (Self::WeightStringCharNative, input, metadata, None) => {
+                crate::native_weight_char_args_valid(input, metadata)
+            }
+            (Self::WeightStringBinaryNative, input, metadata, None) => {
+                crate::native_weight_binary_args_valid(input, metadata)
+            }
+            (Self::WeightStringNumericNative, None, None, kind) => {
+                crate::native_weight_numeric_type_valid(kind)
+            }
+            (Self::FormatLocaleNative, input, locale, precision) => {
+                crate::impl_string::format_locale_native_args_valid(input, locale, precision)
+            }
+            _ => false,
         }
     }
 
@@ -4072,6 +4139,15 @@ impl EvaluatedBytesOp {
             }
             Self::UtcTimeWithFspNative => crate::impl_time::utc_time_with_fsp_native_fn_meta(),
             Self::UtcTimeNullNative => crate::impl_time::utc_time_null_native_fn_meta(),
+            Self::WeightStringNative => crate::impl_string::weight_string_native_fn_meta(),
+            Self::WeightStringCharNative => crate::impl_string::weight_string_char_native_fn_meta(),
+            Self::WeightStringBinaryNative => {
+                crate::impl_string::weight_string_binary_native_fn_meta()
+            }
+            Self::WeightStringNumericNative => {
+                crate::impl_string::weight_string_numeric_native_fn_meta()
+            }
+            Self::FormatLocaleNative => crate::impl_string::format_locale_native_fn_meta(),
             Self::DateCoreNative => crate::impl_time::date_core_native_fn_meta(),
             Self::DateCorePredicateLegacy => crate::impl_time::date_core_predicate_legacy_fn_meta(),
             Self::NowNative => crate::impl_time::now_native_fn_meta(),
@@ -4395,6 +4471,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::WeightStringNative
+            | Self::WeightStringCharNative
+            | Self::WeightStringBinaryNative
+            | Self::WeightStringNumericNative
+            | Self::FormatLocaleNative => EvalType::Bytes,
             Self::DateCoreNative | Self::DateCorePredicateLegacy => EvalType::Int,
             Self::NowNative | Self::CurrentDateNative | Self::SysdateNative => EvalType::Bytes,
             Self::JsonMergeSerdeNative
@@ -4803,6 +4884,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::WeightStringNative
+            | Self::WeightStringCharNative
+            | Self::WeightStringBinaryNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::WeightStringNumericNative => &[EvalType::Int],
+            Self::FormatLocaleNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
             Self::DateCoreNative => &[EvalType::Bytes, EvalType::Int],
             Self::DateCorePredicateLegacy => &[EvalType::Bytes],
             Self::NowNative | Self::SysdateNative => &[EvalType::Bytes, EvalType::Int],
@@ -6184,6 +6270,17 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation.is_weight_or_format_native() {
+            return match self {
+                Self::Bytes2(first, second) => {
+                    operation.weight_or_format_args_valid(first.as_deref(), second.as_deref(), None)
+                }
+                Self::Int(kind) => operation.weight_or_format_args_valid(None, None, *kind),
+                Self::BytesBytesInt(first, second, number) => operation
+                    .weight_or_format_args_valid(first.as_deref(), second.as_deref(), *number),
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::DateCoreNative {
             return match self {
                 Self::BytesInt(core, modes) => {
@@ -9008,6 +9105,198 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn weight_and_format_profiles_keep_actual_metadata_null_rules_and_reuse() {
+        use crate::impl_string::*;
+        let mut padded = 2_i64.to_le_bytes().to_vec();
+        padded.push(1);
+        padded.extend_from_slice(&1_u64.to_le_bytes());
+        padded.extend_from_slice(&[0, 0]);
+        for (operation, getter, args, expected) in [
+            (
+                EvaluatedBytesOp::WeightStringNative,
+                weight_string_native_fn_meta(),
+                EvaluatedArgs::Bytes2(Some(b"A".to_vec()), Some(vec![7, 1])),
+                Some(vec![0, 65]),
+            ),
+            (
+                EvaluatedBytesOp::WeightStringCharNative,
+                weight_string_char_native_fn_meta(),
+                EvaluatedArgs::Bytes2(Some(b"a".to_vec()), Some(padded.clone())),
+                Some(b"a ".to_vec()),
+            ),
+            (
+                EvaluatedBytesOp::WeightStringBinaryNative,
+                weight_string_binary_native_fn_meta(),
+                EvaluatedArgs::Bytes2(Some(b"a".to_vec()), Some(padded.clone())),
+                Some(vec![b'a', 0]),
+            ),
+            (
+                EvaluatedBytesOp::WeightStringNumericNative,
+                weight_string_numeric_native_fn_meta(),
+                EvaluatedArgs::Int(Some(246)),
+                None,
+            ), // Actual numeric type, not a fabricated SQL NULL.
+            (
+                EvaluatedBytesOp::FormatLocaleNative,
+                format_locale_native_fn_meta(),
+                EvaluatedArgs::BytesBytesInt(Some(b"1234.5".to_vec()), None, Some(1)),
+                Some(b"1,234.5".to_vec()),
+            ),
+        ] {
+            let copy_args = || match &args {
+                EvaluatedArgs::Bytes2(value, meta) => {
+                    EvaluatedArgs::Bytes2(value.clone(), meta.clone())
+                }
+                EvaluatedArgs::Int(kind) => EvaluatedArgs::Int(*kind),
+                EvaluatedArgs::BytesBytesInt(value, locale, precision) => {
+                    EvaluatedArgs::BytesBytesInt(value.clone(), locale.clone(), *precision)
+                }
+                _ => unreachable!(),
+            };
+            assert!(args.admission_matches(operation));
+            assert_eq!(args.role(), EvaluatedArgsRole::Values);
+            assert_eq!(args.input_types(), operation.input_types());
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            let arity = operation.input_types().len();
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), arity + 1);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let invalid = match &args {
+                EvaluatedArgs::Bytes2(value, metadata) => {
+                    let mut bad_metadata = metadata.clone().unwrap();
+                    *bad_metadata.last_mut().unwrap() = 2; // Not an actual padding overflow/global-undemanded case.
+                    vec![
+                        EvaluatedArgs::Bytes2(None, metadata.clone()),
+                        EvaluatedArgs::Bytes2(value.clone(), Some(bad_metadata)),
+                    ]
+                }
+                EvaluatedArgs::Int(_) => {
+                    vec![EvaluatedArgs::Int(None), EvaluatedArgs::Int(Some(253))]
+                }
+                EvaluatedArgs::BytesBytesInt(value, ..) => {
+                    assert!(operation.weight_or_format_args_valid(
+                        value.as_deref(),
+                        None,
+                        Some(i64::MAX)
+                    ));
+                    vec![
+                        EvaluatedArgs::BytesBytesInt(None, None, Some(1)),
+                        EvaluatedArgs::BytesBytesInt(value.clone(), Some(vec![255]), Some(1)),
+                        EvaluatedArgs::BytesBytesInt(value.clone(), None, None),
+                    ]
+                }
+                _ => unreachable!(),
+            };
+            for invalid in invalid {
+                let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+                match &invalid {
+                    EvaluatedArgs::Bytes2(value, metadata) => {
+                        ready[0] = ScalarValue::Bytes(value.clone());
+                        ready[1] = ScalarValue::Bytes(metadata.clone());
+                    }
+                    EvaluatedArgs::Int(kind) => ready[0] = ScalarValue::Int(*kind),
+                    EvaluatedArgs::BytesBytesInt(value, locale, precision) => {
+                        ready[0] = ScalarValue::Bytes(value.clone());
+                        ready[1] = ScalarValue::Bytes(locale.clone());
+                        ready[2] = ScalarValue::Int(*precision);
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(ready, arity, &mut reported),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            for invalid in [
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::Bytes(None),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            for calls in 1..=2 {
+                let ComputedValue::Bytes(output) = worker.eval_args(copy_args()).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+                assert_eq!(output.value(), expected.as_deref());
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+        }
+        let mut null = prepare_evaluated_bytes(
+            EvaluatedBytesOp::GetFormatNullNative,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        let ComputedValue::Bytes(output) = null.eval_args(EvaluatedArgs::Bytes(None)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(output.value(), None);
+        assert_eq!(null.kernel_invocations(), 1);
+    }
 
     #[test]
     fn date_core_profiles_keep_signed_bits_nullable_predicates_and_reuse() {

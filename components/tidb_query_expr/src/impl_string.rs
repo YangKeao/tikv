@@ -22,6 +22,66 @@ use crate::{
     },
 };
 
+/// FORMAT receives actual prepared numeric text, optional locale text, and raw
+/// signed precision. A NULL locale is meaningful input, not NULL propagation;
+/// precision clamping and all numeric interpretation belong to the worker.
+pub fn format_locale_native_args_valid(
+    number: Option<&[u8]>,
+    locale: Option<&[u8]>,
+    precision: Option<i64>,
+) -> bool {
+    number.is_some_and(|bytes| str::from_utf8(bytes).is_ok())
+        && locale.is_none_or(|bytes| str::from_utf8(bytes).is_ok())
+        && precision.is_some()
+}
+
+#[rpn_fn]
+fn weight_string_native(value: BytesRef, metadata: BytesRef) -> Result<Option<Bytes>> {
+    crate::native_weight_string::weight_string(value, metadata)
+}
+
+#[rpn_fn]
+fn weight_string_char_native(value: BytesRef, metadata: BytesRef) -> Result<Option<Bytes>> {
+    crate::native_weight_string::weight_string_char(value, metadata)
+}
+
+#[rpn_fn]
+fn weight_string_binary_native(value: BytesRef, metadata: BytesRef) -> Result<Option<Bytes>> {
+    crate::native_weight_string::weight_string_binary(value, metadata)
+}
+
+#[rpn_fn]
+fn weight_string_numeric_native(type_code: &Int) -> Result<Option<Bytes>> {
+    if !crate::native_weight_string::native_weight_numeric_type_valid(Some(*type_code)) {
+        return Err(other_err!(
+            "Native WEIGHT_STRING numeric transport requires an actual numeric type code"
+        ));
+    }
+    Ok(None)
+}
+
+#[rpn_fn(nullable)]
+fn format_locale_native(
+    number: Option<BytesRef>,
+    locale: Option<BytesRef>,
+    precision: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    let (Some(number), Some(precision)) = (number, precision) else {
+        return Err(other_err!(
+            "Native FORMAT requires actual number and precision operands"
+        ));
+    };
+    let number = str::from_utf8(number)
+        .map_err(|error| other_err!("Invalid native FORMAT number UTF-8 transport: {}", error))?;
+    let locale = locale
+        .map(str::from_utf8)
+        .transpose()
+        .map_err(|error| other_err!("Invalid native FORMAT locale UTF-8 transport: {}", error))?;
+    Ok(Some(crate::native_format::format_locale(
+        number, *precision, locale,
+    )))
+}
+
 const SPACE: u8 = 0o40u8;
 const MAX_BLOB_WIDTH: i32 = 16_777_216; // FIXME: Should be isize
 
@@ -3606,6 +3666,133 @@ fn substring_impl(
         }
     };
     view.write_range(start, end, policy, writer)
+}
+
+#[cfg(test)]
+mod native_weight_format_worker_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_weight_and_format_workers_preserve_actual_metadata_and_nullable_locale() {
+        for (meta, name) in [
+            (weight_string_native_fn_meta(), "weight_string_native"),
+            (
+                weight_string_char_native_fn_meta(),
+                "weight_string_char_native",
+            ),
+            (
+                weight_string_binary_native_fn_meta(),
+                "weight_string_binary_native",
+            ),
+            (
+                weight_string_numeric_native_fn_meta(),
+                "weight_string_numeric_native",
+            ),
+            (format_locale_native_fn_meta(), "format_locale_native"),
+        ] {
+            assert_eq!(meta.name, name);
+        }
+        let padded_metadata = |length: i64, budget: Option<u64>, tag: u8, global: u8| {
+            let mut metadata = length.to_le_bytes().to_vec();
+            metadata.push(u8::from(budget.is_some()));
+            metadata.extend_from_slice(&budget.unwrap_or(0).to_le_bytes());
+            metadata.extend_from_slice(&[tag, global]);
+            metadata
+        };
+        assert_eq!(
+            weight_string_native(b"A", &[7, 1]).unwrap(),
+            Some(vec![0, 65])
+        );
+        assert_eq!(
+            weight_string_native(b"ab ", &[6, 1]).unwrap(),
+            Some(b"ab".to_vec())
+        );
+        assert_eq!(
+            weight_string_native(b"ab ", &[6, 0]).unwrap(),
+            Some(b"ab ".to_vec())
+        );
+        // Truncating CHAR decodes lossy runes; padding CHAR retains actual
+        // source bytes. BINARY truncates bytes and forces its key collation.
+        assert_eq!(
+            weight_string_char_native(&[255, b'a'], &padded_metadata(1, None, 0, 0)).unwrap(),
+            Some(vec![239, 191, 189])
+        );
+        assert_eq!(
+            weight_string_char_native(&[255, b'a'], &padded_metadata(3, Some(1), 0, 0)).unwrap(),
+            Some(vec![255, b'a', b' '])
+        );
+        assert_eq!(
+            weight_string_binary_native("中a".as_bytes(), &padded_metadata(1, None, 11, 1))
+                .unwrap(),
+            Some(vec![0xe4])
+        );
+        assert_eq!(
+            weight_string_binary_native(b"ab", &padded_metadata(4, Some(2), 11, 1)).unwrap(),
+            Some(vec![b'a', b'b', 0, 0])
+        );
+        let overflow = padded_metadata(5, Some(1), 11, 2);
+        assert_eq!(weight_string_char_native(b"ab", &overflow).unwrap(), None);
+        assert_eq!(weight_string_binary_native(b"ab", &overflow).unwrap(), None);
+        for code in [8, 246] {
+            assert_eq!(weight_string_numeric_native(&code).unwrap(), None);
+        }
+        for code in [-1, 6, 253, i64::MAX] {
+            assert!(weight_string_numeric_native(&code).is_err());
+        }
+        assert!(weight_string_native(b"a", &[0]).is_err());
+        assert!(weight_string_native(b"a", &[0, 2]).is_err());
+        let missing_budget = padded_metadata(2, None, 0, 0);
+        assert!(weight_string_char_native(b"ab", &missing_budget).is_err());
+        assert!(weight_string_binary_native(b"ab", &missing_budget).is_err());
+        assert!(weight_string_char_native(b"a", &[0; 18]).is_err());
+        assert!(weight_string_binary_native(b"a", &[0; 20]).is_err());
+        assert_eq!(
+            format_locale_native(Some(b"1234.565"), Some(b"de_DE"), Some(&2)).unwrap(),
+            Some(b"1.234,57".to_vec())
+        );
+        assert_eq!(
+            format_locale_native(Some(b"1234.565"), None, Some(&2)).unwrap(),
+            Some(b"1,234.57".to_vec())
+        );
+        assert_eq!(
+            format_locale_native(Some(b"1234.565"), Some(b"unknown"), Some(&2)).unwrap(),
+            Some(b"1,234.57".to_vec())
+        );
+        assert_eq!(
+            format_locale_native(Some(b"1234.5"), None, Some(&i64::MIN)).unwrap(),
+            Some(b"1,235".to_vec())
+        );
+        assert_eq!(
+            format_locale_native(Some(b"1"), None, Some(&i64::MAX)).unwrap(),
+            Some(b"1.000000000000000000000000000000".to_vec())
+        );
+        assert!(format_locale_native_args_valid(
+            Some(b"not-a-number"),
+            None,
+            Some(i64::MIN)
+        ));
+        assert!(format_locale_native_args_valid(
+            Some(b"1"),
+            None,
+            Some(i64::MAX)
+        ));
+        assert!(!format_locale_native_args_valid(None, None, Some(0)));
+        assert!(!format_locale_native_args_valid(Some(b"1"), None, None));
+        assert!(!format_locale_native_args_valid(
+            Some(&[255]),
+            None,
+            Some(0)
+        ));
+        assert!(!format_locale_native_args_valid(
+            Some(b"1"),
+            Some(&[255]),
+            Some(0)
+        ));
+        assert!(format_locale_native(None, None, Some(&0)).is_err());
+        assert!(format_locale_native(Some(b"1"), None, None).is_err());
+        assert!(format_locale_native(Some(&[255]), None, Some(&0)).is_err());
+        assert!(format_locale_native(Some(b"1"), Some(&[255]), Some(&0)).is_err());
+    }
 }
 
 #[cfg(test)]

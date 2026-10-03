@@ -417,7 +417,12 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::CurrentDateNative
         | LocalFunctionId::SysdateNative
         | LocalFunctionId::DateCoreNative
-        | LocalFunctionId::DateCorePredicateLegacy => Err(other_err!(
+        | LocalFunctionId::DateCorePredicateLegacy
+        | LocalFunctionId::WeightStringNative
+        | LocalFunctionId::WeightStringCharNative
+        | LocalFunctionId::WeightStringBinaryNative
+        | LocalFunctionId::WeightStringNumericNative
+        | LocalFunctionId::FormatLocaleNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

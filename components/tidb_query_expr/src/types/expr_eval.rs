@@ -383,6 +383,25 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (!operation.is_weight_or_format_native()
+            || match values {
+                [ScalarValue::Bytes(first), ScalarValue::Bytes(second)] => {
+                    operation.weight_or_format_args_valid(first.as_deref(), second.as_deref(), None)
+                }
+                [ScalarValue::Int(kind)] => {
+                    operation.weight_or_format_args_valid(None, None, *kind)
+                }
+                [
+                    ScalarValue::Bytes(first),
+                    ScalarValue::Bytes(second),
+                    ScalarValue::Int(number),
+                ] => operation.weight_or_format_args_valid(
+                    first.as_deref(),
+                    second.as_deref(),
+                    *number,
+                ),
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::DateCoreNative
             || match values {
                 [ScalarValue::Bytes(core), ScalarValue::Int(modes)] => {

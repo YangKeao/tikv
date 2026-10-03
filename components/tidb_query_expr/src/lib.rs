@@ -53,6 +53,8 @@ pub use native_clock::{
     native_utc_time_without_fsp, native_utc_timestamp,
 };
 
+mod native_format;
+
 mod native_json;
 pub use native_json::{
     NativeJsonArraySelection, NativeJsonPath, NativeJsonPathError, NativeJsonPathLeg,
@@ -91,6 +93,12 @@ pub use native_regexp::{
 mod native_typed_clock;
 pub use native_typed_clock::{
     native_typed_clock_fields, native_typed_clock_utc, native_typed_date_fields,
+};
+
+mod native_weight_string;
+pub use native_weight_string::{
+    native_weight_binary_args_valid, native_weight_binary_padding, native_weight_char_args_valid,
+    native_weight_char_padding, native_weight_numeric_type_valid, native_weight_string_args_valid,
 };
 
 mod regexp_policy;
@@ -157,6 +165,11 @@ pub use self::{
         NATIVE_UUID_EPOCH_100NS, format_uuid_native, grouping_native_args_valid,
     },
     impl_op::NativeUnaryMinusError,
+    impl_string::{
+        format_locale_native_args_valid, format_locale_native_fn_meta,
+        weight_string_binary_native_fn_meta, weight_string_char_native_fn_meta,
+        weight_string_native_fn_meta, weight_string_numeric_native_fn_meta,
+    },
     impl_time::{
         current_date_native_fn_meta, current_time_with_fsp_native_fn_meta,
         current_time_without_fsp_native_fn_meta, date_core_native_args_valid,
