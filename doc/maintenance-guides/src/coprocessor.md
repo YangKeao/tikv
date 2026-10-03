@@ -398,14 +398,42 @@ short-circuit admission policy described above.
   Its worker owns the distinct checked-i64 grammar, type matching, maximum FSP,
   saturating subtraction, silent +/-838:59:59 clamp and formatting. Datetime
   long fractions and duration long fractions retain different policies. The
-  shared formatter also serves native GoDuration, but no other duration parser
-  is migrated. Frontend children remain eager; only right coercion is suppressed.
+  shared formatter also serves native GoDuration. The distinct source duration
+  parser is shared separately below. Frontend children remain eager; only right
+  coercion is suppressed.
   Native typed Duration result casting, including its NULL timezone getter,
   remains outside this core. There is no new carrier, result kind, binding,
   driver, ordinary wire or PB admission. Encoding a TSO result frame can fail
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
+  TIME/MICROSECOND use three fixed unary profiles with existing Bytes/Int and
+  owned result kinds. Native text is actual nullable UTF8, never a host-parsed
+  duration. `native_duration_parse.rs` owns the original signed grammar/FSP/
+  rounding/fallback policy, using `native_time_parse.rs` for wide-delimited and
+  guarded compact-UTC datetimes. These are not the different wire duration or
+  TIMEDIFF parsers. TIME emits actual formatted text plus a strict parse-status
+  byte; native only assembles/replays its original warning after computed
+  failure, then returns the computed text, including the computed zero fallback.
+  MICROSECOND parse failure is an actual NULL without a warning. True input NULL
+  also invokes the worker. Existing typed String-to-Duration result casting and
+  metadata stay outside the leaf. PB observed NULL preserves prefix/suffix and
+  arity demand through a narrow context-forwarding shim; TIME adds no PB entry.
+  Legacy MICROSECOND keeps its original first-child typed duration reader and
+  sends nullable raw i64 nanoseconds to the existing full-domain microsecond
+  projection, not a narrowed wire Duration. CastTimeAsDuration is not SQL TIME
+  and is unchanged. There are no new carriers, bindings, drivers or causes.
+  Time datatype helpers share compact width/year/clock decomposition and exact
+  native byte-fraction parsing. The old wire rounder differs for leading zeroes
+  and carry and is untouched. Native FspError aliases shared NativeFspError with
+  identical variants/data/Display; its nominal owner moves to this datatype.
+  Empty-input-before-FSP, signed prefix, byte errors and source rounding remain.
+  Typed compact errors map back to original native SDK errors. Non-Timestamp
+  calendar/clock validation is also shared, preserving zero-date priority and
+  the last-second9999 microsecond bound; native Timestamp, generic timezone
+  carry/suffix and float policies stay in place. Native duplicate compact/FSP/
+  validator bodies are deleted. Full temporal parsing/type migration, allocator
+  peak and performance neutrality are not claimed by these focused closures.
   Native ANY_VALUE/NAME_CONST use two fixed one-Bytes profiles, both bound to
   the existing nullable `any_value_bytes` worker. The private boundary fixes
   arity at one; the ordinary wire leaf's empty/multiple-argument behavior is

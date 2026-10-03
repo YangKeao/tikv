@@ -1491,6 +1491,9 @@ pub enum EvaluatedBytesOp {
     IntDivDecimalSignedNative,
     IntDivDecimalUnsignedNative,
     IntDivDecimalLegacy,
+    TimeNative,
+    MicrosecondNative,
+    MicrosecondLegacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3187,6 +3190,19 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::IntDivDecimalLegacy,
                 );
             }
+            Self::TimeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::TimeNative);
+            }
+            Self::MicrosecondNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MicrosecondNative,
+                );
+            }
+            Self::MicrosecondLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::MicrosecondLegacy,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -4247,6 +4263,9 @@ impl EvaluatedBytesOp {
             }
             Self::UtcTimeWithFspNative => crate::impl_time::utc_time_with_fsp_native_fn_meta(),
             Self::UtcTimeNullNative => crate::impl_time::utc_time_null_native_fn_meta(),
+            Self::TimeNative => crate::impl_time::time_native_fn_meta(),
+            Self::MicrosecondNative => crate::impl_time::microsecond_native_fn_meta(),
+            Self::MicrosecondLegacy => crate::impl_time::microsecond_legacy_fn_meta(),
             Self::TidbParseTsoNative => crate::impl_time::tidb_parse_tso_native_fn_meta(),
             Self::TimeDiffTextNative => crate::impl_time::time_diff_text_native_fn_meta(),
             Self::AnyValueNative | Self::NameConstNative => {
@@ -4584,6 +4603,8 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::TimeNative => EvalType::Bytes,
+            Self::MicrosecondNative | Self::MicrosecondLegacy => EvalType::Int,
             Self::IntDivDecimalSignedNative | Self::IntDivDecimalUnsignedNative => EvalType::Bytes,
             Self::IntDivDecimalLegacy => EvalType::Int,
             Self::IntDivIntSsNative
@@ -5006,6 +5027,8 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::TimeNative | Self::MicrosecondNative => &[EvalType::Bytes],
+            Self::MicrosecondLegacy => &[EvalType::Int],
             Self::IntDivDecimalSignedNative | Self::IntDivDecimalUnsignedNative => &[
                 EvalType::Bytes,
                 EvalType::Int,
@@ -6408,6 +6431,12 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if matches!(
+            operation,
+            EvaluatedBytesOp::TimeNative | EvaluatedBytesOp::MicrosecondNative
+        ) {
+            return matches!(self, Self::Bytes(value) if value.as_ref().is_none_or(|value| std::str::from_utf8(value).is_ok()));
+        }
         if operation.is_native_decimal_int_div() {
             return match self {
                 Self::BytesIntIntBytes(left, probe, fallback, right) => {
@@ -9291,6 +9320,13 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation == EvaluatedBytesOp::TimeNative
+                    && value.is_some_and(|bytes| !crate::native_time_result_valid(bytes))
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native TIME returned an invalid status/text packet".into(),
+                    ));
+                }
                 if self.operation.is_native_decimal_int_div()
                     && !value.is_some_and(crate::native_intdiv_result_valid)
                 {
@@ -9343,6 +9379,210 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn time_and_microsecond_profiles_keep_actual_nullable_inputs_and_reuse() {
+        let text = |value: Option<&str>| {
+            EvaluatedArgs::Bytes(value.map(|value| value.as_bytes().to_vec()))
+        };
+        for (operation, getter) in [
+            (
+                EvaluatedBytesOp::TimeNative,
+                crate::impl_time::time_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::MicrosecondNative,
+                crate::impl_time::microsecond_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::MicrosecondLegacy,
+                crate::impl_time::microsecond_legacy_fn_meta(),
+            ),
+        ] {
+            let legacy = operation == EvaluatedBytesOp::MicrosecondLegacy;
+            assert_eq!(
+                operation.input_types(),
+                if legacy {
+                    &[EvalType::Int]
+                } else {
+                    &[EvalType::Bytes]
+                }
+            );
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+            assert_eq!(
+                operation.eval_type(),
+                if operation == EvaluatedBytesOp::TimeNative {
+                    EvalType::Bytes
+                } else {
+                    EvalType::Int
+                }
+            );
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), 2);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[1]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, 1);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: vec![LocalExpr::InputSlot {
+                    slot: 0,
+                    field_type: program.schema[0].clone(),
+                }]
+                .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let wrong = if legacy {
+                text(Some("00:00:00"))
+            } else {
+                EvaluatedArgs::Int(Some(0))
+            };
+            for invalid in [
+                wrong,
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::Bytes2(None, None),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+            ready[0] = if legacy {
+                ScalarValue::Bytes(Some(b"00:00:00".to_vec()))
+            } else {
+                ScalarValue::Int(Some(0))
+            };
+            assert!(matches!(
+                worker.eval_ready(ready, 1, &mut None),
+                Err(LocalError::InvalidSpec(_))
+            ));
+            if !legacy {
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes(Some(vec![255]))),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+                ready[0] = ScalarValue::Bytes(Some(vec![255]));
+                assert!(matches!(
+                    worker.eval_ready(ready, 1, &mut None),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            let cases: Vec<(EvaluatedArgs, Option<i64>, Option<(&str, bool)>)> = match operation {
+                EvaluatedBytesOp::TimeNative => vec![
+                    (text(None), None, None),
+                    (
+                        text(Some("12:34:56.123456")),
+                        None,
+                        Some(("12:34:56.123456", false)),
+                    ),
+                    (text(Some("bad")), None, Some(("00:00:00", true))),
+                    (
+                        text(Some("12:34:56.123456")),
+                        None,
+                        Some(("12:34:56.123456", false)),
+                    ),
+                ],
+                EvaluatedBytesOp::MicrosecondNative => vec![
+                    (text(None), None, None),
+                    (text(Some("12:34:56.123456")), Some(123456), None),
+                    (text(Some("bad")), None, None),
+                    (text(Some("-00:00:00.000001")), Some(1), None),
+                ],
+                EvaluatedBytesOp::MicrosecondLegacy => vec![
+                    (EvaluatedArgs::Int(None), None, None),
+                    (EvaluatedArgs::Int(Some(i64::MIN)), Some(854775), None),
+                    (EvaluatedArgs::Int(Some(-1_234_567_890)), Some(234567), None),
+                    (EvaluatedArgs::Int(Some(0)), Some(0), None),
+                ],
+                _ => unreachable!(),
+            };
+            for (calls, (args, expected_int, expected_time)) in (1_u64..).zip(cases) {
+                match worker.eval_args_reported(args).unwrap() {
+                    ComputedValue::Bytes(value) if operation == EvaluatedBytesOp::TimeNative => {
+                        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+                        let decoded = value.value().map(|bytes| {
+                            assert!(crate::native_time_result_valid(bytes));
+                            crate::decode_native_time_result(bytes).unwrap()
+                        });
+                        assert_eq!(
+                            decoded,
+                            expected_time.map(|(value, truncated)| crate::NativeTimeResult {
+                                value,
+                                truncated
+                            })
+                        );
+                    }
+                    ComputedValue::Int(value) if operation != EvaluatedBytesOp::TimeNative => {
+                        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+                        assert_eq!(value.value(), expected_int);
+                    }
+                    _ => panic!("TIME/MICROSECOND returned the wrong ownership domain"),
+                }
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+            let mut zero = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+                usize::MAX,
+            )
+            .unwrap();
+            let args = if legacy {
+                EvaluatedArgs::Int(Some(i64::MIN))
+            } else {
+                text(Some("bad"))
+            };
+            let failure = zero.eval_args_reported(args).unwrap_err();
+            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+            assert_eq!(failure.sql_failure(), None);
+            assert_eq!(zero.kernel_invocations(), 0);
+            assert!(zero.is_healthy());
+        }
+        assert!(!crate::native_time_result_valid(&[]));
+        assert!(!crate::native_time_result_valid(&[2, b'x']));
+        assert!(!crate::native_time_result_valid(&[0, 255]));
+        assert!(!crate::native_time_result_valid(
+            b"\x01not-a-truncated-value"
+        ));
+    }
 
     #[test]
     fn native_decimal_division_profiles_keep_precision_receipts_and_complete_reports() {

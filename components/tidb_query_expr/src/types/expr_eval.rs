@@ -388,6 +388,15 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (!matches!(
+            operation,
+            EvaluatedBytesOp::TimeNative | EvaluatedBytesOp::MicrosecondNative
+        ) || match values {
+            [ScalarValue::Bytes(value)] => value
+                .as_ref()
+                .is_none_or(|value| std::str::from_utf8(value).is_ok()),
+            _ => false,
+        })
         && (operation != EvaluatedBytesOp::IntDivDecimalLegacy
             || match values {
                 [

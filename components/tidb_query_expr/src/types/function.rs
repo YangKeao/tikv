@@ -484,6 +484,9 @@ pub enum LocalFunctionId {
     IntDivDecimalSignedNative,
     IntDivDecimalUnsignedNative,
     IntDivDecimalLegacy,
+    TimeNative,
+    MicrosecondNative,
+    MicrosecondLegacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

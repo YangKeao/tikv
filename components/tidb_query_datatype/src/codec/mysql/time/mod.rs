@@ -31,6 +31,90 @@ use crate::{
     expr::{EvalContext, Flag, SqlMode},
 };
 
+/// Shared native fractional-second error, including the original raw byte
+/// subject and integer-parser range disposition. This is not a worker cause.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum NativeFspError {
+    InvalidFsp(i64),
+    ParseInt { input: Vec<u8>, out_of_range: bool },
+}
+
+impl std::fmt::Display for NativeFspError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidFsp(fsp) => write!(formatter, "Invalid fsp {fsp}"),
+            Self::ParseInt {
+                input,
+                out_of_range,
+            } => {
+                let input = String::from_utf8_lossy(input);
+                let reason = if *out_of_range {
+                    "value out of range"
+                } else {
+                    "invalid syntax"
+                };
+                write!(formatter, "strconv.ParseInt: parsing {input:?}: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for NativeFspError {}
+
+fn native_fraction_i64(input: &[u8]) -> std::result::Result<i64, NativeFspError> {
+    let out_of_range = match std::str::from_utf8(input) {
+        Ok(text) => match text.parse::<i64>() {
+            Ok(value) => return Ok(value),
+            Err(error) => matches!(
+                error.kind(),
+                std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow
+            ),
+        },
+        Err(_) => false,
+    };
+    Err(NativeFspError::ParseInt {
+        input: input.to_vec(),
+        out_of_range,
+    })
+}
+
+const fn native_fraction_pow10(exponent: usize) -> i64 {
+    let mut value = 1_i64;
+    let mut remaining = exponent;
+    while remaining > 0 {
+        value *= 10;
+        remaining -= 1;
+    }
+    value
+}
+
+/// Shared decomposition of a non-float compact native datetime literal.
+/// Calendar validation and timezone-aware fractional carry remain separate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeCompactDateTimeParts {
+    pub fields: [i32; 6],
+    pub has_clock: bool,
+    pub microsecond: i64,
+    pub carry: bool,
+    pub truncated: bool,
+}
+
+/// Compact decomposition preserves the generic SDK's distinct date and
+/// fractional-parser errors; only callers whose contract is Option erase them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeCompactDateTimeError {
+    InvalidDate,
+    InvalidFsp(NativeFspError),
+}
+
+/// The native non-TIMESTAMP validator's original error categories.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeDateTimeValidationError {
+    InvalidDate,
+    InvalidClock,
+    ZeroInDate,
+}
+
 // One ordinary-arithmetic day-number formula, instantiated at each caller's
 // original integer width. In particular, the i32 const API must not widen its
 // intermediates or silently acquire the wide native parser's overflow policy.
@@ -1158,6 +1242,148 @@ impl Time {
         }
     }
 
+    /// Native CheckFsp: unspecified -1 becomes zero; large values clamp to six.
+    pub const fn native_normalize_fsp(fsp: i64) -> Option<i64> {
+        if fsp == -1 {
+            Some(0)
+        } else if fsp < 0 {
+            None
+        } else if fsp > 6 {
+            Some(6)
+        } else {
+            Some(fsp)
+        }
+    }
+
+    /// Native ParseFrac, retaining empty-before-FSP validation, raw byte prefix
+    /// slicing and signed integer division. The separate wire parser is not
+    /// changed: it has different fraction-width and carry conventions.
+    pub fn native_parse_fraction(
+        input: &[u8],
+        fsp: i64,
+    ) -> std::result::Result<(i64, bool), NativeFspError> {
+        if input.is_empty() {
+            return Ok((0, false));
+        }
+        let fsp = Self::native_normalize_fsp(fsp).ok_or(NativeFspError::InvalidFsp(fsp))?;
+        let fsp = usize::try_from(fsp).expect("checked FSP is non-negative");
+        if fsp >= input.len() {
+            let value = native_fraction_i64(input)?;
+            return Ok((value * native_fraction_pow10(6 - input.len()), false));
+        }
+        let value = (native_fraction_i64(&input[..=fsp])? + 5) / 10;
+        if value >= native_fraction_pow10(fsp) {
+            return Ok((0, true));
+        }
+        Ok((value * native_fraction_pow10(6 - fsp), false))
+    }
+
+    /// Decomposes the original native non-float compact grammar using the
+    /// existing TiKV width/year and shared native fraction parsers. Fraction
+    /// input is the digit-only lexical tail; fsp has already been
+    /// normalized to 0..6.
+    pub fn native_compact_datetime_parts(
+        digits: &str,
+        fraction: &[u8],
+        fsp: u8,
+    ) -> std::result::Result<NativeCompactDateTimeParts, NativeCompactDateTimeError> {
+        let whole = parser::parse_whole(digits.as_bytes())
+            .ok_or(NativeCompactDateTimeError::InvalidDate)?;
+        if fsp > 6 {
+            return Err(NativeCompactDateTimeError::InvalidFsp(
+                NativeFspError::InvalidFsp(i64::from(fsp)),
+            ));
+        }
+        let mut fields = [0; 6];
+        for (field, value) in fields.iter_mut().zip(whole) {
+            *field = value as i32;
+        }
+        let has_clock = matches!(digits.len(), 11 | 12 | 14);
+        let prefix = |bytes: &[u8]| -> i32 {
+            std::str::from_utf8(&bytes[..bytes.len().min(2)])
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(0)
+        };
+        let mut truncated = false;
+        if matches!(digits.len(), 5 | 6 | 8) {
+            for (clock, chunk) in fields[3..].iter_mut().zip(fraction.chunks(2)) {
+                *clock = prefix(chunk);
+            }
+        } else if matches!(digits.len(), 9 | 10) {
+            fields[5] = prefix(fraction);
+            truncated = fraction.len() > 2;
+        }
+        let (microsecond, carry) = if has_clock {
+            Self::native_parse_fraction(fraction, i64::from(fsp))
+                .map_err(NativeCompactDateTimeError::InvalidFsp)?
+        } else {
+            (0, false)
+        };
+        Ok(NativeCompactDateTimeParts {
+            fields,
+            has_clock,
+            microsecond,
+            carry,
+            truncated,
+        })
+    }
+
+    /// Validates actual native CoreTime fields without narrowing them into a
+    /// different Time representation. Timestamp instant/DST policy is excluded.
+    /// Year zero is Gregorian-leap here, unlike the week-number convention.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_native_datetime_fields(
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        microsecond: u32,
+        allow_zero_in_date: bool,
+        allow_invalid_date: bool,
+    ) -> std::result::Result<(), NativeDateTimeValidationError> {
+        use NativeDateTimeValidationError::*;
+        let clock = || {
+            if hour >= 24 || minute >= 60 || second >= 60 {
+                Err(InvalidClock)
+            } else {
+                Ok(())
+            }
+        };
+        if year == 0 && month == 0 && day == 0 {
+            return clock();
+        }
+        if !allow_zero_in_date && (month == 0 || day == 0) {
+            return Err(ZeroInDate);
+        }
+        if year > 9999 || month > 12 {
+            return Err(InvalidDate);
+        }
+        let maximum_day = if allow_invalid_date || month == 0 {
+            31
+        } else {
+            Self::native_days_in_month(i64::from(year), u32::from(month)) as u8
+        };
+        if day > maximum_day {
+            return Err(InvalidDate);
+        }
+        // Earlier synthetic cores can retain microseconds above 999999. Only
+        // the exact maximum calendar second has this source upper-bound test.
+        if year == 9999
+            && month == 12
+            && day == 31
+            && hour == 23
+            && minute == 59
+            && second == 59
+            && microsecond > 999_999
+        {
+            return Err(InvalidDate);
+        }
+        clock()
+    }
+
     /// Packs the exact native CoreTime representation, masking each field to
     /// its storage width without calendar validation or clock normalization.
     /// The low four reserved bits remain zero; type and FSP are not core
@@ -1634,7 +1860,7 @@ mod parser {
     /// Try to parse a datetime string `input` without fractional part and
     /// separators. return an array that stores `[year, month, day, hour,
     /// minute, second, 0]`
-    fn parse_whole(input: &[u8]) -> Option<[u32; 7]> {
+    pub(super) fn parse_whole(input: &[u8]) -> Option<[u32; 7]> {
         let mut parts = [0u32; 7];
 
         // If `input`'s len is 8 or 14, then `input` should be in format like:
@@ -3900,6 +4126,125 @@ mod tests {
         codec::mysql::{MAX_FSP, UNSPECIFIED_FSP, duration::*},
         expr::EvalConfig,
     };
+
+    #[test]
+    fn native_compact_parts_and_typed_validation_preserve_source_boundaries() {
+        for (input, fields) in [
+            ("20121", [2020, 12, 1, 0, 0, 0]),
+            ("201231", [2020, 12, 31, 0, 0, 0]),
+            ("2012311", [2020, 12, 31, 1, 0, 0]),
+            ("20201231", [2020, 12, 31, 0, 0, 0]),
+            ("201231121", [2020, 12, 31, 12, 1, 0]),
+            ("2012311259", [2020, 12, 31, 12, 59, 0]),
+            ("20123112591", [2020, 12, 31, 12, 59, 1]),
+            ("201231125959", [2020, 12, 31, 12, 59, 59]),
+            ("20201231125959", [2020, 12, 31, 12, 59, 59]),
+            ("00000", [2000, 0, 0, 0, 0, 0]),
+            ("00000000", [0, 0, 0, 0, 0, 0]),
+        ] {
+            let actual = Time::native_compact_datetime_parts(input, b"", 6).unwrap();
+            assert_eq!(
+                actual,
+                NativeCompactDateTimeParts {
+                    fields,
+                    has_clock: matches!(input.len(), 11 | 12 | 14),
+                    microsecond: 0,
+                    carry: false,
+                    truncated: false,
+                }
+            );
+        }
+        let clock = Time::native_compact_datetime_parts("20201231", b"123456789", 6).unwrap();
+        assert_eq!(clock.fields, [2020, 12, 31, 12, 34, 56]);
+        assert!(!clock.has_clock && !clock.truncated);
+        let second = Time::native_compact_datetime_parts("201231121", b"456", 6).unwrap();
+        assert_eq!(second.fields, [2020, 12, 31, 12, 1, 45]);
+        assert!(second.truncated && !second.has_clock);
+        for (fraction, fsp, expected, carry) in [
+            (b"0123456".as_slice(), 6, 12_346, false),
+            (b"9999995", 6, 0, true),
+            (b"5", 0, 0, true),
+            (b"12", 6, 120_000, false),
+        ] {
+            let actual =
+                Time::native_compact_datetime_parts("20201231235959", fraction, fsp).unwrap();
+            assert_eq!((actual.microsecond, actual.carry), (expected, carry));
+        }
+        assert_eq!(
+            Time::native_compact_datetime_parts("2020123123595", b"", 6),
+            Err(NativeCompactDateTimeError::InvalidDate)
+        );
+        assert_eq!(
+            Time::native_compact_datetime_parts("20201231235959", b"1x", 6),
+            Err(NativeCompactDateTimeError::InvalidFsp(
+                NativeFspError::ParseInt {
+                    input: b"1x".to_vec(),
+                    out_of_range: false
+                }
+            ))
+        );
+        assert_eq!(
+            Time::native_compact_datetime_parts("20201231235959", b"", 7),
+            Err(NativeCompactDateTimeError::InvalidFsp(
+                NativeFspError::InvalidFsp(7)
+            ))
+        );
+        assert_eq!(Time::native_parse_fraction(b"", -2), Ok((0, false)));
+        assert_eq!(
+            Time::native_parse_fraction(b"0", -2),
+            Err(NativeFspError::InvalidFsp(-2))
+        );
+        assert_eq!(
+            Time::native_parse_fraction(b"-123", 4),
+            Ok((-12_300, false))
+        );
+        assert_eq!(Time::native_parse_fraction(b"-12345", 2), Ok((0, false)));
+        assert_eq!(Time::native_parse_fraction(b"1\xff", 0), Ok((0, false)));
+        let bad_byte = NativeFspError::ParseInt {
+            input: vec![255],
+            out_of_range: false,
+        };
+        assert_eq!(
+            Time::native_parse_fraction(&[255], 6),
+            Err(bad_byte.clone())
+        );
+        assert_eq!(
+            bad_byte.to_string(),
+            "strconv.ParseInt: parsing \"�\": invalid syntax"
+        );
+        assert_eq!(Time::native_normalize_fsp(-1), Some(0));
+        assert_eq!(Time::native_normalize_fsp(i64::MAX), Some(6));
+        use NativeDateTimeValidationError::*;
+        let validate = Time::validate_native_datetime_fields;
+        assert_eq!(validate(0, 0, 0, 0, 0, 0, 1_048_575, false, false), Ok(()));
+        assert_eq!(
+            validate(0, 0, 0, 24, 0, 0, 0, false, false),
+            Err(InvalidClock)
+        );
+        assert_eq!(validate(0, 2, 29, 0, 0, 0, 0, false, false), Ok(()));
+        assert_eq!(
+            validate(1900, 2, 29, 0, 0, 0, 0, true, false),
+            Err(InvalidDate)
+        );
+        assert_eq!(validate(1900, 2, 29, 0, 0, 0, 0, true, true), Ok(()));
+        assert_eq!(validate(2020, 0, 31, 0, 0, 0, 0, true, false), Ok(()));
+        assert_eq!(
+            validate(16383, 0, 0, 24, 0, 0, 0, false, false),
+            Err(ZeroInDate)
+        );
+        assert_eq!(
+            validate(16383, 1, 1, 0, 0, 0, 0, true, false),
+            Err(InvalidDate)
+        );
+        assert_eq!(
+            validate(9999, 12, 31, 23, 59, 59, 1_000_000, true, false),
+            Err(InvalidDate)
+        );
+        assert_eq!(
+            validate(9999, 12, 31, 23, 59, 58, 1_048_575, true, false),
+            Ok(())
+        );
+    }
 
     #[test]
     fn test_native_core_from_fields_exact_masked_layout() {

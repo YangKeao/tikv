@@ -219,6 +219,64 @@ fn decode_native_time_text(bytes: BytesRef) -> Result<&str> {
     from_utf8(bytes).map_err(|_| other_err!("Native HMS text transport requires UTF-8"))
 }
 
+/// Borrowed actual TIME output and its original parse-truncation disposition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeTimeResult<'a> {
+    pub value: &'a str,
+    pub truncated: bool,
+}
+
+/// Decodes only the physical TIME result contract, without re-parsing its
+/// value.
+pub fn decode_native_time_result(bytes: &[u8]) -> Option<NativeTimeResult<'_>> {
+    let (&status, payload) = bytes.split_first()?;
+    let value = from_utf8(payload).ok()?;
+    if status > 1 || value.is_empty() || (status == 1 && value != "00:00:00") {
+        return None;
+    }
+    Some(NativeTimeResult {
+        value,
+        truncated: status == 1,
+    })
+}
+
+/// Validates an actual non-NULL TIME report without allocating or warning.
+pub fn native_time_result_valid(bytes: &[u8]) -> bool {
+    decode_native_time_result(bytes).is_some()
+}
+
+#[rpn_fn]
+fn time_native(arg: BytesRef) -> Result<Option<Bytes>> {
+    let text = decode_native_time_text(arg)?;
+    let (status, value) = match crate::parse_native_duration(text, crate::native_duration_fsp(text))
+    {
+        Ok(duration) => (
+            0,
+            crate::native_format_time_diff(duration.micros, duration.fsp.max(0) as usize),
+        ),
+        Err(_) => (1, "00:00:00".to_owned()),
+    };
+    let mut result = Vec::with_capacity(1 + value.len());
+    result.push(status);
+    result.extend_from_slice(value.as_bytes());
+    Ok(Some(result))
+}
+
+#[rpn_fn]
+fn microsecond_native(arg: BytesRef) -> Result<Option<Int>> {
+    let text = decode_native_time_text(arg)?;
+    Ok(
+        crate::parse_native_duration(text, crate::native_duration_fsp(text))
+            .ok()
+            .map(|duration| duration.micro_second()),
+    )
+}
+
+#[rpn_fn]
+fn microsecond_legacy(nanos: &Int) -> Result<Option<Int>> {
+    Ok(Some(Duration::micro_secs_from_nanos(*nanos) as Int))
+}
+
 // SQL's Display-derived text policy is distinct from legacy signed nanos.
 // Invalid UTF-8 is a transport error; a valid string may parse to SQL NULL.
 fn parse_native_hms_text(bytes: BytesRef) -> Result<Option<(u32, u32, u32)>> {
@@ -3097,6 +3155,74 @@ mod native_clock_worker_tests {
             utc_time_without_fsp_native(&raw_nanos).unwrap(),
             Some(b"00:00:00".to_vec())
         );
+    }
+}
+
+#[cfg(test)]
+mod native_time_microsecond_tests {
+    use super::*;
+
+    #[test]
+    fn native_time_and_microsecond_keep_actual_parse_results_and_report_shape() {
+        assert_eq!(time_native_fn_meta().name, "time_native");
+        assert_eq!(microsecond_native_fn_meta().name, "microsecond_native");
+        for (text, expected, micros) in [
+            ("12:34:56.123456", "12:34:56.123456", 123456),
+            ("-00:00:00.1234567", "-00:00:00.123457", 123457),
+            ("1 01:02:03.004", "25:02:03.004", 4000),
+            ("2017-01-18 12:30:50.1234567", "12:30:50.123456", 123456),
+        ] {
+            let frame = time_native(text.as_bytes()).unwrap().unwrap();
+            assert_eq!(
+                decode_native_time_result(&frame),
+                Some(NativeTimeResult {
+                    value: expected,
+                    truncated: false,
+                })
+            );
+            assert!(native_time_result_valid(&frame));
+            assert_eq!(microsecond_native(text.as_bytes()).unwrap(), Some(micros));
+        }
+        let truncated = time_native(b"839:00:00").unwrap().unwrap();
+        assert_eq!(truncated, b"\x0100:00:00");
+        assert_eq!(
+            decode_native_time_result(&truncated),
+            Some(NativeTimeResult {
+                value: "00:00:00",
+                truncated: true,
+            })
+        );
+        assert_eq!(microsecond_native(b"839:00:00").unwrap(), None);
+        assert_eq!(time_native(b"00:00:00").unwrap().unwrap(), b"\x0000:00:00");
+        assert!(time_native(&[255]).is_err());
+        assert!(microsecond_native(&[255]).is_err());
+        for invalid in [
+            b"".as_slice(),
+            b"\x00",
+            b"\x01",
+            b"\x0200:00:00",
+            b"\x0101:00:00",
+            b"\x0100:00:00.0",
+            b"\x00\xff",
+        ] {
+            assert_eq!(decode_native_time_result(invalid), None);
+            assert!(!native_time_result_valid(invalid));
+        }
+    }
+
+    #[test]
+    fn legacy_microsecond_preserves_full_signed_nanosecond_domain() {
+        assert_eq!(microsecond_legacy_fn_meta().name, "microsecond_legacy");
+        for (nanos, expected) in [
+            (0, 0),
+            (-1, 0),
+            (1_234_567_890, 234567),
+            (-1_234_567_890, 234567),
+            (i64::MIN, 854775),
+            (i64::MAX, 854775),
+        ] {
+            assert_eq!(microsecond_legacy(&nanos).unwrap(), Some(expected));
+        }
     }
 }
 
