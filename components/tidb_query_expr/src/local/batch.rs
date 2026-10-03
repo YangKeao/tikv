@@ -1479,6 +1479,8 @@ pub enum EvaluatedBytesOp {
     WeightStringBinaryNative,
     WeightStringNumericNative,
     FormatLocaleNative,
+    AnyValueNative,
+    NameConstNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3119,6 +3121,12 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::FormatLocaleNative,
                 );
             }
+            Self::AnyValueNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AnyValueNative);
+            }
+            Self::NameConstNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::NameConstNative);
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -4139,6 +4147,9 @@ impl EvaluatedBytesOp {
             }
             Self::UtcTimeWithFspNative => crate::impl_time::utc_time_with_fsp_native_fn_meta(),
             Self::UtcTimeNullNative => crate::impl_time::utc_time_null_native_fn_meta(),
+            Self::AnyValueNative | Self::NameConstNative => {
+                crate::impl_miscellaneous::any_value_bytes_fn_meta()
+            }
             Self::WeightStringNative => crate::impl_string::weight_string_native_fn_meta(),
             Self::WeightStringCharNative => crate::impl_string::weight_string_char_native_fn_meta(),
             Self::WeightStringBinaryNative => {
@@ -4471,6 +4482,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::AnyValueNative | Self::NameConstNative => EvalType::Bytes,
             Self::WeightStringNative
             | Self::WeightStringCharNative
             | Self::WeightStringBinaryNative
@@ -4884,6 +4896,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::AnyValueNative | Self::NameConstNative => &[EvalType::Bytes],
             Self::WeightStringNative
             | Self::WeightStringCharNative
             | Self::WeightStringBinaryNative => &[EvalType::Bytes, EvalType::Bytes],
@@ -6270,6 +6283,15 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if matches!(
+            operation,
+            EvaluatedBytesOp::AnyValueNative | EvaluatedBytesOp::NameConstNative
+        ) {
+            return match self {
+                Self::Bytes(value) => crate::native_identity_args_valid(value.as_deref()),
+                _ => false,
+            };
+        }
         if operation.is_weight_or_format_native() {
             return match self {
                 Self::Bytes2(first, second) => {
@@ -9105,6 +9127,192 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn identity_profiles_share_leaf_but_keep_fixed_arity_and_actual_frames() {
+        use crate::{
+            NativeIdentityRef as Identity, decode_native_identity, encode_native_identity,
+        };
+        let views = [
+            Identity::MinNotNull,
+            Identity::MaxValue,
+            Identity::Int(i64::MIN),
+            Identity::UInt(u64::MAX),
+            Identity::Real(0x7ff8_0000_0000_0042),
+            Identity::String {
+                collation: 11,
+                bytes: &[255, 0, b'A'],
+            },
+            Identity::Decimal {
+                negative: true,
+                scale: 4,
+                storage_scale: 9,
+                declared_shape: Some((38, 7)),
+                coefficient: b"0012300",
+            },
+            Identity::Time {
+                core: 0xfedc_ba98_7654_3210,
+                kind: 2,
+                fsp: 0,
+            },
+        ];
+        let mut frames = vec![None]; // Physical NULL, never a synthetic zero tag.
+        frames.extend(
+            views
+                .iter()
+                .copied()
+                .map(|value| Some(encode_native_identity(value).unwrap())),
+        );
+        // The ordinary vararg leaf's zero/multiple-argument behavior is unchanged.
+        assert_eq!(
+            crate::impl_miscellaneous::any_value_bytes(&[]).unwrap(),
+            None
+        );
+        assert_eq!(
+            crate::impl_miscellaneous::any_value_bytes(&[
+                frames[1].as_deref(),
+                frames[2].as_deref()
+            ])
+            .unwrap(),
+            frames[1]
+        );
+        let getter = crate::impl_miscellaneous::any_value_bytes_fn_meta();
+        for (operation, identity) in [
+            (
+                EvaluatedBytesOp::AnyValueNative,
+                crate::LocalFunctionId::AnyValueNative,
+            ),
+            (
+                EvaluatedBytesOp::NameConstNative,
+                crate::LocalFunctionId::NameConstNative,
+            ),
+        ] {
+            assert!(
+                matches!(operation.kernel_kind(), EvaluatedKernelKind::ClosedPrivate(id) if id == identity)
+            );
+            assert_eq!(operation.input_types(), &[EvalType::Bytes]);
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            assert_eq!(operation.call_count(), 1);
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), 2);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[1]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, 1);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: vec![LocalExpr::InputSlot {
+                    slot: 0,
+                    field_type: program.schema[0].clone(),
+                }]
+                .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            for bad in [vec![], vec![0], vec![19]] {
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes(Some(bad.clone()))),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(
+                        [
+                            ScalarValue::Bytes(Some(bad)),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None)
+                        ],
+                        1,
+                        &mut reported
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            for invalid in [
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::Int(Some(0)),
+                EvaluatedArgs::Bytes2(frames[1].clone(), frames[2].clone()),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            for arity in [0, 2] {
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(
+                        [
+                            ScalarValue::Bytes(frames[1].clone()),
+                            ScalarValue::Bytes(frames[2].clone()),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None)
+                        ],
+                        arity,
+                        &mut reported
+                    ),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            for (calls, frame) in (1_u64..).zip(&frames) {
+                let ComputedValue::Bytes(output) = worker
+                    .eval_args(EvaluatedArgs::Bytes(frame.clone()))
+                    .unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+                assert_eq!(output.value(), frame.as_deref());
+                if let Some(bytes) = output.value() {
+                    assert_eq!(
+                        decode_native_identity(bytes).unwrap(),
+                        views[calls as usize - 2]
+                    );
+                }
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+        }
+    }
 
     #[test]
     fn weight_and_format_profiles_keep_actual_metadata_null_rules_and_reuse() {

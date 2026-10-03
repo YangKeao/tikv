@@ -422,7 +422,9 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::WeightStringCharNative
         | LocalFunctionId::WeightStringBinaryNative
         | LocalFunctionId::WeightStringNumericNative
-        | LocalFunctionId::FormatLocaleNative => Err(other_err!(
+        | LocalFunctionId::FormatLocaleNative
+        | LocalFunctionId::AnyValueNative
+        | LocalFunctionId::NameConstNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

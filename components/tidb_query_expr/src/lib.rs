@@ -55,6 +55,12 @@ pub use native_clock::{
 
 mod native_format;
 
+mod native_identity;
+pub use native_identity::{
+    NativeIdentityFrameError, NativeIdentityRef, decode_native_identity, encode_native_identity,
+    native_identity_args_valid,
+};
+
 mod native_json;
 pub use native_json::{
     NativeJsonArraySelection, NativeJsonPath, NativeJsonPathError, NativeJsonPathLeg,

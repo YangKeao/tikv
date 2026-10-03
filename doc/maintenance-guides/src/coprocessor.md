@@ -344,6 +344,29 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  Native ANY_VALUE/NAME_CONST use two fixed one-Bytes profiles, both bound to
+  the existing nullable `any_value_bytes` worker. The private boundary fixes
+  arity at one; the ordinary wire leaf's empty/multiple-argument behavior is
+  untouched. NAME_CONST receives only the actual selected value, after the
+  frontend's original name/value demand; ignored name metadata is not encoded
+  or revalidated. `native_identity.rs` owns one physical representation codec:
+  NULL is Bytes(None), and18 non-NULL operand tags carry actual payload/type
+  metadata. They are not operation selectors, a VM, a runtime binding, or a new
+  computed-result kind. The native bridge reconstructs from returned bytes only,
+  including collation and Decimal declared shape, without an original-value
+  cache. Time core/kind/FSP remain separate; Float32 retains its actual f64 bits;
+  Decimal raw coefficient/scales/sign are not normalized; JSON bytes/typecodes
+  are not parsed; vector dimension follows its raw f32 tail rather than a u32
+  header or SQL cap. Shared validation checks physical widths/presence/tags, not
+  UTF8, numeric/calendar validity, or collation-key support. Narrow native Time
+  and Decimal raw constructors restore representations without changing normal
+  SQL parsing. Native fold/return-type/label/1210 rules and PB/legacy admission
+  remain unchanged. Existing native caller gaps are not repaired: AST's
+  uppercase lookup misses the lowercase arity registry, and generic SQL
+  post-derivation overwrites copied string result metadata with connection
+  collation. Actual SDK representation identity is not a claim of Go SQL
+  whole-FieldType parity. Extra framing copies and native vector reconstruction
+  do not establish zero-copy, performance neutrality or physical-heap guarantees.
   Native WEIGHT_STRING has three fixed byte-result profiles for plain, CHAR
   and BINARY forms. Shared padding classifiers only determine original packet
   getter/warning demand, including zero growth; actual bytes, signed length,

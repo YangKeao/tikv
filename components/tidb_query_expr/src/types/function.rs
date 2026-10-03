@@ -472,6 +472,8 @@ pub enum LocalFunctionId {
     WeightStringBinaryNative,
     WeightStringNumericNative,
     FormatLocaleNative,
+    AnyValueNative,
+    NameConstNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

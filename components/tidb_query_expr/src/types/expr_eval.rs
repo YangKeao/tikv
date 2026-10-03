@@ -383,6 +383,13 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (!matches!(
+            operation,
+            EvaluatedBytesOp::AnyValueNative | EvaluatedBytesOp::NameConstNative
+        ) || match values {
+            [ScalarValue::Bytes(value)] => crate::native_identity_args_valid(value.as_deref()),
+            _ => false,
+        })
         && (!operation.is_weight_or_format_native()
             || match values {
                 [ScalarValue::Bytes(first), ScalarValue::Bytes(second)] => {

@@ -946,6 +946,61 @@ mod tests {
     use crate::test_util::RpnFnScalarEvaluator;
 
     #[test]
+    fn existing_any_value_bytes_preserves_native_identity_frames_and_varg_contract() {
+        use crate::{
+            NativeIdentityRef as Identity, decode_native_identity, encode_native_identity,
+        };
+
+        assert_eq!(any_value_bytes_fn_meta().name, "any_value_bytes");
+        // The framing module covers all eighteen non-NULL representations.
+        // Here the existing worker must copy representative opaque frames,
+        // preserving their representation rather than interpreting SQL values.
+        let cases = [
+            Identity::Real(0x7ff8_0000_0000_0042),
+            Identity::Float32(0x7ff8_0000_0000_0042),
+            Identity::Decimal {
+                negative: true,
+                scale: 2,
+                storage_scale: 9,
+                declared_shape: Some((-1, 7)),
+                coefficient: &[255, 0, b'x'],
+            },
+            Identity::Time {
+                core: u64::MAX,
+                kind: 0,
+                fsp: 7,
+            },
+            Identity::Json {
+                type_code: 255,
+                bytes: &[0, 255, b'['],
+            },
+            Identity::Vector(&[0x42, 0, 0xc0, 0x7f, 0, 0, 0, 0x80]),
+        ];
+        for value in cases {
+            let frame = encode_native_identity(value).unwrap();
+            let expected = frame.clone();
+            let output = any_value_bytes(&[Some(frame.as_slice())]).unwrap().unwrap();
+            assert_eq!(output, expected);
+            assert_ne!(output.as_ptr(), frame.as_ptr());
+            drop(frame);
+            assert_eq!(output, expected);
+            assert_eq!(decode_native_identity(&output), Ok(value));
+        }
+        assert_eq!(any_value_bytes(&[None]).unwrap(), None);
+        // Ordinary varg behavior remains unchanged. These leaf calls do NOT
+        // admit zero/multiple operands through either fixed-arity C4 profile;
+        // their one-operand boundary is checked separately by the C4 tests.
+        assert_eq!(any_value_bytes(&[]).unwrap(), None);
+        let first = encode_native_identity(Identity::Bytes(&[255, 0])).unwrap();
+        let second = encode_native_identity(Identity::Int(42)).unwrap();
+        assert_eq!(
+            any_value_bytes(&[Some(&first), Some(&second)]).unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(any_value_bytes(&[None, Some(&second)]).unwrap(), None);
+    }
+
+    #[test]
     fn test_native_shard_vitess_source_literals() {
         // Original tidb-util vitess.rs five fixed hexadecimal digests.
         for (key, expected) in [
