@@ -2017,6 +2017,79 @@ impl Default for Decimal {
 }
 
 impl Decimal {
+    /// Projects the native raw coefficient using its original signed text
+    /// parser. Storage scale is returned verbatim; visible scale and column
+    /// shape do not participate. Invalid UTF-8 retains the native
+    /// representation panic.
+    pub fn native_raw_coefficient_i128(
+        negative: bool,
+        digits: &[u8],
+        storage_scale: u32,
+    ) -> Option<(i128, u32)> {
+        let digits = std::str::from_utf8(digits).expect("decimal coefficients are ASCII digits");
+        let magnitude = digits.parse::<i128>().ok()?;
+        let value = if negative {
+            magnitude.checked_neg()?
+        } else {
+            magnitude
+        };
+        Some((value, storage_scale))
+    }
+
+    /// Truncates a native raw coefficient to signed BIGINT, retaining
+    /// saturation and fractional disposition without normalizing or
+    /// validating its shape. UTF-8 decoding, scale subtraction and string
+    /// slicing preserve the native panic domain and occur before integer
+    /// conversion.
+    pub fn native_to_i64_trunc(negative: bool, digits: &[u8], storage_scale: u32) -> Res<i64> {
+        let digits = std::str::from_utf8(digits).expect("decimal coefficients are ASCII digits");
+        let split = digits.len() - storage_scale as usize;
+        let integer = digits[..split].trim_start_matches('0');
+        let integer = if integer.is_empty() { "0" } else { integer };
+        let magnitude = integer.parse::<u64>();
+        let value = match (negative, magnitude) {
+            (false, Ok(value)) if value <= i64::MAX as u64 => value as i64,
+            (true, Ok(value)) if value <= i64::MIN.unsigned_abs() => {
+                if value == i64::MIN.unsigned_abs() {
+                    i64::MIN
+                } else {
+                    -(value as i64)
+                }
+            }
+            (false, _) => return Res::Overflow(i64::MAX),
+            (true, _) => return Res::Overflow(i64::MIN),
+        };
+        let truncated = digits[split..].bytes().any(|digit| digit != b'0');
+        if truncated {
+            Res::Truncated(value)
+        } else {
+            Res::Ok(value)
+        }
+    }
+
+    /// Truncates a native raw coefficient to unsigned BIGINT. A negative sign,
+    /// including negative zero, returns overflow before reading coefficient
+    /// text or scale; otherwise the original saturation and fraction rules
+    /// apply.
+    pub fn native_to_u64_trunc(negative: bool, digits: &[u8], storage_scale: u32) -> Res<u64> {
+        if negative {
+            return Res::Overflow(0);
+        }
+        let digits = std::str::from_utf8(digits).expect("decimal coefficients are ASCII digits");
+        let split = digits.len() - storage_scale as usize;
+        let integer = digits[..split].trim_start_matches('0');
+        let integer = if integer.is_empty() { "0" } else { integer };
+        let Ok(value) = integer.parse::<u64>() else {
+            return Res::Overflow(u64::MAX);
+        };
+        let truncated = digits[split..].bytes().any(|digit| digit != b'0');
+        if truncated {
+            Res::Truncated(value)
+        } else {
+            Res::Ok(value)
+        }
+    }
+
     /// Imports a native unsigned coefficient without text formatting/parsing or
     /// a nine-word projection. Only the native logical domain is admitted:
     /// nonempty ASCII digits, enough digits for storage, and result <= storage.
@@ -5261,6 +5334,109 @@ mod native_decimal_cmp_tests {
             assert_eq!(native_decimal_cmp(rhs, lhs), expected.reverse());
             assert_eq!(native_decimal_cmp(lhs, lhs), Equal);
         }
+    }
+}
+
+#[cfg(test)]
+mod native_raw_integer_projection_tests {
+    use super::{Decimal, Res};
+
+    #[test]
+    fn raw_integer_projections_keep_parser_boundaries_and_dispositions() {
+        let minimum = b"-170141183460469231731687303715884105728";
+        let magnitude = b"170141183460469231731687303715884105728";
+        assert_eq!(
+            Decimal::native_raw_coefficient_i128(false, minimum, u32::MAX),
+            Some((i128::MIN, u32::MAX))
+        );
+        assert_eq!(Decimal::native_raw_coefficient_i128(true, minimum, 0), None);
+        assert_eq!(
+            Decimal::native_raw_coefficient_i128(true, magnitude, 0),
+            None
+        );
+        assert_eq!(
+            Decimal::native_raw_coefficient_i128(true, b"+17", 9),
+            Some((-17, 9))
+        );
+        assert_eq!(Decimal::native_raw_coefficient_i128(false, b"", 0), None);
+        for (negative, digits, scale, expected) in [
+            (
+                false,
+                b"9223372036854775807".as_slice(),
+                0,
+                Res::Ok(i64::MAX),
+            ),
+            (
+                true,
+                b"9223372036854775808".as_slice(),
+                0,
+                Res::Ok(i64::MIN),
+            ),
+            (
+                false,
+                b"9223372036854775808".as_slice(),
+                0,
+                Res::Overflow(i64::MAX),
+            ),
+            (true, b"12340".as_slice(), 3, Res::Truncated(-12)),
+            (false, b"12x".as_slice(), 1, Res::Truncated(12)),
+            (true, b"x".as_slice(), 0, Res::Overflow(i64::MIN)),
+            (true, b"000".as_slice(), 3, Res::Ok(0)),
+            (false, b"".as_slice(), 0, Res::Ok(0)),
+        ] {
+            assert_eq!(
+                Decimal::native_to_i64_trunc(negative, digits, scale),
+                expected
+            );
+        }
+        for (negative, digits, scale, expected) in [
+            (
+                false,
+                b"18446744073709551615".as_slice(),
+                0,
+                Res::Ok(u64::MAX),
+            ),
+            (
+                false,
+                b"18446744073709551616x".as_slice(),
+                1,
+                Res::Overflow(u64::MAX),
+            ),
+            (false, "é".as_bytes(), 2, Res::Truncated(0)),
+            (true, b"000".as_slice(), 3, Res::Overflow(0)),
+            (false, b"".as_slice(), 0, Res::Ok(0)),
+        ] {
+            assert_eq!(
+                Decimal::native_to_u64_trunc(negative, digits, scale),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn raw_projection_panics_keep_unsigned_negative_short_circuit() {
+        use std::panic::catch_unwind;
+
+        for (digits, scale) in [
+            (b"\xff".as_slice(), 0),
+            (b"1".as_slice(), 2),
+            ("é".as_bytes(), 1),
+        ] {
+            assert!(catch_unwind(|| Decimal::native_to_i64_trunc(false, digits, scale)).is_err());
+            assert!(catch_unwind(|| Decimal::native_to_u64_trunc(false, digits, scale)).is_err());
+            assert_eq!(
+                Decimal::native_to_u64_trunc(true, digits, scale),
+                Res::Overflow(0)
+            );
+        }
+        let panic =
+            catch_unwind(|| Decimal::native_raw_coefficient_i128(false, b"\xff", 0)).unwrap_err();
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.starts_with("decimal coefficients are ASCII digits"));
     }
 }
 

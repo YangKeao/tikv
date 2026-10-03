@@ -344,6 +344,19 @@ short-circuit admission policy described above.
   physical-heap or allocation-peak guarantees. Gigabyte-scale release arithmetic
   wrapping into an unrepresentable Decimal shape is explicitly deferred rather
   than weakening all bridge validation or converting it into SQL overflow.
+  Integer-division SDK prerequisites share raw Decimal coefficient projection
+  and integer conversion bodies in the datatype layer. These are representation
+  policies, not the normalized word-math bridge: preserve the original UTF8
+  panic, slicing, parse-then-conditional-negation order, visible-scale independence
+  and unsigned-negative short circuit. Raw signed coefficient text may project
+  to i128::MIN even where a canonical positive magnitude cannot be parsed.
+  Native signed/signed and mixed division SDKs also use the existing codec
+  helpers, but keep native zero-divisor assertions and native diagnostic wording.
+  This is not an INTDIV evaluator migration: precision-getter demand, warning
+  ordering, exact decimal quotient policy and scalar/vector NULL roots remain
+  pending. No new profile, carrier, binding, result kind or admission is implied.
+  Codec diagnostic string allocation is not claimed allocation-equivalent to
+  the old native error structure.
   Native TIDB_PARSE_TSO uses a fixed nullable Int2 profile: original TSO plus
   actual offset, with offset absent only for NULL/nonpositive input. Positive
   inputs demand the native zone once; named/local offset lookup uses the shared
