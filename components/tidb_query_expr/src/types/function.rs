@@ -476,6 +476,11 @@ pub enum LocalFunctionId {
     NameConstNative,
     TidbParseTsoNative,
     TimeDiffTextNative,
+    IntDivIntSsNative,
+    IntDivIntUsNative,
+    IntDivIntSuNative,
+    IntDivIntUuNative,
+    IntDivInt128Legacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

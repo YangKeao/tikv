@@ -1483,6 +1483,11 @@ pub enum EvaluatedBytesOp {
     NameConstNative,
     TidbParseTsoNative,
     TimeDiffTextNative,
+    IntDivIntSsNative,
+    IntDivIntUsNative,
+    IntDivIntSuNative,
+    IntDivIntUuNative,
+    IntDivInt128Legacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3139,6 +3144,31 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::TimeDiffTextNative,
                 );
             }
+            Self::IntDivIntSsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntDivIntSsNative,
+                );
+            }
+            Self::IntDivIntUsNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntDivIntUsNative,
+                );
+            }
+            Self::IntDivIntSuNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntDivIntSuNative,
+                );
+            }
+            Self::IntDivIntUuNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntDivIntUuNative,
+                );
+            }
+            Self::IntDivInt128Legacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntDivInt128Legacy,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -3529,7 +3559,8 @@ impl EvaluatedBytesOp {
             | Self::SubInt128RejectRightLegacy
             | Self::MulInt128SignedLegacy
             | Self::ModInt128Legacy
-            | Self::MulInt128UnsignedLegacy => EvaluatedArgsRole::Int1282,
+            | Self::MulInt128UnsignedLegacy
+            | Self::IntDivInt128Legacy => EvaluatedArgsRole::Int1282,
             Self::DivRealNative
             | Self::DivRealLegacy
             | Self::AddRealNative
@@ -3751,6 +3782,10 @@ impl EvaluatedBytesOp {
             | Self::SubIntUsForcedNative
             | Self::SubIntUuForcedNative => (Subtract, IntOverflow),
             Self::MulIntSignedNative | Self::MulIntUnsignedNative => (Multiply, IntOverflow),
+            Self::IntDivIntSsNative
+            | Self::IntDivIntUsNative
+            | Self::IntDivIntSuNative
+            | Self::IntDivIntUuNative => (BinaryArithmeticOperation::IntDivide, IntOverflow),
             Self::AddRealNative => (Add, FloatOverflow),
             Self::SubRealNative => (Subtract, FloatOverflow),
             Self::MulRealNative => (Multiply, FloatOverflow),
@@ -3778,6 +3813,17 @@ impl EvaluatedBytesOp {
             Self::MulInt128UnsignedLegacy => (Multiply, true),
             _ => return None,
         })
+    }
+
+    pub(crate) fn is_integer_division_value(self) -> bool {
+        matches!(
+            self,
+            Self::IntDivIntSsNative
+                | Self::IntDivIntUsNative
+                | Self::IntDivIntSuNative
+                | Self::IntDivIntUuNative
+                | Self::IntDivInt128Legacy
+        )
     }
 
     /// Value-only MOD recipes reserve a successful NULL result for zero
@@ -3827,6 +3873,7 @@ impl EvaluatedBytesOp {
                 | Self::MulInt128SignedLegacy
                 | Self::ModInt128Legacy
                 | Self::MulInt128UnsignedLegacy
+                | Self::IntDivInt128Legacy
         )
     }
 
@@ -3981,6 +4028,11 @@ impl EvaluatedBytesOp {
             Self::AddDecimalFastNative => crate::impl_arithmetic::add_decimal_fast_native_fn_meta(),
             Self::SubDecimalFastNative => crate::impl_arithmetic::sub_decimal_fast_native_fn_meta(),
             Self::MulDecimalFastNative => crate::impl_arithmetic::mul_decimal_fast_native_fn_meta(),
+            Self::IntDivIntSsNative => crate::impl_arithmetic::int_div_int_ss_native_fn_meta(),
+            Self::IntDivIntUsNative => crate::impl_arithmetic::int_div_int_us_native_fn_meta(),
+            Self::IntDivIntSuNative => crate::impl_arithmetic::int_div_int_su_native_fn_meta(),
+            Self::IntDivIntUuNative => crate::impl_arithmetic::int_div_int_uu_native_fn_meta(),
+            Self::IntDivInt128Legacy => crate::impl_arithmetic::int_div_int128_legacy_fn_meta(),
             Self::ModIntSsNative => crate::impl_arithmetic::mod_int_ss_native_fn_meta(),
             Self::ModIntSuNative => crate::impl_arithmetic::mod_int_su_native_fn_meta(),
             Self::ModIntUsNative => crate::impl_arithmetic::mod_int_us_native_fn_meta(),
@@ -4496,6 +4548,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::IntDivIntSsNative
+            | Self::IntDivIntUsNative
+            | Self::IntDivIntSuNative
+            | Self::IntDivIntUuNative => EvalType::Int,
+            Self::IntDivInt128Legacy => EvalType::Bytes,
             Self::TidbParseTsoNative | Self::TimeDiffTextNative => EvalType::Bytes,
             Self::AnyValueNative | Self::NameConstNative => EvalType::Bytes,
             Self::WeightStringNative
@@ -4911,6 +4968,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::IntDivIntSsNative
+            | Self::IntDivIntUsNative
+            | Self::IntDivIntSuNative
+            | Self::IntDivIntUuNative => &[EvalType::Int, EvalType::Int],
+            Self::IntDivInt128Legacy => &[EvalType::Bytes, EvalType::Bytes],
             Self::TidbParseTsoNative => &[EvalType::Int, EvalType::Int],
             Self::TimeDiffTextNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::AnyValueNative | Self::NameConstNative => &[EvalType::Bytes],
@@ -6421,6 +6483,12 @@ impl EvaluatedArgs {
                     left: ReadyIeee754Arg::Value(Some(_)),
                     right: ReadyIeee754Arg::Value(Some(_)),
                 }
+            );
+        }
+        if operation.is_integer_division_value() {
+            return matches!(
+                self,
+                Self::Int2(Some(_), Some(_)) | Self::Int1282(Some(_), Some(_))
             );
         }
         if operation.is_modulo_value() {
@@ -9158,6 +9226,275 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn integer_division_profiles_preserve_signedness_width_zero_and_reuse() {
+        use crate::impl_arithmetic::*;
+        for (operation, getter, left, right, expected) in [
+            (
+                EvaluatedBytesOp::IntDivIntSsNative,
+                int_div_int_ss_native_fn_meta(),
+                -13_i128,
+                5_i128,
+                -2_i128,
+            ),
+            (
+                EvaluatedBytesOp::IntDivIntUsNative,
+                int_div_int_us_native_fn_meta(),
+                -1,
+                1,
+                -1,
+            ),
+            (
+                EvaluatedBytesOp::IntDivIntSuNative,
+                int_div_int_su_native_fn_meta(),
+                -1,
+                2,
+                0,
+            ),
+            (
+                EvaluatedBytesOp::IntDivIntUuNative,
+                int_div_int_uu_native_fn_meta(),
+                -1,
+                -2,
+                1,
+            ),
+            (
+                EvaluatedBytesOp::IntDivInt128Legacy,
+                int_div_int128_legacy_fn_meta(),
+                1_i128 << 100,
+                1_i128 << 20,
+                1_i128 << 80,
+            ),
+        ] {
+            let legacy = operation == EvaluatedBytesOp::IntDivInt128Legacy;
+            let args = |left: Option<i128>, right: Option<i128>| {
+                if legacy {
+                    EvaluatedArgs::Int1282(left, right)
+                } else {
+                    EvaluatedArgs::Int2(
+                        left.map(|value| value as i64),
+                        right.map(|value| value as i64),
+                    )
+                }
+            };
+            assert_eq!(
+                operation.input_role(),
+                if legacy {
+                    EvaluatedArgsRole::Int1282
+                } else {
+                    EvaluatedArgsRole::Values
+                }
+            );
+            assert_eq!(
+                operation.input_types(),
+                if legacy {
+                    &[EvalType::Bytes, EvalType::Bytes]
+                } else {
+                    &[EvalType::Int, EvalType::Int]
+                }
+            );
+            assert_eq!(
+                operation.eval_type(),
+                if legacy {
+                    EvalType::Bytes
+                } else {
+                    EvalType::Int
+                }
+            );
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), 3);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[2]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, 2);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let wrong = if legacy {
+                EvaluatedArgs::Bytes2(Some(vec![0; 16]), Some(vec![1; 16]))
+            } else {
+                EvaluatedArgs::Int1282(Some(1), Some(1))
+            };
+            for invalid in [
+                args(None, Some(1)),
+                args(Some(1), None),
+                wrong,
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::NullWitness(None),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            for missing_left in [true, false] {
+                let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+                for index in 0..2 {
+                    let missing = (index == 0) == missing_left;
+                    ready[index] = if legacy {
+                        ScalarValue::Bytes((!missing).then(|| 1_i128.to_le_bytes().to_vec()))
+                    } else {
+                        ScalarValue::Int((!missing).then_some(1))
+                    };
+                }
+                let mut reported = None;
+                assert!(matches!(
+                    worker.eval_ready(ready, 2, &mut reported),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+                assert_eq!(reported, None);
+            }
+            if legacy {
+                let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+                ready[0] = ScalarValue::Bytes(Some(vec![0; 15]));
+                ready[1] = ScalarValue::Bytes(Some(1_i128.to_le_bytes().to_vec()));
+                assert!(matches!(
+                    worker.eval_ready(ready, 2, &mut None),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            for (calls, divisor, expected) in [
+                (1, right, Some(expected)),
+                (2, 0, None),
+                (3, right, Some(expected)),
+            ] {
+                match worker.eval_args(args(Some(left), Some(divisor))).unwrap() {
+                    ComputedValue::Int(value) if !legacy => {
+                        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+                        assert_eq!(value.value().map(i128::from), expected);
+                    }
+                    ComputedValue::Int128(value) if legacy => {
+                        assert_eq!(value.metadata(), ComputedInt128Metadata::OwnInt128);
+                        assert_eq!(value.value(), expected);
+                    }
+                    _ => panic!("integer DIV returned the wrong ownership domain"),
+                }
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+        }
+    }
+
+    #[test]
+    fn integer_division_typed_overflow_and_legacy_unwind_retirement() {
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        for (operation, left, right) in [
+            (EvaluatedBytesOp::IntDivIntSsNative, i64::MIN, -1),
+            (EvaluatedBytesOp::IntDivIntUsNative, 1, -1),
+            (EvaluatedBytesOp::IntDivIntSuNative, -1, 1),
+        ] {
+            let mut worker = prepare(operation);
+            let storage = worker.retained_storage().unwrap();
+            let mut failure = worker
+                .eval_args_reported(EvaluatedArgs::Int2(Some(left), Some(right)))
+                .unwrap_err();
+            assert_eq!(
+                failure.sql_failure(),
+                Some(EvaluatedSqlFailureKind::BinaryArithmeticNative)
+            );
+            assert_eq!(
+                failure.native_binary_arithmetic_error(),
+                Some(&NativeBinaryArithmeticError {
+                    operation: BinaryArithmeticOperation::IntDivide,
+                    kind: BinaryArithmeticErrorKind::IntOverflow,
+                })
+            );
+            assert!(failure.legacy_binary_arithmetic_error().is_none());
+            for wrong in [
+                EvaluatedBytesOp::AddIntSsNative,
+                EvaluatedBytesOp::DivRealNative,
+                EvaluatedBytesOp::IntDivInt128Legacy,
+                EvaluatedBytesOp::ModIntSsNative,
+            ] {
+                failure.operation = Some(wrong);
+                assert!(failure.native_binary_arithmetic_error().is_none());
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            let ComputedValue::Int(value) = worker
+                .eval_args(EvaluatedArgs::Int2(Some(8), Some(2)))
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(value.value(), Some(4));
+            assert_eq!(worker.kernel_invocations(), 2);
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let mut legacy = prepare(EvaluatedBytesOp::IntDivInt128Legacy);
+        let ComputedValue::Int128(value) = legacy
+            .eval_args(EvaluatedArgs::Int1282(Some(i128::MIN), Some(0)))
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(value.value(), None);
+        assert_eq!(legacy.kernel_invocations(), 1);
+        assert!(legacy.is_healthy());
+        // Only the test harness catches this original raw arithmetic panic.
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            legacy.eval_args(EvaluatedArgs::Int1282(Some(i128::MIN), Some(-1)))
+        }));
+        assert!(panic.is_err());
+        assert!(legacy.poisoned);
+        assert!(!legacy.is_healthy());
+        assert!(legacy.retained_storage().is_err());
+        assert!(matches!(
+            legacy.eval_args(EvaluatedArgs::Int1282(Some(4), Some(2))),
+            Err(LocalError::InvalidSpec(_))
+        ));
+    }
 
     #[test]
     fn tso_and_timediff_profiles_preserve_conditional_inputs_and_reuse() {

@@ -485,6 +485,7 @@ fn evaluated_ready_args_match(
                 .iter()
                 .all(|value| matches!(value, ScalarValue::Bytes(Some(_)))))
         && (!(operation.is_modulo_value()
+            || operation.is_integer_division_value()
             || operation.is_division_value()
             || operation.comparison_op().is_some())
             || values.iter().take(2).all(|value| {

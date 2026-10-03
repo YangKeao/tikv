@@ -34,6 +34,7 @@ pub enum BinaryArithmeticOperation {
     Multiply,
     Modulo,
     Divide,
+    IntDivide,
 }
 
 impl BinaryArithmeticOperation {
@@ -44,6 +45,7 @@ impl BinaryArithmeticOperation {
             Self::Multiply => "MULTIPLY",
             Self::Modulo => "MOD",
             Self::Divide => "/",
+            Self::IntDivide => "DIV",
         }
     }
 
@@ -54,6 +56,7 @@ impl BinaryArithmeticOperation {
             Self::Multiply => NativeDecimalBinaryOp::Multiply,
             Self::Modulo => unreachable!("MOD requires its dedicated remainder recipe"),
             Self::Divide => unreachable!("/ requires its dedicated division recipe"),
+            Self::IntDivide => unreachable!("DIV requires its dedicated integer division recipe"),
         }
     }
 }
@@ -280,6 +283,9 @@ where
         BinaryArithmeticOperation::Divide => {
             unreachable!("/ requires its dedicated division recipe")
         }
+        BinaryArithmeticOperation::IntDivide => {
+            unreachable!("DIV requires its dedicated integer division recipe")
+        }
     }
 }
 
@@ -309,6 +315,11 @@ fn native_integer_binary(
         }
         BinaryArithmeticOperation::Divide => {
             return Err(other_err!("/ requires its dedicated division recipe"));
+        }
+        BinaryArithmeticOperation::IntDivide => {
+            return Err(other_err!(
+                "DIV requires its dedicated integer division recipe"
+            ));
         }
     };
     value.map(Some).ok_or_else(|| {
@@ -506,6 +517,11 @@ fn legacy_integer_binary(
         BinaryArithmeticOperation::Divide => {
             return Err(other_err!("/ requires its dedicated division recipe"));
         }
+        BinaryArithmeticOperation::IntDivide => {
+            return Err(other_err!(
+                "DIV requires its dedicated integer division recipe"
+            ));
+        }
     };
     let negative = match reject {
         LegacyNegativeOperand::Neither => false,
@@ -555,6 +571,71 @@ legacy_integer_binary_recipe!(sub_int128_reject_left_legacy, Subtract, true, Lef
 legacy_integer_binary_recipe!(sub_int128_reject_right_legacy, Subtract, true, Right);
 legacy_integer_binary_recipe!(mul_int128_signed_legacy, Multiply, false, Neither);
 legacy_integer_binary_recipe!(mul_int128_unsigned_legacy, Multiply, true, Neither);
+
+// Closed native DIV recipes retain original operand signedness. Zero is an
+// actual computed NULL; shared nonzero failures retain the existing typed
+// cause.
+#[rpn_fn]
+fn int_div_int_ss_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    if *rhs == 0 {
+        return Ok(None);
+    }
+    div_i64(*lhs, *rhs).map(Some).map_err(|_| {
+        native_binary_arithmetic_error(
+            BinaryArithmeticOperation::IntDivide,
+            BinaryArithmeticErrorKind::IntOverflow,
+        )
+    })
+}
+
+#[rpn_fn]
+fn int_div_int_us_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    if *rhs == 0 {
+        return Ok(None);
+    }
+    div_u64_with_i64(*lhs as u64, *rhs)
+        .map(|value| Some(value as Int))
+        .map_err(|_| {
+            native_binary_arithmetic_error(
+                BinaryArithmeticOperation::IntDivide,
+                BinaryArithmeticErrorKind::IntOverflow,
+            )
+        })
+}
+
+#[rpn_fn]
+fn int_div_int_su_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    if *rhs == 0 {
+        return Ok(None);
+    }
+    div_i64_with_u64(*lhs, *rhs as u64)
+        .map(|value| Some(value as Int))
+        .map_err(|_| {
+            native_binary_arithmetic_error(
+                BinaryArithmeticOperation::IntDivide,
+                BinaryArithmeticErrorKind::IntOverflow,
+            )
+        })
+}
+
+#[rpn_fn]
+fn int_div_int_uu_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    if *rhs == 0 {
+        return Ok(None);
+    }
+    Ok(Some(((*lhs as u64) / (*rhs as u64)) as Int))
+}
+
+#[rpn_fn]
+fn int_div_int128_legacy(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
+    let lhs = binary_raw_i128(lhs)?;
+    let rhs = binary_raw_i128(rhs)?;
+    if rhs == 0 {
+        return Ok(None);
+    }
+    // Preserve raw full-width legacy division, including MIN / -1 panic.
+    Ok(Some((lhs / rhs).to_le_bytes().to_vec()))
+}
 
 // Closed MOD value recipes accept non-NULL operands. The frontend owns NULL
 // witnesses, result signedness, and warnings after a successful zero divisor.
@@ -1303,6 +1384,116 @@ impl ArithmeticOpWithCtx for RealDivide {
                 Some(result)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod integer_division_policy_tests {
+    use tidb_query_common::error::ErrorInner;
+
+    use super::*;
+
+    #[test]
+    fn native_integer_division_keeps_four_signedness_policies_and_typed_overflow() {
+        assert_eq!(
+            int_div_int_ss_native_fn_meta().name,
+            "int_div_int_ss_native"
+        );
+        assert_eq!(
+            int_div_int_us_native_fn_meta().name,
+            "int_div_int_us_native"
+        );
+        assert_eq!(
+            int_div_int_su_native_fn_meta().name,
+            "int_div_int_su_native"
+        );
+        assert_eq!(
+            int_div_int_uu_native_fn_meta().name,
+            "int_div_int_uu_native"
+        );
+        assert_eq!(BinaryArithmeticOperation::IntDivide.sql_name(), "DIV");
+        assert_eq!(int_div_int_ss_native(&-13, &5).unwrap(), Some(-2));
+        assert_eq!(int_div_int_ss_native(&13, &-5).unwrap(), Some(-2));
+        assert_eq!(
+            int_div_int_ss_native(&i64::MIN, &1).unwrap(),
+            Some(i64::MIN)
+        );
+        assert_eq!(int_div_int_us_native(&-1, &1).unwrap(), Some(-1));
+        assert_eq!(int_div_int_us_native(&0, &-1).unwrap(), Some(0));
+        assert_eq!(int_div_int_us_native(&1, &-2).unwrap(), Some(0));
+        assert_eq!(
+            int_div_int_us_native(&i64::MAX, &i64::MIN).unwrap(),
+            Some(0)
+        );
+        assert_eq!(int_div_int_su_native(&-1, &2).unwrap(), Some(0));
+        assert_eq!(int_div_int_su_native(&i64::MIN, &-1).unwrap(), Some(0));
+        assert_eq!(
+            int_div_int_su_native(&i64::MIN, &(i64::MIN + 1)).unwrap(),
+            Some(0)
+        );
+        assert_eq!(int_div_int_uu_native(&-1, &1).unwrap(), Some(-1));
+        assert_eq!(int_div_int_uu_native(&-1, &-2).unwrap(), Some(1));
+        assert_eq!(int_div_int_uu_native(&-2, &-1).unwrap(), Some(0));
+        for recipe in [
+            int_div_int_ss_native,
+            int_div_int_us_native,
+            int_div_int_su_native,
+            int_div_int_uu_native,
+        ] {
+            assert_eq!(recipe(&i64::MIN, &0).unwrap(), None);
+        }
+        for error in [
+            int_div_int_ss_native(&i64::MIN, &-1).unwrap_err(),
+            int_div_int_us_native(&1, &-1).unwrap_err(),
+            int_div_int_us_native(&i64::MIN, &i64::MIN).unwrap_err(),
+            int_div_int_su_native(&-1, &1).unwrap_err(),
+            int_div_int_su_native(&i64::MIN, &i64::MIN).unwrap_err(),
+        ] {
+            match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::Caused(cause)) => assert_eq!(
+                    cause.downcast_ref::<NativeBinaryArithmeticError>(),
+                    Some(&NativeBinaryArithmeticError {
+                        operation: BinaryArithmeticOperation::IntDivide,
+                        kind: BinaryArithmeticErrorKind::IntOverflow,
+                    }),
+                ),
+                _ => panic!("lost typed native DIV overflow: {error:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_integer_division_retains_full_i128_zero_and_original_panic() {
+        assert_eq!(
+            int_div_int128_legacy_fn_meta().name,
+            "int_div_int128_legacy"
+        );
+        for (left, right, expected) in [
+            (i128::MIN, 1_i128, i128::MIN),
+            (i128::MAX, 1, i128::MAX),
+            ((1_i128 << 100) + 7, 8, 1_i128 << 97),
+            (-13, 5, -2),
+            (13, -5, -2),
+            (1, -2, 0),
+        ] {
+            let bytes = int_div_int128_legacy(&left.to_le_bytes(), &right.to_le_bytes())
+                .unwrap()
+                .unwrap();
+            assert_eq!(bytes.len(), 16);
+            assert_eq!(binary_raw_i128(&bytes).unwrap(), expected);
+        }
+        assert_eq!(
+            int_div_int128_legacy(&i128::MIN.to_le_bytes(), &0_i128.to_le_bytes()).unwrap(),
+            None
+        );
+        assert!(int_div_int128_legacy(b"short", &0_i128.to_le_bytes()).is_err());
+        assert!(int_div_int128_legacy(&0_i128.to_le_bytes(), b"short").is_err());
+        assert!(
+            std::panic::catch_unwind(|| {
+                int_div_int128_legacy(&i128::MIN.to_le_bytes(), &(-1_i128).to_le_bytes())
+            })
+            .is_err()
+        );
     }
 }
 

@@ -352,9 +352,17 @@ short-circuit admission policy described above.
   to i128::MIN even where a canonical positive magnitude cannot be parsed.
   Native signed/signed and mixed division SDKs also use the existing codec
   helpers, but keep native zero-divisor assertions and native diagnostic wording.
-  This is not an INTDIV evaluator migration: precision-getter demand, warning
-  ordering, exact decimal quotient policy and scalar/vector NULL roots remain
-  pending. No new profile, carrier, binding, result kind or admission is implied.
+  The subsequent integer DIV slice has four fixed native Int2 profiles and one
+  legacy Int1282 profile using existing Int/Int128 outputs. Native mixed/unsigned
+  outputs preserve u64 bits; actual zero divisors reach the worker before native
+  warning replay. Actual NULL and missing inputs use their existing distinct
+  recipes. Legacy keeps ordinary full-width division and reachable MIN/-1 panic,
+  with the existing poisoned-worker retirement policy, not a panic-to-SQL adapter.
+  The existing arithmetic-operation enum distinguishes IntDivide/DIV from Divide/`/`;
+  other real/Decimal arithmetic SDKs reject the new operation. No new carrier,
+  binding, result kind, cause type, driver or wire admission is involved.
+  Native bounded Decimal, legacy exact Decimal and exact div/rem SDK closure
+  remain pending; this partial slice does not establish whole INTDIV migration.
   Codec diagnostic string allocation is not claimed allocation-equivalent to
   the old native error structure.
   Native TIDB_PARSE_TSO uses a fixed nullable Int2 profile: original TSO plus
