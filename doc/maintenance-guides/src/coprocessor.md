@@ -407,6 +407,27 @@ short-circuit admission policy described above.
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
+  ADDTIME/SUBTIME use `native_time_add.rs` and two fixed-sign BytesBytesInt
+  profiles. Actual nullable text and six-bit temporal-kind/constant-row/binary
+  metadata cross the boundary, not parsed values or an operation encoded in
+  data. Static right-Datetime signatures have a separate unary-Int metadata-only
+  profile: unread operands are not invented NULL data. Missing metadata is
+  rejected, not nullable-macro propagation. Shared validators enforce these
+  distinct shapes. The core retains tuple coercion boundaries, type-dependent
+  parse order, binary warning suppression, vector-Datetime precision and the
+  ADDTIME-only constant-row trailing-dash policy. Row-path is not the session
+  vectorized flag. Output is actual formatted text, silent NULL or a strict
+  warning disposition implying NULL. Native uses original source text only for
+  the exact capped/full diagnostic and directly appends1292, with no new policy
+  getter. Native private duration/datetime DTOs alias shared types; their
+  combine/add/truncating-format/zero/range/predicate methods share one owner in
+  `native_duration_parse.rs`. Existing i64 day-number and bounded calendar-year
+  helpers are reused. Original inverse/absolute-value/zero/FSP quirks remain,
+  rather than narrowing values into wire Time/Duration. Typed result postcasts
+  and context demand remain outside the leaf. No PB/legacy admission, new
+  carrier/result/binding/driver/cause or factory budget is introduced; three
+  physical arguments plus a call fit the existing four-node limit. Sharing this
+  value foundation does not complete TIMESTAMP or TIMESTAMPADD.
   TIME/MICROSECOND use three fixed unary profiles with existing Bytes/Int and
   owned result kinds. Native text is actual nullable UTF8, never a host-parsed
   duration. `native_duration_parse.rs` owns the original signed grammar/FSP/

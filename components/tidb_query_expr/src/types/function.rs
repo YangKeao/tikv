@@ -487,6 +487,9 @@ pub enum LocalFunctionId {
     TimeNative,
     MicrosecondNative,
     MicrosecondLegacy,
+    AddTimeNative,
+    SubTimeNative,
+    TimeAddRightDatetimeNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

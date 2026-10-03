@@ -277,6 +277,67 @@ fn microsecond_legacy(nanos: &Int) -> Result<Option<Int>> {
     Ok(Some(Duration::micro_secs_from_nanos(*nanos) as Int))
 }
 
+fn decode_native_time_add_args<'a>(
+    left: Option<BytesRef<'a>>,
+    right: Option<BytesRef<'a>>,
+    metadata: Option<&Int>,
+) -> Result<(
+    Option<&'a str>,
+    Option<&'a str>,
+    crate::NativeTimeAddMetadata,
+)> {
+    if !crate::native_time_add_args_valid(left, right, metadata.copied()) {
+        return Err(other_err!(
+            "Native time addition arguments contradict their physical signature"
+        ));
+    }
+    let metadata = metadata
+        .and_then(|value| crate::NativeTimeAddMetadata::decode(*value))
+        .ok_or_else(|| other_err!("Native time addition requires valid signature metadata"))?;
+    let left = left.map(decode_native_time_text).transpose()?;
+    let right = right.map(decode_native_time_text).transpose()?;
+    Ok((left, right, metadata))
+}
+
+#[rpn_fn(nullable)]
+fn add_time_native(
+    left: Option<BytesRef>,
+    right: Option<BytesRef>,
+    metadata: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    let (left, right, metadata) = decode_native_time_add_args(left, right, metadata)?;
+    Ok(crate::native_time_add::evaluate_native_time_add(
+        left, right, metadata, 1,
+    ))
+}
+
+#[rpn_fn(nullable)]
+fn sub_time_native(
+    left: Option<BytesRef>,
+    right: Option<BytesRef>,
+    metadata: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    let (left, right, metadata) = decode_native_time_add_args(left, right, metadata)?;
+    Ok(crate::native_time_add::evaluate_native_time_add(
+        left, right, metadata, -1,
+    ))
+}
+
+#[rpn_fn(nullable)]
+fn time_add_right_datetime_native(metadata: Option<&Int>) -> Result<Option<Bytes>> {
+    if !crate::native_time_add_null_metadata_valid(metadata.copied()) {
+        return Err(other_err!(
+            "Native time addition NULL signature requires actual right-datetime metadata"
+        ));
+    }
+    let metadata = metadata
+        .and_then(|value| crate::NativeTimeAddMetadata::decode(*value))
+        .ok_or_else(|| other_err!("Native time addition requires valid signature metadata"))?;
+    Ok(crate::native_time_add::evaluate_native_time_add(
+        None, None, metadata, 1,
+    ))
+}
+
 // SQL's Display-derived text policy is distinct from legacy signed nanos.
 // Invalid UTF-8 is a transport error; a valid string may parse to SQL NULL.
 fn parse_native_hms_text(bytes: BytesRef) -> Result<Option<(u32, u32, u32)>> {
@@ -3155,6 +3216,60 @@ mod native_clock_worker_tests {
             utc_time_without_fsp_native(&raw_nanos).unwrap(),
             Some(b"00:00:00".to_vec())
         );
+    }
+}
+
+#[cfg(test)]
+mod native_time_add_wrapper_tests {
+    use super::*;
+    use crate::{NativeTimeAddKind, NativeTimeAddMetadata, native_time_add_result_valid};
+
+    #[test]
+    fn time_add_wrappers_keep_fixed_signs_metadata_only_null_and_warning_reports() {
+        assert_eq!(add_time_native_fn_meta().name, "add_time_native");
+        assert_eq!(sub_time_native_fn_meta().name, "sub_time_native");
+        assert_eq!(
+            time_add_right_datetime_native_fn_meta().name,
+            "time_add_right_datetime_native"
+        );
+        let metadata = NativeTimeAddMetadata {
+            left: NativeTimeAddKind::Duration,
+            right: NativeTimeAddKind::Duration,
+            row_path: true,
+            right_binary: false,
+        }
+        .encode();
+        let added = add_time_native(Some(b"01:00:00"), Some(b"00:30:00"), Some(&metadata))
+            .unwrap()
+            .unwrap();
+        assert_eq!(added, b"\x0001:30:00");
+        assert!(native_time_add_result_valid(&added));
+        let subtracted = sub_time_native(Some(b"01:00:00"), Some(b"00:30:00"), Some(&metadata))
+            .unwrap()
+            .unwrap();
+        assert_eq!(subtracted, b"\x0000:30:00");
+        let warning = add_time_native(Some(b"bad"), Some(b"00:30:00"), Some(&metadata))
+            .unwrap()
+            .unwrap();
+        assert_eq!(warning.len(), 1);
+        assert!((1..=4).contains(&warning[0]));
+        assert!(native_time_add_result_valid(&warning));
+        assert!(add_time_native(Some(b"01:00:00"), Some(b"00:30:00"), None).is_err());
+        assert!(sub_time_native(None, None, Some(&64)).is_err());
+        assert!(add_time_native(Some(&[255]), Some(b"00:30:00"), Some(&metadata)).is_err());
+        let null_metadata = NativeTimeAddMetadata {
+            left: NativeTimeAddKind::Duration,
+            right: NativeTimeAddKind::Datetime,
+            row_path: true,
+            right_binary: false,
+        }
+        .encode();
+        assert_eq!(
+            time_add_right_datetime_native(Some(&null_metadata)).unwrap(),
+            None
+        );
+        assert!(time_add_right_datetime_native(None).is_err());
+        assert!(time_add_right_datetime_native(Some(&metadata)).is_err());
     }
 }
 

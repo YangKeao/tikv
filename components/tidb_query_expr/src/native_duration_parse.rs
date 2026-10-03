@@ -3,7 +3,11 @@
 //! Native expression duration parsing over the shared datetime value parser.
 //! This preserves the microsecond/error policy, not the wire nanosecond parser.
 
-use crate::native_time_parse::parse_native_duration_datetime;
+use std::sync::OnceLock;
+
+use tidb_query_datatype::codec::mysql::Time;
+
+use crate::native_time_parse::{NativeDurationDateTime, parse_native_duration_datetime};
 
 const MAX_FSP: i32 = 6;
 const MIN_FSP: i32 = 0;
@@ -22,6 +26,168 @@ impl NativeGoDuration {
     pub fn micro_second(self) -> i64 {
         self.micros.abs() % 1_000_000
     }
+
+    /// Native Duration.Add/Sub: scale first, preserve the zero-value operand
+    /// special case, then saturate the sum and retain the larger precision.
+    pub fn combine(self, other: Self, sign: i64) -> Self {
+        let scaled = Self {
+            micros: other.micros * sign,
+            fsp: other.fsp,
+        };
+        if other.micros == 0 && other.fsp == 0 {
+            return self;
+        }
+        Self {
+            micros: self.micros.saturating_add(scaled.micros),
+            fsp: self.fsp.max(other.fsp),
+        }
+    }
+
+    /// Native Duration.String over the shared microsecond formatter.
+    pub fn format(self) -> String {
+        crate::native_time_diff::native_format_time_diff(self.micros, self.fsp.max(0) as usize)
+    }
+
+    /// Original expression duration-shape predicate, before either value
+    /// parser.
+    pub fn is_duration(value: &str) -> bool {
+        static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+        PATTERN
+            .get_or_init(|| {
+                regex::Regex::new(
+                    r"^\s*[-]?(((\d{1,2}\s+)?0*\d{0,3}(:0*\d{1,2}){0,2})|(\d{1,7}))?(\.\d*)?\s*$",
+                )
+                .expect("the source durationPattern is a valid regex")
+            })
+            .is_match(value)
+    }
+
+    /// ADDTIME/SUBTIME use maximum precision when the written fraction contains
+    /// any nonzero character; this is distinct from native_duration_fsp.
+    pub fn fsp_for_time_add_sub(value: &str) -> i32 {
+        match value.find('.') {
+            None => MIN_FSP,
+            Some(dot) => {
+                if value[dot + 1..].chars().any(|c| c != '0') {
+                    MAX_FSP
+                } else {
+                    MIN_FSP
+                }
+            }
+        }
+    }
+}
+
+impl NativeDurationDateTime {
+    /// Native Time.IsZero ignores the precision metadata.
+    pub fn is_zero(self) -> bool {
+        self.year == 0
+            && self.month == 0
+            && self.day == 0
+            && self.hour == 0
+            && self.minute == 0
+            && self.second == 0
+            && self.micros == 0
+    }
+
+    /// Native Time.String truncates the raw microsecond field, without calendar
+    /// validation, field narrowing or rounding to the requested precision.
+    pub fn format(self) -> String {
+        let stem = format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        );
+        let fsp = self.fsp.clamp(0, MAX_FSP);
+        if fsp == 0 {
+            return stem;
+        }
+        let divisor = 10u32.pow(6 - fsp as u32);
+        format!(
+            "{stem}.{:0width$}",
+            self.micros / divisor,
+            width = fsp as usize
+        )
+    }
+
+    /// Native Time.Add keeps its checked total, signed absolute-value policy,
+    /// zero-date inverse result and maximum precision. Validation is separate.
+    pub fn add(self, delta: NativeGoDuration) -> Option<Self> {
+        let total = Self::daynr(self.year, self.month, self.day)
+            .checked_mul(86_400_000_000)?
+            .checked_add(
+                i64::from(self.hour) * 3_600_000_000
+                    + i64::from(self.minute) * 60_000_000
+                    + i64::from(self.second) * 1_000_000
+                    + i64::from(self.micros),
+            )?
+            .checked_add(delta.micros)?;
+        let total = total.abs();
+        let seconds = total / 1_000_000;
+        let micros = (total % 1_000_000) as u32;
+        let (year, month, day) = Self::date_from_daynr(seconds / 86_400);
+        let rest = seconds % 86_400;
+        Some(Self {
+            year,
+            month,
+            day,
+            hour: (rest / 3600) as u32,
+            minute: (rest / 60 % 60) as u32,
+            second: (rest % 60) as u32,
+            micros,
+            fsp: self.fsp.max(delta.fsp),
+        })
+    }
+
+    /// The family's original range predicate, not full civil-date validation.
+    pub fn in_range(self) -> bool {
+        (1..=9999).contains(&self.year) && self.month >= 1 && self.day >= 1
+    }
+
+    /// Wide native day-number arithmetic, sharing the existing original-width
+    /// core.
+    pub fn daynr(year: i64, month: u32, day: u32) -> i64 {
+        Time::native_time_diff_daynr(year, month, day)
+    }
+
+    /// Original inverse day-number algorithm; outside the admitted interval it
+    /// returns zero fields, rather than constructing or rejecting a civil date.
+    pub fn date_from_daynr(daynr: i64) -> (i64, u32, u32) {
+        if daynr <= 365 || daynr >= 3_652_500 {
+            return (0, 0, 0);
+        }
+        let mut year = daynr * 100 / 36525;
+        let temp = (((year - 1) / 100 + 1) * 3) / 4;
+        let mut day_of_year = daynr - year * 365 - (year - 1) / 4 + temp;
+        let mut in_year = days_in_year(year);
+        while day_of_year > in_year {
+            day_of_year -= in_year;
+            year += 1;
+            in_year = days_in_year(year);
+        }
+        let mut leap_day = 0;
+        if in_year == 366 && day_of_year > 31 + 28 {
+            day_of_year -= 1;
+            if day_of_year == 31 + 28 {
+                leap_day = 1;
+            }
+        }
+        let mut month = 1;
+        for length in [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] {
+            if day_of_year <= length {
+                break;
+            }
+            day_of_year -= length;
+            month += 1;
+        }
+        (year, month, (day_of_year + leap_day) as u32)
+    }
+}
+
+fn days_in_year(year: i64) -> i64 {
+    // Only the inverse's admitted day numbers reach this helper: its initial
+    // year is positive and at most 9999, and the loop can advance to 10000.
+    let year = i32::try_from(year).expect("bounded inverse day number year");
+    i64::from(Time::native_calc_days_in_year_i32(year))
 }
 
 /// The native expression parser's single truncation failure.
@@ -251,6 +417,114 @@ pub(crate) fn native_duration_round_frac(micros: i64, fsp: i32) -> NativeGoDurat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_value_methods_keep_zero_precision_raw_fields_and_day_boundaries() {
+        let duration = NativeGoDuration {
+            micros: 42,
+            fsp: -1,
+        };
+        assert_eq!(
+            duration.combine(NativeGoDuration { micros: 0, fsp: 0 }, -1),
+            duration
+        );
+        assert_eq!(
+            NativeGoDuration {
+                micros: i64::MAX,
+                fsp: 2
+            }
+            .combine(NativeGoDuration { micros: 1, fsp: 6 }, 1),
+            NativeGoDuration {
+                micros: i64::MAX,
+                fsp: 6
+            }
+        );
+        assert_eq!(
+            NativeGoDuration {
+                micros: -123_456,
+                fsp: 3
+            }
+            .format(),
+            "-00:00:00.123"
+        );
+        let zero = NativeDurationDateTime {
+            year: 0,
+            month: 0,
+            day: 0,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            micros: 0,
+            fsp: 3,
+        };
+        assert!(zero.is_zero());
+        assert!(!zero.in_range());
+        let reflected = zero.add(NativeGoDuration { micros: -1, fsp: 6 }).unwrap();
+        assert_eq!(
+            reflected,
+            NativeDurationDateTime {
+                micros: 1,
+                fsp: 6,
+                ..zero
+            }
+        );
+        let first_day = NativeDurationDateTime {
+            year: 1,
+            month: 1,
+            day: 1,
+            ..zero
+        };
+        assert!(
+            first_day
+                .add(NativeGoDuration {
+                    micros: i64::MAX,
+                    fsp: 0
+                })
+                .is_none()
+        );
+        assert_eq!(NativeDurationDateTime::daynr(0, 0, u32::MAX), 0);
+        assert_eq!(NativeDurationDateTime::daynr(1, 1, 1), 366);
+        assert_eq!(NativeDurationDateTime::date_from_daynr(366), (1, 1, 1));
+        assert_eq!(
+            NativeDurationDateTime::date_from_daynr(3_652_499),
+            (10_000, 3, 15)
+        );
+        for day in [i64::MIN, 365, 3_652_500, i64::MAX] {
+            assert_eq!(NativeDurationDateTime::date_from_daynr(day), (0, 0, 0));
+        }
+        let raw = NativeDurationDateTime {
+            year: 12_345,
+            month: 99,
+            day: 88,
+            hour: 77,
+            minute: 66,
+            second: 55,
+            micros: 1_234_567,
+            fsp: 3,
+        };
+        assert_eq!(raw.format(), "12345-99-88 77:66:55.1234");
+        assert!(!raw.in_range());
+        assert!(NativeDurationDateTime { year: 1, ..raw }.in_range());
+        assert!(NativeGoDuration::is_duration(""));
+        assert!(NativeGoDuration::is_duration("1 01:00:00"));
+        assert!(!NativeGoDuration::is_duration("aa:bb:cc"));
+        assert!(!NativeGoDuration::is_duration("20171231235959.999999"));
+        assert_eq!(NativeGoDuration::fsp_for_time_add_sub("1.000"), 0);
+        assert_eq!(NativeGoDuration::fsp_for_time_add_sub("1.000 "), 6);
+        #[cfg(debug_assertions)]
+        assert!(
+            std::panic::catch_unwind(|| {
+                duration.combine(
+                    NativeGoDuration {
+                        micros: i64::MIN,
+                        fsp: 0,
+                    },
+                    -1,
+                )
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn duration_parser_keeps_rounding_compact_fallback_and_raw_fsp() {

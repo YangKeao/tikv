@@ -1494,6 +1494,9 @@ pub enum EvaluatedBytesOp {
     TimeNative,
     MicrosecondNative,
     MicrosecondLegacy,
+    AddTimeNative,
+    SubTimeNative,
+    TimeAddRightDatetimeNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3203,6 +3206,17 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::MicrosecondLegacy,
                 );
             }
+            Self::AddTimeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::AddTimeNative);
+            }
+            Self::SubTimeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::SubTimeNative);
+            }
+            Self::TimeAddRightDatetimeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TimeAddRightDatetimeNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -4266,6 +4280,11 @@ impl EvaluatedBytesOp {
             Self::TimeNative => crate::impl_time::time_native_fn_meta(),
             Self::MicrosecondNative => crate::impl_time::microsecond_native_fn_meta(),
             Self::MicrosecondLegacy => crate::impl_time::microsecond_legacy_fn_meta(),
+            Self::AddTimeNative => crate::impl_time::add_time_native_fn_meta(),
+            Self::SubTimeNative => crate::impl_time::sub_time_native_fn_meta(),
+            Self::TimeAddRightDatetimeNative => {
+                crate::impl_time::time_add_right_datetime_native_fn_meta()
+            }
             Self::TidbParseTsoNative => crate::impl_time::tidb_parse_tso_native_fn_meta(),
             Self::TimeDiffTextNative => crate::impl_time::time_diff_text_native_fn_meta(),
             Self::AnyValueNative | Self::NameConstNative => {
@@ -4603,6 +4622,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::AddTimeNative | Self::SubTimeNative | Self::TimeAddRightDatetimeNative => {
+                EvalType::Bytes
+            }
             Self::TimeNative => EvalType::Bytes,
             Self::MicrosecondNative | Self::MicrosecondLegacy => EvalType::Int,
             Self::IntDivDecimalSignedNative | Self::IntDivDecimalUnsignedNative => EvalType::Bytes,
@@ -5027,6 +5049,10 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::AddTimeNative | Self::SubTimeNative => {
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Int]
+            }
+            Self::TimeAddRightDatetimeNative => &[EvalType::Int],
             Self::TimeNative | Self::MicrosecondNative => &[EvalType::Bytes],
             Self::MicrosecondLegacy => &[EvalType::Int],
             Self::IntDivDecimalSignedNative | Self::IntDivDecimalUnsignedNative => &[
@@ -6431,6 +6457,20 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if matches!(
+            operation,
+            EvaluatedBytesOp::AddTimeNative | EvaluatedBytesOp::SubTimeNative
+        ) {
+            return match self {
+                Self::BytesBytesInt(left, right, metadata) => {
+                    crate::native_time_add_args_valid(left.as_deref(), right.as_deref(), *metadata)
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::TimeAddRightDatetimeNative {
+            return matches!(self, Self::Int(metadata) if crate::native_time_add_null_metadata_valid(*metadata));
+        }
         if matches!(
             operation,
             EvaluatedBytesOp::TimeNative | EvaluatedBytesOp::MicrosecondNative
@@ -9320,6 +9360,15 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::AddTimeNative | EvaluatedBytesOp::SubTimeNative
+                ) && value.is_some_and(|bytes| !crate::native_time_add_result_valid(bytes))
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native ADDTIME/SUBTIME returned an invalid warning/value packet".into(),
+                    ));
+                }
                 if self.operation == EvaluatedBytesOp::TimeNative
                     && value.is_some_and(|bytes| !crate::native_time_result_valid(bytes))
                 {
@@ -9379,6 +9428,233 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn time_add_profiles_preserve_metadata_nullable_values_warning_packets_and_reuse() {
+        use crate::{
+            NativeTimeAddKind as Kind, NativeTimeAddMetadata as Metadata,
+            NativeTimeAddResult as ResultValue, NativeTimeAddWarning as Warning,
+        };
+        let metadata = Metadata {
+            left: Kind::Duration,
+            right: Kind::Duration,
+            row_path: false,
+            right_binary: false,
+        };
+        let normal = metadata.encode();
+        let right_datetime = Metadata {
+            right: Kind::Datetime,
+            ..metadata
+        }
+        .encode();
+        let args = |left: Option<&str>, right: Option<&str>, metadata| {
+            EvaluatedArgs::BytesBytesInt(
+                left.map(|text| text.as_bytes().to_vec()),
+                right.map(|text| text.as_bytes().to_vec()),
+                metadata,
+            )
+        };
+        for (operation, getter) in [
+            (
+                EvaluatedBytesOp::AddTimeNative,
+                crate::impl_time::add_time_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::SubTimeNative,
+                crate::impl_time::sub_time_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::TimeAddRightDatetimeNative,
+                crate::impl_time::time_add_right_datetime_native_fn_meta(),
+            ),
+        ] {
+            let metadata_only = operation == EvaluatedBytesOp::TimeAddRightDatetimeNative;
+            let arity = if metadata_only { 1 } else { 3 };
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            assert_eq!(operation.input_types().len(), arity);
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), arity + 1);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let invalid = if metadata_only {
+                vec![
+                    EvaluatedArgs::Int(None),
+                    EvaluatedArgs::Int(Some(-1)),
+                    EvaluatedArgs::Int(Some(64)),
+                    EvaluatedArgs::Int(Some(normal)),
+                ]
+            } else {
+                vec![
+                    args(None, None, None),
+                    args(None, None, Some(-1)),
+                    args(None, None, Some(64)),
+                    args(None, None, Some(right_datetime)),
+                    EvaluatedArgs::BytesBytesInt(
+                        Some(vec![255]),
+                        Some(b"00:00:01".to_vec()),
+                        Some(normal),
+                    ),
+                    EvaluatedArgs::BytesBytesInt(
+                        Some(b"01:02:03".to_vec()),
+                        Some(vec![255]),
+                        Some(normal),
+                    ),
+                ]
+            };
+            for invalid in invalid {
+                let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+                match &invalid {
+                    EvaluatedArgs::Int(metadata) => ready[0] = ScalarValue::Int(*metadata),
+                    EvaluatedArgs::BytesBytesInt(left, right, metadata) => {
+                        ready[0] = ScalarValue::Bytes(left.clone());
+                        ready[1] = ScalarValue::Bytes(right.clone());
+                        ready[2] = ScalarValue::Int(*metadata);
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert!(matches!(
+                    worker.eval_ready(ready, arity, &mut None),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+            }
+            let wrong = if metadata_only {
+                args(None, None, Some(right_datetime))
+            } else {
+                EvaluatedArgs::Int(Some(right_datetime))
+            };
+            for invalid in [
+                wrong,
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::Bytes(None),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            let value = if operation == EvaluatedBytesOp::SubTimeNative {
+                "01:02:02"
+            } else {
+                "01:02:04"
+            };
+            let cases = if metadata_only {
+                vec![
+                    (EvaluatedArgs::Int(Some(right_datetime)), None),
+                    (EvaluatedArgs::Int(Some(right_datetime)), None),
+                ]
+            } else {
+                vec![
+                    (args(None, Some("00:00:01"), Some(normal)), None),
+                    (args(Some("01:02:03"), None, Some(normal)), None),
+                    (
+                        args(Some("01:02:03"), Some("00:00:01"), Some(normal)),
+                        Some(ResultValue::Value(value)),
+                    ),
+                    (
+                        args(Some("bad"), Some("00:00:01"), Some(normal)),
+                        Some(ResultValue::Warning(Warning::TruncatedLeft)),
+                    ),
+                    (
+                        args(Some("01:02:03"), Some("bad"), Some(normal)),
+                        Some(ResultValue::Warning(Warning::TruncatedRight)),
+                    ),
+                    (
+                        args(Some("01:02:03"), Some("00:00:01"), Some(normal)),
+                        Some(ResultValue::Value(value)),
+                    ),
+                ]
+            };
+            for (calls, (args, expected)) in (1_u64..).zip(cases) {
+                let ComputedValue::Bytes(value) = worker.eval_args_reported(args).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+                let decoded = value.value().map(|bytes| {
+                    assert!(crate::native_time_add_result_valid(bytes));
+                    crate::decode_native_time_add_result(bytes).unwrap()
+                });
+                assert_eq!(decoded, expected);
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+            let mut zero = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+                usize::MAX,
+            )
+            .unwrap();
+            let args = if metadata_only {
+                EvaluatedArgs::Int(Some(right_datetime))
+            } else {
+                args(Some("01:02:03"), Some("00:00:01"), Some(normal))
+            };
+            let failure = zero.eval_args_reported(args).unwrap_err();
+            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+            assert_eq!(failure.sql_failure(), None);
+            assert_eq!(zero.kernel_invocations(), 0);
+            assert!(zero.is_healthy());
+        }
+        for invalid in [b"".as_slice(), &[0], &[0, 255], &[1, b'x'], &[5]] {
+            assert!(!crate::native_time_add_result_valid(invalid));
+        }
+    }
 
     #[test]
     fn time_and_microsecond_profiles_keep_actual_nullable_inputs_and_reuse() {

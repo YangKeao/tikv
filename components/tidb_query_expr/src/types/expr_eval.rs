@@ -390,6 +390,24 @@ fn evaluated_ready_args_match(
         && values.len() == types.len()
         && (!matches!(
             operation,
+            EvaluatedBytesOp::AddTimeNative | EvaluatedBytesOp::SubTimeNative
+        ) || match values {
+            [
+                ScalarValue::Bytes(left),
+                ScalarValue::Bytes(right),
+                ScalarValue::Int(metadata),
+            ] => crate::native_time_add_args_valid(left.as_deref(), right.as_deref(), *metadata),
+            _ => false,
+        })
+        && (operation != EvaluatedBytesOp::TimeAddRightDatetimeNative
+            || match values {
+                [ScalarValue::Int(metadata)] => {
+                    crate::native_time_add_null_metadata_valid(*metadata)
+                }
+                _ => false,
+            })
+        && (!matches!(
+            operation,
             EvaluatedBytesOp::TimeNative | EvaluatedBytesOp::MicrosecondNative
         ) || match values {
             [ScalarValue::Bytes(value)] => value
