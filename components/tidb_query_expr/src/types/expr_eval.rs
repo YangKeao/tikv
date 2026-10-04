@@ -315,6 +315,13 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::IfNullHeadNative, EvaluatedArgsRole::Values) => {
+            types.len() == 1 && operation.call_count() == 1
+        }
+        (EvaluatedBytesOp::IfNullFinishNative, EvaluatedArgsRole::Values) => {
+            types.len() == 2 && operation.call_count() == 1
+        }
+        (EvaluatedBytesOp::IfNullHeadNative | EvaluatedBytesOp::IfNullFinishNative, _) => false,
         (
             EvaluatedBytesOp::UnixTimestampValueNative
             | EvaluatedBytesOp::UnixTimestampIntLegacy
@@ -426,6 +433,20 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::IfNullHeadNative
+            || match values {
+                [ScalarValue::Bytes(value)] => {
+                    crate::if_null_head_native_args_valid(value.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::IfNullFinishNative
+            || match values {
+                [ScalarValue::Bytes(report), ScalarValue::Bytes(value)] => {
+                    crate::if_null_finish_native_args_valid(report.as_deref(), value.as_deref())
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::FromUnixTimeNumericNative
             || match values {
                 [ScalarValue::Bytes(value)] => {
@@ -1176,6 +1197,11 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::IfNullHeadNative, EvaluatedArgsRole::Values) => arity == 1 && calls == 1,
+        (EvaluatedBytesOp::IfNullFinishNative, EvaluatedArgsRole::Values) => {
+            arity == 2 && calls == 1
+        }
+        (EvaluatedBytesOp::IfNullHeadNative | EvaluatedBytesOp::IfNullFinishNative, _) => false,
         (
             EvaluatedBytesOp::UnixTimestampValueNative
             | EvaluatedBytesOp::UnixTimestampIntLegacy

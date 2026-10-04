@@ -84,6 +84,12 @@ pub use native_identity::{
     native_identity_args_valid,
 };
 
+mod native_if_null;
+pub use native_if_null::{
+    NativeIfNullChoice, NativeIfNullHeadResult, decode_native_if_null_head_result,
+    if_null_finish_native_args_valid, if_null_head_native_args_valid, native_if_null_choose_first,
+};
+
 mod native_json;
 pub use native_json::{
     NativeJsonArraySelection, NativeJsonPath, NativeJsonPathError, NativeJsonPathLeg,

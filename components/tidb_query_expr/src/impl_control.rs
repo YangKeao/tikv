@@ -7,28 +7,50 @@ use tidb_query_datatype::codec::data_type::*;
 #[rpn_fn(nullable)]
 #[inline]
 fn if_null<T: Evaluable + EvaluableRet>(lhs: Option<&T>, rhs: Option<&T>) -> Result<Option<T>> {
-    if lhs.is_some() {
-        return Ok(lhs.cloned());
+    match crate::native_if_null_choose_first(lhs) {
+        crate::NativeIfNullChoice::Done(value) => Ok(Some(value).cloned()),
+        crate::NativeIfNullChoice::NeedSecond => Ok(rhs.cloned()),
     }
-    Ok(rhs.cloned())
 }
 
 #[rpn_fn(nullable)]
 #[inline]
 fn if_null_json(lhs: Option<JsonRef>, rhs: Option<JsonRef>) -> Result<Option<Json>> {
-    if lhs.is_some() {
-        return Ok(lhs.map(|x| x.to_owned()));
+    match crate::native_if_null_choose_first(lhs) {
+        crate::NativeIfNullChoice::Done(value) => Ok(Some(value.to_owned())),
+        crate::NativeIfNullChoice::NeedSecond => Ok(rhs.map(|x| x.to_owned())),
     }
-    Ok(rhs.map(|x| x.to_owned()))
 }
 
 #[rpn_fn(nullable)]
 #[inline]
 fn if_null_bytes(lhs: Option<BytesRef>, rhs: Option<BytesRef>) -> Result<Option<Bytes>> {
-    if lhs.is_some() {
-        return Ok(lhs.map(|x| x.to_vec()));
+    match crate::native_if_null_choose_first(lhs) {
+        crate::NativeIfNullChoice::Done(value) => Ok(Some(value.to_vec())),
+        crate::NativeIfNullChoice::NeedSecond => Ok(rhs.map(|x| x.to_vec())),
     }
-    Ok(rhs.map(|x| x.to_vec()))
+}
+
+/// The SDK decides whether the actual first operand needs the lazy right side.
+/// Even SQL NULL produces a present demand report, never a NULL head result.
+#[rpn_fn(nullable)]
+fn if_null_head_native(value: Option<BytesRef>) -> Result<Option<Bytes>> {
+    crate::native_if_null::evaluate_if_null_head_native(value)
+        .map(Some)
+        .map_err(|error| other_err!("Invalid native IFNULL head transport: {:?}", error))
+}
+
+#[rpn_fn(nullable)]
+fn if_null_finish_native(
+    report: Option<BytesRef>,
+    value: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    let value = crate::native_if_null::evaluate_if_null_finish_native(report, value)
+        .map_err(|error| other_err!("Invalid native IFNULL finish transport: {:?}", error))?;
+    // The validated original report proves the first operand was SQL NULL.
+    // Reuse the wire worker's nullable byte ownership and the shared choice,
+    // without interpreting the native identity representation.
+    if_null_bytes(None, value)
 }
 
 #[rpn_fn(nullable, raw_varg, extra_validator = case_when_validator::<T>)]

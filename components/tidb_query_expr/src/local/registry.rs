@@ -461,7 +461,9 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::FromUnixTimeTextNative
         | LocalFunctionId::FromUnixTimeLocalNative
         | LocalFunctionId::FromUnixTimeLegacy
-        | LocalFunctionId::FromUnixTimeNullNative => Err(other_err!(
+        | LocalFunctionId::FromUnixTimeNullNative
+        | LocalFunctionId::IfNullHeadNative
+        | LocalFunctionId::IfNullFinishNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

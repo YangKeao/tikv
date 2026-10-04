@@ -511,6 +511,8 @@ pub enum LocalFunctionId {
     FromUnixTimeLocalNative,
     FromUnixTimeLegacy,
     FromUnixTimeNullNative,
+    IfNullHeadNative,
+    IfNullFinishNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

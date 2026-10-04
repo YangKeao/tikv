@@ -1833,3 +1833,193 @@ mod from_unixtime_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod if_null_worker_tests {
+    use tidb_query_datatype::codec::mysql::Time;
+
+    use super::*;
+    use crate::{
+        NativeIdentityRef, NativeIfNullHeadResult, decode_native_if_null_head_result,
+        encode_native_identity,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limit: usize) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_retained_bytes: limit,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn bytes(value: ComputedValue) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("IFNULL must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+
+    #[test]
+    fn if_null_workers_dispatch_actual_null_and_preserve_opaque_identity_frames() {
+        let mut head = prepare(EvaluatedBytesOp::IfNullHeadNative, 64 * 1024 * 1024);
+        let head_storage = head.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Int(None),
+            EvaluatedArgs::Bytes(Some(Vec::new())),
+            EvaluatedArgs::Bytes(Some(vec![0])),
+        ] {
+            assert!(matches!(
+                head.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(head.kernel_invocations(), 0);
+        }
+        let need = bytes(head.eval_one(None).unwrap())
+            .expect("NULL input must produce a real NeedSecond report");
+        assert!(matches!(
+            decode_native_if_null_head_result(&need),
+            Some(NativeIfNullHeadResult::NeedSecond)
+        ));
+        assert_eq!(need, vec![0]);
+        assert_eq!(head.kernel_invocations(), 1);
+        let mut finish = prepare(EvaluatedBytesOp::IfNullFinishNative, 64 * 1024 * 1024);
+        let finish_storage = finish.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(Some(need.clone())),
+            EvaluatedArgs::Bytes2(None, None),
+            EvaluatedArgs::Bytes2(Some(vec![0, 0]), None),
+            EvaluatedArgs::Bytes2(Some(vec![1]), None),
+            EvaluatedArgs::Bytes2(Some(need.clone()), Some(vec![0])),
+        ] {
+            assert!(matches!(
+                finish.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(finish.kernel_invocations(), 0);
+        }
+        let views = [
+            NativeIdentityRef::MinNotNull,
+            NativeIdentityRef::MaxValue,
+            NativeIdentityRef::Int(0),
+            NativeIdentityRef::Float32(16_777_217.0_f64.to_bits()),
+            NativeIdentityRef::Decimal {
+                negative: false,
+                scale: 9,
+                storage_scale: 9,
+                declared_shape: None,
+                coefficient: b"",
+            },
+            NativeIdentityRef::Decimal {
+                negative: true,
+                scale: u32::MAX,
+                storage_scale: 9,
+                declared_shape: Some((-1, 99)),
+                coefficient: b"\xff\0+",
+            },
+            NativeIdentityRef::Time {
+                core: Time::native_core_from_fields(1970, 1, 1, 0, 0, 1, 7),
+                kind: 0,
+                fsp: 255,
+            },
+        ];
+        for (index, view) in views.into_iter().enumerate() {
+            // Decimal tails are opaque even when formatting them would panic;
+            // Float32 bits and DATE's hidden clock must not be interpreted.
+            let frame = encode_native_identity(view).unwrap();
+            let done = bytes(head.eval_one(Some(frame.clone())).unwrap()).unwrap();
+            assert!(
+                matches!(decode_native_if_null_head_result(&done), Some(NativeIfNullHeadResult::Done(actual)) if actual == frame.as_slice())
+            );
+            assert!(matches!(
+                finish.eval_args(EvaluatedArgs::Bytes2(Some(done), None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            let output = bytes(
+                finish
+                    .eval_args(EvaluatedArgs::Bytes2(
+                        Some(need.clone()),
+                        Some(frame.clone()),
+                    ))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(output, frame);
+            assert_eq!(head.kernel_invocations(), index as u64 + 2);
+            assert_eq!(finish.kernel_invocations(), index as u64 + 1);
+            assert!(head.is_healthy() && finish.is_healthy());
+            assert_eq!(head.retained_storage().unwrap(), head_storage);
+            assert_eq!(finish.retained_storage().unwrap(), finish_storage);
+        }
+        assert_eq!(
+            bytes(
+                finish
+                    .eval_args(EvaluatedArgs::Bytes2(Some(need), None))
+                    .unwrap()
+            ),
+            None
+        );
+        assert_eq!(finish.kernel_invocations(), 8);
+        assert!(finish.is_healthy());
+        assert_eq!(finish.retained_storage().unwrap(), finish_storage);
+    }
+
+    #[test]
+    fn if_null_worker_output_and_actual_capacity_refusals_precede_dispatch() {
+        let mut empty_budget = prepare(EvaluatedBytesOp::IfNullHeadNative, 0);
+        let storage = empty_budget.retained_storage().unwrap();
+        for _ in 0..2 {
+            // No input payload exists, but NeedSecond still needs one output
+            // byte. Refusal must happen before the real wrapper invocation.
+            assert!(matches!(
+                empty_budget.eval_one(None),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(empty_budget.kernel_invocations(), 0);
+            assert!(empty_budget.is_healthy());
+            assert_eq!(empty_budget.retained_storage().unwrap(), storage);
+        }
+        let mut producer = prepare(EvaluatedBytesOp::IfNullHeadNative, 64 * 1024 * 1024);
+        let need = bytes(producer.eval_one(None).unwrap()).unwrap();
+        for operation in [
+            EvaluatedBytesOp::IfNullHeadNative,
+            EvaluatedBytesOp::IfNullFinishNative,
+        ] {
+            let mut worker = prepare(operation, 64 * 1024);
+            let storage = worker.retained_storage().unwrap();
+            let mut frame = encode_native_identity(NativeIdentityRef::MaxValue).unwrap();
+            frame.reserve_exact(128 * 1024);
+            assert!(frame.capacity() > 64 * 1024 && frame.len() == 1);
+            let args = if operation == EvaluatedBytesOp::IfNullHeadNative {
+                EvaluatedArgs::Bytes(Some(frame))
+            } else {
+                EvaluatedArgs::Bytes2(Some(need.clone()), Some(frame))
+            };
+            assert!(matches!(
+                worker.eval_args(args),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let args = if operation == EvaluatedBytesOp::IfNullHeadNative {
+                EvaluatedArgs::Bytes(None)
+            } else {
+                EvaluatedArgs::Bytes2(Some(need.clone()), None)
+            };
+            let output = bytes(worker.eval_args(args).unwrap());
+            if operation == EvaluatedBytesOp::IfNullHeadNative {
+                assert_eq!(output, Some(need.clone()));
+            } else {
+                assert_eq!(output, None);
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

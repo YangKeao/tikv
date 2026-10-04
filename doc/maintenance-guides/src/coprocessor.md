@@ -417,6 +417,21 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  IFNULL adds two closed Values/OwnBytes profiles in `native_if_null.rs` and
+  `impl_control.rs`. Actual first identity/SQL absence yields a present report:
+  [0] demands the second operand; [1] plus the original non-NULL frame completes
+  the result. Finish accepts only the unchanged [0] report and actual nullable
+  second identity. Native dispatch does not preselect an answer or serialize a
+  skipped child. The generic nullable chooser also owns three wire IFNULL
+  selectors and native pure optimizer/proof decisions; their original clone,
+  metadata and demand policies remain distinct adapters. Head and Finish use
+  existing Bytes/Bytes2 roles, with common ready output preflight of1+firstlen
+  (NULL1) and secondlen (NULL0), actual input capacities and postflight checks.
+  No raw Decimal/UTF8/time/JSON math-admission filter is added. Native first-child
+  preparation retains original context/precedence; selected scope is lent to
+  the demanded second child and Finish after the head invocation has ended.
+  No-context preparation still occurs before creating its one-shot owner.
+  There is no new carrier, general driver or PB/legacy admission. IF is separate.
   FROM_UNIXTIME uses five closed profiles in `native_from_unixtime.rs`: actual
   numeric identity, coerced UTF8 text, local-zone continuation, typed legacy
   Decimal and actual NULL. Epoch output is tag0+secondsLE8+microsLE4+FSP, or
