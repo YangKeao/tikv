@@ -31,6 +31,149 @@ use crate::{
     types::function::CallBuild,
 };
 
+/// Actual nullable text operands; validate all present UTF-8 before NULL
+/// handling.
+pub fn timestamp_diff_text_native_args_valid(
+    unit: Option<&[u8]>,
+    left: Option<&[u8]>,
+    right: Option<&[u8]>,
+) -> bool {
+    [unit, left, right]
+        .into_iter()
+        .all(|value| value.is_none_or(|value| from_utf8(value).is_ok()))
+}
+
+/// Legacy's actual raw unit and optional complete LE64 calendar cores.
+pub fn timestamp_diff_core_native_args_valid(
+    unit: Option<&[u8]>,
+    left: Option<&[u8]>,
+    right: Option<&[u8]>,
+) -> bool {
+    unit.is_some()
+        && [left, right]
+            .into_iter()
+            .all(|value| value.is_none_or(|value| value.len() == 8))
+}
+
+#[rpn_fn(nullable)]
+fn timestamp_diff_text_native(
+    unit: Option<BytesRef>,
+    left: Option<BytesRef>,
+    right: Option<BytesRef>,
+) -> Result<Option<Int>> {
+    if !timestamp_diff_text_native_args_valid(unit, left, right) {
+        return Err(other_err!(
+            "Native text TIMESTAMPDIFF requires nullable UTF-8 operands"
+        ));
+    }
+    let (Some(unit), Some(left), Some(right)) = (unit, left, right) else {
+        return Ok(None);
+    };
+    Ok(Time::native_timestamp_diff_text(
+        from_utf8(unit).expect("validated TIMESTAMPDIFF unit"),
+        from_utf8(left).expect("validated TIMESTAMPDIFF left"),
+        from_utf8(right).expect("validated TIMESTAMPDIFF right"),
+    ))
+}
+
+#[rpn_fn(nullable)]
+fn timestamp_diff_core_native(
+    unit: Option<BytesRef>,
+    left: Option<BytesRef>,
+    right: Option<BytesRef>,
+) -> Result<Option<Int>> {
+    if !timestamp_diff_core_native_args_valid(unit, left, right) {
+        return Err(other_err!(
+            "Native core TIMESTAMPDIFF requires a unit and optional LE64 cores"
+        ));
+    }
+    let (Some(left), Some(right)) = (left, right) else {
+        return Ok(None);
+    };
+    let left = u64::from_le_bytes(left.try_into().expect("validated TIMESTAMPDIFF left core"));
+    let right = u64::from_le_bytes(
+        right
+            .try_into()
+            .expect("validated TIMESTAMPDIFF right core"),
+    );
+    if left == 0 || right == 0 {
+        return Ok(None);
+    }
+    use tidb_query_datatype::codec::mysql::time::NativeTimestampInterval;
+    let Some(interval) =
+        NativeTimestampInterval::from_uppercase_bytes(unit.expect("validated TIMESTAMPDIFF unit"))
+    else {
+        return Ok(Some(0));
+    };
+    Ok(Some(Time::native_core_timestamp_diff(
+        left, right, interval,
+    )))
+}
+
+#[cfg(test)]
+mod native_timestamp_diff_profile_tests {
+    use super::*;
+
+    #[test]
+    fn timestamp_diff_profiles_keep_unit_and_null_ordering_distinct() {
+        assert_eq!(
+            timestamp_diff_text_native(Some(b"day"), Some(b"0000-01-01"), Some(b"0000-03-01"))
+                .unwrap(),
+            Some(60)
+        );
+        assert_eq!(
+            timestamp_diff_text_native(None, Some(b"bad"), None).unwrap(),
+            None
+        );
+        assert!(timestamp_diff_text_native(None, Some(b"\xff"), None).is_err());
+        assert_eq!(
+            timestamp_diff_text_native(Some(b"unknown"), Some(b"bad"), Some(b"2000-01-01"))
+                .unwrap(),
+            None
+        );
+        let jan = Time::native_core_from_fields(0, 1, 1, 0, 0, 0, 0).to_le_bytes();
+        let mar = Time::native_core_from_fields(0, 3, 1, 0, 0, 0, 0).to_le_bytes();
+        assert_eq!(
+            timestamp_diff_core_native(Some(b"DAY"), Some(&jan), Some(&mar)).unwrap(),
+            Some(59)
+        );
+        for unit in [b"day".as_slice(), b" DAY", b"\xff", b""] {
+            assert_eq!(
+                timestamp_diff_core_native(Some(unit), Some(&jan), Some(&mar)).unwrap(),
+                Some(0)
+            );
+        }
+        assert_eq!(
+            timestamp_diff_core_native(Some(b"\xff"), None, Some(&mar)).unwrap(),
+            None
+        );
+        assert_eq!(
+            timestamp_diff_core_native(Some(b"DAY"), Some(&0_u64.to_le_bytes()), Some(&mar))
+                .unwrap(),
+            None
+        );
+        // Reserved bits mean this is not the exact all-zero core.
+        assert_eq!(
+            timestamp_diff_core_native(
+                Some(b"SECOND"),
+                Some(&15_u64.to_le_bytes()),
+                Some(&1_u64.to_le_bytes())
+            )
+            .unwrap(),
+            Some(0)
+        );
+        assert!(timestamp_diff_core_native(None, Some(&jan), Some(&mar)).is_err());
+        assert!(timestamp_diff_core_native(Some(b"DAY"), Some(b""), None).is_err());
+        let first = Time::native_core_from_fields(2020, 1, 2, 0, 0, 0, 0).to_le_bytes();
+        let second = Time::native_core_from_fields(2020, 1, 1, 31, 0, 0, 0).to_le_bytes();
+        // Unknown raw units must not enter the potentially panicking month core.
+        assert_eq!(
+            timestamp_diff_core_native(Some(b"month"), Some(&first), Some(&second)).unwrap(),
+            Some(0)
+        );
+    }
+}
+
 #[rpn_fn(nullable)]
 fn bounded_staleness_head_native(
     left: Option<BytesRef>,

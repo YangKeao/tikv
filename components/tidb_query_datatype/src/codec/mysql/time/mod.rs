@@ -6,6 +6,7 @@ mod native_datetime;
 mod native_parse;
 mod native_session_time_zone;
 mod native_time_parser;
+mod native_timestamp_diff;
 mod native_value;
 mod tz;
 pub mod weekmode;
@@ -44,6 +45,7 @@ pub use self::{
         native_parse_time_from_decimal_text, native_parse_time_from_float64,
         native_parse_time_from_int64, native_parse_time_from_num,
     },
+    native_timestamp_diff::{NativeTimeDifference, NativeTimestampInterval},
     native_value::{NativeTemporalValue, NativeTimeError},
     tz::Tz,
     weekmode::WeekMode,

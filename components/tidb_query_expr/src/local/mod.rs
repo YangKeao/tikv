@@ -3173,3 +3173,238 @@ mod bounded_staleness_worker_tests {
         // floor with a special zero-retained success rule.
     }
 }
+
+#[cfg(test)]
+mod timestamp_diff_worker_tests {
+    use tidb_query_datatype::codec::mysql::Time;
+
+    use super::*;
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn result(value: ComputedValue) -> Option<i64> {
+        let ComputedValue::Int(value) = value else {
+            panic!("TIMESTAMPDIFF must own signed Int");
+        };
+        assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
+        value.into_option()
+    }
+    fn text(unit: Option<&str>, left: Option<&str>, right: Option<&str>) -> EvaluatedArgs {
+        EvaluatedArgs::Bytes3(
+            [unit, left, right].map(|value| value.map(|value| value.as_bytes().to_vec())),
+        )
+    }
+    fn core(unit: Option<&[u8]>, left: Option<u64>, right: Option<u64>) -> EvaluatedArgs {
+        EvaluatedArgs::Bytes3([
+            unit.map(|value| value.to_vec()),
+            left.map(|value| value.to_le_bytes().to_vec()),
+            right.map(|value| value.to_le_bytes().to_vec()),
+        ])
+    }
+
+    #[test]
+    fn timestamp_diff_text_and_core_keep_distinct_calendar_unit_and_null_policies() {
+        let mut text_worker = prepare(
+            EvaluatedBytesOp::TimestampDiffTextNative,
+            ExecutionLimits::default(),
+        );
+        let storage = text_worker.retained_storage().unwrap();
+        assert!(matches!(
+            text_worker.eval_args(EvaluatedArgs::Bytes(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        for position in 0..3 {
+            let mut values = [None, None, None];
+            values[position] = Some(vec![255]);
+            assert!(matches!(
+                text_worker.eval_args(EvaluatedArgs::Bytes3(values)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(
+                text_worker.kernel_invocations(),
+                0,
+                "all present text must be UTF-8 even beside actual NULL"
+            );
+        }
+        for (index, (unit, left, right, expected)) in [
+            (
+                Some("DAY"),
+                Some("0000-01-01"),
+                Some("0000-03-01"),
+                Some(60),
+            ),
+            (
+                Some("day"),
+                Some("0000-01-01"),
+                Some("0000-03-01"),
+                Some(60),
+            ),
+            (
+                Some(" day "),
+                Some("2020-01-01"),
+                Some("2020-01-02"),
+                Some(0),
+            ),
+            (
+                Some("unknown"),
+                Some("2020-01-01"),
+                Some("2020-01-02"),
+                Some(0),
+            ),
+            (Some("unknown"), Some("bad"), Some("2020-01-02"), None),
+            (
+                Some("SECOND"),
+                Some("2020-01-01 00:00:00.900000"),
+                Some("2020-01-01 00:00:00.100000"),
+                Some(0),
+            ),
+            (
+                Some("MONTH"),
+                Some("2020-01-15 12:00:00.123456"),
+                Some("2020-02-15 12:00:00.123455"),
+                Some(0),
+            ),
+            (
+                Some("MONTH"),
+                Some("2020-01-15 12:00:00.123456"),
+                Some("2020-02-15 12:00:00.123456"),
+                Some(1),
+            ),
+            (
+                Some("MICROSECOND"),
+                Some("2020-01-01 00:00:00.000000"),
+                Some("2020-01-01 00:00:00.000001"),
+                Some(1),
+            ),
+            (None, Some("2020-01-01"), Some("2020-01-02"), None),
+            (Some("DAY"), None, Some("2020-01-02"), None),
+            (Some("DAY"), Some("2020-01-01"), None, None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                result(text_worker.eval_args(text(unit, left, right)).unwrap()),
+                expected
+            );
+            assert_eq!(text_worker.kernel_invocations(), index as u64 + 1);
+            assert!(text_worker.is_healthy());
+            assert_eq!(text_worker.retained_storage().unwrap(), storage);
+        }
+        let january = Time::native_core_from_fields(0, 1, 1, 0, 0, 0, 0);
+        let march = Time::native_core_from_fields(0, 3, 1, 0, 0, 0, 0);
+        let mut core_worker = prepare(
+            EvaluatedBytesOp::TimestampDiffCoreNative,
+            ExecutionLimits::default(),
+        );
+        let storage = core_worker.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes2(None, None),
+            core(None, Some(january), Some(march)),
+            EvaluatedArgs::Bytes3([Some(b"DAY".to_vec()), Some(vec![0; 7]), None]),
+            EvaluatedArgs::Bytes3([Some(b"DAY".to_vec()), None, Some(vec![0; 9])]),
+        ] {
+            assert!(matches!(
+                core_worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(core_worker.kernel_invocations(), 0);
+        }
+        let micro = Time::native_core_from_fields(2020, 1, 1, 0, 0, 0, 0);
+        for (index, (unit, left, right, expected)) in [
+            (&b"DAY"[..], Some(january), Some(march), Some(59)),
+            (&b"day"[..], Some(january), Some(march), Some(0)),
+            (&b"\xff"[..], Some(january), Some(march), Some(0)),
+            (&b"DAY"[..], None, Some(march), None),
+            (&b"DAY"[..], Some(january), None, None),
+            (&b"unknown"[..], Some(0), Some(march), None),
+            (&b"SECOND"[..], Some(1), Some(15), Some(0)),
+            (
+                &b"MICROSECOND"[..],
+                Some(micro),
+                Some(micro + (1 << 4)),
+                Some(1),
+            ),
+            (
+                &b"SECOND"[..],
+                Some(micro + (900_000 << 4)),
+                Some(micro + (100_000 << 4)),
+                Some(0),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                result(
+                    core_worker
+                        .eval_args(core(Some(unit), left, right))
+                        .unwrap()
+                ),
+                expected
+            );
+            assert_eq!(core_worker.kernel_invocations(), index as u64 + 1);
+            assert!(core_worker.is_healthy());
+            assert_eq!(core_worker.retained_storage().unwrap(), storage);
+        }
+    }
+
+    #[test]
+    fn timestamp_diff_charges_actual_ready_unit_and_endpoint_capacities_before_dispatch() {
+        for operation in [
+            EvaluatedBytesOp::TimestampDiffTextNative,
+            EvaluatedBytesOp::TimestampDiffCoreNative,
+        ] {
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            let ready = || {
+                if operation == EvaluatedBytesOp::TimestampDiffTextNative {
+                    text(Some("DAY"), Some("2020-01-01"), Some("2020-01-02"))
+                } else {
+                    core(
+                        Some(b"DAY"),
+                        Some(Time::native_core_from_fields(2020, 1, 1, 0, 0, 0, 0)),
+                        Some(Time::native_core_from_fields(2020, 1, 2, 0, 0, 0, 0)),
+                    )
+                }
+            };
+            let EvaluatedArgs::Bytes3(mut values) = ready() else {
+                unreachable!();
+            };
+            let position = if operation == EvaluatedBytesOp::TimestampDiffTextNative {
+                0
+            } else {
+                1
+            };
+            let owner = values[position].as_mut().unwrap();
+            owner.reserve_exact(128 * 1024);
+            assert!(owner.capacity() > 64 * 1024);
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes3(values)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert_eq!(result(worker.eval_args(ready()).unwrap()), Some(1));
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        // Shared driver/Int row metadata remains charged; no zero-retained or
+        // exact allocator-capacity success threshold is asserted here.
+    }
+}

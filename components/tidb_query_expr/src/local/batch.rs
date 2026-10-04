@@ -1584,6 +1584,8 @@ pub enum EvaluatedBytesOp {
     CastRealUnsignedNative,
     BoundedStalenessHeadNative,
     BoundedStalenessFinishNative,
+    TimestampDiffTextNative,
+    TimestampDiffCoreNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1647,6 +1649,16 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::TimestampDiffTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TimestampDiffTextNative,
+                );
+            }
+            Self::TimestampDiffCoreNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TimestampDiffCoreNative,
+                );
+            }
             Self::BoundedStalenessHeadNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::BoundedStalenessHeadNative,
@@ -4300,6 +4312,8 @@ impl EvaluatedBytesOp {
             Self::BoundedStalenessFinishNative => {
                 crate::impl_time::bounded_staleness_finish_native_fn_meta()
             }
+            Self::TimestampDiffTextNative => crate::impl_time::timestamp_diff_text_native_fn_meta(),
+            Self::TimestampDiffCoreNative => crate::impl_time::timestamp_diff_core_native_fn_meta(),
             Self::CastRealUnsignedNative => crate::impl_cast::cast_real_unsigned_native_fn_meta(),
             Self::NullIfNative => crate::impl_control::null_if_native_fn_meta(),
             Self::CoalesceEndNative => crate::impl_compare::coalesce_end_native_fn_meta(),
@@ -4944,6 +4958,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::TimestampDiffTextNative | Self::TimestampDiffCoreNative => EvalType::Int,
             Self::BoundedStalenessHeadNative | Self::BoundedStalenessFinishNative => {
                 EvalType::Bytes
             }
@@ -5398,6 +5413,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::TimestampDiffTextNative | Self::TimestampDiffCoreNative => {
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
+            }
             Self::BoundedStalenessHeadNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::BoundedStalenessFinishNative => {
                 &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
@@ -6888,6 +6906,26 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::TimestampDiffTextNative {
+            return match self {
+                Self::Bytes3([unit, left, right]) => crate::timestamp_diff_text_native_args_valid(
+                    unit.as_deref(),
+                    left.as_deref(),
+                    right.as_deref(),
+                ),
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::TimestampDiffCoreNative {
+            return match self {
+                Self::Bytes3([unit, left, right]) => crate::timestamp_diff_core_native_args_valid(
+                    unit.as_deref(),
+                    left.as_deref(),
+                    right.as_deref(),
+                ),
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::BoundedStalenessHeadNative {
             return match self {
                 Self::Bytes2(left, right) => crate::bounded_staleness_head_native_args_valid(

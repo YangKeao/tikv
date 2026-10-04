@@ -520,6 +520,8 @@ pub enum LocalFunctionId {
     CastRealUnsignedNative,
     BoundedStalenessHeadNative,
     BoundedStalenessFinishNative,
+    TimestampDiffTextNative,
+    TimestampDiffCoreNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

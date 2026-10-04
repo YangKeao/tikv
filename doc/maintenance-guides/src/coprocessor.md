@@ -417,6 +417,16 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  Native TIMESTAMPDIFF has separate Text/Core Values/Bytes3/nullable-Int
+  profiles. The datatype `time/native_timestamp_diff.rs` owns strict wide-year
+  text/civil/signed-month arithmetic and the distinct raw i32-daynr/u32-month
+  policy, plus shared interval/difference types and exact uppercase lookup.
+  Text consumes actual display/coercion and computes delta before unknown-unit
+  zero; Core uses actual optional8LE cores, full-raw zero and exact unit bytes,
+  returning unknown-unit zero before arithmetic. Existing wire metadata and
+  invalid-time policy are unchanged. Callers retain ordinary eager casts,
+  Shared PB first-NULL demand and manual legacy unit-first/two-endpoint demand.
+  Native type helpers are aliases/thin delegates, not a second implementation.
   Native bounded staleness uses `native_bounded_staleness.rs`: a Bytes2 Head
   classifies actual raw Time endpoints into invalid-left/right, reversed-window
   NULL or NeedSafe; a Bytes3 Finish accepts the original endpoints and actual
