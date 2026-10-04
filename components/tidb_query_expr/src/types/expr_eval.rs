@@ -316,6 +316,19 @@ fn evaluated_ready_args_match(
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
         (
+            EvaluatedBytesOp::StrToDateHeadNative | EvaluatedBytesOp::StrToDateFinishNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 3 && operation.call_count() == 1,
+        (EvaluatedBytesOp::StrToDateTypedFinishNative, EvaluatedArgsRole::Values) => {
+            types.len() == 2 && operation.call_count() == 1
+        }
+        (
+            EvaluatedBytesOp::StrToDateHeadNative
+            | EvaluatedBytesOp::StrToDateFinishNative
+            | EvaluatedBytesOp::StrToDateTypedFinishNative,
+            _,
+        ) => false,
+        (
             EvaluatedBytesOp::ToBinaryNative | EvaluatedBytesOp::FromBinaryNative,
             EvaluatedArgsRole::Values,
         ) => types.len() == 2 && operation.call_count() == 1,
@@ -484,6 +497,43 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::StrToDateHeadNative
+            || match values {
+                [
+                    ScalarValue::Bytes(data),
+                    ScalarValue::Bytes(format),
+                    ScalarValue::Int(target_type),
+                ] => crate::str_to_date_head_native_args_valid(
+                    data.as_deref(),
+                    format.as_deref(),
+                    *target_type,
+                ),
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::StrToDateFinishNative
+            || match values {
+                [
+                    ScalarValue::Bytes(state),
+                    ScalarValue::Int(no_zero),
+                    ScalarValue::Int(allow_invalid),
+                ] => crate::str_to_date_finish_native_args_valid(
+                    state.as_deref(),
+                    *no_zero,
+                    *allow_invalid,
+                ),
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::StrToDateTypedFinishNative
+            || match values {
+                [
+                    ScalarValue::Bytes(need_typed_report),
+                    ScalarValue::Int(no_zero),
+                ] => crate::str_to_date_typed_finish_native_args_valid(
+                    need_typed_report.as_deref(),
+                    *no_zero,
+                ),
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::ToBinaryNative
             || match values {
                 [ScalarValue::Bytes(value), ScalarValue::Bytes(charset)] => {
@@ -1352,6 +1402,19 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::StrToDateHeadNative | EvaluatedBytesOp::StrToDateFinishNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 3 && calls == 1,
+        (EvaluatedBytesOp::StrToDateTypedFinishNative, EvaluatedArgsRole::Values) => {
+            arity == 2 && calls == 1
+        }
+        (
+            EvaluatedBytesOp::StrToDateHeadNative
+            | EvaluatedBytesOp::StrToDateFinishNative
+            | EvaluatedBytesOp::StrToDateTypedFinishNative,
+            _,
+        ) => false,
         (
             EvaluatedBytesOp::ToBinaryNative | EvaluatedBytesOp::FromBinaryNative,
             EvaluatedArgsRole::Values,

@@ -417,6 +417,15 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  Ordinary STR_TO_DATE expression policy lives separately in query_expr's
+  `native_str_to_date.rs`: three one-call Values/OwnBytes profiles parse, finish
+  date-mode validation and finish typed DATETIME's late zero-date-prefix policy.
+  Reports preserve wide parsed fields and original input for warning rendering;
+  mode facts are read only on the corresponding continuation. A narrow
+  BytesIntInt carrier keeps both actual booleans separate; no generic compile or
+  wire admission is widened. Declared-type metadata preserves named versus
+  Unknown variants, and checked input-length-plus64 bounds retained replies,
+  without claiming parser temporary/physical allocation peaks.
   The native public datatype STR_TO_DATE parser now lives in
   `codec/mysql/time/native_str_to_date.rs`, alongside its format classifier and
   Go-compatible punctuation predicate. It preserves the original raw packing and

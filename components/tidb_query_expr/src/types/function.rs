@@ -525,6 +525,9 @@ pub enum LocalFunctionId {
     ToBinaryNative,
     FromBinaryNative,
     ConvertUsingNative,
+    StrToDateHeadNative,
+    StrToDateFinishNative,
+    StrToDateTypedFinishNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

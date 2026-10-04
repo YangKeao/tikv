@@ -3680,3 +3680,258 @@ mod convert_charset_worker_tests {
         // every ready owner and the existing driver row metadata still count.
     }
 }
+
+#[cfg(test)]
+mod str_to_date_worker_tests {
+    use super::*;
+    use crate::{NativeStrToDateResult as Reply, decode_native_str_to_date_result};
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn head_args(input: &str, format: &str, target: Option<i64>) -> EvaluatedArgs {
+        EvaluatedArgs::BytesBytesInt(
+            Some(input.as_bytes().to_vec()),
+            Some(format.as_bytes().to_vec()),
+            target,
+        )
+    }
+    fn run(worker: &mut EvaluatedBytesWorker, args: EvaluatedArgs) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("STR_TO_DATE stages must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+    fn value(report: &[u8], expected: &str) {
+        let Reply::Value(actual) = decode_native_str_to_date_result(report).unwrap() else {
+            panic!("expected value report");
+        };
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn str_to_date_workers_pass_whole_states_keep_wide_days_and_read_typed_mode_late() {
+        let mut head = prepare(
+            EvaluatedBytesOp::StrToDateHeadNative,
+            ExecutionLimits::default(),
+        );
+        let storage = head.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes2(Some(b"2020".to_vec()), Some(b"%Y".to_vec())),
+            EvaluatedArgs::BytesBytesInt(Some(vec![255]), Some(b"%Y".to_vec()), None),
+            EvaluatedArgs::BytesBytesInt(Some(b"2020".to_vec()), Some(vec![255]), None),
+            head_args("202310", "%H%i%s", Some(256)),
+            head_args("202310", "%H%i%s", Some(-257)),
+        ] {
+            assert!(matches!(
+                head.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(head.kernel_invocations(), 0);
+        }
+        let plain = run(&mut head, head_args("202310", "%H%i%s", None)).unwrap();
+        value(&plain, "20:23:10");
+        // Unknown(12) is encoded as -1-12, not actual Datetime code +12.
+        value(
+            &run(&mut head, head_args("202310", "%H%i%s", Some(-13))).unwrap(),
+            "20:23:10",
+        );
+        let typed = run(&mut head, head_args("202310", "%H%i%s", Some(12))).unwrap();
+        assert!(matches!(
+            decode_native_str_to_date_result(&typed),
+            Some(Reply::NeedTypedDateMode("20:23:10"))
+        ));
+        let invalid_day = run(&mut head, head_args("2021-02-30", "%Y-%m-%d", None)).unwrap();
+        let wide_day = run(&mut head, head_args("2020 12 999", "%Y %m %j", None)).unwrap();
+        let zero_month = run(&mut head, head_args("2020 999", "%Y %j", None)).unwrap();
+        for state in [&invalid_day, &wide_day, &zero_month] {
+            assert!(matches!(
+                decode_native_str_to_date_result(state),
+                Some(Reply::NeedDateModes(_))
+            ));
+        }
+        assert_eq!(head.kernel_invocations(), 6);
+        assert!(head.is_healthy());
+        assert_eq!(head.retained_storage().unwrap(), storage);
+        let mut finish = prepare(
+            EvaluatedBytesOp::StrToDateFinishNative,
+            ExecutionLimits::default(),
+        );
+        let storage = finish.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::BytesInt(Some(invalid_day.clone()), Some(0)),
+            EvaluatedArgs::BytesIntInt(Some(plain), Some(0), Some(1)),
+            EvaluatedArgs::BytesIntInt(None, Some(0), Some(1)),
+            EvaluatedArgs::BytesIntInt(Some(invalid_day.clone()), Some(2), Some(1)),
+            EvaluatedArgs::BytesIntInt(Some(invalid_day.clone()), Some(0), None),
+        ] {
+            assert!(matches!(
+                finish.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(finish.kernel_invocations(), 0);
+        }
+        for (index, (state, allow_invalid, warning, expected)) in [
+            (&invalid_day, 0, Some(1292), "0000-00-00"),
+            (&invalid_day, 1, None, "2021-02-30"),
+            // 999 must remain u32 in the opaque state, not become packed day 7.
+            (&wide_day, 1, Some(1292), "0000-00-00"),
+            (&zero_month, 1, Some(1411), "2020 999"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = run(
+                &mut finish,
+                EvaluatedArgs::BytesIntInt(Some(state.clone()), Some(0), Some(allow_invalid)),
+            )
+            .unwrap();
+            match warning {
+                Some(expected_code) => {
+                    let Reply::Warning { code, message } =
+                        decode_native_str_to_date_result(&output).unwrap()
+                    else {
+                        panic!("expected warning report");
+                    };
+                    assert_eq!(code, expected_code);
+                    assert!(message.contains(expected));
+                }
+                None => value(&output, expected),
+            }
+            assert_eq!(finish.kernel_invocations(), index as u64 + 1);
+            assert!(finish.is_healthy());
+            assert_eq!(finish.retained_storage().unwrap(), storage);
+        }
+        let mut typed_finish = prepare(
+            EvaluatedBytesOp::StrToDateTypedFinishNative,
+            ExecutionLimits::default(),
+        );
+        let storage = typed_finish.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(Some(typed.clone())),
+            EvaluatedArgs::BytesInt(Some(invalid_day), Some(0)),
+            EvaluatedArgs::BytesInt(None, Some(0)),
+            EvaluatedArgs::BytesInt(Some(typed.clone()), Some(-1)),
+            EvaluatedArgs::BytesInt(Some(typed.clone()), None),
+        ] {
+            assert!(matches!(
+                typed_finish.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(typed_finish.kernel_invocations(), 0);
+        }
+        // Forward tag 4 with its entire original payload, never just its text.
+        value(
+            &run(
+                &mut typed_finish,
+                EvaluatedArgs::BytesInt(Some(typed.clone()), Some(0)),
+            )
+            .unwrap(),
+            "0000-00-00 20:23:10",
+        );
+        assert_eq!(
+            run(
+                &mut typed_finish,
+                EvaluatedArgs::BytesInt(Some(typed), Some(1))
+            ),
+            None
+        );
+        assert_eq!(typed_finish.kernel_invocations(), 2);
+        assert!(typed_finish.is_healthy());
+        assert_eq!(typed_finish.retained_storage().unwrap(), storage);
+    }
+
+    #[test]
+    fn str_to_date_stages_refuse_zero_steps_and_actual_spare_capacity_before_dispatch() {
+        let mut source = prepare(
+            EvaluatedBytesOp::StrToDateHeadNative,
+            ExecutionLimits::default(),
+        );
+        let modes = run(&mut source, head_args("2021-02-30", "%Y-%m-%d", None)).unwrap();
+        let typed = run(&mut source, head_args("202310", "%H%i%s", Some(12))).unwrap();
+        assert!(matches!(
+            decode_native_str_to_date_result(&modes),
+            Some(Reply::NeedDateModes(_))
+        ));
+        assert!(matches!(
+            decode_native_str_to_date_result(&typed),
+            Some(Reply::NeedTypedDateMode(_))
+        ));
+        for (operation, position) in [
+            (EvaluatedBytesOp::StrToDateHeadNative, 0),
+            (EvaluatedBytesOp::StrToDateHeadNative, 1),
+            (EvaluatedBytesOp::StrToDateFinishNative, 0),
+            (EvaluatedBytesOp::StrToDateTypedFinishNative, 0),
+        ] {
+            let ready = || match operation {
+                EvaluatedBytesOp::StrToDateHeadNative => head_args("2021-02-30", "%Y-%m-%d", None),
+                EvaluatedBytesOp::StrToDateFinishNative => {
+                    EvaluatedArgs::BytesIntInt(Some(modes.clone()), Some(0), Some(1))
+                }
+                _ => EvaluatedArgs::BytesInt(Some(typed.clone()), Some(0)),
+            };
+            // CPP execution steps are not frontend pool slots.
+            let mut stopped = prepare(
+                operation,
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = stopped.retained_storage().unwrap();
+            assert!(matches!(
+                stopped.eval_args(ready()),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(stopped.kernel_invocations(), 0);
+            assert!(stopped.is_healthy());
+            assert_eq!(stopped.retained_storage().unwrap(), storage);
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            let mut args = ready();
+            let owner = match (&mut args, position) {
+                (EvaluatedArgs::BytesBytesInt(input, ..), 0) => input.as_mut().unwrap(),
+                (EvaluatedArgs::BytesBytesInt(_, format, _), 1) => format.as_mut().unwrap(),
+                (EvaluatedArgs::BytesIntInt(state, ..), _)
+                | (EvaluatedArgs::BytesInt(state, _), _) => state.as_mut().unwrap(),
+                _ => unreachable!(),
+            };
+            owner.reserve_exact(128 * 1024);
+            assert!(owner.capacity() > 64 * 1024);
+            assert!(matches!(
+                worker.eval_args(args),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let output = run(&mut worker, ready()).unwrap();
+            match operation {
+                EvaluatedBytesOp::StrToDateHeadNative => assert!(matches!(
+                    decode_native_str_to_date_result(&output),
+                    Some(Reply::NeedDateModes(_))
+                )),
+                EvaluatedBytesOp::StrToDateFinishNative => value(&output, "2021-02-30"),
+                _ => value(&output, "0000-00-00 20:23:10"),
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        // first.len()+64 is the reply plan, not an allocator/total-retained
+        // threshold; every actual owner and the old row metadata still count.
+    }
+}

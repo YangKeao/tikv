@@ -1589,6 +1589,9 @@ pub enum EvaluatedBytesOp {
     ToBinaryNative,
     FromBinaryNative,
     ConvertUsingNative,
+    StrToDateHeadNative,
+    StrToDateFinishNative,
+    StrToDateTypedFinishNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1652,6 +1655,21 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::StrToDateHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::StrToDateHeadNative,
+                );
+            }
+            Self::StrToDateFinishNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::StrToDateFinishNative,
+                );
+            }
+            Self::StrToDateTypedFinishNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::StrToDateTypedFinishNative,
+                );
+            }
             Self::ToBinaryNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ToBinaryNative);
             }
@@ -4328,6 +4346,15 @@ impl EvaluatedBytesOp {
             Self::BoundedStalenessFinishNative => {
                 crate::impl_time::bounded_staleness_finish_native_fn_meta()
             }
+            Self::StrToDateHeadNative => {
+                crate::native_str_to_date::str_to_date_head_native_fn_meta()
+            }
+            Self::StrToDateFinishNative => {
+                crate::native_str_to_date::str_to_date_finish_native_fn_meta()
+            }
+            Self::StrToDateTypedFinishNative => {
+                crate::native_str_to_date::str_to_date_typed_finish_native_fn_meta()
+            }
             Self::ToBinaryNative => crate::to_binary_native_fn_meta(),
             Self::FromBinaryNative => crate::from_binary_native_fn_meta(),
             Self::ConvertUsingNative => crate::convert_using_native_fn_meta(),
@@ -4977,6 +5004,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::StrToDateHeadNative
+            | Self::StrToDateFinishNative
+            | Self::StrToDateTypedFinishNative => EvalType::Bytes,
             Self::ToBinaryNative | Self::FromBinaryNative | Self::ConvertUsingNative => {
                 EvalType::Bytes
             }
@@ -5435,6 +5465,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::StrToDateHeadNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
+            Self::StrToDateFinishNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
+            Self::StrToDateTypedFinishNative => &[EvalType::Bytes, EvalType::Int],
             Self::ToBinaryNative | Self::FromBinaryNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::ConvertUsingNative => &[
                 EvalType::Bytes,
@@ -6789,6 +6822,9 @@ pub enum EvaluatedArgs {
         policy: NativeSearchPolicy,
     },
     BytesBytesInt(Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>),
+    /// Original STR_TO_DATE state and two separately observed nullable modes;
+    /// no packed mode bits or representative SQL arguments.
+    BytesIntInt(Option<Vec<u8>>, Option<i64>, Option<i64>),
     FindInSetPreparedReady {
         needle: ReadyBytesArg,
         keys: PreparedFindInSetKeys,
@@ -6932,6 +6968,7 @@ impl EvaluatedArgs {
                 &[EvalType::Bytes, EvalType::Int]
             }
             Self::Bytes3(_) => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
+            Self::BytesIntInt(..) => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
             Self::Bytes4(_) => &[
                 EvalType::Bytes,
                 EvalType::Bytes,
@@ -6944,6 +6981,41 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::StrToDateHeadNative {
+            return match self {
+                Self::BytesBytesInt(value, format, target) => {
+                    crate::native_str_to_date::str_to_date_head_native_args_valid(
+                        value.as_deref(),
+                        format.as_deref(),
+                        *target,
+                    )
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::StrToDateFinishNative {
+            return match self {
+                Self::BytesIntInt(state, no_zero_date, allow_invalid_dates) => {
+                    crate::native_str_to_date::str_to_date_finish_native_args_valid(
+                        state.as_deref(),
+                        *no_zero_date,
+                        *allow_invalid_dates,
+                    )
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::StrToDateTypedFinishNative {
+            return match self {
+                Self::BytesInt(report, no_zero_date) => {
+                    crate::native_str_to_date::str_to_date_typed_finish_native_args_valid(
+                        report.as_deref(),
+                        *no_zero_date,
+                    )
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::ToBinaryNative {
             return match self {
                 Self::Bytes2(value, charset) => {
@@ -8171,6 +8243,9 @@ impl EvaluatedArgs {
                 ([Bytes(bytes), Bytes(delimiter), Int(count), Int(None)], 3)
             }
             Self::Bytes3([a, b, c]) => ([Bytes(a), Bytes(b), Bytes(c), Int(None)], 3),
+            Self::BytesIntInt(value, first, second) => {
+                ([Bytes(value), Int(first), Int(second), Int(None)], 3)
+            }
             Self::Bytes4([a, b, c, d]) => ([Bytes(a), Bytes(b), Bytes(c), Bytes(d)], 4),
             Self::Int2(lhs, rhs) => ([Int(lhs), Int(rhs), Int(None), Int(None)], 2),
             Self::PacketInt { value, disposition } => (
@@ -10124,6 +10199,65 @@ impl EvaluatedBytesWorker {
             // Codec-internal temporary allocation peaks are not claimed here.
             budget.check_output(bound, input_bytes)?;
         }
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::StrToDateHeadNative
+                | EvaluatedBytesOp::StrToDateFinishNative
+                | EvaluatedBytesOp::StrToDateTypedFinishNative
+        ) {
+            let first = match (self.operation, &ready[..arity]) {
+                (
+                    EvaluatedBytesOp::StrToDateHeadNative,
+                    [
+                        ScalarValue::Bytes(value),
+                        ScalarValue::Bytes(format),
+                        ScalarValue::Int(target),
+                    ],
+                ) if crate::native_str_to_date::str_to_date_head_native_args_valid(
+                    value.as_deref(),
+                    format.as_deref(),
+                    *target,
+                ) =>
+                {
+                    value.as_deref()
+                }
+                (
+                    EvaluatedBytesOp::StrToDateFinishNative,
+                    [
+                        ScalarValue::Bytes(state),
+                        ScalarValue::Int(no_zero_date),
+                        ScalarValue::Int(allow_invalid_dates),
+                    ],
+                ) if crate::native_str_to_date::str_to_date_finish_native_args_valid(
+                    state.as_deref(),
+                    *no_zero_date,
+                    *allow_invalid_dates,
+                ) =>
+                {
+                    state.as_deref()
+                }
+                (
+                    EvaluatedBytesOp::StrToDateTypedFinishNative,
+                    [ScalarValue::Bytes(report), ScalarValue::Int(no_zero_date)],
+                ) if crate::native_str_to_date::str_to_date_typed_finish_native_args_valid(
+                    report.as_deref(),
+                    *no_zero_date,
+                ) =>
+                {
+                    report.as_deref()
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "STR_TO_DATE operands differ from their fixed stage domain".into(),
+                    ));
+                }
+            };
+            let bound = crate::native_str_to_date::native_str_to_date_output_bound(first)
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // The full original stage report and every actual mode operand stay
+            // live. No allocating producer runs before this retained-reply bound.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -10539,6 +10673,42 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation == EvaluatedBytesOp::StrToDateFinishNative
+                    && value.is_none_or(|bytes| {
+                        !matches!(
+                            crate::decode_native_str_to_date_result(bytes),
+                            Some(
+                                crate::NativeStrToDateResult::Value(_)
+                                    | crate::NativeStrToDateResult::Warning { .. }
+                            )
+                        )
+                    })
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "STR_TO_DATE finish returned an invalid report".into(),
+                    ));
+                }
+                if self.operation == EvaluatedBytesOp::StrToDateHeadNative
+                    && value.is_some_and(|bytes| {
+                        crate::decode_native_str_to_date_result(bytes).is_none()
+                    })
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "STR_TO_DATE head returned an invalid report".into(),
+                    ));
+                }
+                if self.operation == EvaluatedBytesOp::StrToDateTypedFinishNative
+                    && value.is_some_and(|bytes| {
+                        !matches!(
+                            crate::decode_native_str_to_date_result(bytes),
+                            Some(crate::NativeStrToDateResult::Value(_))
+                        )
+                    })
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "STR_TO_DATE typed finish returned an invalid report".into(),
+                    ));
+                }
                 if matches!(
                     self.operation,
                     EvaluatedBytesOp::ToBinaryNative

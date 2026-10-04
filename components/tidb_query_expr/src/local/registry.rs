@@ -475,7 +475,10 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::TimestampDiffCoreNative
         | LocalFunctionId::ToBinaryNative
         | LocalFunctionId::FromBinaryNative
-        | LocalFunctionId::ConvertUsingNative => Err(other_err!(
+        | LocalFunctionId::ConvertUsingNative
+        | LocalFunctionId::StrToDateHeadNative
+        | LocalFunctionId::StrToDateFinishNative
+        | LocalFunctionId::StrToDateTypedFinishNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

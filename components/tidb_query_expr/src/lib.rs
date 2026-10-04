@@ -160,6 +160,14 @@ pub use native_time_add::{
     native_time_add_result_valid,
 };
 
+mod native_str_to_date;
+pub use native_str_to_date::{
+    NativeStrToDateResult, decode_native_str_to_date_result, str_to_date_finish_native_args_valid,
+    str_to_date_finish_native_fn_meta, str_to_date_head_native_args_valid,
+    str_to_date_head_native_fn_meta, str_to_date_typed_finish_native_args_valid,
+    str_to_date_typed_finish_native_fn_meta,
+};
+
 mod native_time_diff;
 pub use native_time_diff::{
     native_format_time_diff, native_time_diff, native_time_diff_needs_right,
