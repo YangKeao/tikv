@@ -81,8 +81,11 @@ pub enum PatternType {
 pub enum TrailingEscape {
     /// Treat the final escape character as a literal (normal LIKE).
     Literal,
-    /// A final escape without a following character cannot match (JSON search).
+    /// A final escape without a following character cannot match.
     Reject,
+    /// Match the final escape literally, accepting any remaining target suffix
+    /// once that character matches (native JSON search compatibility).
+    PrefixLiteral,
 }
 
 /// Pattern syntax, independent of collation and character decoding.
@@ -106,6 +109,7 @@ struct Unit<'a> {
 #[derive(Clone, Copy, Debug)]
 enum Token<T> {
     Literal(T),
+    PrefixLiteral(T),
     One,
     Any,
     Reject,
@@ -133,8 +137,20 @@ fn next_raw_token<'a>(
             let (next, width) = decoder(&pattern[start..])?;
             code = next;
             end += width;
-        } else if options.trailing_escape == TrailingEscape::Reject {
-            return Some((Token::Reject, end));
+        } else {
+            match options.trailing_escape {
+                TrailingEscape::Literal => {}
+                TrailingEscape::Reject => return Some((Token::Reject, end)),
+                TrailingEscape::PrefixLiteral => {
+                    return Some((
+                        Token::PrefixLiteral(Unit {
+                            code,
+                            bytes: &pattern[start..end],
+                        }),
+                        end,
+                    ));
+                }
+            }
         }
     }
     let token = match code {
@@ -170,11 +186,11 @@ fn match_tokens<T: Copy, E>(
                     backtrack = Some((px, tx));
                     continue;
                 }
-                Token::One | Token::Literal(_) => {
+                Token::One | Token::Literal(_) | Token::PrefixLiteral(_) => {
                     if let Some((code, width)) = decoder(&target[tx..]) {
                         let matched = match token {
                             Token::One => true,
-                            Token::Literal(literal) => equal(
+                            Token::Literal(literal) | Token::PrefixLiteral(literal) => equal(
                                 Unit {
                                     code,
                                     bytes: &target[tx..tx + width],
@@ -184,6 +200,9 @@ fn match_tokens<T: Copy, E>(
                             _ => unreachable!(),
                         };
                         if matched {
+                            if matches!(token, Token::PrefixLiteral(_)) {
+                                return Ok(true);
+                            }
                             px = next_px;
                             tx += width;
                             continue;
@@ -262,6 +281,11 @@ fn compile_tokens(
     while let Some((token, end)) = next_raw_token(pattern, pos, decoder, options) {
         let token = match token {
             Token::Literal(unit) => Token::Literal(StoredLiteral {
+                code: unit.code,
+                start: end - unit.bytes.len(),
+                end,
+            }),
+            Token::PrefixLiteral(unit) => Token::PrefixLiteral(StoredLiteral {
                 code: unit.code,
                 start: end - unit.bytes.len(),
                 end,
@@ -360,6 +384,7 @@ fn compile_units<T: From<u8>>(
         Token::One => (T::from(b'_'), PatternType::One),
         Token::Any => (T::from(b'%'), PatternType::Any),
         Token::Reject => unreachable!("Literal trailing escape never rejects"),
+        Token::PrefixLiteral(_) => unreachable!("Literal trailing escape never accepts a prefix"),
     })
     .unzip()
 }
@@ -500,6 +525,65 @@ mod tests {
             (0xff, 8),
         ] {
             assert_eq!(utf8_len(first), width);
+        }
+    }
+
+    #[test]
+    fn test_native_json_search_prefix_literal_escape() {
+        // Native search.rs's final-escape branch compares only the current rune;
+        // a quoted escape with a following pattern rune still requires the end.
+        for (text, pattern, escape, expected) in [
+            ("", "", '\\', true),
+            ("x", "", '\\', false),
+            ("", r"\", '\\', false),
+            (r"\", r"\", '\\', true),
+            (r"\x", r"\", '\\', true),
+            ("x", r"\", '\\', false),
+            (r"a\tail", r"a\", '\\', true),
+            (r"ab\tail", r"a\", '\\', false),
+            (r"\", r"\\", '\\', true),
+            (r"\x", r"\\", '\\', false),
+            (r"\\tail", r"\\\", '\\', true),
+            (r"\tail", r"\\\", '\\', false),
+            ("%tail", "%", '%', true),
+            ("", "%", '%', false),
+            ("x", "%", '%', false),
+            ("%", "%%", '%', true),
+            ("%tail", "%%", '%', false),
+            ("_tail", "_", '_', true),
+            ("", "_", '_', false),
+            ("_", "__", '_', true),
+            ("_tail", "__", '_', false),
+            ("a_b", r"a\_b", '\\', true),
+            ("a%b", r"a\%b", '\\', true),
+            ("界tail", "界", '界', true),
+            ("界", "界界", '界', true),
+            ("界tail", "界界", '界', false),
+            ("abc界tail", "%界", '界', true),
+            ("abctail", "%界", '界', false),
+            (r"💡xaab\suffix", r"%ab\", '\\', true),
+            ("💡xaabxsuffix", r"%ab\", '\\', false),
+            (r"x\tail", r"_\", '\\', true),
+            (r"\tail", r"_\", '\\', false),
+            (r"xx\suffix", r"%_\", '\\', true),
+            ("_%tail", "_%", '%', true),
+        ] {
+            let opts = options(escape as u32, TrailingEscape::PrefixLiteral);
+            assert_eq!(
+                matches_runes(text.as_bytes(), pattern.as_bytes(), opts),
+                expected,
+                "text={text:?}, pattern={pattern:?}, escape={escape:?}"
+            );
+            assert_eq!(
+                compile::<CollatorUtf8Mb4BinNoPadding, CharsetUtf8mb4>(pattern.as_bytes(), opts)
+                    .is_match(text.as_bytes())
+                    .unwrap(),
+                expected,
+                "compiled text={text:?}, pattern={pattern:?}, escape={escape:?}"
+            );
+        }
+        for policy in [TrailingEscape::Literal, TrailingEscape::Reject] {
+            assert!(!matches_runes(br"\x", br"\", options('\\' as u32, policy)));
         }
     }
 

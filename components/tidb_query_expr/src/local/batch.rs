@@ -1499,6 +1499,7 @@ pub enum EvaluatedBytesOp {
     TimeAddRightDatetimeNative,
     TimestampAddNative,
     TimestampAddPrefixNullNative,
+    JsonSearchSerdeNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3229,6 +3230,11 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::TimestampAddPrefixNullNative,
                 );
             }
+            Self::JsonSearchSerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonSearchSerdeNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -3338,6 +3344,7 @@ impl EvaluatedBytesOp {
         matches!(
             self,
             Self::JsonArraySerdeNative
+                | Self::JsonSearchSerdeNative
                 | Self::JsonObjectSerdeNative
                 | Self::JsonKeysSerdeNative
                 | Self::JsonKeysPathSerdeNative
@@ -3372,6 +3379,9 @@ impl EvaluatedBytesOp {
             json_unquote_text_native_args_valid,
         };
         match (self, values) {
+            (Self::JsonSearchSerdeNative, [document, paths, spec]) => {
+                crate::impl_json::json_search_native_args_valid(*document, *paths, *spec)
+            }
             (Self::JsonArraySerdeNative | Self::JsonMergeSerdeNative, [Some(values)]) => {
                 json_array_serde_args_valid(values)
             }
@@ -4257,6 +4267,7 @@ impl EvaluatedBytesOp {
             }
             Self::JsonPrettySerdeNative => crate::impl_json::json_pretty_serde_native_fn_meta(),
             Self::JsonOutputNullNative => crate::impl_json::json_output_null_native_fn_meta(),
+            Self::JsonSearchSerdeNative => crate::impl_json::json_search_native_fn_meta(),
             Self::JsonExtractSerdeNative => crate::impl_json::json_extract_serde_native_fn_meta(),
             Self::JsonInsertSerdeNative => crate::impl_json::json_insert_serde_native_fn_meta(),
             Self::JsonSetSerdeNative => crate::impl_json::json_set_serde_native_fn_meta(),
@@ -4638,6 +4649,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::JsonSearchSerdeNative => EvalType::Bytes,
             Self::TimestampAddNative | Self::TimestampAddPrefixNullNative => EvalType::Bytes,
             Self::AddTimeNative | Self::SubTimeNative | Self::TimeAddRightDatetimeNative => {
                 EvalType::Bytes
@@ -5066,6 +5078,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::JsonSearchSerdeNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::TimestampAddNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
             Self::TimestampAddPrefixNullNative => &[EvalType::Bytes, EvalType::Int],
             Self::AddTimeNative | Self::SubTimeNative => {
@@ -5928,6 +5941,34 @@ pub fn prepare_json_paths_args(
         Some(document),
         Some(encode_json_paths(paths)?),
     ))
+}
+
+/// Packs actual JSON_SEARCH operands without traversing the document or paths.
+pub fn prepare_json_search_args(
+    document: &serde_json::Value,
+    paths: &[crate::NativeJsonPath],
+    one: bool,
+    pattern: &str,
+    escape: char,
+) -> LocalResult<EvaluatedArgs> {
+    let EvaluatedArgs::Bytes2(Some(document), Some(paths)) =
+        prepare_json_paths_args(document, paths)?
+    else {
+        return Err(LocalError::InvalidSpec(
+            "JSON path operand packing changed its fixed shape".into(),
+        ));
+    };
+    let spec = crate::native_json_search::encode_native_json_search_spec(one, pattern, escape)
+        .ok_or_else(|| {
+            LocalError::ResourceLimit(
+                "JSON search specification allocation or extent failed".into(),
+            )
+        })?;
+    Ok(EvaluatedArgs::Bytes3([
+        Some(document),
+        Some(paths),
+        Some(spec),
+    ]))
 }
 
 /// Adds actual ordered value operands using the existing ARRAY operand framing,
@@ -9472,6 +9513,210 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn json_search_profile_preserves_actual_specs_ordered_scopes_and_null_results() {
+        let operation = EvaluatedBytesOp::JsonSearchSerdeNative;
+        let getter = crate::impl_json::json_search_native_fn_meta();
+        assert_eq!(
+            operation.input_types(),
+            &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
+        );
+        assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+        assert_eq!(operation.eval_type(), EvalType::Bytes);
+        let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+        assert_eq!(program.expression.len(), 4);
+        assert!(program.check_entry(ProgramEntry::Row).is_err());
+        let RpnExpressionNode::FnCall {
+            func_meta,
+            metadata,
+            args_len,
+            ..
+        } = &program.expression[3]
+        else {
+            panic!()
+        };
+        assert_eq!(*args_len, 3);
+        assert!(metadata.is::<()>());
+        assert_eq!(func_meta.name, getter.name);
+        assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.validator_ptr,
+            getter.validator_ptr
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            func_meta.metadata_ptr,
+            getter.metadata_ptr
+        ));
+        let spec = LocalExpr::Call {
+            function: operation.function_ref(),
+            args: program
+                .schema
+                .iter()
+                .enumerate()
+                .map(|(slot, field_type)| LocalExpr::InputSlot {
+                    slot,
+                    field_type: field_type.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            return_type: operation.return_type(),
+            metadata: crate::CallMetadata::None,
+        };
+        assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+        let document = serde_json::json!(["needle", "other", "needle"]);
+        let ordered = [
+            crate::parse_native_json_path("$[2]").unwrap(),
+            crate::parse_native_json_path("$[0]").unwrap(),
+            crate::parse_native_json_path("$[2]").unwrap(),
+        ];
+        let scalar = serde_json::json!("needle");
+        let null = serde_json::Value::Null;
+        let escaped = serde_json::json!(["a%b", "acb"]);
+        let index = [crate::parse_native_json_path("$[0]").unwrap()];
+        let EvaluatedArgs::Bytes3(valid) =
+            prepare_json_search_args(&document, &ordered, true, "needle", '\\').unwrap()
+        else {
+            panic!()
+        };
+        let EvaluatedArgs::Bytes2(old_document, old_paths) =
+            prepare_json_paths_args(&document, &ordered).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(valid[0], old_document);
+        assert_eq!(valid[1], old_paths);
+        assert_eq!(
+            crate::native_json_search::decode_native_json_search_spec(valid[2].as_deref().unwrap()),
+            Some((true, "needle", '\\'))
+        );
+        let mut worker = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        let storage = worker.retained_storage().unwrap();
+        let mut malformed = Vec::new();
+        for slot in 0..3 {
+            let mut bad = valid.clone();
+            bad[slot] = None;
+            malformed.push(bad);
+        }
+        for (slot, bytes) in [
+            (0, b"[".to_vec()),
+            (1, vec![1]),
+            (2, vec![]),
+            (2, vec![2, 0, 0, 0, 0]),
+            (2, vec![1, 0, 216, 0, 0]),
+            (2, vec![0, 92, 0, 0, 0, 255]),
+        ] {
+            let mut bad = valid.clone();
+            bad[slot] = Some(bytes);
+            malformed.push(bad);
+        }
+        for bad in malformed {
+            let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+            for slot in 0..3 {
+                ready[slot] = ScalarValue::Bytes(bad[slot].clone());
+            }
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes3(bad)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert!(matches!(
+                worker.eval_ready(ready, 3, &mut None),
+                Err(LocalError::InvalidSpec(_))
+            ));
+        }
+        for invalid in [
+            EvaluatedArgs::NoArgs,
+            EvaluatedArgs::NullWitness(None),
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Bytes2(valid[0].clone(), valid[1].clone()),
+            EvaluatedArgs::BytesBytesInt(valid[0].clone(), valid[1].clone(), Some(0)),
+        ] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+        }
+        for arity in [0, 1, 2, 4] {
+            let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+            for slot in 0..3 {
+                ready[slot] = ScalarValue::Bytes(valid[slot].clone());
+            }
+            assert!(matches!(
+                worker.eval_ready(ready, arity, &mut None),
+                Err(LocalError::InvalidSpec(_))
+            ));
+        }
+        assert_eq!(worker.kernel_invocations(), 0);
+        let cases: &[(
+            &serde_json::Value,
+            &[crate::NativeJsonPath],
+            bool,
+            &str,
+            char,
+            Option<&str>,
+        )] = &[
+            (&document, &[], true, "needle", '\\', Some(r#""$[0]""#)),
+            (
+                &document,
+                &[],
+                false,
+                "needle",
+                '\\',
+                Some(r#"["$[0]", "$[2]"]"#),
+            ),
+            (&document, &ordered, true, "needle", '\\', Some(r#""$[2]""#)),
+            (
+                &document,
+                &ordered,
+                false,
+                "needle",
+                '\\',
+                Some(r#"["$[2]", "$[0]"]"#),
+            ),
+            (&document, &[], true, "missing", '\\', None),
+            (&null, &[], true, "%", '\\', None),
+            (&scalar, &index, true, "needle", '\\', None), /* SEARCH must not use EXTRACT's
+                                                            * scalar auto-wrap. */
+            (&escaped, &[], true, "a界%b", '界', Some(r#""$[0]""#)),
+        ];
+        for (calls, &(document, paths, one, pattern, escape, expected)) in (1_u64..).zip(cases) {
+            let args = prepare_json_search_args(document, paths, one, pattern, escape).unwrap();
+            assert!(args.admission_matches(operation));
+            let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+                panic!()
+            };
+            assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(value.value(), expected.map(str::as_bytes));
+            assert_eq!(worker.kernel_invocations(), calls);
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert!(worker.is_healthy());
+        }
+        let mut zero = prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_steps: 0,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap();
+        let failure = zero
+            .eval_args_reported(
+                prepare_json_search_args(&document, &[], true, "missing", '\\').unwrap(),
+            )
+            .unwrap_err();
+        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+        assert_eq!(failure.sql_failure(), None);
+        assert_eq!(zero.kernel_invocations(), 0);
+        assert!(zero.is_healthy());
+    }
 
     #[test]
     fn timestamp_add_profiles_preserve_actual_prefixes_ieee_bits_and_reports() {

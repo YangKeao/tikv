@@ -407,6 +407,21 @@ short-circuit admission policy described above.
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
+  JSON_SEARCH uses `native_json_search.rs` for its original selection, leaf walk,
+  stable global path deduplication and formatted String result. Existing Bytes3
+  transports actual serde JSON, ordered parsed path legs and a fixed search
+  specification: one/all bit, Unicode escape scalar and UTF8 pattern. Neither
+  a host match nor a ready result crosses this boundary. Document/mode/pattern/
+  path NULLs use the existing observed-NULL recipe; NULL escape is the original
+  default backslash, not result NULL. The frontend preserves argument/error
+  order and parses all demanded paths before walking, including in one mode.
+  Reusing a path decoder does not import EXTRACT's scalar-array autowrap policy.
+  The shared pattern tokenizer/matcher explicitly supports PrefixLiteral for
+  this native compatibility domain: a dangling escape can match the current
+  escape character even when target characters remain. Normal LIKE Literal and
+  Reject policies are unchanged; there is no additional collation getter or
+  separate copied LIKE algorithm. All main inputs are present and validated on
+  both boundaries. No new carrier/result/driver/budget or PB/legacy admission.
   TIMESTAMPADD uses `native_timestamp_add.rs` for its original unit, rounding,
   month-clamp-versus-roll, range and diagnostic policies on the shared datetime
   DTOs. BytesBytesInt carries present actual unit text and raw coerced f64 bits

@@ -595,6 +595,43 @@ pub fn json_extract_serde_args_valid(document: &[u8], paths: &[u8]) -> bool {
         && json_serde_native_paths(paths, JsonSerdePathUse::Extract).is_ok()
 }
 
+/// SEARCH carries an actual document, ordered parsed paths, and pattern
+/// metadata. Observed SQL NULLs use the separate shared JSON output-NULL
+/// recipe.
+pub fn json_search_native_args_valid(
+    document: Option<&[u8]>,
+    paths: Option<&[u8]>,
+    spec: Option<&[u8]>,
+) -> bool {
+    let (Some(document), Some(paths), Some(spec)) = (document, paths, spec) else {
+        return false;
+    };
+    json_extract_serde_args_valid(document, paths)
+        && crate::native_json_search::decode_native_json_search_spec(spec).is_some()
+}
+
+#[rpn_fn(nullable)]
+fn json_search_native(
+    document: Option<BytesRef>,
+    paths: Option<BytesRef>,
+    spec: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    let (Some(document), Some(paths), Some(spec)) = (document, paths, spec) else {
+        return Err(other_err!(
+            "Native JSON_SEARCH requires actual document, paths, and search specification"
+        ));
+    };
+    let document = json_serde_native_value(document)?;
+    // Extract's transport role admits every original leg and cached flag. Only
+    // the SEARCH core supplies traversal rules; this does not run extraction.
+    let paths = json_serde_native_paths(paths, JsonSerdePathUse::Extract)?;
+    let (one, pattern, escape) = crate::native_json_search::decode_native_json_search_spec(spec)
+        .ok_or_else(|| other_err!("Invalid native JSON_SEARCH specification"))?;
+    Ok(crate::native_json_search::native_json_search(
+        &document, one, pattern, escape, &paths,
+    ))
+}
+
 /// Removal preserves exact non-root selectors, independently of the cached
 /// flag.
 pub fn json_remove_serde_args_valid(document: &[u8], paths: &[u8]) -> bool {
@@ -1544,6 +1581,64 @@ fn parse_json_path(path: Option<BytesRef>) -> Result<Option<PathExpression>> {
     }?;
 
     Ok(Some(parse_json_path_expr(json_path)?))
+}
+
+#[cfg(test)]
+mod native_json_search_worker_tests {
+    use super::*;
+
+    #[test]
+    fn json_search_wrapper_keeps_actual_inputs_unicode_and_null_recipe() {
+        assert_eq!(json_search_native_fn_meta().name, "json_search_native");
+        let paths = 0_u64.to_le_bytes();
+        let spec =
+            crate::native_json_search::encode_native_json_search_spec(false, "é界%", '界').unwrap();
+        let document = "\"é%\"".as_bytes();
+        assert!(json_search_native_args_valid(
+            Some(document),
+            Some(&paths),
+            Some(&spec)
+        ));
+        assert_eq!(
+            json_search_native(Some(document), Some(&paths), Some(&spec)).unwrap(),
+            Some(b"\"$\"".to_vec())
+        );
+        assert_eq!(
+            json_search_native(Some(b"[]"), Some(&paths), Some(&spec)).unwrap(),
+            None
+        );
+        let empty_pattern =
+            crate::native_json_search::encode_native_json_search_spec(true, "", '\\').unwrap();
+        assert_eq!(
+            json_search_native(Some(b"\"\""), Some(&paths), Some(&empty_pattern)).unwrap(),
+            Some(b"\"$\"".to_vec())
+        );
+        for (document, paths, spec) in [
+            (None, Some(paths.as_slice()), Some(spec.as_slice())),
+            (Some(document), None, Some(spec.as_slice())),
+            (Some(document), Some(paths.as_slice()), None),
+            (
+                Some(b"".as_slice()),
+                Some(paths.as_slice()),
+                Some(spec.as_slice()),
+            ),
+            (Some(document), Some(b"".as_slice()), Some(spec.as_slice())),
+            (Some(document), Some(paths.as_slice()), Some(b"".as_slice())),
+        ] {
+            assert!(!json_search_native_args_valid(document, paths, spec));
+            assert!(json_search_native(document, paths, spec).is_err());
+        }
+        let mut bad_spec = empty_pattern;
+        bad_spec[0] = 2;
+        assert!(!json_search_native_args_valid(
+            Some(document),
+            Some(&paths),
+            Some(&bad_spec)
+        ));
+        assert!(json_search_native(Some(document), Some(&paths), Some(&bad_spec)).is_err());
+        assert_eq!(json_output_null_native(None).unwrap(), None);
+        assert!(json_output_null_native(Some(&0)).is_err());
+    }
 }
 
 #[cfg(test)]

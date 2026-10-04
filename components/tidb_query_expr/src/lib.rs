@@ -96,6 +96,9 @@ pub use native_json_modify::{
     native_json_remove,
 };
 
+mod native_json_search;
+pub use native_json_search::parse_native_json_search_mode;
+
 mod native_like;
 pub use native_like::{
     NativeCompiledIlikePattern, NativeCompiledLikePattern, NativeLikeInvocation, NativeLikeKind,
@@ -197,10 +200,11 @@ pub use self::{
         json_predicate_null_native_fn_meta, json_pretty_serde_native_fn_meta,
         json_remove_serde_args_valid, json_remove_serde_native_fn_meta,
         json_replace_raw_legacy_args_valid, json_replace_raw_legacy_fn_meta,
-        json_replace_serde_native_fn_meta, json_serde_native_args_valid,
-        json_set_serde_native_fn_meta, json_unquote_binary_native_args_valid,
-        json_unquote_binary_native_fn_meta, json_unquote_text_native_args_valid,
-        json_unquote_text_native_fn_meta, json_value_absent_legacy_fn_meta,
+        json_replace_serde_native_fn_meta, json_search_native_args_valid,
+        json_search_native_fn_meta, json_serde_native_args_valid, json_set_serde_native_fn_meta,
+        json_unquote_binary_native_args_valid, json_unquote_binary_native_fn_meta,
+        json_unquote_text_native_args_valid, json_unquote_text_native_fn_meta,
+        json_value_absent_legacy_fn_meta,
     },
     impl_miscellaneous::{
         GroupingFunction, GroupingMetadata, GroupingMetadataError, GroupingMode,

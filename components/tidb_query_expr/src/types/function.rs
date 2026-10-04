@@ -492,6 +492,7 @@ pub enum LocalFunctionId {
     TimeAddRightDatetimeNative,
     TimestampAddNative,
     TimestampAddPrefixNullNative,
+    JsonSearchSerdeNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.
