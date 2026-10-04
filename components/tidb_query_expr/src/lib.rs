@@ -98,6 +98,14 @@ pub use native_extract::{
     extract_select_native_fn_meta,
 };
 
+mod native_extremum_policy;
+pub use native_extremum_policy::{
+    NativeExtremumComparisonOp, NativeExtremumComparisonRequest, NativeExtremumComparisonValue,
+    NativeExtremumDomain, NativeExtremumEvalType, NativeExtremumHead, NativeExtremumNumericCursor,
+    NativeExtremumPolicyError, NativeExtremumPromotion, NativeExtremumSignature,
+    NativeExtremumStringMode, NativeExtremumValueMeta, native_extremum_head,
+};
+
 mod native_format;
 
 mod native_from_unixtime;
