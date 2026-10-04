@@ -2042,16 +2042,7 @@ impl Decimal {
                 value.try_native_round_with_storage(target, true, retained_storage, usize::MAX)
             })
             .and_then(|value| {
-                value.check_native_math_value(usize::MAX)?;
-                let mut digits = value.native_coefficient_digits(usize::MAX)?;
-                // Same logical coefficient projection as the native
-                // bridge: retain at least storage_scale (or one) digits.
-                let removable = digits.len().saturating_sub(value.frac_cnt.max(1));
-                let leading = digits[..removable]
-                    .iter()
-                    .take_while(|digit| **digit == b'0')
-                    .count();
-                digits.drain(..leading);
+                let digits = value.native_canonical_coefficient_digits(usize::MAX)?;
                 Ok((
                     value.negative,
                     digits,
@@ -2099,6 +2090,38 @@ impl Decimal {
         };
         let significant = digits[first_nonzero..].trim_end_matches('0');
         let exponent = exponent + decimal_index as i32 - first_nonzero as i32 - 1;
+        Self::native_format_go_shortest_parts(negative, significant, exponent)
+    }
+
+    /// Original native scalar/MyDecimal spelling for conversions and
+    /// diagnostics, including signed zero and nonfinite values. Keep Rust
+    /// LowerExp as its digit generator, independently of the Ryu-based
+    /// coefficient Decimal constructor's finite-only policy.
+    pub fn native_format_float_g_shortest(value: f64) -> String {
+        if value.is_nan() {
+            return "NaN".to_owned();
+        }
+        if value.is_infinite() {
+            return if value > 0.0 { "+Inf" } else { "-Inf" }.to_owned();
+        }
+        let negative = value.is_sign_negative();
+        let magnitude = value.abs();
+        if magnitude == 0.0 {
+            return format!("{}0", if negative { "-" } else { "" });
+        }
+        let scientific = format!("{magnitude:e}");
+        let (mantissa, exponent) = scientific
+            .split_once('e')
+            .expect("Rust LowerExp always emits an exponent");
+        let exponent: i32 = exponent.parse().expect("exponent is an integer");
+        let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+        Self::native_format_go_shortest_parts(negative, &digits, exponent)
+    }
+
+    // Both generators supply nonempty significant digits and the exponent of
+    // their first digit. Do not trim/re-round those digits or choose a generator
+    // here: this is only the original shared Go-g notation/layout policy.
+    fn native_format_go_shortest_parts(negative: bool, significant: &str, exponent: i32) -> String {
         let prefix = if negative { "-" } else { "" };
 
         // strconv.FormatFloat with `g`, -1 chooses scientific notation below
@@ -2884,6 +2907,54 @@ impl Decimal {
             digits.push(b'0');
         }
         Ok(digits)
+    }
+
+    // The native value bridge's exact coefficient projection: keep at least
+    // storage-scale digits, or one digit for an integral zero. Shared by visible
+    // formatting and precision casting rather than inventing a second count.
+    fn native_canonical_coefficient_digits(&self, limit: usize) -> NativeDecimalResult<Vec<u8>> {
+        self.check_native_math_value(limit)?;
+        let mut digits = self.native_coefficient_digits(limit)?;
+        let removable = digits.len().saturating_sub(self.frac_cnt.max(1));
+        let leading = digits[..removable]
+            .iter()
+            .take_while(|digit| **digit == b'0')
+            .count();
+        digits.drain(..leading);
+        Ok(digits)
+    }
+
+    /// Native CAST DECIMAL precision policy over the existing shared rounder.
+    /// Keep the original requested u32 scale for the clamp, even when casting
+    /// it to the signed rounding scale wraps. No fixed-word SQL precision
+    /// cap is imposed here; `limit` is the existing native allocation
+    /// budget.
+    pub fn try_native_cast_to_precision(
+        &self,
+        flen: u32,
+        scale: u32,
+        limit: usize,
+    ) -> NativeDecimalResult<Self> {
+        let target = scale as i32;
+        let rounded =
+            self.try_native_round_with_storage(target, true, target.max(0) as u32, limit)?;
+        if flen == 0 {
+            return Ok(rounded);
+        }
+        let digits = rounded.native_canonical_coefficient_digits(limit)?;
+        let int_digits = digits.len() as u32 - rounded.result_scale();
+        let max_int_digits = flen.saturating_sub(scale);
+        if int_digits > max_int_digits {
+            let mut maximum = Vec::new();
+            native_digit_reserve(&mut maximum, flen as usize, limit)?;
+            maximum.resize(flen as usize, b'9');
+            // Native Decimal::new left-pads to the requested scale. In the
+            // original degenerate (flen < scale) policy, (1,2) clamps to .09,
+            // not .99; a subunit value without excess integer digits stays as is.
+            native_pad_coefficient(&mut maximum, scale as usize, limit)?;
+            return Self::try_from_native_digits(rounded.negative, &maximum, scale, scale, limit);
+        }
+        Ok(rounded)
     }
 
     /// The same native round policy with explicitly retained storage scale.
@@ -5606,6 +5677,96 @@ mod native_exact_integer_division_tests {
 #[cfg(test)]
 mod native_presentation_tests {
     use super::Decimal;
+
+    #[test]
+    fn native_shortest_float_policies_share_layout_not_digit_generators() {
+        for (value, expected) in [
+            (0.0, "0"),
+            (1e-5, "1e-05"),
+            (1e-4, "0.0001"),
+            (100_000.0, "100000"),
+            (1_000_000.0, "1e+06"),
+            (-1_234_500.0, "-1.2345e+06"),
+            (1.25, "1.25"),
+            (f64::from_bits(1), "5e-324"),
+            (f64::MAX, "1.7976931348623157e+308"),
+        ] {
+            // Fixed source spellings, not one generator used as the oracle for
+            // the other. These examples do not claim exhaustive equivalence.
+            assert_eq!(Decimal::native_format_float_g_shortest(value), expected);
+            assert_eq!(Decimal::native_format_go_shortest_float(value), expected);
+        }
+        assert_eq!(Decimal::native_format_float_g_shortest(-0.0), "-0");
+        assert_eq!(Decimal::native_format_go_shortest_float(-0.0), "0");
+        for (value, expected) in [
+            (f64::NAN, "NaN"),
+            (f64::from_bits(0xfff8_0000_0000_0042), "NaN"),
+            (f64::INFINITY, "+Inf"),
+            (f64::NEG_INFINITY, "-Inf"),
+        ] {
+            assert_eq!(Decimal::native_format_float_g_shortest(value), expected);
+        }
+    }
+
+    #[test]
+    fn native_precision_cast_keeps_rounding_hidden_scale_and_degenerate_clamp() {
+        let visible = |value: &Decimal| {
+            Decimal::native_format_visible(
+                value.negative,
+                &value
+                    .native_canonical_coefficient_digits(usize::MAX)
+                    .unwrap(),
+                value.result_scale(),
+                value.storage_scale(),
+            )
+        };
+        for (negative, coefficient, storage, result, flen, scale, expected) in [
+            (false, b"123456".as_slice(), 0, 0, 5, 2, "999.99"),
+            (true, b"123456".as_slice(), 0, 0, 5, 2, "-999.99"),
+            (false, b"9995".as_slice(), 3, 3, 0, 2, "10.00"),
+            (false, b"9995".as_slice(), 3, 3, 3, 2, "9.99"),
+            (false, b"123".as_slice(), 2, 2, 1, 2, "0.09"),
+            (false, b"12".as_slice(), 2, 2, 1, 2, "0.12"),
+            (false, b"10049".as_slice(), 4, 2, 6, 3, "1.005"),
+            (true, b"000".as_slice(), 2, 1, 1, 2, "0.00"),
+            (false, b"15".as_slice(), 0, 0, 0, u32::MAX, "20"),
+        ] {
+            let input =
+                Decimal::try_from_native_digits(negative, coefficient, storage, result, usize::MAX)
+                    .unwrap();
+            let cast = input
+                .try_native_cast_to_precision(flen, scale, usize::MAX)
+                .unwrap();
+            assert_eq!(visible(&cast), expected);
+            assert_eq!(cast.storage_scale(), cast.result_scale());
+            assert_eq!(cast.result_scale(), (scale as i32).max(0) as u32);
+        }
+        let wide = format!("1{}", "0".repeat(99));
+        let input =
+            Decimal::try_from_native_digits(false, wide.as_bytes(), 0, 0, usize::MAX).unwrap();
+        let cast = input
+            .try_native_cast_to_precision(90, 0, usize::MAX)
+            .unwrap();
+        assert_eq!(visible(&cast), "9".repeat(90));
+        assert!(cast.words().words.len() > 9);
+        assert!(matches!(
+            input.try_native_cast_to_precision(5, 2, 0),
+            Err(super::NativeDecimalError::Resource(_))
+        ));
+        // Integral zero's canonical coefficient has length one, not the word
+        // core's zero integer_digits(). A wrapped target still demands the
+        // original-scale clamp, which this small budget refuses before padding.
+        assert!(matches!(
+            Decimal::zero().try_native_cast_to_precision(1, u32::MAX, 128),
+            Err(super::NativeDecimalError::Resource(_))
+        ));
+        let mut invalid_shape = Decimal::zero();
+        invalid_shape.result_frac_cnt = 1;
+        assert!(matches!(
+            invalid_shape.try_native_cast_to_precision(0, 0, usize::MAX),
+            Err(super::NativeDecimalError::InvalidInput(_))
+        ));
+    }
 
     #[test]
     fn native_visible_format_keeps_raw_sign_substrings_and_hidden_rounding() {

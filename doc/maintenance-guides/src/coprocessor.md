@@ -423,8 +423,15 @@ short-circuit admission policy described above.
   an optional rounded overflow event. Its canonical 9/17-byte report is not an
   identity frame; ready preflight computes its bound through the same producer,
   still charging actual input capacity and running the real kernel afterward.
-  Native callers only decode and present the existing 1690 warning; the native
-  diagnostic formatter remains an adapter. Legacy wire conversion has different
+  Native callers only decode and present the existing 1690 warning. The later
+  M2 type step moves the full conversion/diagnostic formatter to datatype
+  `Decimal::native_format_float_g_shortest`: LowerExp, signed zero and nonfinite
+  spellings remain distinct from the existing Ryu finite formatter, with one
+  shared Go-g layout renderer. `try_native_cast_to_precision` owns the existing
+  round/canonical-coefficient-count/all-nine-clamp policy, including raw scales
+  and the original degenerate target behavior. Both native APIs are thin
+  delegates; no new C4 profile, SQL precision cap or family credit is implied.
+  Legacy wire conversion has different
   rounding/clip/boundary/NaN policy and is untouched. Other CAST domains, outer
   NULL and UNION's negative bypass are not covered by this slice, and no whole
   CAST family or new wire admission is credited.
