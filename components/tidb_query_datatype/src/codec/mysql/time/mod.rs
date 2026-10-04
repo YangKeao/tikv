@@ -2,6 +2,8 @@
 
 pub mod extension;
 pub mod interval;
+mod native_datetime;
+mod native_parse;
 mod tz;
 pub mod weekmode;
 
@@ -19,7 +21,20 @@ use chrono::prelude::*;
 use codec::prelude::*;
 use tipb::FieldType;
 
-pub use self::{extension::*, interval::IntervalUnit, tz::Tz, weekmode::WeekMode};
+pub use self::{
+    extension::*,
+    interval::IntervalUnit,
+    native_datetime::{
+        NativeTimeConversionError, native_core_from_datetime, native_core_naive_datetime,
+        native_core_to_datetime,
+    },
+    native_parse::{
+        NativeTimezoneSuffix, native_get_frac_index, native_get_time_fsp, native_get_timezone,
+        native_is_date_format, native_parse_date_format, native_time_is_ascii_punctuation,
+    },
+    tz::Tz,
+    weekmode::WeekMode,
+};
 use crate::{
     FieldTypeAccessor, FieldTypeTp,
     codec::{

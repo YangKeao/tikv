@@ -407,6 +407,18 @@ short-circuit admission policy described above.
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
+  Temporal datatype prerequisites live in `codec/mysql/time/native_datetime.rs`
+  and `native_parse.rs`. They share native raw-calendar validation, generic
+  timezone/DST resolution and +500ns-to-raw packing, plus lexical suffix,
+  fractional-index/FSP and loose date-format helpers. Native conversion errors
+  and suffix DTOs are aliases; the suffix's original Debug label is preserved.
+  These APIs accept the caller's actual chrono timezone, not a name re-parsed
+  into wire Tz or a snapshot fixed offset. Wire Tz and timezone-database versions
+  are unchanged. Invalid-calendar ordering, ambiguous-time choice, four-hour
+  gap search, leap-second microseconds and existing panic/cast domains remain
+  distinct from SQL validation. Lexical recognition is not full parsing: byte
+  indices, source-suffix FSP counts and permissive date-shape rules remain.
+  This SDK-only slice adds no evaluator admission/profile or family credit.
   JSON_SEARCH uses `native_json_search.rs` for its original selection, leaf walk,
   stable global path deduplication and formatted String result. Existing Bytes3
   transports actual serde JSON, ordered parsed path legs and a fixed search
