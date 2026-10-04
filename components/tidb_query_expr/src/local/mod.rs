@@ -2773,3 +2773,185 @@ mod null_if_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod cast_real_unsigned_worker_tests {
+    use super::*;
+    use crate::{
+        NativeIdentityRef, decode_native_cast_real_unsigned_result, encode_native_identity,
+    };
+
+    fn prepare(limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            EvaluatedBytesOp::CastRealUnsignedNative,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn report(value: ComputedValue) -> Vec<u8> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("native unsigned real cast must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value
+            .into_option()
+            .expect("nonnull real cast always returns a report")
+    }
+
+    #[test]
+    fn cast_real_unsigned_native_admission_preserves_ties_even_and_rounded_overflow_reports() {
+        let mut worker = prepare(ExecutionLimits::default());
+        let storage = worker.retained_storage().unwrap();
+        let mut short = encode_native_identity(NativeIdentityRef::Real(1.0_f64.to_bits())).unwrap();
+        short.pop();
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Int(Some(1)),
+            EvaluatedArgs::BytesInt(None, None),
+            EvaluatedArgs::Bytes(Some(short)),
+            EvaluatedArgs::Bytes(Some(
+                encode_native_identity(NativeIdentityRef::Int(1)).unwrap(),
+            )),
+            EvaluatedArgs::Bytes(Some(
+                encode_native_identity(NativeIdentityRef::UInt(1)).unwrap(),
+            )),
+        ] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+        }
+        assert!(matches!(
+            worker.eval_one(None),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        // These expectations pin the legacy NATIVE policy, not the wire cast.
+        // NaN is checked as a class; floating arithmetic need not preserve its
+        // incoming payload bits, whereas finite rounded warning bits are exact.
+        for (index, (view, expected, overflow)) in [
+            (NativeIdentityRef::Real(2.5_f64.to_bits()), 2, None),
+            (NativeIdentityRef::Real(3.5_f64.to_bits()), 4, None),
+            (NativeIdentityRef::Real((-0.5_f64).to_bits()), 0, None),
+            (
+                NativeIdentityRef::Real((-1.5_f64).to_bits()),
+                u64::MAX - 1,
+                Some((-2.0_f64).to_bits()),
+            ),
+            (
+                NativeIdentityRef::Float32(16_777_217.0_f64.to_bits()),
+                16_777_217,
+                None,
+            ),
+            (
+                NativeIdentityRef::Real(f64::NEG_INFINITY.to_bits()),
+                1_u64 << 63,
+                Some(f64::NEG_INFINITY.to_bits()),
+            ),
+            (
+                NativeIdentityRef::Real(f64::INFINITY.to_bits()),
+                u64::MAX,
+                Some(f64::INFINITY.to_bits()),
+            ),
+            (
+                NativeIdentityRef::Float32(0x7ff8_0000_0000_1234),
+                u64::MAX,
+                Some(0x7ff8_0000_0000_1234),
+            ),
+            (
+                NativeIdentityRef::Real(18_446_744_073_709_551_616.0_f64.to_bits()),
+                u64::MAX,
+                Some(18_446_744_073_709_551_616.0_f64.to_bits()),
+            ),
+            (
+                NativeIdentityRef::Real(0x43ef_ffff_ffff_ffff),
+                u64::MAX - 2047,
+                None,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = report(
+                worker
+                    .eval_one(Some(encode_native_identity(view).unwrap()))
+                    .unwrap(),
+            );
+            let result = decode_native_cast_real_unsigned_result(&output).unwrap();
+            assert_eq!(result.value, expected);
+            assert_eq!(output.len(), if overflow.is_some() { 17 } else { 9 });
+            match (result.overflow_bits, overflow) {
+                (Some(actual), Some(expected)) if f64::from_bits(expected).is_nan() => {
+                    assert!(f64::from_bits(actual).is_nan())
+                }
+                (actual, expected) => assert_eq!(actual, expected),
+            }
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+
+    #[test]
+    fn cast_real_unsigned_charges_actual_input_capacity_before_small_report_dispatch() {
+        let mut zero = prepare(ExecutionLimits {
+            max_retained_bytes: 0,
+            ..ExecutionLimits::default()
+        });
+        let storage = zero.retained_storage().unwrap();
+        let input = encode_native_identity(NativeIdentityRef::Real(1.0_f64.to_bits())).unwrap();
+        assert!(matches!(
+            zero.eval_one(Some(input.clone())),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(zero.kernel_invocations(), 0);
+        assert!(zero.is_healthy());
+        assert_eq!(zero.retained_storage().unwrap(), storage);
+        let mut worker = prepare(ExecutionLimits {
+            max_retained_bytes: 64 * 1024,
+            ..ExecutionLimits::default()
+        });
+        let storage = worker.retained_storage().unwrap();
+        let mut oversized = input.clone();
+        oversized.reserve_exact(128 * 1024);
+        assert!(oversized.capacity() > 64 * 1024 && oversized.len() == 9);
+        assert!(matches!(
+            worker.eval_one(Some(oversized)),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(
+            worker.kernel_invocations(),
+            0,
+            "a nine-byte reply does not erase the actual retained input"
+        );
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+        // Reply lengths 9/17 are payload sizes, not total-retained thresholds:
+        // input capacity and existing driver/Bytes row metadata still count.
+        for (index, (frame, length, expected)) in [
+            (input, 9, 1),
+            (
+                encode_native_identity(NativeIdentityRef::Real((-1.5_f64).to_bits())).unwrap(),
+                17,
+                u64::MAX - 1,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = report(worker.eval_one(Some(frame)).unwrap());
+            assert_eq!(output.len(), length);
+            assert_eq!(
+                decode_native_cast_real_unsigned_result(&output)
+                    .unwrap()
+                    .value,
+                expected
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

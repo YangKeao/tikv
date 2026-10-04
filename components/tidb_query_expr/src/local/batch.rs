@@ -1581,6 +1581,7 @@ pub enum EvaluatedBytesOp {
     IfFinishNative,
     CoalesceEndNative,
     NullIfNative,
+    CastRealUnsignedNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1644,6 +1645,11 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::CastRealUnsignedNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CastRealUnsignedNative,
+                );
+            }
             Self::NullIfNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::NullIfNative);
             }
@@ -4276,6 +4282,7 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::CastRealUnsignedNative => crate::impl_cast::cast_real_unsigned_native_fn_meta(),
             Self::NullIfNative => crate::impl_control::null_if_native_fn_meta(),
             Self::CoalesceEndNative => crate::impl_compare::coalesce_end_native_fn_meta(),
             Self::IfHeadNative => crate::impl_control::if_head_native_fn_meta(),
@@ -4919,6 +4926,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::CastRealUnsignedNative => EvalType::Bytes,
             Self::NullIfNative => EvalType::Bytes,
             Self::CoalesceEndNative => EvalType::Bytes,
             Self::IfHeadNative | Self::IfFinishNative => EvalType::Bytes,
@@ -5369,6 +5377,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::CastRealUnsignedNative => &[EvalType::Bytes],
             Self::NullIfNative => &[EvalType::Bytes, EvalType::Int],
             Self::CoalesceEndNative => &[],
             Self::IfHeadNative => &[EvalType::Int],
@@ -6854,6 +6863,12 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::CastRealUnsignedNative {
+            return match self {
+                Self::Bytes(value) => crate::cast_real_unsigned_native_args_valid(value.as_deref()),
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::NullIfNative {
             return match self {
                 Self::BytesInt(lhs, comparison) => {
@@ -9816,6 +9831,38 @@ impl EvaluatedBytesWorker {
             // Actual LHS capacity stays charged even when the reply is SQL NULL.
             budget.check_output(bound, input_bytes)?;
         }
+        if self.operation == EvaluatedBytesOp::CastRealUnsignedNative {
+            let [ScalarValue::Bytes(value)] = &ready[..arity] else {
+                return Err(LocalError::InvalidSpec(
+                    "real-to-unsigned cast requires one identity operand".into(),
+                ));
+            };
+            if !crate::cast_real_unsigned_native_args_valid(value.as_deref()) {
+                return Err(LocalError::InvalidSpec(
+                    "real-to-unsigned cast requires an actual Real or Float32 identity".into(),
+                ));
+            }
+            let bound = {
+                let report =
+                    crate::native_cast::evaluate_cast_real_unsigned_native(value.as_deref())
+                        .map_err(|error| match error {
+                            crate::NativeIdentityFrameError::Invalid => LocalError::InvalidSpec(
+                                "real-to-unsigned cast rejected its identity".into(),
+                            ),
+                            crate::NativeIdentityFrameError::Capacity => {
+                                evaluated_ascii_storage_overflow()
+                            }
+                        })?;
+                if report.overflow_bits.is_some() {
+                    17
+                } else {
+                    9
+                }
+            };
+            // Only the canonical report length survives this scope. The real
+            // generated wrapper still computes and owns the actual reply below.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -10231,6 +10278,15 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation == EvaluatedBytesOp::CastRealUnsignedNative
+                    && value.is_none_or(|bytes| {
+                        crate::decode_native_cast_real_unsigned_result(bytes).is_none()
+                    })
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native real-to-unsigned cast returned an invalid report".into(),
+                    ));
+                }
                 if self.operation == EvaluatedBytesOp::NullIfNative
                     && !crate::native_identity_args_valid(value)
                 {

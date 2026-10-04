@@ -417,6 +417,17 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  Partial native Real/Float32-to-UNSIGNED CAST uses `CastRealUnsignedNative`
+  (Values/unary Bytes/call1). `native_cast.rs` accepts the actual identity and
+  computes ties-even rounding, negative wrapping, nonfinite/range handling and
+  an optional rounded overflow event. Its canonical 9/17-byte report is not an
+  identity frame; ready preflight computes its bound through the same producer,
+  still charging actual input capacity and running the real kernel afterward.
+  Native callers only decode and present the existing 1690 warning; the native
+  diagnostic formatter remains an adapter. Legacy wire conversion has different
+  rounding/clip/boundary/NaN policy and is untouched. Other CAST domains, outer
+  NULL and UNION's negative bypass are not covered by this slice, and no whole
+  CAST family or new wire admission is credited.
   NULLIF adds one closed `NullIfNative` Values profile on existing BytesInt
   transport: actual left identity, then canonical nullable comparison result.
   `native_if.rs` validates both actual inputs even when equality selects NULL;

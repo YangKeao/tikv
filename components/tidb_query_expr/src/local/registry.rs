@@ -467,7 +467,8 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::IfHeadNative
         | LocalFunctionId::IfFinishNative
         | LocalFunctionId::CoalesceEndNative
-        | LocalFunctionId::NullIfNative => Err(other_err!(
+        | LocalFunctionId::NullIfNative
+        | LocalFunctionId::CastRealUnsignedNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

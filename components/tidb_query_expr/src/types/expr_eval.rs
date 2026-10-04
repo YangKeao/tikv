@@ -315,6 +315,10 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::CastRealUnsignedNative, EvaluatedArgsRole::Values) => {
+            types.len() == 1 && operation.call_count() == 1
+        }
+        (EvaluatedBytesOp::CastRealUnsignedNative, _) => false,
         (EvaluatedBytesOp::NullIfNative, EvaluatedArgsRole::Values) => {
             types.len() == 2 && operation.call_count() == 1
         }
@@ -448,6 +452,13 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::CastRealUnsignedNative
+            || match values {
+                [ScalarValue::Bytes(value)] => {
+                    crate::cast_real_unsigned_native_args_valid(value.as_deref())
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::NullIfNative
             || match values {
                 [ScalarValue::Bytes(lhs), ScalarValue::Int(comparison)] => {
@@ -1231,6 +1242,10 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::CastRealUnsignedNative, EvaluatedArgsRole::Values) => {
+            arity == 1 && calls == 1
+        }
+        (EvaluatedBytesOp::CastRealUnsignedNative, _) => false,
         (EvaluatedBytesOp::NullIfNative, EvaluatedArgsRole::Values) => arity == 2 && calls == 1,
         (EvaluatedBytesOp::NullIfNative, _) => false,
         (EvaluatedBytesOp::CoalesceEndNative, EvaluatedArgsRole::NoArgs) => {

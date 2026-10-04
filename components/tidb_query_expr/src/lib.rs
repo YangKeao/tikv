@@ -45,6 +45,12 @@ pub mod impl_string;
 pub mod impl_time;
 pub mod impl_vec;
 
+mod native_cast;
+pub use native_cast::{
+    NativeCastRealUnsignedResult, cast_real_unsigned_native_args_valid,
+    decode_native_cast_real_unsigned_result,
+};
+
 mod native_clock;
 pub use native_clock::{
     NativeClockInput, native_current_date, native_current_time_with_fsp,

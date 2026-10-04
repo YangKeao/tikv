@@ -31,6 +31,21 @@ use crate::{
     RpnExpressionNode, RpnFnCallExtra, RpnFnMeta, RpnStackNode, types::function::CallShape,
 };
 
+/// Native Real/Float32-to-UNSIGNED has its own exact warning/value policy;
+/// leave the existing wire cast selection and kernels below unchanged.
+#[rpn_fn(nullable)]
+fn cast_real_unsigned_native(value: Option<BytesRef>) -> Result<Option<Bytes>> {
+    crate::native_cast::evaluate_cast_real_unsigned_native(value)
+        .and_then(crate::native_cast::encode_native_cast_real_unsigned_result)
+        .map(Some)
+        .map_err(|error| {
+            other_err!(
+                "Invalid native real-to-unsigned cast transport: {:?}",
+                error
+            )
+        })
+}
+
 fn get_cast_fn_rpn_meta(
     binary_literal_numeric: bool,
     from_field_type: &FieldType,
