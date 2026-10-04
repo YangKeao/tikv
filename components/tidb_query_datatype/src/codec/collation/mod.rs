@@ -5,6 +5,7 @@ pub mod collator;
 pub mod encoding;
 pub mod gb;
 pub mod native;
+pub mod native_encoding;
 pub mod pattern;
 
 use std::{

@@ -417,6 +417,15 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  Native-compatible charset byte policy lives in
+  `codec/collation/native_encoding.rs`, separate from wire Encoding traits.
+  It owns TransformOp, generic first-error/trim/replace/collection policy,
+  ASCII/UTF8 group scanning and seven-encoding byte operations/prefix counts.
+  GB operations reuse existing native GB helpers; UTF8 scanning reuses the
+  strict decoder. Primitive valid-input fastpaths deliberately differ from
+  registry transforms. Native error/result carriers remain frontend projections;
+  charset metadata/name/case policy and evaluator selection are not implied
+  migrated by this foundation. No C4 profile or wire policy is added here.
   Native TIMESTAMPDIFF has separate Text/Core Values/Bytes3/nullable-Int
   profiles. The datatype `time/native_timestamp_diff.rs` owns strict wide-year
   text/civil/signed-month arithmetic and the distinct raw i32-daynr/u32-month
