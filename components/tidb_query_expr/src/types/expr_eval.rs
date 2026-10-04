@@ -315,6 +315,17 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::BoundedStalenessHeadNative, EvaluatedArgsRole::Values) => {
+            types.len() == 2 && operation.call_count() == 1
+        }
+        (EvaluatedBytesOp::BoundedStalenessFinishNative, EvaluatedArgsRole::Values) => {
+            types.len() == 3 && operation.call_count() == 1
+        }
+        (
+            EvaluatedBytesOp::BoundedStalenessHeadNative
+            | EvaluatedBytesOp::BoundedStalenessFinishNative,
+            _,
+        ) => false,
         (EvaluatedBytesOp::CastRealUnsignedNative, EvaluatedArgsRole::Values) => {
             types.len() == 1 && operation.call_count() == 1
         }
@@ -452,6 +463,29 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::BoundedStalenessHeadNative
+            || match values {
+                [ScalarValue::Bytes(left), ScalarValue::Bytes(right)] => {
+                    crate::bounded_staleness_head_native_args_valid(
+                        left.as_deref(),
+                        right.as_deref(),
+                    )
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::BoundedStalenessFinishNative
+            || match values {
+                [
+                    ScalarValue::Bytes(left),
+                    ScalarValue::Bytes(right),
+                    ScalarValue::Bytes(safe),
+                ] => crate::bounded_staleness_finish_native_args_valid(
+                    left.as_deref(),
+                    right.as_deref(),
+                    safe.as_deref(),
+                ),
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::CastRealUnsignedNative
             || match values {
                 [ScalarValue::Bytes(value)] => {
@@ -1242,6 +1276,17 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::BoundedStalenessHeadNative, EvaluatedArgsRole::Values) => {
+            arity == 2 && calls == 1
+        }
+        (EvaluatedBytesOp::BoundedStalenessFinishNative, EvaluatedArgsRole::Values) => {
+            arity == 3 && calls == 1
+        }
+        (
+            EvaluatedBytesOp::BoundedStalenessHeadNative
+            | EvaluatedBytesOp::BoundedStalenessFinishNative,
+            _,
+        ) => false,
         (EvaluatedBytesOp::CastRealUnsignedNative, EvaluatedArgsRole::Values) => {
             arity == 1 && calls == 1
         }

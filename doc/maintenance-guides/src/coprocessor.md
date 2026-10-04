@@ -417,6 +417,16 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  Native bounded staleness uses `native_bounded_staleness.rs`: a Bytes2 Head
+  classifies actual raw Time endpoints into invalid-left/right, reversed-window
+  NULL or NeedSafe; a Bytes3 Finish accepts the original endpoints and actual
+  optional SafeTS. Both are closed Values/1call/OwnBytes profiles, using shared
+  producers for ready preflight (1/11bytes) and real dispatch. Finish owns strict
+  clamping and DateTime/FSP3 metadata only, preserving all raw bits; equality
+  keeps SafeTS itself. The caller projects warnings and reads the original
+  already-zone-adjusted SafeTS exactly once only after NeedSafe. Actual NULL
+  uses the existing Int NULL witness, not a forged Time. No new calendar/FSP
+  validation, clock/storage query or PB admission is implied.
   Partial native Real/Float32-to-UNSIGNED CAST uses `CastRealUnsignedNative`
   (Values/unary Bytes/call1). `native_cast.rs` accepts the actual identity and
   computes ties-even rounding, negative wrapping, nonfinite/range handling and

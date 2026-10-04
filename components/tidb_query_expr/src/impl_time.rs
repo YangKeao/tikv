@@ -32,6 +32,29 @@ use crate::{
 };
 
 #[rpn_fn(nullable)]
+fn bounded_staleness_head_native(
+    left: Option<BytesRef>,
+    right: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    let result =
+        crate::native_bounded_staleness::evaluate_bounded_staleness_head_native(left, right)
+            .map_err(|error| other_err!("Invalid bounded-staleness head transport: {:?}", error))?;
+    Ok(Some(vec![result as u8]))
+}
+
+#[rpn_fn(nullable)]
+fn bounded_staleness_finish_native(
+    left: Option<BytesRef>,
+    right: Option<BytesRef>,
+    safe: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    crate::native_bounded_staleness::evaluate_bounded_staleness_finish_native(left, right, safe)
+        .and_then(crate::encode_native_identity)
+        .map(Some)
+        .map_err(|error| other_err!("Invalid bounded-staleness finish transport: {:?}", error))
+}
+
+#[rpn_fn(nullable)]
 fn convert_tz_native(
     datetime: Option<BytesRef>,
     from: Option<BytesRef>,

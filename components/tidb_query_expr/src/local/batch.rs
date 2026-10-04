@@ -1582,6 +1582,8 @@ pub enum EvaluatedBytesOp {
     CoalesceEndNative,
     NullIfNative,
     CastRealUnsignedNative,
+    BoundedStalenessHeadNative,
+    BoundedStalenessFinishNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1645,6 +1647,16 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::BoundedStalenessHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::BoundedStalenessHeadNative,
+                );
+            }
+            Self::BoundedStalenessFinishNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::BoundedStalenessFinishNative,
+                );
+            }
             Self::CastRealUnsignedNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::CastRealUnsignedNative,
@@ -4282,6 +4294,12 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::BoundedStalenessHeadNative => {
+                crate::impl_time::bounded_staleness_head_native_fn_meta()
+            }
+            Self::BoundedStalenessFinishNative => {
+                crate::impl_time::bounded_staleness_finish_native_fn_meta()
+            }
             Self::CastRealUnsignedNative => crate::impl_cast::cast_real_unsigned_native_fn_meta(),
             Self::NullIfNative => crate::impl_control::null_if_native_fn_meta(),
             Self::CoalesceEndNative => crate::impl_compare::coalesce_end_native_fn_meta(),
@@ -4926,6 +4944,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::BoundedStalenessHeadNative | Self::BoundedStalenessFinishNative => {
+                EvalType::Bytes
+            }
             Self::CastRealUnsignedNative => EvalType::Bytes,
             Self::NullIfNative => EvalType::Bytes,
             Self::CoalesceEndNative => EvalType::Bytes,
@@ -5377,6 +5398,10 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::BoundedStalenessHeadNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::BoundedStalenessFinishNative => {
+                &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
+            }
             Self::CastRealUnsignedNative => &[EvalType::Bytes],
             Self::NullIfNative => &[EvalType::Bytes, EvalType::Int],
             Self::CoalesceEndNative => &[],
@@ -6863,6 +6888,27 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::BoundedStalenessHeadNative {
+            return match self {
+                Self::Bytes2(left, right) => crate::bounded_staleness_head_native_args_valid(
+                    left.as_deref(),
+                    right.as_deref(),
+                ),
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::BoundedStalenessFinishNative {
+            return match self {
+                Self::Bytes3([left, right, safe]) => {
+                    crate::bounded_staleness_finish_native_args_valid(
+                        left.as_deref(),
+                        right.as_deref(),
+                        safe.as_deref(),
+                    )
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::CastRealUnsignedNative {
             return match self {
                 Self::Bytes(value) => crate::cast_real_unsigned_native_args_valid(value.as_deref()),
@@ -9863,6 +9909,66 @@ impl EvaluatedBytesWorker {
             // generated wrapper still computes and owns the actual reply below.
             budget.check_output(bound, input_bytes)?;
         }
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::BoundedStalenessHeadNative
+                | EvaluatedBytesOp::BoundedStalenessFinishNative
+        ) {
+            let transport_error = |error| match error {
+                crate::NativeIdentityFrameError::Invalid => LocalError::InvalidSpec(
+                    "bounded-staleness producer rejected its operands".into(),
+                ),
+                crate::NativeIdentityFrameError::Capacity => evaluated_ascii_storage_overflow(),
+            };
+            let bound = match (self.operation, &ready[..arity]) {
+                (
+                    EvaluatedBytesOp::BoundedStalenessHeadNative,
+                    [ScalarValue::Bytes(left), ScalarValue::Bytes(right)],
+                ) if crate::bounded_staleness_head_native_args_valid(
+                    left.as_deref(),
+                    right.as_deref(),
+                ) =>
+                {
+                    let _ =
+                        crate::native_bounded_staleness::evaluate_bounded_staleness_head_native(
+                            left.as_deref(),
+                            right.as_deref(),
+                        )
+                        .map_err(transport_error)?;
+                    1
+                }
+                (
+                    EvaluatedBytesOp::BoundedStalenessFinishNative,
+                    [
+                        ScalarValue::Bytes(left),
+                        ScalarValue::Bytes(right),
+                        ScalarValue::Bytes(safe),
+                    ],
+                ) if crate::bounded_staleness_finish_native_args_valid(
+                    left.as_deref(),
+                    right.as_deref(),
+                    safe.as_deref(),
+                ) =>
+                {
+                    let _ =
+                        crate::native_bounded_staleness::evaluate_bounded_staleness_finish_native(
+                            left.as_deref(),
+                            right.as_deref(),
+                            safe.as_deref(),
+                        )
+                        .map_err(transport_error)?;
+                    11
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "bounded-staleness operands differ from their fixed stage domain".into(),
+                    ));
+                }
+            };
+            // Planning never supplies the result: retain all actual input owners,
+            // then invoke the real generated wrapper below for its own reply.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -10278,6 +10384,31 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation == EvaluatedBytesOp::BoundedStalenessHeadNative
+                    && value.is_none_or(|bytes| {
+                        crate::decode_native_bounded_staleness_head(bytes).is_none()
+                    })
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "bounded-staleness head returned an invalid report".into(),
+                    ));
+                }
+                if self.operation == EvaluatedBytesOp::BoundedStalenessFinishNative
+                    && value.is_none_or(|bytes| {
+                        !matches!(
+                            crate::decode_native_identity(bytes),
+                            Ok(crate::NativeIdentityRef::Time {
+                                kind: 1,
+                                fsp: 3,
+                                ..
+                            })
+                        )
+                    })
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "bounded-staleness finish returned an invalid temporal identity".into(),
+                    ));
+                }
                 if self.operation == EvaluatedBytesOp::CastRealUnsignedNative
                     && value.is_none_or(|bytes| {
                         crate::decode_native_cast_real_unsigned_result(bytes).is_none()

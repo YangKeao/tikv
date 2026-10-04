@@ -2955,3 +2955,221 @@ mod cast_real_unsigned_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod bounded_staleness_worker_tests {
+    use tidb_query_datatype::codec::mysql::Time;
+
+    use super::*;
+    use crate::{
+        NativeBoundedStalenessHeadResult as Head, NativeIdentityRef,
+        decode_native_bounded_staleness_head, decode_native_identity, encode_native_identity,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn time(core: u64, kind: u8) -> Vec<u8> {
+        encode_native_identity(NativeIdentityRef::Time {
+            core,
+            kind,
+            fsp: 255,
+        })
+        .unwrap()
+    }
+    fn report(value: ComputedValue) -> Vec<u8> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("bounded staleness must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value
+            .into_option()
+            .expect("both stages return non-NULL reports")
+    }
+    fn result_time(output: &[u8], expected: u64) {
+        assert_eq!(output.len(), 11);
+        assert_eq!(
+            decode_native_identity(output).unwrap(),
+            NativeIdentityRef::Time {
+                core: expected,
+                kind: 1,
+                fsp: 3
+            }
+        );
+    }
+
+    #[test]
+    fn bounded_staleness_workers_keep_endpoint_priority_safe_raw_fields_and_strict_clamps() {
+        let left = Time::native_core_from_fields(2020, 1, 1, 12, 0, 0, 123_456) | 9;
+        let right = Time::native_core_from_fields(2020, 1, 3, 12, 0, 0, 123_456) | 2;
+        let invalid_left = Time::native_core_from_fields(2020, 0, 1, 0, 0, 0, 0);
+        let invalid_right = Time::native_core_from_fields(2020, 1, 0, 0, 0, 0, 0);
+        let mut head = prepare(
+            EvaluatedBytesOp::BoundedStalenessHeadNative,
+            ExecutionLimits::default(),
+        );
+        let storage = head.retained_storage().unwrap();
+        let mut short = time(left, 0);
+        short.pop();
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::BytesInt(Some(time(left, 0)), Some(0)),
+            EvaluatedArgs::Bytes2(None, Some(time(right, 2))),
+            EvaluatedArgs::Bytes2(Some(time(left, 0)), None),
+            EvaluatedArgs::Bytes2(Some(short), Some(time(right, 2))),
+            EvaluatedArgs::Bytes2(
+                Some(encode_native_identity(NativeIdentityRef::Int(0)).unwrap()),
+                Some(time(right, 2)),
+            ),
+        ] {
+            assert!(matches!(
+                head.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(head.kernel_invocations(), 0);
+        }
+        for (index, (lhs, rhs, expected)) in [
+            (invalid_left, invalid_right, Head::InvalidLeft),
+            (left, invalid_right, Head::InvalidRight),
+            (right, left, Head::RangeNull),
+            (left, right, Head::NeedSafe),
+            (left, (left & !15) | 1, Head::NeedSafe),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = report(
+                head.eval_args(EvaluatedArgs::Bytes2(
+                    Some(time(lhs, 0)),
+                    Some(time(rhs, 2)),
+                ))
+                .unwrap(),
+            );
+            assert_eq!(output.len(), 1);
+            assert_eq!(
+                decode_native_bounded_staleness_head(&output),
+                Some(expected)
+            );
+            assert_eq!(head.kernel_invocations(), index as u64 + 1);
+            assert!(head.is_healthy());
+            assert_eq!(head.retained_storage().unwrap(), storage);
+        }
+        let mut finish = prepare(
+            EvaluatedBytesOp::BoundedStalenessFinishNative,
+            ExecutionLimits::default(),
+        );
+        let storage = finish.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes2(Some(time(left, 0)), Some(time(right, 2))),
+            EvaluatedArgs::Bytes3([None, Some(time(right, 2)), None]),
+            EvaluatedArgs::Bytes3([Some(time(left, 0)), None, None]),
+            EvaluatedArgs::Bytes3([Some(time(invalid_left, 0)), Some(time(right, 2)), None]),
+            EvaluatedArgs::Bytes3([Some(time(left, 0)), Some(time(invalid_right, 2)), None]),
+            EvaluatedArgs::Bytes3([Some(time(right, 0)), Some(time(left, 2)), None]),
+            EvaluatedArgs::Bytes3([Some(time(left, 0)), Some(time(right, 2)), Some(vec![15])]),
+        ] {
+            assert!(matches!(
+                finish.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(finish.kernel_invocations(), 0);
+        }
+        let before = Time::native_core_from_fields(2019, 12, 31, 0, 0, 0, 0);
+        let after = Time::native_core_from_fields(2020, 2, 1, 0, 0, 0, 0);
+        let zero_month_safe = Time::native_core_from_fields(2020, 0, 15, 0, 0, 0, 123_456) | 7;
+        for (index, (lhs, rhs, safe, expected)) in [
+            (left, right, None, left),
+            (left, right, Some(before), left),
+            (left, right, Some(after), right),
+            (left, right, Some((left & !15) | 1), (left & !15) | 1),
+            (left, right, Some((right & !15) | 15), (right & !15) | 15),
+            (before, after, Some(zero_month_safe), zero_month_safe),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Safe equal to an endpoint is selected as-is, including low bits.
+            // An in-range zero-month Safe is NOT subjected to the endpoint gate.
+            let output = report(
+                finish
+                    .eval_args(EvaluatedArgs::Bytes3([
+                        Some(time(lhs, 0)),
+                        Some(time(rhs, 2)),
+                        safe.map(|core| time(core, 1)),
+                    ]))
+                    .unwrap(),
+            );
+            result_time(&output, expected);
+            assert_eq!(finish.kernel_invocations(), index as u64 + 1);
+            assert!(finish.is_healthy());
+            assert_eq!(finish.retained_storage().unwrap(), storage);
+        }
+    }
+
+    #[test]
+    fn bounded_staleness_charges_actual_endpoint_and_safe_capacities_before_dispatch() {
+        let left = Time::native_core_from_fields(2020, 1, 1, 0, 0, 0, 123_456) | 9;
+        let right = Time::native_core_from_fields(2020, 1, 3, 0, 0, 0, 0);
+        for operation in [
+            EvaluatedBytesOp::BoundedStalenessHeadNative,
+            EvaluatedBytesOp::BoundedStalenessFinishNative,
+        ] {
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            let mut oversized = time(
+                if operation == EvaluatedBytesOp::BoundedStalenessHeadNative {
+                    left
+                } else {
+                    0
+                },
+                0,
+            );
+            oversized.reserve_exact(128 * 1024);
+            assert!(oversized.capacity() > 64 * 1024 && oversized.len() == 11);
+            let args = if operation == EvaluatedBytesOp::BoundedStalenessHeadNative {
+                EvaluatedArgs::Bytes2(Some(oversized), Some(time(right, 2)))
+            } else {
+                // Even a Safe that would clamp to left retains its actual owner.
+                EvaluatedArgs::Bytes3([Some(time(left, 0)), Some(time(right, 2)), Some(oversized)])
+            };
+            assert!(matches!(
+                worker.eval_args(args),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let args = if operation == EvaluatedBytesOp::BoundedStalenessHeadNative {
+                EvaluatedArgs::Bytes2(Some(time(left, 0)), Some(time(right, 2)))
+            } else {
+                EvaluatedArgs::Bytes3([Some(time(left, 0)), Some(time(right, 2)), None])
+            };
+            let output = report(worker.eval_args(args).unwrap());
+            if operation == EvaluatedBytesOp::BoundedStalenessHeadNative {
+                assert_eq!(
+                    decode_native_bounded_staleness_head(&output),
+                    Some(Head::NeedSafe)
+                );
+            } else {
+                result_time(&output, left);
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        // The one-/eleven-byte replies do not replace the shared row metadata
+        // floor with a special zero-retained success rule.
+    }
+}

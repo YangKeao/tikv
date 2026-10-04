@@ -45,6 +45,12 @@ pub mod impl_string;
 pub mod impl_time;
 pub mod impl_vec;
 
+mod native_bounded_staleness;
+pub use native_bounded_staleness::{
+    NativeBoundedStalenessHeadResult, bounded_staleness_finish_native_args_valid,
+    bounded_staleness_head_native_args_valid, decode_native_bounded_staleness_head,
+};
+
 mod native_cast;
 pub use native_cast::{
     NativeCastRealUnsignedResult, cast_real_unsigned_native_args_valid,
@@ -266,7 +272,8 @@ pub use self::{
         weight_string_native_fn_meta, weight_string_numeric_native_fn_meta,
     },
     impl_time::{
-        NativeTimeResult, add_time_native_fn_meta, convert_tz_native_fn_meta,
+        NativeTimeResult, add_time_native_fn_meta, bounded_staleness_finish_native_fn_meta,
+        bounded_staleness_head_native_fn_meta, convert_tz_native_fn_meta,
         current_date_native_fn_meta, current_time_with_fsp_native_fn_meta,
         current_time_without_fsp_native_fn_meta, date_core_native_args_valid,
         date_core_native_fn_meta, date_core_predicate_legacy_fn_meta, date_literal_native_fn_meta,

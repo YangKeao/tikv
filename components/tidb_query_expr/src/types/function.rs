@@ -518,6 +518,8 @@ pub enum LocalFunctionId {
     CoalesceEndNative,
     NullIfNative,
     CastRealUnsignedNative,
+    BoundedStalenessHeadNative,
+    BoundedStalenessFinishNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.
