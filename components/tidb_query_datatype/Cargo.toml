@@ -16,6 +16,8 @@ bstr = "0.2.8"
 bytemuck = "1.14.3"
 chrono = { workspace = true }
 chrono-tz = "0.5.1"
+# Native session semantics use this exact database; wire Tz keeps its old version.
+chrono-tz-native = { package = "chrono-tz", version = "=0.10.4" }
 codec = { workspace = true }
 collections = { workspace = true }
 crc32fast = "1.2"

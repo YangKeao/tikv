@@ -4,6 +4,9 @@ pub mod extension;
 pub mod interval;
 mod native_datetime;
 mod native_parse;
+mod native_session_time_zone;
+mod native_time_parser;
+mod native_value;
 mod tz;
 pub mod weekmode;
 
@@ -32,6 +35,16 @@ pub use self::{
         NativeTimezoneSuffix, native_get_frac_index, native_get_time_fsp, native_get_timezone,
         native_is_date_format, native_parse_date_format, native_time_is_ascii_punctuation,
     },
+    native_session_time_zone::{
+        SessionTimeZone as NativeSessionTimeZone,
+        SessionTimeZoneOffset as NativeSessionTimeZoneOffset,
+    },
+    native_time_parser::{
+        NativeParsedTime, NativeTimeParseOutcome, native_parse_time,
+        native_parse_time_from_decimal_text, native_parse_time_from_float64,
+        native_parse_time_from_int64, native_parse_time_from_num,
+    },
+    native_value::{NativeTemporalValue, NativeTimeError},
     tz::Tz,
     weekmode::WeekMode,
 };
@@ -691,7 +704,7 @@ bitfield! {
     u8, get_fsp_tt, set_fsp_tt: 3, 0;
 }
 
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub enum TimeType {
     Date,
     DateTime,

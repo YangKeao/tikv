@@ -418,6 +418,19 @@ short-circuit admission policy described above.
   gap search, leap-second microseconds and existing panic/cast domains remain
   distinct from SQL validation. Lexical recognition is not full parsing: byte
   indices, source-suffix FSP counts and permissive date-shape rules remain.
+  `native_time_parser.rs` now owns DATE/DATETIME/TIMESTAMP string and numeric
+  parsing, with raw/kind/FSP construction, setters, validation and the original
+  nine-cause error in `native_value.rs`. Native TimeType aliases the existing
+  wire enum (with Eq/Hash added); native Time storage remains a facade. Keep
+  DATE hidden clock/raw bits, parser-versus-constructor FSP ordering, numeric
+  error-side typed zeros and original float/Decimal representation behavior.
+  `native_session_time_zone.rs` owns the native zone implementation with a
+  separate exact chrono-tz 0.10.4 dependency; wire Tz/database 0.5.3 is unchanged.
+  Native aliases retain exact package identity, original names/raw offsets,
+  conversion-only clamping and from_offset's Fixed reconstruction. No name
+  reparse or offset snapshot substitutes for the real timezone. Dual database
+  footprint and performance are unmeasured. YEAR/INTERVAL, broader temporal
+  methods and evaluator closure remain open.
   This SDK-only slice adds no evaluator admission/profile or family credit.
   JSON_SEARCH uses `native_json_search.rs` for its original selection, leaf walk,
   stable global path deduplication and formatted String result. Existing Bytes3
