@@ -126,6 +126,12 @@ pub use native_json::{
     validate_native_json_unquote_text,
 };
 
+mod native_json_sum_crc32;
+pub use native_json_sum_crc32::{
+    NativeJsonSumCrc32Result, decode_native_json_sum_crc32_result,
+    json_sum_crc32_serde_native_args_valid, json_sum_crc32_serde_native_fn_meta,
+};
+
 mod native_json_legacy;
 pub use native_json_legacy::{native_json_array_append_raw_legacy, native_json_replace_raw_legacy};
 

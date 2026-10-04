@@ -315,6 +315,10 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::JsonSumCrc32SerdeNative, EvaluatedArgsRole::Values) => {
+            types.len() == 1 && operation.call_count() == 1
+        }
+        (EvaluatedBytesOp::JsonSumCrc32SerdeNative, _) => false,
         (
             EvaluatedBytesOp::StrToDateHeadNative | EvaluatedBytesOp::StrToDateFinishNative,
             EvaluatedArgsRole::Values,
@@ -497,6 +501,13 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::JsonSumCrc32SerdeNative
+            || match values {
+                [ScalarValue::Bytes(input)] => {
+                    crate::json_sum_crc32_serde_native_args_valid(input.as_deref())
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::StrToDateHeadNative
             || match values {
                 [
@@ -1402,6 +1413,10 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::JsonSumCrc32SerdeNative, EvaluatedArgsRole::Values) => {
+            arity == 1 && calls == 1
+        }
+        (EvaluatedBytesOp::JsonSumCrc32SerdeNative, _) => false,
         (
             EvaluatedBytesOp::StrToDateHeadNative | EvaluatedBytesOp::StrToDateFinishNative,
             EvaluatedArgsRole::Values,

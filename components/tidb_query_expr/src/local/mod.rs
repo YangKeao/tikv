@@ -3935,3 +3935,130 @@ mod str_to_date_worker_tests {
         // threshold; every actual owner and the old row metadata still count.
     }
 }
+
+#[cfg(test)]
+mod json_sum_crc32_worker_tests {
+    use super::*;
+    use crate::{NativeJsonSumCrc32Result as Reply, decode_native_json_sum_crc32_result};
+
+    fn prepare(limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            EvaluatedBytesOp::JsonSumCrc32SerdeNative,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn ready(document: &str) -> EvaluatedArgs {
+        let document: serde_json::Value = serde_json::from_str(document).unwrap();
+        prepare_json_serde_args(&document, None, None).unwrap()
+    }
+    fn check(value: ComputedValue, expected: Option<Reply>) {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("JSON sum must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        let output = value.into_option();
+        match (output.as_deref(), expected) {
+            (None, None) => {}
+            (Some(frame), Some(expected)) => match (
+                decode_native_json_sum_crc32_result(frame).unwrap(),
+                expected,
+            ) {
+                (Reply::Value(actual), Reply::Value(expected)) => {
+                    assert_eq!(frame.len(), 9);
+                    assert_eq!(actual, expected);
+                }
+                (Reply::RequiresArray, Reply::RequiresArray)
+                | (Reply::RequiresScalar, Reply::RequiresScalar)
+                | (Reply::RequiresHomogeneous, Reply::RequiresHomogeneous) => {
+                    assert_eq!(frame.len(), 1)
+                }
+                _ => panic!("unexpected JSON sum report class"),
+            },
+            _ => panic!("SQL NULL is distinct from a JSON null document"),
+        }
+    }
+
+    #[test]
+    fn json_sum_crc32_worker_keeps_source_vectors_first_error_order_and_ready_capacity() {
+        let mut worker = prepare(ExecutionLimits::default());
+        let storage = worker.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Int(None),
+            EvaluatedArgs::Bytes2(None, None),
+            EvaluatedArgs::Bytes(Some(b"not-json".to_vec())),
+            EvaluatedArgs::Bytes(Some(vec![255])),
+        ] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+        }
+        check(worker.eval_args(EvaluatedArgs::Bytes(None)).unwrap(), None);
+        assert_eq!(worker.kernel_invocations(), 1);
+        // Static original json_sum_crc32_go_vectors oracles, not SDK/provider
+        // output or a host CRC calculation. No typed SQL ARRAY cast claim.
+        for (index, (document, expected)) in [
+            ("[]", Reply::Value(0)),
+            ("[-1, 2, 3]", Reply::Value(3_101_005_010)),
+            ("[1, 2, 3]", Reply::Value(4_505_025_631)),
+            (r#"["a", "b", "c"]"#, Reply::Value(5_925_539_243)),
+            ("[1.1, 1, 3.3]", Reply::Value(6_204_045_883)),
+            ("[1.1, 2.2, 3.3]", Reply::Value(4_453_038_788)),
+            ("null", Reply::RequiresArray),
+            ("[null]", Reply::RequiresScalar),
+            (r#"[1, "x", true]"#, Reply::RequiresHomogeneous),
+            (r#"[1, true, "x"]"#, Reply::RequiresScalar),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            check(worker.eval_args(ready(document)).unwrap(), Some(expected));
+            assert_eq!(worker.kernel_invocations(), index as u64 + 2);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let mut stopped = prepare(ExecutionLimits {
+            max_steps: 0,
+            ..ExecutionLimits::default()
+        });
+        let storage = stopped.retained_storage().unwrap();
+        assert!(matches!(
+            stopped.eval_args(ready("[]")),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(stopped.kernel_invocations(), 0);
+        assert!(stopped.is_healthy());
+        assert_eq!(stopped.retained_storage().unwrap(), storage);
+        let mut limited = prepare(ExecutionLimits {
+            max_retained_bytes: 64 * 1024,
+            ..ExecutionLimits::default()
+        });
+        let storage = limited.retained_storage().unwrap();
+        let EvaluatedArgs::Bytes(Some(mut frame)) = ready("[]") else {
+            unreachable!();
+        };
+        frame.reserve_exact(128 * 1024);
+        assert!(frame.capacity() > 64 * 1024 && frame.len() == 2);
+        assert!(matches!(
+            limited.eval_args(EvaluatedArgs::Bytes(Some(frame))),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(limited.kernel_invocations(), 0);
+        assert!(limited.is_healthy());
+        assert_eq!(limited.retained_storage().unwrap(), storage);
+        check(
+            limited.eval_args(ready("[]")).unwrap(),
+            Some(Reply::Value(0)),
+        );
+        assert_eq!(limited.kernel_invocations(), 1);
+        assert!(limited.is_healthy());
+        assert_eq!(limited.retained_storage().unwrap(), storage);
+        // The fixed nine-byte reply plan is not an allocator peak/total bound;
+        // actual input ownership and the existing NULL-row metadata still
+        // count.
+    }
+}

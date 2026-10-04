@@ -2118,7 +2118,44 @@ impl Decimal {
         Self::native_format_go_shortest_parts(negative, &digits, exponent)
     }
 
-    // Both generators supply nonempty significant digits and the exponent of
+    /// Finite JSON_SUM_CRC32 numeric spelling. Keep Rust Display as the digit
+    /// generator, including its original fixed/scientific cutover test, and
+    /// normalize BOTH signed zeros to "0". This is not the Ryu or LowerExp
+    /// policy used by the other native float entrypoints.
+    pub fn native_format_json_sum_float(value: f64) -> String {
+        assert!(value.is_finite(), "JSON sum float must be finite");
+        if value == 0.0 {
+            return "0".to_string();
+        }
+        let mut rendered = value.to_string();
+        let abs = value.abs();
+        if (1e-4..1e6).contains(&abs) {
+            return rendered;
+        }
+        let negative = rendered.starts_with('-');
+        if negative {
+            rendered.remove(0);
+        }
+        let (integer, fraction) = rendered
+            .split_once('.')
+            .map_or((rendered.as_str(), ""), |(integer, fraction)| {
+                (integer, fraction)
+            });
+        let digits = format!("{integer}{fraction}");
+        let first = digits
+            .bytes()
+            .position(|digit| digit != b'0')
+            .expect("nonzero float has a significant digit");
+        let exponent = if integer != "0" {
+            integer.len() as i32 - first as i32 - 1
+        } else {
+            -(first as i32 - integer.len() as i32 + 1)
+        };
+        let significant = digits[first..].trim_end_matches('0');
+        Self::native_format_go_shortest_parts(negative, significant, exponent)
+    }
+
+    // All generators supply nonempty significant digits and the exponent of
     // their first digit. Do not trim/re-round those digits or choose a generator
     // here: this is only the original shared Go-g notation/layout policy.
     fn native_format_go_shortest_parts(negative: bool, significant: &str, exponent: i32) -> String {
@@ -5677,6 +5714,31 @@ mod native_exact_integer_division_tests {
 #[cfg(test)]
 mod native_presentation_tests {
     use super::Decimal;
+
+    #[test]
+    fn native_json_sum_float_keeps_display_generator_cutovers_and_unsigned_zero() {
+        for (value, expected) in [
+            (0.0, "0"),
+            (-0.0, "0"),
+            (1.0, "1"),
+            (1.25, "1.25"),
+            (1e-4, "0.0001"),
+            (1e-5, "1e-05"),
+            (999_999.5, "999999.5"),
+            (1_000_000.0, "1e+06"),
+            (-1_234_500.0, "-1.2345e+06"),
+            (f64::from_bits(1), "5e-324"),
+            (f64::MAX, "1.7976931348623157e+308"),
+        ] {
+            assert_eq!(Decimal::native_format_json_sum_float(value), expected);
+        }
+        assert_eq!(Decimal::native_format_float_g_shortest(-0.0), "-0");
+        let just_below = f64::from_bits(1e6_f64.to_bits() - 1);
+        assert_eq!(
+            Decimal::native_format_json_sum_float(just_below),
+            just_below.to_string()
+        );
+    }
 
     #[test]
     fn native_shortest_float_policies_share_layout_not_digit_generators() {

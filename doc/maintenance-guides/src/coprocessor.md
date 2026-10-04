@@ -417,6 +417,16 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  The existing native JSON_SUM_CRC32 scalar-array domain uses query_expr's
+  `native_json_sum_crc32.rs`: one nullable Bytes/OwnBytes worker owns ordered
+  classification, numeric spelling, IEEE CRC and wrapping accumulation.
+  Actual prepared serde documents are inputs, not precomputed checksums;
+  NULL versus JSON null and three original semantic errors remain distinct.
+  The output is bounded by9bytes before dispatch (actual NULL needs0), with
+  actual capacities checked. Decimal's narrow `native_format_json_sum_float`
+  keeps Rust Display digits but shares Go-g layout; CRC uses the existing
+  file_system service. This is not SQL ARRAY-target conversion support or
+  new wire admission, nor a physical parsing/allocation peak guarantee.
   Ordinary STR_TO_DATE expression policy lives separately in query_expr's
   `native_str_to_date.rs`: three one-call Values/OwnBytes profiles parse, finish
   date-mode validation and finish typed DATETIME's late zero-date-prefix policy.

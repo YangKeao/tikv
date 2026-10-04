@@ -1592,6 +1592,7 @@ pub enum EvaluatedBytesOp {
     StrToDateHeadNative,
     StrToDateFinishNative,
     StrToDateTypedFinishNative,
+    JsonSumCrc32SerdeNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1655,6 +1656,11 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::JsonSumCrc32SerdeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::JsonSumCrc32SerdeNative,
+                );
+            }
             Self::StrToDateHeadNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::StrToDateHeadNative,
@@ -4355,6 +4361,9 @@ impl EvaluatedBytesOp {
             Self::StrToDateTypedFinishNative => {
                 crate::native_str_to_date::str_to_date_typed_finish_native_fn_meta()
             }
+            Self::JsonSumCrc32SerdeNative => {
+                crate::native_json_sum_crc32::json_sum_crc32_serde_native_fn_meta()
+            }
             Self::ToBinaryNative => crate::to_binary_native_fn_meta(),
             Self::FromBinaryNative => crate::from_binary_native_fn_meta(),
             Self::ConvertUsingNative => crate::convert_using_native_fn_meta(),
@@ -5004,6 +5013,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::JsonSumCrc32SerdeNative => EvalType::Bytes,
             Self::StrToDateHeadNative
             | Self::StrToDateFinishNative
             | Self::StrToDateTypedFinishNative => EvalType::Bytes,
@@ -5465,6 +5475,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::JsonSumCrc32SerdeNative => &[EvalType::Bytes],
             Self::StrToDateHeadNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
             Self::StrToDateFinishNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
             Self::StrToDateTypedFinishNative => &[EvalType::Bytes, EvalType::Int],
@@ -6981,6 +6992,14 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::JsonSumCrc32SerdeNative {
+            return match self {
+                Self::Bytes(value) => {
+                    crate::json_sum_crc32_serde_native_args_valid(value.as_deref())
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::StrToDateHeadNative {
             return match self {
                 Self::BytesBytesInt(value, format, target) => {
@@ -10258,6 +10277,24 @@ impl EvaluatedBytesWorker {
             // live. No allocating producer runs before this retained-reply bound.
             budget.check_output(bound, input_bytes)?;
         }
+        if self.operation == EvaluatedBytesOp::JsonSumCrc32SerdeNative {
+            let [ScalarValue::Bytes(value)] = &ready[..arity] else {
+                return Err(LocalError::InvalidSpec(
+                    "JSON_SUM_CRC32 requires its unary prepared document".into(),
+                ));
+            };
+            if !crate::json_sum_crc32_serde_native_args_valid(value.as_deref()) {
+                return Err(LocalError::InvalidSpec(
+                    "JSON_SUM_CRC32 received an invalid prepared document".into(),
+                ));
+            }
+            let bound =
+                crate::native_json_sum_crc32::native_json_sum_crc32_output_bound(value.as_deref())
+                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // Structural admission and reply planning only: CRC and semantic
+            // classification remain in the real producer invoked below.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -10673,6 +10710,21 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation == EvaluatedBytesOp::JsonSumCrc32SerdeNative {
+                    let valid = match (&ready[..arity], value) {
+                        ([ScalarValue::Bytes(None)], None) => true,
+                        ([ScalarValue::Bytes(Some(_))], Some(bytes)) => {
+                            crate::decode_native_json_sum_crc32_result(bytes).is_some()
+                        }
+                        _ => false,
+                    };
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "JSON_SUM_CRC32 returned an invalid report or changed input presence"
+                                .into(),
+                        ));
+                    }
+                }
                 if self.operation == EvaluatedBytesOp::StrToDateFinishNative
                     && value.is_none_or(|bytes| {
                         !matches!(
