@@ -2601,3 +2601,175 @@ mod case_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod null_if_worker_tests {
+    use super::*;
+    use crate::{NativeIdentityRef, encode_native_identity};
+
+    fn prepare(limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            EvaluatedBytesOp::NullIfNative,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn bytes(value: ComputedValue) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("NULLIF must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+
+    #[test]
+    fn null_if_validates_every_actual_left_before_selecting_or_returning_null() {
+        let mut worker = prepare(ExecutionLimits::default());
+        let storage = worker.retained_storage().unwrap();
+        let integer = encode_native_identity(NativeIdentityRef::Int(0)).unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Bytes2(None, None),
+            EvaluatedArgs::Int2(None, None),
+            EvaluatedArgs::BytesInt(Some(integer.clone()), Some(2)),
+            EvaluatedArgs::BytesInt(Some(integer.clone()), Some(-1)),
+        ] {
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+        }
+        assert!(matches!(
+            worker.eval_one(None),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        for comparison in [None, Some(0), Some(1)] {
+            for malformed in [Vec::new(), vec![0], vec![1, 2]] {
+                // Equality does not excuse an invalid present identity or turn
+                // a control report into a ready left value.
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::BytesInt(Some(malformed), comparison)),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+        }
+        let sources = [
+            None,
+            Some(integer),
+            Some(
+                encode_native_identity(NativeIdentityRef::Decimal {
+                    negative: false,
+                    scale: 9,
+                    storage_scale: 9,
+                    declared_shape: None,
+                    coefficient: b"",
+                })
+                .unwrap(),
+            ),
+            Some(
+                encode_native_identity(NativeIdentityRef::Decimal {
+                    negative: true,
+                    scale: u32::MAX,
+                    storage_scale: 9,
+                    declared_shape: Some((-1, 99)),
+                    coefficient: b"\xff\0+",
+                })
+                .unwrap(),
+            ),
+            Some(
+                encode_native_identity(NativeIdentityRef::Float32(0x7ff8_0000_0000_1234)).unwrap(),
+            ),
+        ];
+        let mut calls = 0;
+        for source in sources {
+            for comparison in [None, Some(0), Some(1)] {
+                let output = bytes(
+                    worker
+                        .eval_args(EvaluatedArgs::BytesInt(source.clone(), comparison))
+                        .unwrap(),
+                );
+                assert_eq!(
+                    output,
+                    if comparison == Some(1) {
+                        None
+                    } else {
+                        source.clone()
+                    }
+                );
+                calls += 1;
+                assert_eq!(
+                    worker.kernel_invocations(),
+                    calls,
+                    "actual NULL operands still invoke the wrapper"
+                );
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+        }
+    }
+
+    #[test]
+    fn null_if_charges_actual_left_capacity_even_when_equality_selects_null() {
+        let mut zero = prepare(ExecutionLimits {
+            max_retained_bytes: 0,
+            ..ExecutionLimits::default()
+        });
+        let storage = zero.retained_storage().unwrap();
+        // Zero reply payload does not remove the existing driver/NULL-row
+        // metadata cost. No special zero-retained success or allocator cutoff.
+        assert!(matches!(
+            zero.eval_args(EvaluatedArgs::BytesInt(None, Some(1))),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(zero.kernel_invocations(), 0);
+        assert!(zero.is_healthy());
+        assert_eq!(zero.retained_storage().unwrap(), storage);
+        for comparison in [None, Some(0), Some(1)] {
+            let mut worker = prepare(ExecutionLimits {
+                max_retained_bytes: 64 * 1024,
+                ..ExecutionLimits::default()
+            });
+            let storage = worker.retained_storage().unwrap();
+            let mut left = encode_native_identity(NativeIdentityRef::MaxValue).unwrap();
+            left.reserve_exact(128 * 1024);
+            assert!(left.capacity() > 64 * 1024 && left.len() == 1);
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::BytesInt(Some(left), comparison)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(
+                worker.kernel_invocations(),
+                0,
+                "even equality must charge the retained actual left"
+            );
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let left = encode_native_identity(NativeIdentityRef::MaxValue).unwrap();
+            assert_eq!(
+                bytes(
+                    worker
+                        .eval_args(EvaluatedArgs::BytesInt(Some(left.clone()), Some(0)))
+                        .unwrap()
+                ),
+                Some(left)
+            );
+            assert_eq!(
+                bytes(
+                    worker
+                        .eval_args(EvaluatedArgs::BytesInt(None, Some(1)))
+                        .unwrap()
+                ),
+                None
+            );
+            assert_eq!(worker.kernel_invocations(), 2);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

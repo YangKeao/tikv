@@ -1580,6 +1580,7 @@ pub enum EvaluatedBytesOp {
     IfHeadNative,
     IfFinishNative,
     CoalesceEndNative,
+    NullIfNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1643,6 +1644,9 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::NullIfNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::NullIfNative);
+            }
             Self::CoalesceEndNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::CoalesceEndNative,
@@ -4272,6 +4276,7 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::NullIfNative => crate::impl_control::null_if_native_fn_meta(),
             Self::CoalesceEndNative => crate::impl_compare::coalesce_end_native_fn_meta(),
             Self::IfHeadNative => crate::impl_control::if_head_native_fn_meta(),
             Self::IfFinishNative => crate::impl_control::if_finish_native_fn_meta(),
@@ -4914,6 +4919,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::NullIfNative => EvalType::Bytes,
             Self::CoalesceEndNative => EvalType::Bytes,
             Self::IfHeadNative | Self::IfFinishNative => EvalType::Bytes,
             Self::IfNullHeadNative | Self::IfNullFinishNative => EvalType::Bytes,
@@ -5363,6 +5369,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::NullIfNative => &[EvalType::Bytes, EvalType::Int],
             Self::CoalesceEndNative => &[],
             Self::IfHeadNative => &[EvalType::Int],
             Self::IfFinishNative => &[EvalType::Bytes, EvalType::Bytes],
@@ -6847,6 +6854,14 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::NullIfNative {
+            return match self {
+                Self::BytesInt(lhs, comparison) => {
+                    crate::null_if_native_args_valid(lhs.as_deref(), *comparison)
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::CoalesceEndNative {
             return matches!(self, Self::NoArgs);
         }
@@ -9777,6 +9792,30 @@ impl EvaluatedBytesWorker {
             }
             budget.check_output(0, input_bytes)?;
         }
+        if self.operation == EvaluatedBytesOp::NullIfNative {
+            let [ScalarValue::Bytes(lhs), ScalarValue::Int(comparison)] = &ready[..arity] else {
+                return Err(LocalError::InvalidSpec(
+                    "NULLIF requires its ordered Bytes/Int operands".into(),
+                ));
+            };
+            if !crate::null_if_native_args_valid(lhs.as_deref(), *comparison) {
+                return Err(LocalError::InvalidSpec(
+                    "NULLIF operands differ from their fixed domain".into(),
+                ));
+            }
+            // Borrow the shared selector only to measure this exact reply; do not
+            // retain its answer or replace the real generated-wrapper dispatch.
+            let bound = crate::native_if::evaluate_null_if_native(lhs.as_deref(), *comparison)
+                .map_err(|error| match error {
+                    crate::NativeIdentityFrameError::Invalid => {
+                        LocalError::InvalidSpec("NULLIF selector rejected its operands".into())
+                    }
+                    crate::NativeIdentityFrameError::Capacity => evaluated_ascii_storage_overflow(),
+                })?
+                .map_or(0, <[u8]>::len);
+            // Actual LHS capacity stays charged even when the reply is SQL NULL.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -10192,6 +10231,13 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation == EvaluatedBytesOp::NullIfNative
+                    && !crate::native_identity_args_valid(value)
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native NULLIF returned an invalid identity".into(),
+                    ));
+                }
                 if self.operation == EvaluatedBytesOp::CoalesceEndNative && value.is_some() {
                     return Err(LocalError::InvalidBatch(
                         "COALESCE end returned a present value".into(),

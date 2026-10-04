@@ -176,6 +176,13 @@ fn if_finish_native(report: Option<BytesRef>, value: Option<BytesRef>) -> Result
     Ok(value.map(|value| value.to_vec()))
 }
 
+#[rpn_fn(nullable)]
+fn null_if_native(lhs: Option<BytesRef>, comparison: Option<&Int>) -> Result<Option<Bytes>> {
+    let selected = crate::native_if::evaluate_null_if_native(lhs, comparison.copied())
+        .map_err(|error| other_err!("Invalid native NULLIF transport: {:?}", error))?;
+    Ok(selected.map(|value| value.to_vec()))
+}
+
 fn case_when_validator<T: EvaluableRet>(expr: &crate::types::function::CallShape) -> Result<()> {
     for chunk in expr.args().chunks(2) {
         if chunk.len() == 1 {
@@ -197,7 +204,12 @@ fn case_when_validator<T: EvaluableRet>(expr: &crate::types::function::CallShape
 pub fn local_nullif_int_signed_signed(lhs: Option<&Int>, rhs: Option<&Int>) -> Result<Option<Int>> {
     use crate::impl_compare::{BasicComparer, CmpOpEq, compare};
     let equal = compare::<BasicComparer<Int, CmpOpEq>>(lhs, rhs)?;
-    Ok(if equal == Some(1) { None } else { lhs.copied() })
+    Ok(
+        match crate::native_if_choose_branch(equal.map(|value| value == 1)) {
+            crate::NativeIfBranch::Then => None,
+            crate::NativeIfBranch::Else => lhs.copied(),
+        },
+    )
 }
 
 #[cfg(test)]

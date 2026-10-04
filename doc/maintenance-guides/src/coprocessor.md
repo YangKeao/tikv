@@ -417,6 +417,17 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  NULLIF adds one closed `NullIfNative` Values profile on existing BytesInt
+  transport: actual left identity, then canonical nullable comparison result.
+  `native_if.rs` validates both actual inputs even when equality selects NULL;
+  its single borrowed selector uses the existing IF chooser. The nullable RPN
+  wrapper copies that result. Common ready-value preflight uses the same helper
+  only for exact reply length; actual dispatch and input-capacity charging still
+  occur, including a retained left whose output is NULL. The old signed-Int
+  NULLIF retains its comparison once and shares only this choice primitive.
+  Native equality precedes identity preparation; existing comparison workers
+  already explain SQL zero-slot refusals. No standalone NULLIF PB signature,
+  carrier, report or general driver is introduced.
   CASE introduces no profile: actual condition chains reuse IF Head/Finish,
   genuine no-ELSE exhaustion reuses CoalesceEnd, and a statically sole ELSE uses
   AnyValue after its original first-value preparation. No synthetic condition or

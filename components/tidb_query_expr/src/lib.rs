@@ -87,7 +87,7 @@ pub use native_identity::{
 mod native_if;
 pub use native_if::{
     NativeIfBranch, decode_native_if_head_result, if_finish_native_args_valid,
-    if_head_native_args_valid, native_if_choose_branch,
+    if_head_native_args_valid, native_if_choose_branch, null_if_native_args_valid,
 };
 
 mod native_if_null;

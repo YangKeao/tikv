@@ -64,10 +64,108 @@ pub(crate) fn evaluate_if_finish_native<'a>(
     Ok(value)
 }
 
+/// Even an equal comparison must carry a structurally valid actual left value.
+/// Equality does not authorize discarding malformed transport before admission.
+pub fn null_if_native_args_valid(lhs: Option<&[u8]>, comparison: Option<i64>) -> bool {
+    native_identity_args_valid(lhs) && if_head_native_args_valid(comparison)
+}
+
+/// Shared borrowed result for both execution and exact reply-length planning.
+/// The existing comparison result is data; this helper never compares operands.
+pub(crate) fn evaluate_null_if_native<'a>(
+    lhs: Option<&'a [u8]>,
+    comparison: Option<i64>,
+) -> Result<Option<&'a [u8]>, NativeIdentityFrameError> {
+    if !null_if_native_args_valid(lhs, comparison) {
+        return Err(NativeIdentityFrameError::Invalid);
+    }
+    Ok(
+        match native_if_choose_branch(comparison.map(|value| value == 1)) {
+            NativeIfBranch::Then => None,
+            NativeIfBranch::Else => lhs,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{NativeIdentityRef as View, encode_native_identity};
+
+    #[test]
+    fn null_if_validates_actual_left_before_equal_and_borrows_false_or_null_results() {
+        for comparison in [None, Some(0), Some(1)] {
+            assert!(null_if_native_args_valid(None, comparison));
+            assert_eq!(evaluate_null_if_native(None, comparison).unwrap(), None);
+            for invalid in [b"".as_slice(), &[0], &[3, 0]] {
+                assert!(!null_if_native_args_valid(Some(invalid), comparison));
+                assert_eq!(
+                    evaluate_null_if_native(Some(invalid), comparison),
+                    Err(NativeIdentityFrameError::Invalid)
+                );
+            }
+        }
+        for value in [
+            View::Int(i64::MIN),
+            View::Decimal {
+                negative: true,
+                scale: u32::MAX,
+                storage_scale: 0,
+                declared_shape: Some((i64::MIN, i64::MAX)),
+                coefficient: b"\xff\0",
+            },
+            View::String {
+                collation: 15,
+                bytes: b"\xff\0",
+            },
+            View::Real(0x7ff8_0000_0000_0123),
+            View::Time {
+                core: u64::MAX,
+                kind: 2,
+                fsp: u8::MAX,
+            },
+            View::Json {
+                type_code: 255,
+                bytes: b"invalid\xff",
+            },
+        ] {
+            let identity = encode_native_identity(value).unwrap();
+            assert_eq!(
+                evaluate_null_if_native(Some(&identity), Some(1)).unwrap(),
+                None
+            );
+            for comparison in [None, Some(0)] {
+                assert!(null_if_native_args_valid(Some(&identity), comparison));
+                let selected = evaluate_null_if_native(Some(&identity), comparison)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(selected, identity.as_slice());
+                assert_eq!(selected.as_ptr(), identity.as_ptr());
+            }
+            for comparison in [i64::MIN, -1, 2, i64::MAX] {
+                assert!(!null_if_native_args_valid(
+                    Some(&identity),
+                    Some(comparison)
+                ));
+                assert!(evaluate_null_if_native(Some(&identity), Some(comparison)).is_err());
+                assert!(evaluate_null_if_native(None, Some(comparison)).is_err());
+            }
+        }
+        for (left, right, expected) in [
+            (None, None, None),
+            (None, Some(1), None),
+            (Some(i64::MIN), None, Some(i64::MIN)),
+            (Some(i64::MIN), Some(i64::MAX), Some(i64::MIN)),
+            (Some(0), Some(0), None),
+            (Some(0), Some(1), Some(0)),
+        ] {
+            assert_eq!(
+                crate::impl_control::local_nullif_int_signed_signed(left.as_ref(), right.as_ref())
+                    .unwrap(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn if_head_and_finish_keep_normalized_demand_and_opaque_selected_values() {
