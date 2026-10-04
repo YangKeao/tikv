@@ -1607,6 +1607,9 @@ pub enum EvaluatedBytesOp {
     ExtremumTimeTextNative,
     ExtremumTimeContextNative,
     ExtremumFinishNative,
+    IntervalEagerHeadNative,
+    IntervalLazyHeadNative,
+    IntervalStepNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1670,6 +1673,21 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::IntervalEagerHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntervalEagerHeadNative,
+                );
+            }
+            Self::IntervalLazyHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntervalLazyHeadNative,
+                );
+            }
+            Self::IntervalStepNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::IntervalStepNative,
+                );
+            }
             Self::ExtremumHeadNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::ExtremumHeadNative,
@@ -4465,6 +4483,9 @@ impl EvaluatedBytesOp {
             Self::ExtremumTimeTextNative => crate::extremum_time_text_native_fn_meta(),
             Self::ExtremumTimeContextNative => crate::extremum_time_context_native_fn_meta(),
             Self::ExtremumFinishNative => crate::extremum_finish_native_fn_meta(),
+            Self::IntervalEagerHeadNative => crate::interval_eager_head_native_fn_meta(),
+            Self::IntervalLazyHeadNative => crate::interval_lazy_head_native_fn_meta(),
+            Self::IntervalStepNative => crate::interval_step_native_fn_meta(),
             Self::ToBinaryNative => crate::to_binary_native_fn_meta(),
             Self::FromBinaryNative => crate::from_binary_native_fn_meta(),
             Self::ConvertUsingNative => crate::convert_using_native_fn_meta(),
@@ -5114,6 +5135,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::IntervalEagerHeadNative
+            | Self::IntervalLazyHeadNative
+            | Self::IntervalStepNative => EvalType::Bytes,
             Self::ExtremumHeadNative
             | Self::ExtremumNumericNative
             | Self::ExtremumTimeNative
@@ -5590,6 +5614,8 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::IntervalEagerHeadNative | Self::IntervalLazyHeadNative => &[EvalType::Bytes],
+            Self::IntervalStepNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::ExtremumHeadNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
             Self::ExtremumNumericNative
             | Self::ExtremumTimeNative
@@ -7123,6 +7149,30 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::IntervalEagerHeadNative {
+            return match self {
+                Self::Bytes(packet) => {
+                    crate::interval_eager_head_native_args_valid(packet.as_deref())
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::IntervalLazyHeadNative {
+            return match self {
+                Self::Bytes(packet) => {
+                    crate::interval_lazy_head_native_args_valid(packet.as_deref())
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::IntervalStepNative {
+            return match self {
+                Self::Bytes2(state, value) => {
+                    crate::interval_step_native_args_valid(state.as_deref(), value.as_deref())
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::ExtremumHeadNative {
             return match self {
                 Self::BytesIntInt(packet, want, collation) => {
@@ -10722,6 +10772,41 @@ impl EvaluatedBytesWorker {
             // All actual operands and the bound zone owner remain charged here.
             budget.check_output(bound, input_bytes)?;
         }
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::IntervalEagerHeadNative
+                | EvaluatedBytesOp::IntervalLazyHeadNative
+                | EvaluatedBytesOp::IntervalStepNative
+        ) {
+            let (first, second) = match (self.operation, &ready[..arity]) {
+                (EvaluatedBytesOp::IntervalEagerHeadNative, [ScalarValue::Bytes(packet)])
+                    if crate::interval_eager_head_native_args_valid(packet.as_deref()) =>
+                {
+                    (packet.as_deref(), None)
+                }
+                (EvaluatedBytesOp::IntervalLazyHeadNative, [ScalarValue::Bytes(packet)])
+                    if crate::interval_lazy_head_native_args_valid(packet.as_deref()) =>
+                {
+                    (packet.as_deref(), None)
+                }
+                (
+                    EvaluatedBytesOp::IntervalStepNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
+                ) if crate::interval_step_native_args_valid(state.as_deref(), value.as_deref()) => {
+                    (state.as_deref(), value.as_deref())
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "INTERVAL operands differ from their fixed stage domain".into(),
+                    ));
+                }
+            };
+            let bound = crate::native_interval::native_interval_output_bound(first, second)
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // Plan from the original packet/state, retaining all actual owners.
+            // Cast order, NULL selection and search stay in the real SDK producer.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -11137,6 +11222,55 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::IntervalEagerHeadNative
+                        | EvaluatedBytesOp::IntervalLazyHeadNative
+                        | EvaluatedBytesOp::IntervalStepNative
+                ) {
+                    use crate::{NativeIntervalCast as Cast, NativeIntervalResult as Report};
+                    let valid = match (
+                        self.operation,
+                        value.and_then(crate::decode_native_interval_result),
+                    ) {
+                        (
+                            EvaluatedBytesOp::IntervalEagerHeadNative,
+                            Some(
+                                Report::IntIndex(_)
+                                | Report::SentinelsError
+                                | Report::Request {
+                                    index: 0,
+                                    cast: Cast::Real,
+                                    ..
+                                },
+                            ),
+                        ) => true,
+                        (
+                            EvaluatedBytesOp::IntervalLazyHeadNative,
+                            Some(Report::Request {
+                                index: 0,
+                                cast: Cast::Int | Cast::Real,
+                                ..
+                            }),
+                        ) => true,
+                        (
+                            EvaluatedBytesOp::IntervalStepNative,
+                            Some(
+                                Report::IntIndex(_)
+                                | Report::Request {
+                                    cast: Cast::Int | Cast::Real,
+                                    ..
+                                },
+                            ),
+                        ) => true,
+                        _ => false,
+                    };
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "INTERVAL returned an invalid report for its fixed stage".into(),
+                        ));
+                    }
+                }
                 if matches!(
                     self.operation,
                     EvaluatedBytesOp::ExtremumHeadNative

@@ -493,7 +493,10 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::ExtremumStringNative
         | LocalFunctionId::ExtremumTimeTextNative
         | LocalFunctionId::ExtremumTimeContextNative
-        | LocalFunctionId::ExtremumFinishNative => Err(other_err!(
+        | LocalFunctionId::ExtremumFinishNative
+        | LocalFunctionId::IntervalEagerHeadNative
+        | LocalFunctionId::IntervalLazyHeadNative
+        | LocalFunctionId::IntervalStepNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

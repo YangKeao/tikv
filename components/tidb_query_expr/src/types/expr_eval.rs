@@ -315,6 +315,19 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::IntervalEagerHeadNative | EvaluatedBytesOp::IntervalLazyHeadNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 1 && operation.call_count() == 1,
+        (EvaluatedBytesOp::IntervalStepNative, EvaluatedArgsRole::Values) => {
+            types.len() == 2 && operation.call_count() == 1
+        }
+        (
+            EvaluatedBytesOp::IntervalEagerHeadNative
+            | EvaluatedBytesOp::IntervalLazyHeadNative
+            | EvaluatedBytesOp::IntervalStepNative,
+            _,
+        ) => false,
         (EvaluatedBytesOp::ExtremumHeadNative, EvaluatedArgsRole::Values) => {
             types.len() == 3 && operation.call_count() == 1
         }
@@ -549,6 +562,27 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::IntervalEagerHeadNative
+            || match values {
+                [ScalarValue::Bytes(packet)] => {
+                    crate::interval_eager_head_native_args_valid(packet.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::IntervalLazyHeadNative
+            || match values {
+                [ScalarValue::Bytes(packet)] => {
+                    crate::interval_lazy_head_native_args_valid(packet.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::IntervalStepNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Bytes(value)] => {
+                    crate::interval_step_native_args_valid(state.as_deref(), value.as_deref())
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::ExtremumHeadNative
             || match values {
                 [
@@ -1569,6 +1603,19 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::IntervalEagerHeadNative | EvaluatedBytesOp::IntervalLazyHeadNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 1 && calls == 1,
+        (EvaluatedBytesOp::IntervalStepNative, EvaluatedArgsRole::Values) => {
+            arity == 2 && calls == 1
+        }
+        (
+            EvaluatedBytesOp::IntervalEagerHeadNative
+            | EvaluatedBytesOp::IntervalLazyHeadNative
+            | EvaluatedBytesOp::IntervalStepNative,
+            _,
+        ) => false,
         (EvaluatedBytesOp::ExtremumHeadNative, EvaluatedArgsRole::Values) => {
             arity == 3 && calls == 1
         }

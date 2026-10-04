@@ -4625,3 +4625,256 @@ mod extremum_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod interval_worker_tests {
+    use tidb_query_datatype::FieldTypeFlag;
+
+    use super::*;
+    use crate::{
+        NativeIdentityRef, NativeIntervalCast as Cast, NativeIntervalEvalType as Type,
+        NativeIntervalFieldType, NativeIntervalResult as Reply, decode_native_interval_result,
+        encode_native_identity, encode_native_interval_eager_head,
+        encode_native_interval_lazy_head,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn run(worker: &mut EvaluatedBytesWorker, args: EvaluatedArgs) -> Vec<u8> {
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("INTERVAL must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value
+            .into_option()
+            .expect("even NULL semantics produce an IntIndex report")
+    }
+    fn eager(values: &[Option<Vec<u8>>]) -> EvaluatedArgs {
+        let values: Vec<_> = values.iter().map(|value| value.as_deref()).collect();
+        EvaluatedArgs::Bytes(Some(encode_native_interval_eager_head(&values).unwrap()))
+    }
+    fn request(report: &[u8], expected_index: usize, expected_cast: Cast) {
+        let Some(Reply::Request { index, cast, state }) = decode_native_interval_result(report)
+        else {
+            panic!("expected actual INTERVAL request");
+        };
+        assert_eq!(index, expected_index);
+        assert_eq!(cast, expected_cast);
+        assert_eq!(state, report);
+    }
+    fn drive(
+        mut report: Vec<u8>,
+        casts: &[Option<Vec<u8>>],
+        cast_kind: Cast,
+        expected_order: &[usize],
+        expected: i64,
+    ) {
+        let mut worker = prepare(
+            EvaluatedBytesOp::IntervalStepNative,
+            ExecutionLimits::default(),
+        );
+        let storage = worker.retained_storage().unwrap();
+        let mut observed = Vec::new();
+        loop {
+            match decode_native_interval_result(&report).unwrap() {
+                Reply::Request { index, cast, state } => {
+                    assert_eq!(cast, cast_kind);
+                    assert_eq!(state, report.as_slice());
+                    observed.push(index);
+                    assert!(observed.len() <= casts.len() + 1, "cursor must terminate");
+                    // Only the SDK chooses which actual cast datum is supplied.
+                    let args = EvaluatedArgs::Bytes2(Some(state.to_vec()), casts[index].clone());
+                    report = run(&mut worker, args);
+                }
+                Reply::IntIndex(index) => {
+                    assert_eq!(index, expected);
+                    break;
+                }
+                _ => panic!("unexpected INTERVAL result"),
+            }
+        }
+        assert_eq!(observed, expected_order);
+        assert_eq!(worker.kernel_invocations(), observed.len() as u64);
+        assert!(worker.is_healthy());
+        assert_eq!(worker.retained_storage().unwrap(), storage);
+    }
+    fn copy(args: &EvaluatedArgs) -> EvaluatedArgs {
+        match args {
+            EvaluatedArgs::Bytes(value) => EvaluatedArgs::Bytes(value.clone()),
+            EvaluatedArgs::Bytes2(state, value) => {
+                EvaluatedArgs::Bytes2(state.clone(), value.clone())
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn interval_workers_preserve_eager_lazy_nan_null_and_actual_request_lifecycles() {
+        let mut eager_head = prepare(
+            EvaluatedBytesOp::IntervalEagerHeadNative,
+            ExecutionLimits::default(),
+        );
+        let mut lazy_head = prepare(
+            EvaluatedBytesOp::IntervalLazyHeadNative,
+            ExecutionLimits::default(),
+        );
+        let real = [0x7ff8_0000_0000_1234, 1.0_f64.to_bits(), 2.0_f64.to_bits()]
+            .map(|bits| Some(encode_native_identity(NativeIdentityRef::Real(bits)).unwrap()));
+        let nn = FieldTypeFlag::NOT_NULL.bits();
+        let real_types = [Some(NativeIntervalFieldType {
+            eval_type: Type::Real,
+            flags: nn,
+        }); 3];
+        let lazy_real_packet = encode_native_interval_lazy_head(&real_types).unwrap();
+        let eager_real = run(&mut eager_head, eager(&real));
+        let lazy_real = run(&mut lazy_head, EvaluatedArgs::Bytes(Some(lazy_real_packet)));
+        request(&eager_real, 0, Cast::Real);
+        request(&lazy_real, 0, Cast::Real);
+        // Original eager <= partition and lazy target<boundary branching differ
+        // for NaN. These are isolated ready cast fixtures, not SQL cast claims.
+        drive(eager_real, &real, Cast::Real, &[0, 1, 2], 0);
+        drive(lazy_real, &real, Cast::Real, &[0, 2], 2);
+        let integers = [
+            Some(encode_native_identity(NativeIdentityRef::UInt(u64::MAX)).unwrap()),
+            Some(encode_native_identity(NativeIdentityRef::Int(-1)).unwrap()),
+            Some(encode_native_identity(NativeIdentityRef::UInt(u64::MAX)).unwrap()),
+        ];
+        let eager_int_args = eager(&integers);
+        let output = run(&mut eager_head, copy(&eager_int_args));
+        assert!(matches!(
+            decode_native_interval_result(&output),
+            Some(Reply::IntIndex(2))
+        ));
+        let uint_type = Some(NativeIntervalFieldType {
+            eval_type: Type::Int,
+            flags: nn | FieldTypeFlag::UNSIGNED.bits(),
+        });
+        let int_type = Some(NativeIntervalFieldType {
+            eval_type: Type::Int,
+            flags: nn,
+        });
+        let lazy_int_packet =
+            encode_native_interval_lazy_head(&[uint_type, int_type, uint_type]).unwrap();
+        let lazy_int = run(
+            &mut lazy_head,
+            EvaluatedArgs::Bytes(Some(lazy_int_packet.clone())),
+        );
+        request(&lazy_int, 0, Cast::Int);
+        drive(lazy_int.clone(), &integers, Cast::Int, &[0, 2], 2);
+        // Actual NULL remains legal even for NOT_NULL source metadata and is
+        // reported as IntIndex(-1), never a fabricated computed SQL NULL.
+        drive(lazy_int.clone(), &[None, None, None], Cast::Int, &[0], -1);
+        let mut null_boundary = integers.clone();
+        null_boundary[2] = None;
+        drive(lazy_int.clone(), &null_boundary, Cast::Int, &[0, 2], 2);
+        let output = run(&mut eager_head, eager(&[None, None]));
+        assert!(matches!(
+            decode_native_interval_result(&output),
+            Some(Reply::IntIndex(-1))
+        ));
+        let sentinel = Some(encode_native_identity(NativeIdentityRef::MinNotNull).unwrap());
+        let output = run(&mut eager_head, eager(&[None, sentinel]));
+        assert!(matches!(
+            decode_native_interval_result(&output),
+            Some(Reply::SentinelsError)
+        ));
+        let absent = encode_native_interval_lazy_head(&[None, None]).unwrap();
+        request(
+            &run(&mut lazy_head, EvaluatedArgs::Bytes(Some(absent))),
+            0,
+            Cast::Real,
+        );
+        for (operation, args) in [
+            (EvaluatedBytesOp::IntervalEagerHeadNative, eager_int_args),
+            (
+                EvaluatedBytesOp::IntervalLazyHeadNative,
+                EvaluatedArgs::Bytes(Some(lazy_int_packet)),
+            ),
+            (
+                EvaluatedBytesOp::IntervalStepNative,
+                EvaluatedArgs::Bytes2(Some(lazy_int), integers[0].clone()),
+            ),
+        ] {
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Int(None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            let bad = if operation == EvaluatedBytesOp::IntervalStepNative {
+                EvaluatedArgs::Bytes2(Some(Vec::new()), integers[0].clone())
+            } else {
+                EvaluatedArgs::Bytes(Some(Vec::new()))
+            };
+            assert!(matches!(
+                worker.eval_args(bad),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            let owners = if operation == EvaluatedBytesOp::IntervalStepNative {
+                2
+            } else {
+                1
+            };
+            for position in 0..owners {
+                let mut oversized = copy(&args);
+                let owner = match (&mut oversized, position) {
+                    (EvaluatedArgs::Bytes(Some(value)), 0)
+                    | (EvaluatedArgs::Bytes2(Some(value), _), 0)
+                    | (EvaluatedArgs::Bytes2(_, Some(value)), 1) => value,
+                    _ => unreachable!(),
+                };
+                owner.reserve_exact(128 * 1024);
+                assert!(owner.capacity() > 64 * 1024);
+                assert!(matches!(
+                    worker.eval_args(oversized),
+                    Err(LocalError::ResourceLimit(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            let output = run(&mut worker, copy(&args));
+            match operation {
+                EvaluatedBytesOp::IntervalEagerHeadNative => assert!(matches!(
+                    decode_native_interval_result(&output),
+                    Some(Reply::IntIndex(2))
+                )),
+                EvaluatedBytesOp::IntervalLazyHeadNative => request(&output, 0, Cast::Int),
+                _ => request(&output, 2, Cast::Int),
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let mut stopped = prepare(
+                operation,
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = stopped.retained_storage().unwrap();
+            assert!(matches!(
+                stopped.eval_args(copy(&args)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(stopped.kernel_invocations(), 0);
+            assert!(stopped.is_healthy());
+            assert_eq!(stopped.retained_storage().unwrap(), storage);
+            // Instruction zero is not frontend pool zero; row metadata still
+            // counts, and no exact allocator/physical-peak bound is asserted.
+        }
+    }
+}

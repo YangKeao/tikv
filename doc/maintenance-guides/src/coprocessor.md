@@ -434,6 +434,19 @@ short-circuit admission policy described above.
   it is not a physical-memory or parser-temporary bound. Existing cast/NULL
   witnesses and original warning delivery remain native adapters, without
   PB/legacy admission or a new specialized vector kernel.
+- Query_expr `native_interval.rs` owns eager and lazy native INTERVAL through
+  two heads and one continuation step, all Values/OwnBytes/one-call profiles.
+  Actual identities or complete evaluation-type/flags metadata drive SDK
+  classification; the frontend only evaluates requested children and performs
+  original generic casts. Eager sentinel-before-NULL and complete real
+  conversion precede its partition search; lazy metadata selects linear or
+  binary demand without reading skipped children. Raw f64 NaN behavior differs
+  between eager boundary<=target and lazy target<boundary and remains distinct.
+  Integer comparison reuses existing signed/unsigned comparers. Successful
+  replies are always present, including the integer -1 for a NULL target.
+  Compact eager state stores NULL markers and only converted real payloads;
+  retained reply bounds do not certify transient materialization or physical
+  memory. Existing wire kernels and admission are unchanged.
 - Query_expr `native_extremum.rs` adds eight native GREATEST/LEAST profiles
   over `native_extremum_policy.rs`: head, numeric/time/vector/string steps,
   text preparation, temporal context and final identity/precision conversion.

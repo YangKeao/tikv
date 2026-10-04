@@ -543,6 +543,9 @@ pub enum LocalFunctionId {
     ExtremumTimeTextNative,
     ExtremumTimeContextNative,
     ExtremumFinishNative,
+    IntervalEagerHeadNative,
+    IntervalLazyHeadNative,
+    IntervalStepNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.
