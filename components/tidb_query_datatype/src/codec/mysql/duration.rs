@@ -20,6 +20,15 @@ use crate::{
     expr::EvalContext,
 };
 
+mod native_parser;
+pub use native_parser::{
+    NativeDurationDateTimeFallbackKind, NativeDurationOverflow, NativeDurationParseError,
+    NativeDurationParseEvent, NativeDurationValueError, NativeParsedDuration,
+    native_can_fallback_to_datetime, native_classify_duration_datetime_fallback,
+    native_duration_from_time, native_parse_duration, native_parse_mysql_duration,
+    native_truncate_overflow_mysql_time,
+};
+
 pub const NANOS_PER_MICRO: i64 = 1_000;
 pub const NANOS_PER_MILLI: i64 = 1_000_000;
 pub const NANOS_PER_SEC: i64 = 1_000_000_000;

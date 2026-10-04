@@ -417,6 +417,16 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  Datatype `duration/native_parser.rs` owns the native byte duration grammar,
+  datetime-fallback routing/full parsing, original endpoint clamp and raw
+  Time-to-duration conversion. Its source status/error carriers are distinct
+  from wire Duration parsing and query_expr's NativeGoDuration policy. The
+  native endpoint ends at838:59:59.0, matching the shared MAX_NANOS constant
+  rather than adding a fractional component to that endpoint.
+  `time/native_extract.rs` owns the original unit sets and raw numeric extraction
+  formulas without SQL range/FSP normalization. These foundations add no
+  EXTRACT profile or admission: its mixed double-mode getter orchestration
+  and separate broad calendar-composite policy remain pending caller migration.
   The existing native JSON_SUM_CRC32 scalar-array domain uses query_expr's
   `native_json_sum_crc32.rs`: one nullable Bytes/OwnBytes worker owns ordered
   classification, numeric spelling, IEEE CRC and wrapping accumulation.
