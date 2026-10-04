@@ -1497,6 +1497,8 @@ pub enum EvaluatedBytesOp {
     AddTimeNative,
     SubTimeNative,
     TimeAddRightDatetimeNative,
+    TimestampAddNative,
+    TimestampAddPrefixNullNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -3217,6 +3219,16 @@ impl EvaluatedBytesOp {
                     crate::LocalFunctionId::TimeAddRightDatetimeNative,
                 );
             }
+            Self::TimestampAddNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TimestampAddNative,
+                );
+            }
+            Self::TimestampAddPrefixNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TimestampAddPrefixNullNative,
+                );
+            }
         };
         EvaluatedKernelKind::Wire(signature)
     }
@@ -4280,6 +4292,10 @@ impl EvaluatedBytesOp {
             Self::TimeNative => crate::impl_time::time_native_fn_meta(),
             Self::MicrosecondNative => crate::impl_time::microsecond_native_fn_meta(),
             Self::MicrosecondLegacy => crate::impl_time::microsecond_legacy_fn_meta(),
+            Self::TimestampAddNative => crate::impl_time::timestamp_add_native_fn_meta(),
+            Self::TimestampAddPrefixNullNative => {
+                crate::impl_time::timestamp_add_prefix_null_native_fn_meta()
+            }
             Self::AddTimeNative => crate::impl_time::add_time_native_fn_meta(),
             Self::SubTimeNative => crate::impl_time::sub_time_native_fn_meta(),
             Self::TimeAddRightDatetimeNative => {
@@ -4622,6 +4638,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::TimestampAddNative | Self::TimestampAddPrefixNullNative => EvalType::Bytes,
             Self::AddTimeNative | Self::SubTimeNative | Self::TimeAddRightDatetimeNative => {
                 EvalType::Bytes
             }
@@ -5049,6 +5066,8 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::TimestampAddNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
+            Self::TimestampAddPrefixNullNative => &[EvalType::Bytes, EvalType::Int],
             Self::AddTimeNative | Self::SubTimeNative => {
                 &[EvalType::Bytes, EvalType::Bytes, EvalType::Int]
             }
@@ -6457,6 +6476,24 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::TimestampAddNative {
+            return match self {
+                Self::BytesBytesInt(unit, date, amount) => crate::native_timestamp_add_args_valid(
+                    unit.as_deref(),
+                    date.as_deref(),
+                    *amount,
+                ),
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::TimestampAddPrefixNullNative {
+            return match self {
+                Self::BytesInt(unit, amount) => {
+                    crate::native_timestamp_add_prefix_null_args_valid(unit.as_deref(), *amount)
+                }
+                _ => false,
+            };
+        }
         if matches!(
             operation,
             EvaluatedBytesOp::AddTimeNative | EvaluatedBytesOp::SubTimeNative
@@ -9360,6 +9397,13 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation == EvaluatedBytesOp::TimestampAddNative
+                    && value.is_some_and(|bytes| !crate::native_timestamp_add_result_valid(bytes))
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native TIMESTAMPADD returned an invalid outcome packet".into(),
+                    ));
+                }
                 if matches!(
                     self.operation,
                     EvaluatedBytesOp::AddTimeNative | EvaluatedBytesOp::SubTimeNative
@@ -9428,6 +9472,256 @@ mod evaluated_ascii_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn timestamp_add_profiles_preserve_actual_prefixes_ieee_bits_and_reports() {
+        use crate::NativeTimestampAddResult as Report;
+        let one = 1.0_f64.to_bits() as i64;
+        let nan = 0x7ff8_0000_0000_0042_i64;
+        let main = |unit: Option<&str>, date: Option<&str>, amount| {
+            EvaluatedArgs::BytesBytesInt(
+                unit.map(|value| value.as_bytes().to_vec()),
+                date.map(|value| value.as_bytes().to_vec()),
+                amount,
+            )
+        };
+        for (operation, getter) in [
+            (
+                EvaluatedBytesOp::TimestampAddNative,
+                crate::impl_time::timestamp_add_native_fn_meta(),
+            ),
+            (
+                EvaluatedBytesOp::TimestampAddPrefixNullNative,
+                crate::impl_time::timestamp_add_prefix_null_native_fn_meta(),
+            ),
+        ] {
+            let prefix = operation == EvaluatedBytesOp::TimestampAddPrefixNullNative;
+            let arity = if prefix { 2 } else { 3 };
+            assert_eq!(operation.input_role(), EvaluatedArgsRole::Values);
+            assert_eq!(operation.input_types().len(), arity);
+            assert_eq!(operation.eval_type(), EvalType::Bytes);
+            let program =
+                compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
+            assert_eq!(program.expression.len(), arity + 1);
+            assert!(program.check_entry(ProgramEntry::Row).is_err());
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                metadata,
+                args_len,
+                ..
+            } = &program.expression[arity]
+            else {
+                panic!()
+            };
+            assert_eq!(*args_len, arity);
+            assert!(metadata.is::<()>());
+            assert_eq!(func_meta.name, getter.name);
+            assert!(std::ptr::fn_addr_eq(func_meta.fn_ptr, getter.fn_ptr));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.validator_ptr,
+                getter.validator_ptr
+            ));
+            assert!(std::ptr::fn_addr_eq(
+                func_meta.metadata_ptr,
+                getter.metadata_ptr
+            ));
+            let spec = LocalExpr::Call {
+                function: operation.function_ref(),
+                args: program
+                    .schema
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, field_type)| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field_type.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                return_type: operation.return_type(),
+                metadata: crate::CallMetadata::None,
+            };
+            assert!(compile_local(&spec, &program.schema, LocalCompileContext::default()).is_err());
+            let mut worker = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap();
+            let storage = worker.retained_storage().unwrap();
+            let invalid = if prefix {
+                vec![
+                    EvaluatedArgs::BytesInt(Some(b"DAY".to_vec()), Some(one)),
+                    EvaluatedArgs::BytesInt(Some(b"DAY".to_vec()), Some(nan)),
+                    EvaluatedArgs::BytesInt(Some(vec![255]), None),
+                ]
+            } else {
+                vec![
+                    main(None, Some("2020-01-01"), Some(one)),
+                    main(Some("DAY"), None, None),
+                    EvaluatedArgs::BytesBytesInt(Some(vec![255]), None, Some(one)),
+                    EvaluatedArgs::BytesBytesInt(Some(b"DAY".to_vec()), Some(vec![255]), Some(one)),
+                ]
+            };
+            for invalid in invalid {
+                let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
+                match &invalid {
+                    EvaluatedArgs::BytesInt(unit, amount) => {
+                        ready[0] = ScalarValue::Bytes(unit.clone());
+                        ready[1] = ScalarValue::Int(*amount);
+                    }
+                    EvaluatedArgs::BytesBytesInt(unit, date, amount) => {
+                        ready[0] = ScalarValue::Bytes(unit.clone());
+                        ready[1] = ScalarValue::Bytes(date.clone());
+                        ready[2] = ScalarValue::Int(*amount);
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert!(matches!(
+                    worker.eval_ready(ready, arity, &mut None),
+                    Err(LocalError::InvalidSpec(_))
+                ));
+            }
+            let wrong = if prefix {
+                main(None, None, Some(nan))
+            } else {
+                EvaluatedArgs::BytesInt(None, Some(nan))
+            };
+            for invalid in [
+                wrong,
+                EvaluatedArgs::NoArgs,
+                EvaluatedArgs::NullWitness(None),
+                EvaluatedArgs::Bytes(None),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            assert_eq!(worker.kernel_invocations(), 0);
+            let mut cases = if prefix {
+                vec![
+                    (EvaluatedArgs::BytesInt(Some(b"DAY".to_vec()), None), None),
+                    (EvaluatedArgs::BytesInt(None, None), None),
+                    (EvaluatedArgs::BytesInt(Some(vec![]), None), None),
+                ]
+            } else {
+                vec![
+                    (main(Some("DAY"), None, Some(one)), None),
+                    (
+                        main(Some("DAY"), Some("2020-01-01"), Some(one)),
+                        Some(Report::Value("2020-01-02 00:00:00")),
+                    ),
+                    (
+                        main(
+                            Some("MINUTE"),
+                            Some("2020-01-01"),
+                            Some(1.5_f64.to_bits() as i64),
+                        ),
+                        Some(Report::Value("2020-01-01 00:02:00")),
+                    ),
+                    (
+                        main(
+                            Some("SECOND"),
+                            Some("2020-01-01"),
+                            Some(0.0000099999_f64.to_bits() as i64),
+                        ),
+                        Some(Report::Value("2020-01-01 00:00:00.000009")),
+                    ),
+                    (
+                        main(Some("unknown"), Some("2020-01-01"), Some(nan)),
+                        Some(Report::UnknownUnit),
+                    ),
+                    (
+                        main(Some("unknown"), Some("bad"), Some(nan)),
+                        Some(Report::IncorrectDateTimeInput),
+                    ),
+                    (
+                        main(Some("DAY"), Some("9999-12-31"), Some(one)),
+                        Some(Report::IncorrectTimeResult(
+                            "Incorrect time value: '{10000 1 1 0 0 0 0}'",
+                        )),
+                    ),
+                ]
+            };
+            for (bits, unchanged) in [
+                (0, true),
+                (i64::MIN, true),
+                (1, true),
+                (i64::MAX, false),
+                (-1, false),
+                (nan, false),
+                (f64::INFINITY.to_bits() as i64, false),
+                (f64::NEG_INFINITY.to_bits() as i64, false),
+            ] {
+                cases.push(if prefix {
+                    (EvaluatedArgs::BytesInt(None, Some(bits)), None)
+                } else {
+                    (
+                        main(Some("DAY"), Some("2020-01-01"), Some(bits)),
+                        unchanged.then_some(Report::Value("2020-01-01 00:00:00")),
+                    )
+                });
+            }
+            if !prefix {
+                cases.push((
+                    main(Some("DAY"), Some("2020-01-01"), Some(one)),
+                    Some(Report::Value("2020-01-02 00:00:00")),
+                ));
+            }
+            for (calls, (args, expected)) in (1_u64..).zip(cases) {
+                assert!(args.admission_matches(operation));
+                let ComputedValue::Bytes(value) = worker.eval_args_reported(args).unwrap() else {
+                    panic!()
+                };
+                assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+                let decoded = value.value().map(|bytes| {
+                    assert!(crate::native_timestamp_add_result_valid(bytes));
+                    crate::decode_native_timestamp_add_result(bytes).unwrap()
+                });
+                assert_eq!(decoded, expected);
+                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+                assert!(worker.is_healthy());
+            }
+            let mut zero = prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+                usize::MAX,
+            )
+            .unwrap();
+            let args = if prefix {
+                EvaluatedArgs::BytesInt(None, Some(nan))
+            } else {
+                main(Some("DAY"), Some("2020-01-01"), Some(one))
+            };
+            let failure = zero.eval_args_reported(args).unwrap_err();
+            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
+            assert_eq!(failure.sql_failure(), None);
+            assert_eq!(zero.kernel_invocations(), 0);
+            assert!(zero.is_healthy());
+        }
+        for invalid in [
+            b"".as_slice(),
+            &[0],
+            &[3],
+            &[0, 255],
+            &[3, 255],
+            &[1, b'x'],
+            &[2, b'x'],
+            &[4],
+        ] {
+            assert!(!crate::native_timestamp_add_result_valid(invalid));
+        }
+    }
 
     #[test]
     fn time_add_profiles_preserve_metadata_nullable_values_warning_packets_and_reuse() {

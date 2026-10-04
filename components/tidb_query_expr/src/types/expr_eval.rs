@@ -388,6 +388,26 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::TimestampAddNative
+            || match values {
+                [
+                    ScalarValue::Bytes(unit),
+                    ScalarValue::Bytes(date),
+                    ScalarValue::Int(amount),
+                ] => crate::native_timestamp_add_args_valid(
+                    unit.as_deref(),
+                    date.as_deref(),
+                    *amount,
+                ),
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::TimestampAddPrefixNullNative
+            || match values {
+                [ScalarValue::Bytes(unit), ScalarValue::Int(amount)] => {
+                    crate::native_timestamp_add_prefix_null_args_valid(unit.as_deref(), *amount)
+                }
+                _ => false,
+            })
         && (!matches!(
             operation,
             EvaluatedBytesOp::AddTimeNative | EvaluatedBytesOp::SubTimeNative

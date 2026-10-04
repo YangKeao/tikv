@@ -338,6 +338,44 @@ fn time_add_right_datetime_native(metadata: Option<&Int>) -> Result<Option<Bytes
     ))
 }
 
+#[rpn_fn(nullable)]
+fn timestamp_add_native(
+    unit: Option<BytesRef>,
+    date: Option<BytesRef>,
+    amount: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    if !crate::native_timestamp_add_args_valid(unit, date, amount.copied()) {
+        return Err(other_err!(
+            "Native TIMESTAMPADD arguments differ from their physical signature"
+        ));
+    }
+    let (Some(unit), Some(amount)) = (unit, amount) else {
+        return Err(other_err!(
+            "Native TIMESTAMPADD requires an actual unit and amount"
+        ));
+    };
+    let unit = decode_native_time_text(unit)?;
+    let date = date.map(decode_native_time_text).transpose()?;
+    Ok(crate::native_timestamp_add::evaluate_native_timestamp_add(
+        unit,
+        date,
+        f64::from_bits(*amount as u64),
+    ))
+}
+
+#[rpn_fn(nullable)]
+fn timestamp_add_prefix_null_native(
+    unit: Option<BytesRef>,
+    amount: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    if !crate::native_timestamp_add_prefix_null_args_valid(unit, amount.copied()) {
+        return Err(other_err!(
+            "Native TIMESTAMPADD prefix NULL requires an actual missing prefix operand"
+        ));
+    }
+    Ok(None)
+}
+
 // SQL's Display-derived text policy is distinct from legacy signed nanos.
 // Invalid UTF-8 is a transport error; a valid string may parse to SQL NULL.
 fn parse_native_hms_text(bytes: BytesRef) -> Result<Option<(u32, u32, u32)>> {
@@ -3216,6 +3254,70 @@ mod native_clock_worker_tests {
             utc_time_without_fsp_native(&raw_nanos).unwrap(),
             Some(b"00:00:00".to_vec())
         );
+    }
+}
+
+#[cfg(test)]
+mod native_timestamp_add_wrapper_tests {
+    use super::*;
+
+    #[test]
+    fn timestamp_add_wrappers_preserve_prefix_null_raw_bits_and_computed_reports() {
+        assert_eq!(timestamp_add_native_fn_meta().name, "timestamp_add_native");
+        assert_eq!(
+            timestamp_add_prefix_null_native_fn_meta().name,
+            "timestamp_add_prefix_null_native"
+        );
+        let one = 1.0_f64.to_bits() as i64;
+        let nan = 0x7ff8_0000_0000_0042_u64 as i64;
+        let date = b"2020-01-01";
+        let value = timestamp_add_native(Some(b"DAY"), Some(date), Some(&one))
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, b"\x002020-01-02 00:00:00");
+        assert!(crate::native_timestamp_add_result_valid(&value));
+        assert_eq!(
+            timestamp_add_native(Some(b"DAY"), None, Some(&one)).unwrap(),
+            None
+        );
+        assert_eq!(
+            timestamp_add_prefix_null_native(None, Some(&nan)).unwrap(),
+            None
+        );
+        assert_eq!(
+            timestamp_add_prefix_null_native(Some(b"DAY"), None).unwrap(),
+            None
+        );
+        assert_eq!(timestamp_add_prefix_null_native(None, None).unwrap(), None);
+        assert!(timestamp_add_prefix_null_native(Some(b"DAY"), Some(&one)).is_err());
+        assert!(timestamp_add_prefix_null_native(Some(&[255]), None).is_err());
+        assert!(timestamp_add_native(None, Some(date), Some(&one)).is_err());
+        assert!(timestamp_add_native(Some(b"DAY"), Some(date), None).is_err());
+        assert!(timestamp_add_native(Some(&[255]), Some(date), Some(&one)).is_err());
+        assert!(timestamp_add_native(Some(b"DAY"), Some(&[255]), Some(&one)).is_err());
+        for bits in [
+            nan,
+            f64::INFINITY.to_bits() as i64,
+            f64::NEG_INFINITY.to_bits() as i64,
+        ] {
+            assert_eq!(
+                timestamp_add_native(Some(b"DAY"), Some(date), Some(&bits)).unwrap(),
+                None
+            );
+            assert_eq!(
+                timestamp_add_native(Some(b"unknown"), Some(date), Some(&bits)).unwrap(),
+                Some(vec![1])
+            );
+        }
+        assert_eq!(
+            timestamp_add_native(Some(b"unknown"), Some(b"bad"), Some(&nan)).unwrap(),
+            Some(vec![2])
+        );
+        let warning = timestamp_add_native(Some(b"DAY"), Some(b"9999-12-31"), Some(&one))
+            .unwrap()
+            .unwrap();
+        assert_eq!(warning, b"\x03Incorrect time value: '{10000 1 1 0 0 0 0}'");
+        assert!(crate::native_timestamp_add_result_valid(&warning));
     }
 }
 

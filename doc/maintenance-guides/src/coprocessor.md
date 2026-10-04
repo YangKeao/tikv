@@ -407,6 +407,21 @@ short-circuit admission policy described above.
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
+  TIMESTAMPADD uses `native_timestamp_add.rs` for its original unit, rounding,
+  month-clamp-versus-roll, range and diagnostic policies on the shared datetime
+  DTOs. BytesBytesInt carries present actual unit text and raw coerced f64 bits
+  plus observed nullable date text; all bit patterns remain admissible. A separate
+  BytesInt prefix-NULL profile requires an actual NULL among its two observed
+  values and has no date slot. Both use shared shape/UTF8 validators, not date or
+  finite-value prefilters. Nullable RPN workers do not erase reached NULL roots.
+  Native retains original numeric coercion and conditional leaf date coercion,
+  then consumes actual text, unknown-unit or input/computed-warning reports.
+  It does not uppercase units, round amounts or calculate result fields. Existing
+  AST/typed child evaluation and datetime wrapping still precede the leaf,
+  including on prefix NULL. Core getter absence is not entry-wide getter absence.
+  Bare-unit syntax, unsupported composite units and current String metadata are
+  preserved. No PB/legacy admission or new carrier/result/driver/budget is added.
+  Broader TIMESTAMP parsing and timezone work remain separate.
   ADDTIME/SUBTIME use `native_time_add.rs` and two fixed-sign BytesBytesInt
   profiles. Actual nullable text and six-bit temporal-kind/constant-row/binary
   metadata cross the boundary, not parsed values or an operation encoded in
@@ -427,7 +442,8 @@ short-circuit admission policy described above.
   and context demand remain outside the leaf. No PB/legacy admission, new
   carrier/result/binding/driver/cause or factory budget is introduced; three
   physical arguments plus a call fit the existing four-node limit. Sharing this
-  value foundation does not complete TIMESTAMP or TIMESTAMPADD.
+  value foundation alone does not complete TIMESTAMP; TIMESTAMPADD closes in
+  its separate evaluator above.
   TIME/MICROSECOND use three fixed unary profiles with existing Bytes/Int and
   owned result kinds. Native text is actual nullable UTF8, never a host-parsed
   duration. `native_duration_parse.rs` owns the original signed grammar/FSP/

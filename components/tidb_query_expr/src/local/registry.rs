@@ -440,7 +440,9 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::MicrosecondLegacy
         | LocalFunctionId::AddTimeNative
         | LocalFunctionId::SubTimeNative
-        | LocalFunctionId::TimeAddRightDatetimeNative => Err(other_err!(
+        | LocalFunctionId::TimeAddRightDatetimeNative
+        | LocalFunctionId::TimestampAddNative
+        | LocalFunctionId::TimestampAddPrefixNullNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),
