@@ -2451,3 +2451,153 @@ mod coalesce_worker_tests {
         assert_eq!(head.retained_storage().unwrap(), storage);
     }
 }
+
+#[cfg(test)]
+mod case_worker_tests {
+    use super::*;
+    use crate::{
+        NativeIdentityRef, NativeIfBranch, decode_native_if_head_result, encode_native_identity,
+    };
+
+    fn bytes(value: ComputedValue) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("CASE stages must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+
+    #[test]
+    fn case_composes_actual_if_reports_selected_null_and_real_empty_end() {
+        let prepare = |operation| {
+            prepare_evaluated_bytes(
+                operation,
+                LocalCompileContext::default(),
+                ExecutionLimits::default(),
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        let mut head = prepare(EvaluatedBytesOp::IfHeadNative);
+        let mut finish = prepare(EvaluatedBytesOp::IfFinishNative);
+        let mut identity = prepare(EvaluatedBytesOp::AnyValueNative);
+        let mut end = prepare(EvaluatedBytesOp::CoalesceEndNative);
+        let storage = [
+            head.retained_storage().unwrap(),
+            finish.retained_storage().unwrap(),
+            identity.retained_storage().unwrap(),
+            end.retained_storage().unwrap(),
+        ];
+        let opaque = encode_native_identity(NativeIdentityRef::Decimal {
+            negative: true,
+            scale: u32::MAX,
+            storage_scale: 9,
+            declared_shape: Some((-1, 99)),
+            coefficient: b"\xff\0+",
+        })
+        .unwrap();
+        // The invalid frame stands for an undemanded value: submitting it to
+        // any identity-consuming worker would fail, so never prepare/evaluate it.
+        let skipped = Some(vec![0]);
+        for (conditions, otherwise, expected, calls) in [
+            (
+                vec![
+                    (None, skipped.clone()),
+                    (Some(0), skipped.clone()),
+                    (Some(1), Some(opaque.clone())),
+                    (Some(1), skipped.clone()),
+                ],
+                Some(skipped.clone()),
+                Some(opaque.clone()),
+                [3, 1, 0, 0],
+            ),
+            (
+                vec![(Some(1), None), (Some(1), skipped.clone())],
+                Some(skipped.clone()),
+                None,
+                [1, 1, 0, 0],
+            ),
+            (
+                vec![(Some(0), skipped.clone()), (None, skipped.clone())],
+                Some(Some(opaque.clone())),
+                Some(opaque.clone()),
+                [2, 1, 0, 0],
+            ),
+            (
+                vec![(Some(0), skipped.clone()), (None, skipped.clone())],
+                None,
+                None,
+                [2, 0, 0, 1],
+            ),
+            (
+                vec![],
+                Some(Some(opaque.clone())),
+                Some(opaque.clone()),
+                [0, 0, 1, 0],
+            ),
+            (vec![], Some(None), None, [0, 0, 1, 0]),
+            (vec![], None, None, [0, 0, 0, 1]),
+            (
+                vec![(Some(0), skipped.clone())],
+                Some(None),
+                None,
+                [1, 1, 0, 0],
+            ),
+        ] {
+            let before = [
+                head.kernel_invocations(),
+                finish.kernel_invocations(),
+                identity.kernel_invocations(),
+                end.kernel_invocations(),
+            ];
+            // Outer Some means selection finished, including selected SQL NULL.
+            // It must not be confused with an unmatched condition chain.
+            let mut selected: Option<Option<Vec<u8>>> = None;
+            let mut last_else = None;
+            for (condition, value) in conditions {
+                let report = bytes(head.eval_args(EvaluatedArgs::Int(condition)).unwrap()).unwrap();
+                match decode_native_if_head_result(&report).unwrap() {
+                    NativeIfBranch::Then => {
+                        selected = Some(bytes(
+                            finish
+                                .eval_args(EvaluatedArgs::Bytes2(Some(report), value))
+                                .unwrap(),
+                        ));
+                        break;
+                    }
+                    NativeIfBranch::Else => last_else = Some(report),
+                }
+            }
+            let result = match selected {
+                Some(result) => result,
+                None => match otherwise {
+                    Some(value) => match last_else {
+                        // Forward the entire original final Else report, not a
+                        // synthesized condition/report or a native answer.
+                        Some(report) => bytes(
+                            finish
+                                .eval_args(EvaluatedArgs::Bytes2(Some(report), value))
+                                .unwrap(),
+                        ),
+                        None => bytes(identity.eval_args(EvaluatedArgs::Bytes(value)).unwrap()),
+                    },
+                    None => bytes(end.eval_args(EvaluatedArgs::NoArgs).unwrap()),
+                },
+            };
+            assert_eq!(result, expected);
+            let after = [
+                head.kernel_invocations(),
+                finish.kernel_invocations(),
+                identity.kernel_invocations(),
+                end.kernel_invocations(),
+            ];
+            for ((before, after), expected) in before.into_iter().zip(after).zip(calls) {
+                assert_eq!(after - before, expected);
+            }
+            for (worker, storage) in [&head, &finish, &identity, &end].into_iter().zip(&storage) {
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), *storage);
+            }
+        }
+    }
+}

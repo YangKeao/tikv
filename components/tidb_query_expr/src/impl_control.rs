@@ -63,9 +63,12 @@ pub fn case_when<T: Evaluable + EvaluableRet>(args: &[ScalarValueRef<'_>]) -> Re
             return Ok(ret.cloned());
         }
         let cond: Option<&Int> = Evaluable::borrow_scalar_value_ref(chunk[0]);
-        if cond.cloned().unwrap_or(0) != 0 {
-            let ret: Option<&T> = Evaluable::borrow_scalar_value_ref(chunk[1]);
-            return Ok(ret.cloned());
+        match crate::native_if_choose_branch(cond.map(|value| *value != 0)) {
+            crate::NativeIfBranch::Then => {
+                let ret: Option<&T> = Evaluable::borrow_scalar_value_ref(chunk[1]);
+                return Ok(ret.cloned());
+            }
+            crate::NativeIfBranch::Else => continue,
         }
     }
     Ok(None)
@@ -81,9 +84,12 @@ pub fn case_when_bytes(args: &[ScalarValueRef<'_>]) -> Result<Option<Bytes>> {
             return Ok(ret.map(|x| x.to_vec()));
         }
         let cond: Option<&Int> = Evaluable::borrow_scalar_value_ref(chunk[0]);
-        if cond.cloned().unwrap_or(0) != 0 {
-            let ret: Option<BytesRef> = EvaluableRef::borrow_scalar_value_ref(chunk[1]);
-            return Ok(ret.map(|x| x.to_vec()));
+        match crate::native_if_choose_branch(cond.map(|value| *value != 0)) {
+            crate::NativeIfBranch::Then => {
+                let ret: Option<BytesRef> = EvaluableRef::borrow_scalar_value_ref(chunk[1]);
+                return Ok(ret.map(|x| x.to_vec()));
+            }
+            crate::NativeIfBranch::Else => continue,
         }
     }
     Ok(None)
@@ -99,9 +105,12 @@ pub fn case_when_json(args: &[ScalarValueRef<'_>]) -> Result<Option<Json>> {
             return Ok(ret.map(|x| x.to_owned()));
         }
         let cond: Option<&Int> = Evaluable::borrow_scalar_value_ref(chunk[0]);
-        if cond.cloned().unwrap_or(0) != 0 {
-            let ret: Option<JsonRef> = EvaluableRef::borrow_scalar_value_ref(chunk[1]);
-            return Ok(ret.map(|x| x.to_owned()));
+        match crate::native_if_choose_branch(cond.map(|value| *value != 0)) {
+            crate::NativeIfBranch::Then => {
+                let ret: Option<JsonRef> = EvaluableRef::borrow_scalar_value_ref(chunk[1]);
+                return Ok(ret.map(|x| x.to_owned()));
+            }
+            crate::NativeIfBranch::Else => continue,
         }
     }
     Ok(None)
@@ -214,6 +223,90 @@ mod tests {
                 .unwrap();
             assert_eq!(output, expected, "lhs={:?}, rhs={:?}", lhs, rhs);
         }
+    }
+
+    #[test]
+    fn case_when_shared_branch_stops_on_selected_null_and_keeps_owned_else() {
+        use ScalarValueRef as Ref;
+        let zero = 0_i64;
+        let later = 9_i64;
+        for condition in [i64::MIN, -1, 2, i64::MAX] {
+            for selected in [Some(&zero), None] {
+                assert_eq!(
+                    case_when::<Int>(&[
+                        Ref::Int(Some(&condition)),
+                        Ref::Int(selected),
+                        Ref::Int(Some(&1)),
+                        Ref::Int(Some(&later)),
+                        Ref::Int(Some(&later)),
+                    ])
+                    .unwrap(),
+                    selected.copied()
+                );
+            }
+        }
+        assert_eq!(case_when::<Int>(&[]).unwrap(), None);
+        assert_eq!(case_when_bytes(&[]).unwrap(), None);
+        assert_eq!(case_when_json(&[]).unwrap(), None);
+        assert_eq!(
+            case_when::<Int>(&[
+                Ref::Int(None),
+                Ref::Int(Some(&zero)),
+                Ref::Int(Some(&later))
+            ])
+            .unwrap(),
+            Some(later)
+        );
+        assert_eq!(
+            case_when_bytes(&[
+                Ref::Int(Some(&-1)),
+                Ref::Bytes(None),
+                Ref::Bytes(Some(b"dead else")),
+            ])
+            .unwrap(),
+            None
+        );
+
+        let mut source = vec![255, 0, 7];
+        let owned = case_when_bytes(&[
+            Ref::Int(Some(&zero)),
+            Ref::Bytes(Some(b"skipped")),
+            Ref::Bytes(Some(&source)),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_ne!(owned.as_ptr(), source.as_ptr());
+        assert_eq!(
+            case_when_bytes(&[Ref::Bytes(Some(&source))]).unwrap(),
+            Some(source.clone())
+        );
+        source[0] = 1;
+        drop(source);
+        assert_eq!(owned, [255, 0, 7]);
+
+        let json: Json = "null".parse().unwrap();
+        assert_eq!(
+            case_when_json(&[
+                Ref::Int(Some(&-1)),
+                Ref::Json(None),
+                Ref::Json(Some(json.as_ref())),
+            ])
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            case_when_json(&[
+                Ref::Int(None),
+                Ref::Json(None),
+                Ref::Json(Some(json.as_ref())),
+            ])
+            .unwrap(),
+            Some(json.clone())
+        );
+        assert_eq!(
+            case_when_json(&[Ref::Json(Some(json.as_ref()))]).unwrap(),
+            Some(json)
+        );
     }
 
     #[test]

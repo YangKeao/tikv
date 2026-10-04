@@ -417,6 +417,15 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  CASE introduces no profile: actual condition chains reuse IF Head/Finish,
+  genuine no-ELSE exhaustion reuses CoalesceEnd, and a statically sole ELSE uses
+  AnyValue after its original first-value preparation. No synthetic condition or
+  report is passed as an admission token. Three wire CASE loops use the existing
+  IF chooser, preserving full Int conditions, selected-NULL stopping and odd
+  ELSE ownership. Native initialization retains simple-base-once ordering even
+  with zero WHENs; the selected context then spans iterative condition demand.
+  Existing SQL branch casts, PB truth coercion and optimizer policies remain
+  caller adapters, not extra CASE kernels or new wire admission.
   COALESCE composes the unchanged IFNULL head for actual candidates with one
   `CoalesceEndNative` NoArgs/zero-input/one-call/OwnBytes profile for a genuine
   empty suffix. Its wrapper delegates `impl_compare::coalesce_bytes(&[])`;
