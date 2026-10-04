@@ -316,11 +316,31 @@ fn evaluated_ready_args_match(
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
         (
-            EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative,
+            EvaluatedBytesOp::UnixTimestampValueNative
+            | EvaluatedBytesOp::UnixTimestampIntLegacy
+            | EvaluatedBytesOp::UnixTimestampDecLegacy,
+            EvaluatedArgsRole::TemporalValue,
+        ) => types.len() == 1 && operation.call_count() == 1,
+        (_, EvaluatedArgsRole::TemporalValue)
+        | (
+            EvaluatedBytesOp::UnixTimestampValueNative
+            | EvaluatedBytesOp::UnixTimestampIntLegacy
+            | EvaluatedBytesOp::UnixTimestampDecLegacy,
+            _,
+        ) => false,
+        (
+            EvaluatedBytesOp::Timestamp1Native
+            | EvaluatedBytesOp::Timestamp2BaseNative
+            | EvaluatedBytesOp::UnixTimestampParseNative,
             EvaluatedArgsRole::TemporalParseText,
         ) => types.len() == 2 && operation.call_count() == 1,
         (_, EvaluatedArgsRole::TemporalParseText)
-        | (EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative, _) => false,
+        | (
+            EvaluatedBytesOp::Timestamp1Native
+            | EvaluatedBytesOp::Timestamp2BaseNative
+            | EvaluatedBytesOp::UnixTimestampParseNative,
+            _,
+        ) => false,
         (
             EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative,
             EvaluatedArgsRole::TemporalText,
@@ -402,6 +422,20 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::UnixTimestampNowNative
+            || match values {
+                [ScalarValue::Int(secs), ScalarValue::Int(nanos)] => {
+                    crate::unix_timestamp_now_native_args_valid(*secs, *nanos)
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::UnixTimestampNullNative
+            || match values {
+                [ScalarValue::Bytes(value)] => {
+                    crate::unix_timestamp_null_native_args_valid(value.as_deref())
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::Timestamp2AddNative
             || match values {
                 [ScalarValue::Bytes(base), ScalarValue::Bytes(rhs)] => {
@@ -694,13 +728,28 @@ fn evaluated_ready_args_match(
                         _ => false,
                     })
             }
-            EvaluatedArgsRole::TemporalParseText => {
-                matches!(
-                    operation,
-                    EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative
-                ) && matches!(values, [ScalarValue::Bytes(value), ScalarValue::Int(is_float)]
-                        if crate::timestamp_parse_native_args_valid(value.as_deref(), *is_float))
-            }
+            EvaluatedArgsRole::TemporalParseText => match (operation, values) {
+                (
+                    EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative,
+                    [ScalarValue::Bytes(value), ScalarValue::Int(is_float)],
+                ) => crate::timestamp_parse_native_args_valid(value.as_deref(), *is_float),
+                (
+                    EvaluatedBytesOp::UnixTimestampParseNative,
+                    [ScalarValue::Bytes(value), ScalarValue::Int(is_float)],
+                ) => crate::unix_timestamp_parse_native_args_valid(value.as_deref(), *is_float),
+                _ => false,
+            },
+            EvaluatedArgsRole::TemporalValue => match (operation, values) {
+                (EvaluatedBytesOp::UnixTimestampValueNative, [ScalarValue::Bytes(value)]) => {
+                    crate::unix_timestamp_value_native_args_valid(value.as_deref())
+                }
+                (
+                    EvaluatedBytesOp::UnixTimestampIntLegacy
+                    | EvaluatedBytesOp::UnixTimestampDecLegacy,
+                    [ScalarValue::Bytes(value)],
+                ) => crate::unix_timestamp_legacy_args_valid(value.as_deref()),
+                _ => false,
+            },
             EvaluatedArgsRole::TemporalText => {
                 matches!(
                     operation,
@@ -1097,11 +1146,31 @@ pub(crate) fn evaluated_bytes_shape(
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
         (
-            EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative,
+            EvaluatedBytesOp::UnixTimestampValueNative
+            | EvaluatedBytesOp::UnixTimestampIntLegacy
+            | EvaluatedBytesOp::UnixTimestampDecLegacy,
+            EvaluatedArgsRole::TemporalValue,
+        ) => arity == 1 && calls == 1,
+        (_, EvaluatedArgsRole::TemporalValue)
+        | (
+            EvaluatedBytesOp::UnixTimestampValueNative
+            | EvaluatedBytesOp::UnixTimestampIntLegacy
+            | EvaluatedBytesOp::UnixTimestampDecLegacy,
+            _,
+        ) => false,
+        (
+            EvaluatedBytesOp::Timestamp1Native
+            | EvaluatedBytesOp::Timestamp2BaseNative
+            | EvaluatedBytesOp::UnixTimestampParseNative,
             EvaluatedArgsRole::TemporalParseText,
         ) => arity == 2 && calls == 1,
         (_, EvaluatedArgsRole::TemporalParseText)
-        | (EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative, _) => false,
+        | (
+            EvaluatedBytesOp::Timestamp1Native
+            | EvaluatedBytesOp::Timestamp2BaseNative
+            | EvaluatedBytesOp::UnixTimestampParseNative,
+            _,
+        ) => false,
         (
             EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative,
             EvaluatedArgsRole::TemporalText,

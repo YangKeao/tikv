@@ -186,6 +186,124 @@ fn timestamp_null_native(value: Option<BytesRef>) -> Result<Option<Bytes>> {
     Ok(None)
 }
 
+fn native_unix_timestamp_output_error(
+    error: crate::NativeIdentityFrameError,
+) -> tidb_query_common::Error {
+    other_err!("Unable to encode native UNIX_TIMESTAMP output: {:?}", error)
+}
+
+#[rpn_fn(nullable)]
+fn unix_timestamp_now_native(secs: Option<&Int>, nanos: Option<&Int>) -> Result<Option<Bytes>> {
+    if !crate::unix_timestamp_now_native_args_valid(secs.copied(), nanos.copied()) {
+        return Err(other_err!(
+            "UNIX_TIMESTAMP clock requires actual i64 seconds and u32 nanos"
+        ));
+    }
+    crate::native_unix_timestamp::evaluate_unix_timestamp_now_native(
+        *secs.expect("UNIX_TIMESTAMP seconds were validated"),
+        *nanos.expect("UNIX_TIMESTAMP nanos were validated") as u32,
+    )
+    .map(Some)
+    .map_err(native_unix_timestamp_output_error)
+}
+
+#[rpn_fn(nullable)]
+fn unix_timestamp_null_native(value: Option<BytesRef>) -> Result<Option<Bytes>> {
+    if !crate::unix_timestamp_null_native_args_valid(value) {
+        return Err(other_err!(
+            "UNIX_TIMESTAMP NULL profile requires the actual NULL operand"
+        ));
+    }
+    Ok(None)
+}
+
+#[rpn_fn(nullable, capture = [metadata], metadata_mapper = init_native_temporal_literal_data)]
+fn unix_timestamp_parse_native(
+    metadata: &NativeTemporalCallMetadata,
+    value: Option<BytesRef>,
+    is_float: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    if !crate::unix_timestamp_parse_native_args_valid(value, is_float.copied()) {
+        return Err(other_err!(
+            "UNIX_TIMESTAMP parse requires non-NULL UTF-8 and numeric-kind bit 0 or 1"
+        ));
+    }
+    let text = from_utf8(value.expect("UNIX_TIMESTAMP text presence was validated"))
+        .expect("UNIX_TIMESTAMP UTF-8 was validated");
+    let is_float = *is_float.expect("UNIX_TIMESTAMP numeric-kind bit was validated") == 1;
+    let zone = metadata
+        .zone()
+        .map_err(temporal_literal_infrastructure_error)?;
+    crate::native_unix_timestamp::evaluate_unix_timestamp_parse_native(text, is_float, &zone)
+        .map_err(native_unix_timestamp_output_error)
+}
+
+#[rpn_fn(nullable, capture = [metadata], metadata_mapper = init_native_temporal_literal_data)]
+fn unix_timestamp_value_native(
+    metadata: &NativeTemporalCallMetadata,
+    frame: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    if !crate::unix_timestamp_value_native_args_valid(frame) {
+        return Err(other_err!(
+            "UNIX_TIMESTAMP continuation requires DateTime identity and FSP 0 through 6"
+        ));
+    }
+    let value = crate::native_unix_timestamp::decode_unix_timestamp_time(
+        frame.expect("UNIX_TIMESTAMP continuation presence was validated"),
+    )
+    .expect("UNIX_TIMESTAMP continuation identity was validated");
+    let zone = metadata
+        .zone()
+        .map_err(temporal_literal_infrastructure_error)?;
+    crate::native_unix_timestamp::evaluate_unix_timestamp_value_native(value, &zone)
+        .map(Some)
+        .map_err(native_unix_timestamp_output_error)
+}
+
+#[rpn_fn(nullable, capture = [metadata], metadata_mapper = init_native_temporal_literal_data)]
+fn unix_timestamp_int_legacy(
+    metadata: &NativeTemporalCallMetadata,
+    frame: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    if !crate::unix_timestamp_legacy_args_valid(frame) {
+        return Err(other_err!(
+            "Legacy UNIX_TIMESTAMP requires an actual Time identity"
+        ));
+    }
+    let value = crate::native_unix_timestamp::decode_unix_timestamp_time(
+        frame.expect("Legacy UNIX_TIMESTAMP Time presence was validated"),
+    )
+    .expect("Legacy UNIX_TIMESTAMP Time identity was validated");
+    let zone = metadata
+        .zone()
+        .map_err(temporal_literal_infrastructure_error)?;
+    crate::native_unix_timestamp::evaluate_unix_timestamp_int_legacy(value, &zone)
+        .map(Some)
+        .map_err(native_unix_timestamp_output_error)
+}
+
+#[rpn_fn(nullable, capture = [metadata], metadata_mapper = init_native_temporal_literal_data)]
+fn unix_timestamp_dec_legacy(
+    metadata: &NativeTemporalCallMetadata,
+    frame: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    if !crate::unix_timestamp_legacy_args_valid(frame) {
+        return Err(other_err!(
+            "Legacy UNIX_TIMESTAMP requires an actual Time identity"
+        ));
+    }
+    let value = crate::native_unix_timestamp::decode_unix_timestamp_time(
+        frame.expect("Legacy UNIX_TIMESTAMP Time presence was validated"),
+    )
+    .expect("Legacy UNIX_TIMESTAMP Time identity was validated");
+    let zone = metadata
+        .zone()
+        .map_err(temporal_literal_infrastructure_error)?;
+    crate::native_unix_timestamp::evaluate_unix_timestamp_dec_legacy(value, &zone)
+        .map(Some)
+        .map_err(native_unix_timestamp_output_error)
+}
+
 /// Only the actual clock tuple's transport width is constrained. Raw nanos and
 /// timestamp/offset domains retain the original pure clock implementation's
 /// arithmetic and panic behavior rather than being normalized by admission.
@@ -2798,7 +2916,7 @@ fn unix_timestamp_to_mysql_unix_timestamp(
     micro_time: i64,
     frac: i8,
 ) -> Result<Decimal> {
-    if !(1000000..=32536771199999999).contains(&micro_time) {
+    if !crate::native_unix_timestamp::unix_timestamp_micros_in_range(micro_time) {
         return Ok(Decimal::zero());
     }
 

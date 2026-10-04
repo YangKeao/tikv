@@ -407,6 +407,22 @@ short-circuit admission policy described above.
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
+  UNIX_TIMESTAMP adds six closed profiles in `native_unix_timestamp.rs`.
+  Ordinary parsing uses actual TemporalParseText/source-kind/zone1, then returns
+  NULL, a terminal numeric identity, a computed warning, or an actual Time frame
+  requesting zone2. Only that last disposition permits the second native getter.
+  Unary TemporalValue carries the unchanged frame and fresh owned zone to the
+  value worker; the two legacy profiles instead carry actual typed Time and the
+  separately borrowed request zone. Legacy accepts raw kind/FSP without DATE
+  clock clearing or normalization, uses strict native_core_to_datetime(false),
+  and preserves Decimal zero-scale0 versus valid-scale6. Ordinary conversion
+  keeps its distinct Naive gap policy and source FSP. Clock input is actual
+  seconds/full-u32 nanos, with original i64 arithmetic and no dummy offset.
+  The old wire kernels retain their DST/ret-field Decimal policies; only the
+  pure microsecond-range predicate is shared. TemporalValue uses the same owned
+  zone guard/accounting and a closed unary role; no new pool, EvalConfig or
+  resource cause is added. Native PB signatures retain the ordinary route,
+  including actual observed NULL, rather than adopting legacy result policies.
   Ordinary TIMESTAMP uses four closed profiles in `native_timestamp.rs`:
   actual-NULL, one-argument parse/format, two-argument parse/base and duration
   addition. Nonnull heads carry actual TemporalParseText text/source-kind/zone,

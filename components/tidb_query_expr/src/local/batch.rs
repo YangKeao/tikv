@@ -1564,6 +1564,12 @@ pub enum EvaluatedBytesOp {
     Timestamp2BaseNative,
     Timestamp2AddNative,
     TimestampNullNative,
+    UnixTimestampNowNative,
+    UnixTimestampNullNative,
+    UnixTimestampParseNative,
+    UnixTimestampValueNative,
+    UnixTimestampIntLegacy,
+    UnixTimestampDecLegacy,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1578,6 +1584,7 @@ pub(crate) enum EvaluatedKernelKind {
 /// one another, including when their physical value is NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EvaluatedArgsRole {
+    TemporalValue,
     TemporalParseText,
     TemporalText,
     Values,
@@ -1626,6 +1633,36 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::UnixTimestampNowNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnixTimestampNowNative,
+                );
+            }
+            Self::UnixTimestampNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnixTimestampNullNative,
+                );
+            }
+            Self::UnixTimestampParseNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnixTimestampParseNative,
+                );
+            }
+            Self::UnixTimestampValueNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnixTimestampValueNative,
+                );
+            }
+            Self::UnixTimestampIntLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnixTimestampIntLegacy,
+                );
+            }
+            Self::UnixTimestampDecLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::UnixTimestampDecLegacy,
+                );
+            }
             Self::Timestamp1Native => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::Timestamp1Native,
@@ -3673,7 +3710,15 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn uses_native_temporal_zone(self) -> bool {
         self.is_temporal_literal()
-            || matches!(self, Self::Timestamp1Native | Self::Timestamp2BaseNative)
+            || matches!(
+                self,
+                Self::Timestamp1Native
+                    | Self::Timestamp2BaseNative
+                    | Self::UnixTimestampParseNative
+                    | Self::UnixTimestampValueNative
+                    | Self::UnixTimestampIntLegacy
+                    | Self::UnixTimestampDecLegacy
+            )
     }
 
     pub(crate) fn metadata_matches(self, metadata: &(dyn std::any::Any + Send)) -> bool {
@@ -3699,7 +3744,18 @@ impl EvaluatedBytesOp {
     }
 
     pub(crate) fn input_role(self) -> EvaluatedArgsRole {
-        if matches!(self, Self::Timestamp1Native | Self::Timestamp2BaseNative) {
+        if matches!(
+            self,
+            Self::UnixTimestampValueNative
+                | Self::UnixTimestampIntLegacy
+                | Self::UnixTimestampDecLegacy
+        ) {
+            return EvaluatedArgsRole::TemporalValue;
+        }
+        if matches!(
+            self,
+            Self::Timestamp1Native | Self::Timestamp2BaseNative | Self::UnixTimestampParseNative
+        ) {
             return EvaluatedArgsRole::TemporalParseText;
         }
         if self.is_temporal_literal() {
@@ -4153,6 +4209,16 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::UnixTimestampNowNative => crate::impl_time::unix_timestamp_now_native_fn_meta(),
+            Self::UnixTimestampNullNative => crate::impl_time::unix_timestamp_null_native_fn_meta(),
+            Self::UnixTimestampParseNative => {
+                crate::impl_time::unix_timestamp_parse_native_fn_meta()
+            }
+            Self::UnixTimestampValueNative => {
+                crate::impl_time::unix_timestamp_value_native_fn_meta()
+            }
+            Self::UnixTimestampIntLegacy => crate::impl_time::unix_timestamp_int_legacy_fn_meta(),
+            Self::UnixTimestampDecLegacy => crate::impl_time::unix_timestamp_dec_legacy_fn_meta(),
             Self::Timestamp1Native => crate::impl_time::timestamp1_native_fn_meta(),
             Self::Timestamp2BaseNative => crate::impl_time::timestamp2_base_native_fn_meta(),
             Self::Timestamp2AddNative => crate::impl_time::timestamp2_add_native_fn_meta(),
@@ -4773,6 +4839,12 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::UnixTimestampNowNative
+            | Self::UnixTimestampNullNative
+            | Self::UnixTimestampParseNative
+            | Self::UnixTimestampValueNative
+            | Self::UnixTimestampIntLegacy
+            | Self::UnixTimestampDecLegacy => EvalType::Bytes,
             Self::Timestamp1Native
             | Self::Timestamp2BaseNative
             | Self::Timestamp2AddNative
@@ -5208,6 +5280,12 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::UnixTimestampNowNative => &[EvalType::Int, EvalType::Int],
+            Self::UnixTimestampParseNative => &[EvalType::Bytes, EvalType::Int],
+            Self::UnixTimestampNullNative
+            | Self::UnixTimestampValueNative
+            | Self::UnixTimestampIntLegacy
+            | Self::UnixTimestampDecLegacy => &[EvalType::Bytes],
             Self::Timestamp1Native | Self::Timestamp2BaseNative => {
                 &[EvalType::Bytes, EvalType::Int]
             }
@@ -6329,6 +6407,10 @@ pub fn prepare_json_raw_values_args(values: &[(u8, &[u8])]) -> LocalResult<Evalu
 /// NULL.
 #[derive(Debug)]
 pub enum EvaluatedArgs {
+    TemporalValue {
+        value: Vec<u8>,
+        zone: NativeSessionTimeZone,
+    },
     TemporalParseText {
         value: Vec<u8>,
         is_float: bool,
@@ -6542,6 +6624,7 @@ pub enum EvaluatedArgs {
 impl EvaluatedArgs {
     fn role(&self) -> EvaluatedArgsRole {
         match self {
+            Self::TemporalValue { .. } => EvaluatedArgsRole::TemporalValue,
             Self::TemporalParseText { .. } => EvaluatedArgsRole::TemporalParseText,
             Self::TemporalText { .. } => EvaluatedArgsRole::TemporalText,
             Self::Decimal2 { .. } => EvaluatedArgsRole::DecimalBinary,
@@ -6597,6 +6680,7 @@ impl EvaluatedArgs {
 
     fn input_types(&self) -> &'static [EvalType] {
         match self {
+            Self::TemporalValue { .. } => &[EvalType::Bytes],
             Self::TemporalParseText { .. } => &[EvalType::Bytes, EvalType::Int],
             Self::TemporalText { .. } => &[EvalType::Bytes, EvalType::Int],
             Self::Like { .. } => EvaluatedBytesOp::LikeNative.input_types(),
@@ -6670,6 +6754,52 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::UnixTimestampNowNative {
+            return match self {
+                Self::Int2(secs, nanos) => {
+                    crate::unix_timestamp_now_native_args_valid(*secs, *nanos)
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::UnixTimestampNullNative {
+            return match self {
+                Self::Bytes(value) => {
+                    crate::unix_timestamp_null_native_args_valid(value.as_deref())
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::UnixTimestampParseNative {
+            return match self {
+                Self::TemporalParseText {
+                    value, is_float, ..
+                } => crate::unix_timestamp_parse_native_args_valid(
+                    Some(value),
+                    Some(i64::from(*is_float)),
+                ),
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::UnixTimestampValueNative {
+            return match self {
+                Self::TemporalValue { value, .. } => {
+                    crate::unix_timestamp_value_native_args_valid(Some(value))
+                }
+                _ => false,
+            };
+        }
+        if matches!(
+            operation,
+            EvaluatedBytesOp::UnixTimestampIntLegacy | EvaluatedBytesOp::UnixTimestampDecLegacy
+        ) {
+            return match self {
+                Self::TemporalValue { value, .. } => {
+                    crate::unix_timestamp_legacy_args_valid(Some(value))
+                }
+                _ => false,
+            };
+        }
         if matches!(
             operation,
             EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative
@@ -7299,7 +7429,9 @@ impl EvaluatedArgs {
         // handles are real semantic context, never hidden ScalarValue operands.
         use ScalarValue::{Bytes, Int};
         let (ready, arity) = match self {
-            Self::TemporalText { .. } | Self::TemporalParseText { .. } => {
+            Self::TemporalText { .. }
+            | Self::TemporalParseText { .. }
+            | Self::TemporalValue { .. } => {
                 return Err(LocalError::InvalidSpec(
                     "temporal operands require their guarded zone projection".into(),
                 ));
@@ -9147,6 +9279,26 @@ impl EvaluatedBytesWorker {
                 _ => None,
             };
             let (ready, arity, invocation, temporal_zone) = match args {
+                EvaluatedArgs::TemporalValue { value, zone } => {
+                    let input_bytes = value
+                        .capacity()
+                        .checked_add(temporal_zone_heap_bytes(&zone))
+                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    EvalBudget::exact(self.state.limits)?.check_output(64, input_bytes)?;
+                    (
+                        [
+                            ScalarValue::Bytes(Some(value)),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                        ],
+                        1,
+                        None,
+                        Some(zone),
+                    )
+                }
                 EvaluatedArgs::TemporalParseText {
                     value,
                     is_float,
@@ -9761,6 +9913,52 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::UnixTimestampNowNative
+                        | EvaluatedBytesOp::UnixTimestampNullNative
+                        | EvaluatedBytesOp::UnixTimestampParseNative
+                        | EvaluatedBytesOp::UnixTimestampValueNative
+                        | EvaluatedBytesOp::UnixTimestampIntLegacy
+                        | EvaluatedBytesOp::UnixTimestampDecLegacy
+                ) {
+                    let valid = match value {
+                        None => matches!(
+                            self.operation,
+                            EvaluatedBytesOp::UnixTimestampParseNative
+                                | EvaluatedBytesOp::UnixTimestampNullNative
+                        ),
+                        Some(bytes) => match crate::decode_native_unix_timestamp_result(bytes) {
+                            Some(crate::NativeUnixTimestampResult::Value(
+                                crate::NativeIdentityRef::Int(_),
+                            )) => matches!(
+                                self.operation,
+                                EvaluatedBytesOp::UnixTimestampNowNative
+                                    | EvaluatedBytesOp::UnixTimestampParseNative
+                                    | EvaluatedBytesOp::UnixTimestampValueNative
+                                    | EvaluatedBytesOp::UnixTimestampIntLegacy
+                            ),
+                            Some(crate::NativeUnixTimestampResult::Value(
+                                crate::NativeIdentityRef::Decimal { .. },
+                            )) => matches!(
+                                self.operation,
+                                EvaluatedBytesOp::UnixTimestampParseNative
+                                    | EvaluatedBytesOp::UnixTimestampValueNative
+                                    | EvaluatedBytesOp::UnixTimestampDecLegacy
+                            ),
+                            Some(
+                                crate::NativeUnixTimestampResult::Continue(_)
+                                | crate::NativeUnixTimestampResult::Warning { .. },
+                            ) => self.operation == EvaluatedBytesOp::UnixTimestampParseNative,
+                            _ => false,
+                        },
+                    };
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "native UNIX_TIMESTAMP returned the wrong stage result".into(),
+                        ));
+                    }
+                }
                 if matches!(
                     self.operation,
                     EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative

@@ -138,7 +138,16 @@ fn check_evaluated_bytes_source(
     };
     let arity_matches = match (operation, operation.input_role()) {
         (
-            EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative,
+            EvaluatedBytesOp::UnixTimestampValueNative
+            | EvaluatedBytesOp::UnixTimestampIntLegacy
+            | EvaluatedBytesOp::UnixTimestampDecLegacy,
+            EvaluatedArgsRole::TemporalValue,
+        ) => arity == 1 && calls == 1,
+        (_, EvaluatedArgsRole::TemporalValue) => false,
+        (
+            EvaluatedBytesOp::Timestamp1Native
+            | EvaluatedBytesOp::Timestamp2BaseNative
+            | EvaluatedBytesOp::UnixTimestampParseNative,
             EvaluatedArgsRole::TemporalParseText,
         ) => arity == 2 && calls == 1,
         (_, EvaluatedArgsRole::TemporalParseText) => false,

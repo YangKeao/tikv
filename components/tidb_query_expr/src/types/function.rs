@@ -500,6 +500,12 @@ pub enum LocalFunctionId {
     Timestamp2BaseNative,
     Timestamp2AddNative,
     TimestampNullNative,
+    UnixTimestampNowNative,
+    UnixTimestampNullNative,
+    UnixTimestampParseNative,
+    UnixTimestampValueNative,
+    UnixTimestampIntLegacy,
+    UnixTimestampDecLegacy,
 }
 
 /// Source provenance, not a deduction from the value's collation.

@@ -971,3 +971,418 @@ mod timestamp_worker_tests {
         assert_eq!(head.retained_storage().unwrap(), head_storage);
     }
 }
+
+#[cfg(test)]
+mod unix_timestamp_worker_tests {
+    use tidb_query_datatype::codec::mysql::{Time, TimeType, time::NativeSessionTimeZone};
+
+    use super::*;
+    use crate::{
+        NativeIdentityRef, NativeUnixTimestampResult, decode_native_unix_timestamp_result,
+        encode_native_identity,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn bytes(value: ComputedValue) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("UNIX_TIMESTAMP must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+    fn text(value: &str, zone: NativeSessionTimeZone) -> EvaluatedArgs {
+        EvaluatedArgs::TemporalParseText {
+            value: value.as_bytes().to_vec(),
+            is_float: false,
+            zone,
+        }
+    }
+    fn actual_time(raw: u64, kind: TimeType, fsp: u8) -> Vec<u8> {
+        // An actual typed SQL temporal representation, not a computed epoch or
+        // a fabricated parse-head continuation.
+        encode_native_identity(NativeIdentityRef::Time {
+            core: raw,
+            kind: kind as u8,
+            fsp,
+        })
+        .unwrap()
+    }
+    fn int_result(output: &[u8], expected: i64) {
+        assert!(
+            matches!(decode_native_unix_timestamp_result(output), Some(NativeUnixTimestampResult::Value(NativeIdentityRef::Int(value))) if value == expected)
+        );
+    }
+    fn decimal_result(output: &[u8], expected_coefficient: u64, expected_scale: u32) {
+        let Some(NativeUnixTimestampResult::Value(NativeIdentityRef::Decimal {
+            negative,
+            scale,
+            storage_scale,
+            coefficient,
+            ..
+        })) = decode_native_unix_timestamp_result(output)
+        else {
+            panic!("expected actual Decimal identity");
+        };
+        assert!(!negative);
+        assert_eq!(scale, expected_scale);
+        assert_eq!(storage_scale, expected_scale);
+        if expected_coefficient == 0 {
+            assert!(coefficient.iter().all(|byte| *byte == b'0'));
+        } else {
+            assert_eq!(
+                std::str::from_utf8(coefficient)
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap(),
+                expected_coefficient
+            );
+        }
+    }
+
+    #[test]
+    fn unix_timestamp_now_parse_and_value_use_actual_stage_data_and_distinct_zone_reads() {
+        let mut now = prepare(
+            EvaluatedBytesOp::UnixTimestampNowNative,
+            ExecutionLimits::default(),
+        );
+        let now_storage = now.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Int2(None, Some(0)),
+            EvaluatedArgs::Int2(Some(0), None),
+            EvaluatedArgs::Int2(Some(0), Some(-1)),
+            EvaluatedArgs::Int2(Some(0), Some(i64::from(u32::MAX) + 1)),
+        ] {
+            assert!(matches!(
+                now.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(now.kernel_invocations(), 0);
+        }
+        for (index, (seconds, nanos, expected)) in [(1, 0, 1), (0, i64::from(u32::MAX), 4)]
+            .into_iter()
+            .enumerate()
+        {
+            let output = bytes(
+                now.eval_args(EvaluatedArgs::Int2(Some(seconds), Some(nanos)))
+                    .unwrap(),
+            )
+            .unwrap();
+            int_result(&output, expected);
+            assert_eq!(now.kernel_invocations(), index as u64 + 1);
+            assert!(now.is_healthy());
+            assert_eq!(now.retained_storage().unwrap(), now_storage);
+        }
+        let mut null = prepare(
+            EvaluatedBytesOp::UnixTimestampNullNative,
+            ExecutionLimits::default(),
+        );
+        assert!(matches!(
+            null.eval_args(EvaluatedArgs::Bytes(Some(Vec::new()))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(null.kernel_invocations(), 0);
+        assert_eq!(
+            bytes(null.eval_args(EvaluatedArgs::Bytes(None)).unwrap()),
+            None
+        );
+        assert_eq!(null.kernel_invocations(), 1);
+        assert!(null.is_healthy());
+
+        let mut head = prepare(
+            EvaluatedBytesOp::UnixTimestampParseNative,
+            ExecutionLimits::default(),
+        );
+        let head_storage = head.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::BytesInt(Some(b"1970-01-01 01:00:01".to_vec()), Some(0)),
+            EvaluatedArgs::TemporalParseText {
+                value: vec![255],
+                is_float: false,
+                zone: NativeSessionTimeZone::utc(),
+            },
+        ] {
+            assert!(matches!(
+                head.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(head.kernel_invocations(), 0);
+        }
+        let continued = bytes(
+            head.eval_args(text("1970-01-01 01:00:01", NativeSessionTimeZone::utc()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_native_unix_timestamp_result(&continued),
+            Some(NativeUnixTimestampResult::Continue(_))
+        ));
+        let mut value = prepare(
+            EvaluatedBytesOp::UnixTimestampValueNative,
+            ExecutionLimits::default(),
+        );
+        let value_storage = value.retained_storage().unwrap();
+        let mut broken = continued.clone();
+        broken.pop();
+        for invalid in [
+            EvaluatedArgs::Bytes(Some(continued.clone())),
+            EvaluatedArgs::TemporalValue {
+                value: broken,
+                zone: NativeSessionTimeZone::utc(),
+            },
+            EvaluatedArgs::TemporalValue {
+                value: actual_time(
+                    Time::native_core_from_fields(1970, 1, 1, 1, 0, 1, 0),
+                    TimeType::Date,
+                    0,
+                ),
+                zone: NativeSessionTimeZone::utc(),
+            },
+            EvaluatedArgs::TemporalValue {
+                value: actual_time(
+                    Time::native_core_from_fields(1970, 1, 1, 1, 0, 1, 0),
+                    TimeType::DateTime,
+                    7,
+                ),
+                zone: NativeSessionTimeZone::utc(),
+            },
+        ] {
+            assert!(matches!(
+                value.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(value.kernel_invocations(), 0);
+        }
+        // Pass the untouched, actual head-produced frame, with a freshly read
+        // second zone. UTC yields 3601; +01:00 yields the known epoch second 1.
+        for (index, (zone, expected)) in [
+            (NativeSessionTimeZone::utc(), 3601),
+            (
+                NativeSessionTimeZone::Fixed {
+                    name: "UTC".to_owned(),
+                    offset_secs: 3600,
+                },
+                1,
+            ),
+            (NativeSessionTimeZone::utc(), 3601),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = bytes(
+                value
+                    .eval_args(EvaluatedArgs::TemporalValue {
+                        value: continued.clone(),
+                        zone,
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            int_result(&output, expected);
+            assert_eq!(value.kernel_invocations(), index as u64 + 1);
+            assert!(value.is_healthy());
+            assert_eq!(value.retained_storage().unwrap(), value_storage);
+        }
+        assert_eq!(
+            bytes(
+                head.eval_args(text(
+                    "0000-00-00 00:00:00.000",
+                    NativeSessionTimeZone::utc()
+                ))
+                .unwrap()
+            ),
+            None
+        );
+        let terminal = bytes(
+            head.eval_args(text(
+                "2017-00-02 00:00:00.000",
+                NativeSessionTimeZone::utc(),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        decimal_result(&terminal, 0, 3);
+        assert_eq!(
+            value.kernel_invocations(),
+            3,
+            "terminal head outcomes do not demand the value stage"
+        );
+        assert!(matches!(
+            value.eval_args(EvaluatedArgs::TemporalValue {
+                value: terminal,
+                zone: NativeSessionTimeZone::utc()
+            }),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        let warning = bytes(
+            head.eval_args(text("bad", NativeSessionTimeZone::utc()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            matches!(decode_native_unix_timestamp_result(&warning), Some(NativeUnixTimestampResult::Warning { code: 1292, message }) if message == "Incorrect datetime value: 'bad'")
+        );
+        assert_eq!(head.kernel_invocations(), 4);
+        assert!(head.is_healthy());
+        assert_eq!(head.retained_storage().unwrap(), head_storage);
+        assert!(value.is_healthy());
+        assert_eq!(value.retained_storage().unwrap(), value_storage);
+    }
+
+    #[test]
+    fn unix_timestamp_legacy_raw_time_gap_policy_and_zone_owner_budget_remain_distinct() {
+        let raw = Time::native_core_from_fields(1970, 1, 1, 0, 0, 1, 500_000);
+        let gap = Time::native_core_from_fields(2025, 3, 30, 2, 30, 0, 0);
+        let paris = || NativeSessionTimeZone::Named("Europe/Paris".parse().unwrap());
+        for operation in [
+            EvaluatedBytesOp::UnixTimestampIntLegacy,
+            EvaluatedBytesOp::UnixTimestampDecLegacy,
+        ] {
+            let mut worker = prepare(operation, ExecutionLimits::default());
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes(Some(actual_time(
+                    raw,
+                    TimeType::DateTime,
+                    6
+                )))),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::TemporalValue {
+                    value: encode_native_identity(NativeIdentityRef::Int(1)).unwrap(),
+                    zone: NativeSessionTimeZone::utc(),
+                }),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            for (index, kind) in [TimeType::Date, TimeType::DateTime, TimeType::Timestamp]
+                .into_iter()
+                .enumerate()
+            {
+                let output = bytes(
+                    worker
+                        .eval_args(EvaluatedArgs::TemporalValue {
+                            value: actual_time(raw, kind, 255),
+                            zone: NativeSessionTimeZone::utc(),
+                        })
+                        .unwrap(),
+                )
+                .unwrap();
+                // DATE's hidden clock/micros are preserved. Legacy signatures
+                // ignore even raw FSP 255 and keep distinct INT / DECIMAL rules.
+                if operation == EvaluatedBytesOp::UnixTimestampIntLegacy {
+                    int_result(&output, 1);
+                } else {
+                    decimal_result(&output, 1_500_000, 6);
+                }
+                assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            for (index, (core, zone)) in [(0, NativeSessionTimeZone::utc()), (gap, paris())]
+                .into_iter()
+                .enumerate()
+            {
+                let output = bytes(
+                    worker
+                        .eval_args(EvaluatedArgs::TemporalValue {
+                            value: actual_time(core, TimeType::DateTime, 255),
+                            zone,
+                        })
+                        .unwrap(),
+                )
+                .unwrap();
+                if operation == EvaluatedBytesOp::UnixTimestampIntLegacy {
+                    int_result(&output, 0);
+                } else {
+                    decimal_result(&output, 0, 0);
+                }
+                assert_eq!(worker.kernel_invocations(), index as u64 + 4);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+        }
+        let mut ordinary = prepare(
+            EvaluatedBytesOp::UnixTimestampValueNative,
+            ExecutionLimits::default(),
+        );
+        let storage = ordinary.retained_storage().unwrap();
+        let output = bytes(
+            ordinary
+                .eval_args(EvaluatedArgs::TemporalValue {
+                    value: actual_time(gap, TimeType::DateTime, 0),
+                    zone: paris(),
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        // Existing native Paris spring-gap source table: ordinary conversion
+        // returns the transition, whereas the strict legacy signatures give 0.
+        int_result(&output, 1_743_296_400);
+        assert!(ordinary.is_healthy());
+        assert_eq!(ordinary.retained_storage().unwrap(), storage);
+
+        for operation in [
+            EvaluatedBytesOp::UnixTimestampParseNative,
+            EvaluatedBytesOp::UnixTimestampValueNative,
+        ] {
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            let mut name = String::with_capacity(128 * 1024);
+            name.push_str("UTC");
+            assert!(name.capacity() > 64 * 1024 && name.len() == 3);
+            let args = |zone| {
+                if operation == EvaluatedBytesOp::UnixTimestampParseNative {
+                    text("1970-01-01 00:00:01", zone)
+                } else {
+                    EvaluatedArgs::TemporalValue {
+                        value: actual_time(raw, TimeType::DateTime, 0),
+                        zone,
+                    }
+                }
+            };
+            assert!(matches!(
+                worker.eval_args(args(NativeSessionTimeZone::Fixed {
+                    name,
+                    offset_secs: 0
+                })),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let output = bytes(
+                worker
+                    .eval_args(args(NativeSessionTimeZone::utc()))
+                    .unwrap(),
+            )
+            .unwrap();
+            if operation == EvaluatedBytesOp::UnixTimestampParseNative {
+                assert!(matches!(
+                    decode_native_unix_timestamp_result(&output),
+                    Some(NativeUnixTimestampResult::Continue(_))
+                ));
+            } else {
+                int_result(&output, 1);
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

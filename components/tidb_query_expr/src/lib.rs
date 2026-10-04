@@ -153,6 +153,14 @@ pub use native_typed_clock::{
     native_typed_date_fields,
 };
 
+mod native_unix_timestamp;
+pub use native_unix_timestamp::{
+    NativeUnixTimestampResult, decode_native_unix_timestamp_result,
+    unix_timestamp_legacy_args_valid, unix_timestamp_now_native_args_valid,
+    unix_timestamp_null_native_args_valid, unix_timestamp_parse_native_args_valid,
+    unix_timestamp_value_native_args_valid,
+};
+
 mod native_weight_string;
 pub use native_weight_string::{
     native_weight_binary_args_valid, native_weight_binary_padding, native_weight_char_args_valid,
@@ -243,7 +251,10 @@ pub use self::{
         time_native_fn_meta, timestamp_add_native_fn_meta,
         timestamp_add_prefix_null_native_fn_meta, timestamp_literal_native_fn_meta,
         timestamp_null_native_fn_meta, timestamp1_native_fn_meta, timestamp2_add_native_fn_meta,
-        timestamp2_base_native_fn_meta, utc_date_native_fn_meta, utc_time_null_native_fn_meta,
+        timestamp2_base_native_fn_meta, unix_timestamp_dec_legacy_fn_meta,
+        unix_timestamp_int_legacy_fn_meta, unix_timestamp_now_native_fn_meta,
+        unix_timestamp_null_native_fn_meta, unix_timestamp_parse_native_fn_meta,
+        unix_timestamp_value_native_fn_meta, utc_date_native_fn_meta, utc_time_null_native_fn_meta,
         utc_time_with_fsp_native_fn_meta, utc_time_without_fsp_native_fn_meta,
         utc_timestamp_native_fn_meta,
     },
