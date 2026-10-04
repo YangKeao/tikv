@@ -189,6 +189,28 @@ pub struct NativeExtremumNumericCursor {
 }
 
 impl NativeExtremumNumericCursor {
+    // Crate-private checkpoint for the SDK's opaque runtime report only. Native
+    // adapters cannot supply a winner through this API; they forward the whole
+    // SDK-produced report. Reconstruction validates the cursor invariant.
+    pub(crate) fn runtime_checkpoint(&self) -> (usize, usize, usize) {
+        (self.count, self.next, self.best)
+    }
+
+    pub(crate) fn from_runtime_checkpoint(
+        count: usize,
+        next: usize,
+        best: usize,
+        want: Ordering,
+    ) -> Option<Self> {
+        if count == 0 || next == 0 || next > count || best >= next {
+            return None;
+        }
+        let mut cursor = Self::new(count, want).ok()?;
+        cursor.next = next;
+        cursor.best = best;
+        Some(cursor)
+    }
+
     pub fn new(count: usize, want: Ordering) -> Result<Self, NativeExtremumPolicyError> {
         if count == 0 {
             return Err(NativeExtremumPolicyError::EmptyArguments);

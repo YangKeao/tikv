@@ -98,6 +98,19 @@ pub use native_extract::{
     extract_select_native_fn_meta,
 };
 
+mod native_extremum;
+pub use native_extremum::{
+    NativeExtremumRequest, NativeExtremumResult, decode_native_extremum_result,
+    encode_native_extremum_head, extremum_finish_native_args_valid, extremum_finish_native_fn_meta,
+    extremum_head_native_args_valid, extremum_head_native_fn_meta,
+    extremum_numeric_native_args_valid, extremum_numeric_native_fn_meta,
+    extremum_string_native_args_valid, extremum_string_native_fn_meta,
+    extremum_time_context_native_args_valid, extremum_time_context_native_fn_meta,
+    extremum_time_native_args_valid, extremum_time_native_fn_meta,
+    extremum_time_text_native_args_valid, extremum_time_text_native_fn_meta,
+    extremum_vector_native_args_valid, extremum_vector_native_fn_meta,
+};
+
 mod native_extremum_policy;
 pub use native_extremum_policy::{
     NativeExtremumComparisonOp, NativeExtremumComparisonRequest, NativeExtremumComparisonValue,

@@ -535,6 +535,14 @@ pub enum LocalFunctionId {
     ExtractMixedDurationNative,
     ExtractMixedFinishNative,
     ExtractCompositeNative,
+    ExtremumHeadNative,
+    ExtremumNumericNative,
+    ExtremumTimeNative,
+    ExtremumVectorNative,
+    ExtremumStringNative,
+    ExtremumTimeTextNative,
+    ExtremumTimeContextNative,
+    ExtremumFinishNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

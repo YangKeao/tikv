@@ -4272,3 +4272,356 @@ mod extract_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod extremum_worker_tests {
+    use tidb_query_datatype::codec::mysql::{Time, time::NativeSessionTimeZone};
+
+    use super::*;
+    use crate::{
+        NativeExtremumEvalType, NativeExtremumRequest as Request, NativeExtremumResult as Reply,
+        NativeExtremumSignature, NativeExtremumStringMode, NativeIdentityRef,
+        decode_native_extremum_result, encode_native_extremum_head, encode_native_identity,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn bytes(value: ComputedValue) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("extremum stages must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+    fn copy(args: &EvaluatedArgs) -> EvaluatedArgs {
+        match args {
+            EvaluatedArgs::BytesIntInt(packet, want, collation) => {
+                EvaluatedArgs::BytesIntInt(packet.clone(), *want, *collation)
+            }
+            EvaluatedArgs::Bytes2(state, value) => {
+                EvaluatedArgs::Bytes2(state.clone(), value.clone())
+            }
+            EvaluatedArgs::TemporalText { value, modes, zone } => EvaluatedArgs::TemporalText {
+                value: value.clone(),
+                modes: *modes,
+                zone: zone.clone(),
+            },
+            _ => unreachable!(),
+        }
+    }
+    fn head_args(packet: Vec<u8>) -> EvaluatedArgs {
+        EvaluatedArgs::BytesIntInt(Some(packet), Some(1), Some(NativeCollation::Binary.tag()))
+    }
+    fn request(report: &[u8], expected: Request) -> usize {
+        let Some(Reply::Request {
+            kind, index, state, ..
+        }) = decode_native_extremum_result(report)
+        else {
+            panic!("expected actual SDK continuation");
+        };
+        assert_eq!(kind, expected);
+        assert_eq!(state, report, "forward the entire original report");
+        index
+    }
+    enum Expected {
+        Request(Request, usize),
+        Value(Vec<u8>),
+        String(&'static [u8]),
+    }
+    fn check(report: &[u8], expected: &Expected) {
+        match (decode_native_extremum_result(report).unwrap(), expected) {
+            (
+                Reply::Request {
+                    kind, index, state, ..
+                },
+                Expected::Request(want, at),
+            ) => {
+                assert_eq!(&kind, want);
+                assert_eq!(&index, at);
+                assert_eq!(state, report);
+            }
+            (Reply::Value(value), Expected::Value(want)) => assert_eq!(value, want.as_slice()),
+            (Reply::RetagString(value), Expected::String(want)) => assert_eq!(value, *want),
+            _ => panic!("unexpected extremum lifecycle result"),
+        }
+    }
+
+    #[test]
+    fn extremum_workers_keep_sdk_continuations_owned_operands_and_zone_guard_lifetimes() {
+        let mut head = prepare(
+            EvaluatedBytesOp::ExtremumHeadNative,
+            ExecutionLimits::default(),
+        );
+        let numbers = [
+            encode_native_identity(NativeIdentityRef::Int(9)).unwrap(),
+            encode_native_identity(NativeIdentityRef::Int(3)).unwrap(),
+        ];
+        let packet =
+            encode_native_extremum_head(&[Some(&numbers[0]), Some(&numbers[1])], None, &[], false)
+                .unwrap();
+        let numeric = bytes(head.eval_args(head_args(packet.clone())).unwrap()).unwrap();
+        assert_eq!(request(&numeric, Request::CompareGt), 1);
+        // Isolated ready-stage fixture: the actual comparison datum is SQL
+        // NULL (OtherValue), never a host-computed wins/tie flag or winner.
+        let mut numeric_source = prepare(
+            EvaluatedBytesOp::ExtremumNumericNative,
+            ExecutionLimits::default(),
+        );
+        let finish = bytes(
+            numeric_source
+                .eval_args(EvaluatedArgs::Bytes2(Some(numeric.clone()), None))
+                .unwrap(),
+        )
+        .unwrap();
+        let selected = request(&finish, Request::Original);
+        let selected_identity = numbers[selected].clone();
+        let time = encode_native_identity(NativeIdentityRef::Time {
+            core: Time::native_core_from_fields(2020, 7, 1, 0, 0, 0, 0) | 9,
+            kind: 1,
+            fsp: 0,
+        })
+        .unwrap();
+        // Identity Vector carries raw LE elements, NOT storage's length prefix.
+        // The Value expectation below retains exactly these two actual elements.
+        let vector_bytes = [
+            1.0_f32.to_bits().to_le_bytes(),
+            2.0_f32.to_bits().to_le_bytes(),
+        ]
+        .concat();
+        assert_eq!(vector_bytes.len(), 8);
+        let vector = encode_native_identity(NativeIdentityRef::Vector(&vector_bytes)).unwrap();
+        let string = encode_native_identity(NativeIdentityRef::Bytes(b"z")).unwrap();
+        let text = b"2020-07-01 00:00:00+00:00";
+        let text_identity = encode_native_identity(NativeIdentityRef::Bytes(text)).unwrap();
+        let mut start = |identity: &[u8], signature| {
+            let packet =
+                encode_native_extremum_head(&[Some(identity)], signature, &[], false).unwrap();
+            bytes(head.eval_args(head_args(packet)).unwrap()).unwrap()
+        };
+        let time_state = start(&time, None);
+        request(&time_state, Request::CastTime);
+        let vector_state = start(&vector, None);
+        request(&vector_state, Request::CastVector);
+        let string_state = start(&string, None);
+        request(&string_state, Request::StringBytes);
+        let text_state = start(
+            &text_identity,
+            Some(NativeExtremumSignature {
+                arg_type: NativeExtremumEvalType::String,
+                cmp_string_mode: NativeExtremumStringMode::AsDatetime,
+                ret_date: false,
+            }),
+        );
+        request(&text_state, Request::TimeText);
+        let mut text_source = prepare(
+            EvaluatedBytesOp::ExtremumTimeTextNative,
+            ExecutionLimits::default(),
+        );
+        let context = bytes(
+            text_source
+                .eval_args(EvaluatedArgs::Bytes2(
+                    Some(text_state.clone()),
+                    Some(text.to_vec()),
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+        request(&context, Request::TimeContext);
+        let fixtures = [
+            (
+                EvaluatedBytesOp::ExtremumHeadNative,
+                head_args(packet),
+                Expected::Request(Request::CompareGt, 1),
+            ),
+            (
+                EvaluatedBytesOp::ExtremumNumericNative,
+                EvaluatedArgs::Bytes2(Some(numeric), None),
+                Expected::Request(Request::Original, 0),
+            ),
+            (
+                EvaluatedBytesOp::ExtremumTimeNative,
+                EvaluatedArgs::Bytes2(Some(time_state), Some(time.clone())),
+                Expected::Value(time),
+            ),
+            (
+                EvaluatedBytesOp::ExtremumVectorNative,
+                EvaluatedArgs::Bytes2(Some(vector_state), Some(vector.clone())),
+                Expected::Value(vector),
+            ),
+            (
+                EvaluatedBytesOp::ExtremumStringNative,
+                EvaluatedArgs::Bytes2(Some(string_state), Some(b"z".to_vec())),
+                Expected::String(b"z"),
+            ),
+            (
+                EvaluatedBytesOp::ExtremumTimeTextNative,
+                EvaluatedArgs::Bytes2(Some(text_state), Some(text.to_vec())),
+                Expected::Request(Request::TimeContext, 0),
+            ),
+            (
+                EvaluatedBytesOp::ExtremumTimeContextNative,
+                EvaluatedArgs::TemporalText {
+                    value: context,
+                    modes: 0,
+                    zone: NativeSessionTimeZone::Fixed {
+                        name: "UTC".into(),
+                        offset_secs: 0,
+                    },
+                },
+                Expected::String(b"2020-07-01 00:00:00"),
+            ),
+            (
+                EvaluatedBytesOp::ExtremumFinishNative,
+                EvaluatedArgs::Bytes2(Some(finish), Some(selected_identity.clone())),
+                Expected::Value(selected_identity),
+            ),
+        ];
+        for (operation, args, expected) in fixtures {
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Int(None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            let mut wrong_stage = copy(&args);
+            match &mut wrong_stage {
+                EvaluatedArgs::BytesIntInt(state, ..) | EvaluatedArgs::Bytes2(state, _) => {
+                    *state = Some(Vec::new())
+                }
+                EvaluatedArgs::TemporalText { value, .. } => value.clear(),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                worker.eval_args(wrong_stage),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            if let EvaluatedArgs::TemporalText { modes, .. } = &args {
+                assert_eq!(*modes, 0);
+                let mut bad = copy(&args);
+                let EvaluatedArgs::TemporalText { modes, .. } = &mut bad else {
+                    unreachable!();
+                };
+                *modes = 2;
+                assert!(matches!(
+                    worker.eval_args(bad),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            let owners = match &args {
+                EvaluatedArgs::Bytes2(_, Some(_)) | EvaluatedArgs::TemporalText { .. } => 2,
+                _ => 1,
+            };
+            for owner_index in 0..owners {
+                let mut oversized = copy(&args);
+                match (&mut oversized, owner_index) {
+                    (EvaluatedArgs::BytesIntInt(Some(value), ..), 0)
+                    | (EvaluatedArgs::Bytes2(Some(value), _), 0)
+                    | (EvaluatedArgs::Bytes2(_, Some(value)), 1)
+                    | (EvaluatedArgs::TemporalText { value, .. }, 0) => {
+                        value.reserve_exact(128 * 1024);
+                        assert!(value.capacity() > 64 * 1024);
+                    }
+                    (
+                        EvaluatedArgs::TemporalText {
+                            zone: NativeSessionTimeZone::Fixed { name, .. },
+                            ..
+                        },
+                        1,
+                    ) => {
+                        name.reserve_exact(128 * 1024);
+                        assert!(name.capacity() > 64 * 1024);
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    worker.eval_args(oversized),
+                    Err(LocalError::ResourceLimit(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            check(
+                &bytes(worker.eval_args(copy(&args)).unwrap()).unwrap(),
+                &expected,
+            );
+            let mut calls = 1;
+            if operation == EvaluatedBytesOp::ExtremumHeadNative {
+                let null = encode_native_extremum_head(&[None], None, &[], false).unwrap();
+                assert_eq!(bytes(worker.eval_args(head_args(null)).unwrap()), None);
+                let empty = encode_native_extremum_head(&[], None, &[], false).unwrap();
+                let output = bytes(worker.eval_args(head_args(empty)).unwrap()).unwrap();
+                assert!(matches!(
+                    decode_native_extremum_result(&output),
+                    Some(Reply::BadArity)
+                ));
+                calls += 2;
+            } else if matches!(
+                operation,
+                EvaluatedBytesOp::ExtremumTimeNative | EvaluatedBytesOp::ExtremumTimeTextNative
+            ) {
+                let EvaluatedArgs::Bytes2(state, _) = copy(&args) else {
+                    unreachable!();
+                };
+                assert_eq!(
+                    bytes(
+                        worker
+                            .eval_args(EvaluatedArgs::Bytes2(state, None))
+                            .unwrap()
+                    ),
+                    None
+                );
+                calls += 1;
+            } else if operation == EvaluatedBytesOp::ExtremumTimeContextNative {
+                let mut london = copy(&args);
+                let EvaluatedArgs::TemporalText { zone, .. } = &mut london else {
+                    unreachable!();
+                };
+                *zone = NativeSessionTimeZone::Named("Europe/London".parse().unwrap());
+                check(
+                    &bytes(worker.eval_args(london).unwrap()).unwrap(),
+                    &Expected::String(b"2020-07-01 01:00:00"),
+                );
+                check(
+                    &bytes(worker.eval_args(copy(&args)).unwrap()).unwrap(),
+                    &expected,
+                );
+                calls += 2;
+            }
+            assert_eq!(worker.kernel_invocations(), calls);
+            // Storage observation also requires temporal metadata to be unbound
+            // after success, admission refusal and budget refusal; zones rebind.
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let mut stopped = prepare(
+                operation,
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = stopped.retained_storage().unwrap();
+            assert!(matches!(
+                stopped.eval_args(copy(&args)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(stopped.kernel_invocations(), 0);
+            assert!(stopped.is_healthy());
+            assert_eq!(stopped.retained_storage().unwrap(), storage);
+            // This is a CPP instruction-budget check, not frontend pool slots.
+        }
+    }
+}

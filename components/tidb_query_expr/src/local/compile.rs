@@ -157,7 +157,9 @@ fn check_evaluated_bytes_source(
         ) => arity == 2 && calls == 1,
         (_, EvaluatedArgsRole::TemporalParseText) => false,
         (
-            EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative,
+            EvaluatedBytesOp::DateLiteralNative
+            | EvaluatedBytesOp::TimestampLiteralNative
+            | EvaluatedBytesOp::ExtremumTimeContextNative,
             EvaluatedArgsRole::TemporalText,
         ) => arity == 2 && calls == 1,
         (_, EvaluatedArgsRole::TemporalText) => false,

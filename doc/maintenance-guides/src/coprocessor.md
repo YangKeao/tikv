@@ -434,16 +434,22 @@ short-circuit admission policy described above.
   it is not a physical-memory or parser-temporary bound. Existing cast/NULL
   witnesses and original warning delivery remain native adapters, without
   PB/legacy admission or a new specialized vector kernel.
-- Query_expr `native_extremum_policy.rs` owns the native GREATEST/LEAST
-  metadata head, numeric winner cursor and post-comparison promotion/scale
-  policy. Actual kinds, temporal kinds, Decimal scales and planner signature
-  metadata are projected without preselecting a domain or winner. Only an
-  actual comparison Int(1) advances the winner; the original candidate/best
-  order and late promotion remain. This is a pure policy foundation, not new
-  RPN/worker admission: four other reducers and string-as-time conversion
-  remain native, and numeric comparisons retain historical NoColumns policy.
-  Existing shared time/vector/Decimal services already suffice for staged
-  runtime integration; no extra primitive migration is required.
+- Query_expr `native_extremum.rs` adds eight native GREATEST/LEAST profiles
+  over `native_extremum_policy.rs`: head, numeric/time/vector/string steps,
+  text preparation, temporal context and final identity/precision conversion.
+  SDK requests own domain, winner, parse fallback and promotion decisions;
+  complete actual identity frames preserve the global NULL prepass and raw
+  representations. Native code only actuates original requested preparation
+  and comparisons. Numeric NoColumns semantics bind the selected execution
+  authority, rather than opening another standalone owner.
+  Seven profiles use Values; TimeContext retains TemporalText and existing
+  NativeTemporalCallMetadata/TemporalBindingGuard zone accounting and cleanup.
+  Role/compile gates and report subsets stay profile-specific. The checked
+  reply bound includes actual input lengths, fixed framing overhead and the
+  SDK-selected Decimal precision expansion; actual capacities are checked
+  separately. It is not a physical heap or temporary-allocation guarantee.
+  Existing literal profiles, planner metadata, PB/legacy admission and
+  specialized vector kernels are unchanged.
   The existing native JSON_SUM_CRC32 scalar-array domain uses query_expr's
   `native_json_sum_crc32.rs`: one nullable Bytes/OwnBytes worker owns ordered
   classification, numeric spelling, IEEE CRC and wrapping accumulation.

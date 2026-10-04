@@ -1599,6 +1599,14 @@ pub enum EvaluatedBytesOp {
     ExtractMixedDurationNative,
     ExtractMixedFinishNative,
     ExtractCompositeNative,
+    ExtremumHeadNative,
+    ExtremumNumericNative,
+    ExtremumTimeNative,
+    ExtremumVectorNative,
+    ExtremumStringNative,
+    ExtremumTimeTextNative,
+    ExtremumTimeContextNative,
+    ExtremumFinishNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1662,6 +1670,46 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::ExtremumHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtremumHeadNative,
+                );
+            }
+            Self::ExtremumNumericNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtremumNumericNative,
+                );
+            }
+            Self::ExtremumTimeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtremumTimeNative,
+                );
+            }
+            Self::ExtremumVectorNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtremumVectorNative,
+                );
+            }
+            Self::ExtremumStringNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtremumStringNative,
+                );
+            }
+            Self::ExtremumTimeTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtremumTimeTextNative,
+                );
+            }
+            Self::ExtremumTimeContextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtremumTimeContextNative,
+                );
+            }
+            Self::ExtremumFinishNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtremumFinishNative,
+                );
+            }
             Self::ExtractSelectNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::ExtractSelectNative,
@@ -3875,7 +3923,8 @@ impl EvaluatedBytesOp {
     }
 
     pub(crate) fn uses_native_temporal_zone(self) -> bool {
-        self.is_temporal_literal()
+        self == Self::ExtremumTimeContextNative
+            || self.is_temporal_literal()
             || matches!(
                 self,
                 Self::Timestamp1Native
@@ -3931,7 +3980,7 @@ impl EvaluatedBytesOp {
         ) {
             return EvaluatedArgsRole::TemporalParseText;
         }
-        if self.is_temporal_literal() {
+        if self.is_temporal_literal() || self == Self::ExtremumTimeContextNative {
             return EvaluatedArgsRole::TemporalText;
         }
         // A private identity does not determine its carrier or packet policy.
@@ -4408,6 +4457,14 @@ impl EvaluatedBytesOp {
             Self::ExtractMixedDurationNative => crate::extract_mixed_duration_native_fn_meta(),
             Self::ExtractMixedFinishNative => crate::extract_mixed_finish_native_fn_meta(),
             Self::ExtractCompositeNative => crate::extract_composite_native_fn_meta(),
+            Self::ExtremumHeadNative => crate::extremum_head_native_fn_meta(),
+            Self::ExtremumNumericNative => crate::extremum_numeric_native_fn_meta(),
+            Self::ExtremumTimeNative => crate::extremum_time_native_fn_meta(),
+            Self::ExtremumVectorNative => crate::extremum_vector_native_fn_meta(),
+            Self::ExtremumStringNative => crate::extremum_string_native_fn_meta(),
+            Self::ExtremumTimeTextNative => crate::extremum_time_text_native_fn_meta(),
+            Self::ExtremumTimeContextNative => crate::extremum_time_context_native_fn_meta(),
+            Self::ExtremumFinishNative => crate::extremum_finish_native_fn_meta(),
             Self::ToBinaryNative => crate::to_binary_native_fn_meta(),
             Self::FromBinaryNative => crate::from_binary_native_fn_meta(),
             Self::ConvertUsingNative => crate::convert_using_native_fn_meta(),
@@ -5057,6 +5114,14 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::ExtremumHeadNative
+            | Self::ExtremumNumericNative
+            | Self::ExtremumTimeNative
+            | Self::ExtremumVectorNative
+            | Self::ExtremumStringNative
+            | Self::ExtremumTimeTextNative
+            | Self::ExtremumTimeContextNative
+            | Self::ExtremumFinishNative => EvalType::Bytes,
             Self::ExtractSelectNative
             | Self::ExtractDatetimeNative
             | Self::ExtractDurationNative
@@ -5525,6 +5590,14 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::ExtremumHeadNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
+            Self::ExtremumNumericNative
+            | Self::ExtremumTimeNative
+            | Self::ExtremumVectorNative
+            | Self::ExtremumStringNative
+            | Self::ExtremumTimeTextNative
+            | Self::ExtremumFinishNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::ExtremumTimeContextNative => &[EvalType::Bytes, EvalType::Int],
             Self::ExtractSelectNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
             Self::ExtractDatetimeNative | Self::ExtractCompositeNative => {
                 &[EvalType::Bytes, EvalType::Bytes]
@@ -7050,6 +7123,62 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::ExtremumHeadNative {
+            return match self {
+                Self::BytesIntInt(packet, want, collation) => {
+                    crate::extremum_head_native_args_valid(packet.as_deref(), *want, *collation)
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::ExtremumTimeContextNative {
+            return match self {
+                Self::TemporalText { value, modes, .. } => {
+                    crate::extremum_time_context_native_args_valid(Some(value), Some(*modes))
+                }
+                _ => false,
+            };
+        }
+        if matches!(
+            operation,
+            EvaluatedBytesOp::ExtremumNumericNative
+                | EvaluatedBytesOp::ExtremumTimeNative
+                | EvaluatedBytesOp::ExtremumVectorNative
+                | EvaluatedBytesOp::ExtremumStringNative
+                | EvaluatedBytesOp::ExtremumTimeTextNative
+                | EvaluatedBytesOp::ExtremumFinishNative
+        ) {
+            return match self {
+                Self::Bytes2(state, value) => match operation {
+                    EvaluatedBytesOp::ExtremumNumericNative => {
+                        crate::extremum_numeric_native_args_valid(
+                            state.as_deref(),
+                            value.as_deref(),
+                        )
+                    }
+                    EvaluatedBytesOp::ExtremumTimeNative => {
+                        crate::extremum_time_native_args_valid(state.as_deref(), value.as_deref())
+                    }
+                    EvaluatedBytesOp::ExtremumVectorNative => {
+                        crate::extremum_vector_native_args_valid(state.as_deref(), value.as_deref())
+                    }
+                    EvaluatedBytesOp::ExtremumStringNative => {
+                        crate::extremum_string_native_args_valid(state.as_deref(), value.as_deref())
+                    }
+                    EvaluatedBytesOp::ExtremumTimeTextNative => {
+                        crate::extremum_time_text_native_args_valid(
+                            state.as_deref(),
+                            value.as_deref(),
+                        )
+                    }
+                    EvaluatedBytesOp::ExtremumFinishNative => {
+                        crate::extremum_finish_native_args_valid(state.as_deref(), value.as_deref())
+                    }
+                    _ => unreachable!(),
+                },
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::ExtractSelectNative {
             return match self {
                 Self::BytesIntInt(unit, source, kind) => {
@@ -9889,11 +10018,16 @@ impl EvaluatedBytesWorker {
                         .capacity()
                         .checked_add(temporal_zone_heap_bytes(&zone))
                         .ok_or_else(evaluated_ascii_storage_overflow)?;
-                    let bound = value
-                        .len()
-                        .checked_add(64)
-                        .map(|bytes| bytes.max(11))
-                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    let bound = if self.operation == EvaluatedBytesOp::ExtremumTimeContextNative {
+                        crate::native_extremum::native_extremum_output_bound(Some(&value), None)
+                            .ok_or_else(evaluated_ascii_storage_overflow)?
+                    } else {
+                        value
+                            .len()
+                            .checked_add(64)
+                            .map(|bytes| bytes.max(11))
+                            .ok_or_else(evaluated_ascii_storage_overflow)?
+                    };
                     // The name is an owned invocation input, not a SQL slot. Check
                     // it with the reply bound before installing or invoking anything.
                     EvalBudget::exact(self.state.limits)?.check_output(bound, input_bytes)?;
@@ -10487,6 +10621,107 @@ impl EvaluatedBytesWorker {
             // size planning precedes the real producer, never host extraction.
             budget.check_output(bound, input_bytes)?;
         }
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::ExtremumHeadNative
+                | EvaluatedBytesOp::ExtremumNumericNative
+                | EvaluatedBytesOp::ExtremumTimeNative
+                | EvaluatedBytesOp::ExtremumVectorNative
+                | EvaluatedBytesOp::ExtremumStringNative
+                | EvaluatedBytesOp::ExtremumTimeTextNative
+                | EvaluatedBytesOp::ExtremumTimeContextNative
+                | EvaluatedBytesOp::ExtremumFinishNative
+        ) {
+            let (first, second) = match (self.operation, &ready[..arity]) {
+                (
+                    EvaluatedBytesOp::ExtremumHeadNative,
+                    [
+                        ScalarValue::Bytes(packet),
+                        ScalarValue::Int(want),
+                        ScalarValue::Int(collation),
+                    ],
+                ) if crate::extremum_head_native_args_valid(
+                    packet.as_deref(),
+                    *want,
+                    *collation,
+                ) =>
+                {
+                    (packet.as_deref(), None)
+                }
+                (
+                    EvaluatedBytesOp::ExtremumTimeContextNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Int(modes)],
+                ) if crate::extremum_time_context_native_args_valid(state.as_deref(), *modes) => {
+                    (state.as_deref(), None)
+                }
+                (
+                    EvaluatedBytesOp::ExtremumNumericNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
+                ) if crate::extremum_numeric_native_args_valid(
+                    state.as_deref(),
+                    value.as_deref(),
+                ) =>
+                {
+                    (state.as_deref(), value.as_deref())
+                }
+                (
+                    EvaluatedBytesOp::ExtremumTimeNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
+                ) if crate::extremum_time_native_args_valid(state.as_deref(), value.as_deref()) => {
+                    (state.as_deref(), value.as_deref())
+                }
+                (
+                    EvaluatedBytesOp::ExtremumVectorNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
+                ) if crate::extremum_vector_native_args_valid(
+                    state.as_deref(),
+                    value.as_deref(),
+                ) =>
+                {
+                    (state.as_deref(), value.as_deref())
+                }
+                (
+                    EvaluatedBytesOp::ExtremumStringNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
+                ) if crate::extremum_string_native_args_valid(
+                    state.as_deref(),
+                    value.as_deref(),
+                ) =>
+                {
+                    (state.as_deref(), value.as_deref())
+                }
+                (
+                    EvaluatedBytesOp::ExtremumTimeTextNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
+                ) if crate::extremum_time_text_native_args_valid(
+                    state.as_deref(),
+                    value.as_deref(),
+                ) =>
+                {
+                    (state.as_deref(), value.as_deref())
+                }
+                (
+                    EvaluatedBytesOp::ExtremumFinishNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
+                ) if crate::extremum_finish_native_args_valid(
+                    state.as_deref(),
+                    value.as_deref(),
+                ) =>
+                {
+                    (state.as_deref(), value.as_deref())
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "extremum operands differ from their fixed stage domain".into(),
+                    ));
+                }
+            };
+            let bound = crate::native_extremum::native_extremum_output_bound(first, second)
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // The SDK planner accounts for state-dependent Decimal expansion.
+            // All actual operands and the bound zone owner remain charged here.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -10902,6 +11137,121 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::ExtremumHeadNative
+                        | EvaluatedBytesOp::ExtremumNumericNative
+                        | EvaluatedBytesOp::ExtremumTimeNative
+                        | EvaluatedBytesOp::ExtremumVectorNative
+                        | EvaluatedBytesOp::ExtremumStringNative
+                        | EvaluatedBytesOp::ExtremumTimeTextNative
+                        | EvaluatedBytesOp::ExtremumTimeContextNative
+                        | EvaluatedBytesOp::ExtremumFinishNative
+                ) {
+                    use crate::{NativeExtremumRequest as Request, NativeExtremumResult as Report};
+                    let valid = match value {
+                        None => matches!(
+                            self.operation,
+                            EvaluatedBytesOp::ExtremumHeadNative
+                                | EvaluatedBytesOp::ExtremumTimeNative
+                                | EvaluatedBytesOp::ExtremumTimeTextNative
+                        ),
+                        Some(bytes) => {
+                            match (self.operation, crate::decode_native_extremum_result(bytes)) {
+                                (EvaluatedBytesOp::ExtremumHeadNative, Some(Report::BadArity)) => {
+                                    true
+                                }
+                                (
+                                    EvaluatedBytesOp::ExtremumHeadNative,
+                                    Some(Report::Request { kind, .. }),
+                                ) => matches!(
+                                    kind,
+                                    Request::CompareLt
+                                        | Request::CompareGt
+                                        | Request::CastTime
+                                        | Request::CastVector
+                                        | Request::StringBytes
+                                        | Request::TimeText
+                                        | Request::Original
+                                        | Request::ToReal
+                                        | Request::ToDecimal
+                                ),
+                                (
+                                    EvaluatedBytesOp::ExtremumNumericNative,
+                                    Some(Report::Request { kind, .. }),
+                                ) => matches!(
+                                    kind,
+                                    Request::CompareLt
+                                        | Request::CompareGt
+                                        | Request::Original
+                                        | Request::ToReal
+                                        | Request::ToDecimal
+                                ),
+                                (
+                                    EvaluatedBytesOp::ExtremumTimeNative,
+                                    Some(Report::Request {
+                                        kind: Request::CastTime,
+                                        ..
+                                    }),
+                                ) => true,
+                                (
+                                    EvaluatedBytesOp::ExtremumTimeNative,
+                                    Some(Report::Value(identity)),
+                                ) => matches!(
+                                    crate::decode_native_identity(identity),
+                                    Ok(crate::NativeIdentityRef::Time { .. })
+                                ),
+                                (
+                                    EvaluatedBytesOp::ExtremumVectorNative,
+                                    Some(Report::Request {
+                                        kind: Request::CastVector,
+                                        ..
+                                    }),
+                                ) => true,
+                                (
+                                    EvaluatedBytesOp::ExtremumVectorNative,
+                                    Some(Report::Value(identity)),
+                                ) => matches!(
+                                    crate::decode_native_identity(identity),
+                                    Ok(crate::NativeIdentityRef::Vector(_))
+                                ),
+                                (
+                                    EvaluatedBytesOp::ExtremumStringNative,
+                                    Some(Report::Request {
+                                        kind: Request::StringBytes,
+                                        ..
+                                    })
+                                    | Some(Report::RetagString(_)),
+                                ) => true,
+                                (
+                                    EvaluatedBytesOp::ExtremumTimeTextNative,
+                                    Some(Report::Request {
+                                        kind: Request::TimeContext,
+                                        ..
+                                    }),
+                                ) => true,
+                                (
+                                    EvaluatedBytesOp::ExtremumTimeContextNative,
+                                    Some(Report::Request {
+                                        kind: Request::TimeText,
+                                        ..
+                                    })
+                                    | Some(Report::RetagString(_)),
+                                ) => true,
+                                (
+                                    EvaluatedBytesOp::ExtremumFinishNative,
+                                    Some(Report::Value(identity)),
+                                ) => crate::decode_native_identity(identity).is_ok(),
+                                _ => false,
+                            }
+                        }
+                    };
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "extremum returned an invalid report for its fixed stage".into(),
+                        ));
+                    }
+                }
                 if matches!(
                     self.operation,
                     EvaluatedBytesOp::ExtractSelectNative

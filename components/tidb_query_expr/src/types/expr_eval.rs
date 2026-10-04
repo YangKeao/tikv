@@ -315,6 +315,32 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::ExtremumHeadNative, EvaluatedArgsRole::Values) => {
+            types.len() == 3 && operation.call_count() == 1
+        }
+        (
+            EvaluatedBytesOp::ExtremumNumericNative
+            | EvaluatedBytesOp::ExtremumTimeNative
+            | EvaluatedBytesOp::ExtremumVectorNative
+            | EvaluatedBytesOp::ExtremumStringNative
+            | EvaluatedBytesOp::ExtremumTimeTextNative
+            | EvaluatedBytesOp::ExtremumFinishNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 2 && operation.call_count() == 1,
+        (EvaluatedBytesOp::ExtremumTimeContextNative, EvaluatedArgsRole::TemporalText) => {
+            types.len() == 2 && operation.call_count() == 1
+        }
+        (
+            EvaluatedBytesOp::ExtremumHeadNative
+            | EvaluatedBytesOp::ExtremumNumericNative
+            | EvaluatedBytesOp::ExtremumTimeNative
+            | EvaluatedBytesOp::ExtremumVectorNative
+            | EvaluatedBytesOp::ExtremumStringNative
+            | EvaluatedBytesOp::ExtremumTimeTextNative
+            | EvaluatedBytesOp::ExtremumTimeContextNative
+            | EvaluatedBytesOp::ExtremumFinishNative,
+            _,
+        ) => false,
         (
             EvaluatedBytesOp::ExtractSelectNative | EvaluatedBytesOp::ExtractMixedDurationNative,
             EvaluatedArgsRole::Values,
@@ -523,6 +549,57 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::ExtremumHeadNative
+            || match values {
+                [
+                    ScalarValue::Bytes(packet),
+                    ScalarValue::Int(want),
+                    ScalarValue::Int(collation),
+                ] => crate::extremum_head_native_args_valid(packet.as_deref(), *want, *collation),
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtremumNumericNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Bytes(value)] => {
+                    crate::extremum_numeric_native_args_valid(state.as_deref(), value.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtremumTimeNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Bytes(value)] => {
+                    crate::extremum_time_native_args_valid(state.as_deref(), value.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtremumVectorNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Bytes(value)] => {
+                    crate::extremum_vector_native_args_valid(state.as_deref(), value.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtremumStringNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Bytes(value)] => {
+                    crate::extremum_string_native_args_valid(state.as_deref(), value.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtremumTimeTextNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Bytes(value)] => {
+                    crate::extremum_time_text_native_args_valid(state.as_deref(), value.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtremumFinishNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Bytes(value)] => {
+                    crate::extremum_finish_native_args_valid(state.as_deref(), value.as_deref())
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::ExtractSelectNative
             || match values {
                 [
@@ -1090,13 +1167,17 @@ fn evaluated_ready_args_match(
                 ) => crate::unix_timestamp_legacy_args_valid(value.as_deref()),
                 _ => false,
             },
-            EvaluatedArgsRole::TemporalText => {
-                matches!(
-                    operation,
-                    EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative
-                ) && matches!(values, [ScalarValue::Bytes(value), ScalarValue::Int(modes)]
-                        if crate::temporal_literal_native_args_valid(value.as_deref(), *modes))
-            }
+            EvaluatedArgsRole::TemporalText => match (operation, values) {
+                (
+                    EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative,
+                    [ScalarValue::Bytes(value), ScalarValue::Int(modes)],
+                ) => crate::temporal_literal_native_args_valid(value.as_deref(), *modes),
+                (
+                    EvaluatedBytesOp::ExtremumTimeContextNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Int(modes)],
+                ) => crate::extremum_time_context_native_args_valid(state.as_deref(), *modes),
+                _ => false,
+            },
             EvaluatedArgsRole::Values => {
                 operation != EvaluatedBytesOp::UuidToBinSwapNative
                     || matches!(values, [ScalarValue::Bytes(Some(bytes)), ScalarValue::Int(Some(_))]
@@ -1488,6 +1569,32 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::ExtremumHeadNative, EvaluatedArgsRole::Values) => {
+            arity == 3 && calls == 1
+        }
+        (
+            EvaluatedBytesOp::ExtremumNumericNative
+            | EvaluatedBytesOp::ExtremumTimeNative
+            | EvaluatedBytesOp::ExtremumVectorNative
+            | EvaluatedBytesOp::ExtremumStringNative
+            | EvaluatedBytesOp::ExtremumTimeTextNative
+            | EvaluatedBytesOp::ExtremumFinishNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 2 && calls == 1,
+        (EvaluatedBytesOp::ExtremumTimeContextNative, EvaluatedArgsRole::TemporalText) => {
+            arity == 2 && calls == 1
+        }
+        (
+            EvaluatedBytesOp::ExtremumHeadNative
+            | EvaluatedBytesOp::ExtremumNumericNative
+            | EvaluatedBytesOp::ExtremumTimeNative
+            | EvaluatedBytesOp::ExtremumVectorNative
+            | EvaluatedBytesOp::ExtremumStringNative
+            | EvaluatedBytesOp::ExtremumTimeTextNative
+            | EvaluatedBytesOp::ExtremumTimeContextNative
+            | EvaluatedBytesOp::ExtremumFinishNative,
+            _,
+        ) => false,
         (
             EvaluatedBytesOp::ExtractSelectNative | EvaluatedBytesOp::ExtractMixedDurationNative,
             EvaluatedArgsRole::Values,

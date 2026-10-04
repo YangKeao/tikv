@@ -485,7 +485,15 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::ExtractDurationNative
         | LocalFunctionId::ExtractMixedDurationNative
         | LocalFunctionId::ExtractMixedFinishNative
-        | LocalFunctionId::ExtractCompositeNative => Err(other_err!(
+        | LocalFunctionId::ExtractCompositeNative
+        | LocalFunctionId::ExtremumHeadNative
+        | LocalFunctionId::ExtremumNumericNative
+        | LocalFunctionId::ExtremumTimeNative
+        | LocalFunctionId::ExtremumVectorNative
+        | LocalFunctionId::ExtremumStringNative
+        | LocalFunctionId::ExtremumTimeTextNative
+        | LocalFunctionId::ExtremumTimeContextNative
+        | LocalFunctionId::ExtremumFinishNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),
