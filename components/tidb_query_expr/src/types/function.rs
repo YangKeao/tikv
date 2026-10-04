@@ -529,6 +529,12 @@ pub enum LocalFunctionId {
     StrToDateFinishNative,
     StrToDateTypedFinishNative,
     JsonSumCrc32SerdeNative,
+    ExtractSelectNative,
+    ExtractDatetimeNative,
+    ExtractDurationNative,
+    ExtractMixedDurationNative,
+    ExtractMixedFinishNative,
+    ExtractCompositeNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

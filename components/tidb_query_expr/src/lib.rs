@@ -87,6 +87,17 @@ pub use native_duration_parse::{
     NativeDurationTruncated, NativeGoDuration, native_duration_fsp, parse_native_duration,
 };
 
+mod native_extract;
+pub use native_extract::{
+    NativeExtractResult, decode_native_extract_result, extract_composite_native_args_valid,
+    extract_composite_native_fn_meta, extract_datetime_native_args_valid,
+    extract_datetime_native_fn_meta, extract_duration_native_args_valid,
+    extract_duration_native_fn_meta, extract_mixed_duration_native_args_valid,
+    extract_mixed_duration_native_fn_meta, extract_mixed_finish_native_args_valid,
+    extract_mixed_finish_native_fn_meta, extract_select_native_args_valid,
+    extract_select_native_fn_meta,
+};
+
 mod native_format;
 
 mod native_from_unixtime;

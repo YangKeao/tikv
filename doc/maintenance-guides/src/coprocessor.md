@@ -424,9 +424,16 @@ short-circuit admission policy described above.
   native endpoint ends at838:59:59.0, matching the shared MAX_NANOS constant
   rather than adding a fractional component to that endpoint.
   `time/native_extract.rs` owns the original unit sets and raw numeric extraction
-  formulas without SQL range/FSP normalization. These foundations add no
-  EXTRACT profile or admission: its mixed double-mode getter orchestration
-  and separate broad calendar-composite policy remain pending caller migration.
+  formulas without SQL range/FSP normalization. Query_expr `native_extract.rs`
+  now uses these services in six EXTRACT profiles: metadata selection, raw
+  datetime/duration finishes, two mixed stages and broad calendar compatibility.
+  Five use Values; raw datetime retains the existing TimeCoreBitsBytes role.
+  Whole SDK continuation reports preserve two independently demanded native
+  mode reads. The uniform checked input-length-plus64 bound is precharged,
+  with actual input capacities and fresh report capacity checked separately;
+  it is not a physical-memory or parser-temporary bound. Existing cast/NULL
+  witnesses and original warning delivery remain native adapters, without
+  PB/legacy admission or a new specialized vector kernel.
   The existing native JSON_SUM_CRC32 scalar-array domain uses query_expr's
   `native_json_sum_crc32.rs`: one nullable Bytes/OwnBytes worker owns ordered
   classification, numeric spelling, IEEE CRC and wrapping accumulation.

@@ -315,6 +315,28 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::ExtractSelectNative | EvaluatedBytesOp::ExtractMixedDurationNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 3 && operation.call_count() == 1,
+        (EvaluatedBytesOp::ExtractDatetimeNative, EvaluatedArgsRole::TimeCoreBitsBytes) => {
+            types.len() == 2 && operation.call_count() == 1
+        }
+        (
+            EvaluatedBytesOp::ExtractDurationNative
+            | EvaluatedBytesOp::ExtractMixedFinishNative
+            | EvaluatedBytesOp::ExtractCompositeNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 2 && operation.call_count() == 1,
+        (
+            EvaluatedBytesOp::ExtractSelectNative
+            | EvaluatedBytesOp::ExtractDatetimeNative
+            | EvaluatedBytesOp::ExtractDurationNative
+            | EvaluatedBytesOp::ExtractMixedDurationNative
+            | EvaluatedBytesOp::ExtractMixedFinishNative
+            | EvaluatedBytesOp::ExtractCompositeNative,
+            _,
+        ) => false,
         (EvaluatedBytesOp::JsonSumCrc32SerdeNative, EvaluatedArgsRole::Values) => {
             types.len() == 1 && operation.call_count() == 1
         }
@@ -501,6 +523,56 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::ExtractSelectNative
+            || match values {
+                [
+                    ScalarValue::Bytes(source),
+                    ScalarValue::Int(first),
+                    ScalarValue::Int(second),
+                ] => crate::extract_select_native_args_valid(source.as_deref(), *first, *second),
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtractDatetimeNative
+            || match values {
+                [ScalarValue::Bytes(core), ScalarValue::Bytes(unit)] => {
+                    crate::extract_datetime_native_args_valid(core.as_deref(), unit.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtractDurationNative
+            || match values {
+                [ScalarValue::Bytes(bytes), ScalarValue::Int(number)] => {
+                    crate::extract_duration_native_args_valid(bytes.as_deref(), *number)
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtractMixedDurationNative
+            || match values {
+                [
+                    ScalarValue::Bytes(left),
+                    ScalarValue::Bytes(right),
+                    ScalarValue::Int(number),
+                ] => crate::extract_mixed_duration_native_args_valid(
+                    left.as_deref(),
+                    right.as_deref(),
+                    *number,
+                ),
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtractMixedFinishNative
+            || match values {
+                [ScalarValue::Bytes(bytes), ScalarValue::Int(number)] => {
+                    crate::extract_mixed_finish_native_args_valid(bytes.as_deref(), *number)
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ExtractCompositeNative
+            || match values {
+                [ScalarValue::Bytes(left), ScalarValue::Bytes(right)] => {
+                    crate::extract_composite_native_args_valid(left.as_deref(), right.as_deref())
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::JsonSumCrc32SerdeNative
             || match values {
                 [ScalarValue::Bytes(input)] => {
@@ -1240,9 +1312,12 @@ fn evaluated_ready_args_match(
                 _ => false,
             },
             EvaluatedArgsRole::TimeCoreBitsBytes => {
-                operation == EvaluatedBytesOp::DateFormatCoreNative
-                    && matches!(values, [ScalarValue::Bytes(Some(core)), ScalarValue::Bytes(_)]
-                        if core.len() == 8)
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::DateFormatCoreNative
+                        | EvaluatedBytesOp::ExtractDatetimeNative
+                ) && matches!(values, [ScalarValue::Bytes(Some(core)), ScalarValue::Bytes(_)]
+                    if core.len() == 8)
             }
             EvaluatedArgsRole::TimeCoreBits2 => {
                 matches!(
@@ -1413,6 +1488,28 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::ExtractSelectNative | EvaluatedBytesOp::ExtractMixedDurationNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 3 && calls == 1,
+        (EvaluatedBytesOp::ExtractDatetimeNative, EvaluatedArgsRole::TimeCoreBitsBytes) => {
+            arity == 2 && calls == 1
+        }
+        (
+            EvaluatedBytesOp::ExtractDurationNative
+            | EvaluatedBytesOp::ExtractMixedFinishNative
+            | EvaluatedBytesOp::ExtractCompositeNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 2 && calls == 1,
+        (
+            EvaluatedBytesOp::ExtractSelectNative
+            | EvaluatedBytesOp::ExtractDatetimeNative
+            | EvaluatedBytesOp::ExtractDurationNative
+            | EvaluatedBytesOp::ExtractMixedDurationNative
+            | EvaluatedBytesOp::ExtractMixedFinishNative
+            | EvaluatedBytesOp::ExtractCompositeNative,
+            _,
+        ) => false,
         (EvaluatedBytesOp::JsonSumCrc32SerdeNative, EvaluatedArgsRole::Values) => {
             arity == 1 && calls == 1
         }

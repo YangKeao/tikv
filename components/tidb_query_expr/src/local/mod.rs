@@ -4062,3 +4062,213 @@ mod json_sum_crc32_worker_tests {
         // count.
     }
 }
+
+#[cfg(test)]
+mod extract_worker_tests {
+    use tidb_query_datatype::codec::mysql::Time;
+
+    use super::*;
+    use crate::{NativeExtractResult as Reply, decode_native_extract_result};
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn bytes(value: ComputedValue) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("EXTRACT stages must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+    fn ready(operation: EvaluatedBytesOp, mixed: &[u8]) -> EvaluatedArgs {
+        match operation {
+            // DatumKind 15 is the actual Time kind; absent FieldType is data,
+            // not a preselected cast route or a synthetic SQL NULL result.
+            EvaluatedBytesOp::ExtractSelectNative => {
+                EvaluatedArgs::BytesIntInt(Some(b"YEAR".to_vec()), None, Some(15))
+            }
+            EvaluatedBytesOp::ExtractDatetimeNative => EvaluatedArgs::TimeCoreBitsBytes {
+                core: Time::native_core_from_fields(2024, 3, 15, 2, 3, 4, 123_456) | 9,
+                bytes: Some(b"YEAR".to_vec()),
+            },
+            EvaluatedBytesOp::ExtractDurationNative => {
+                EvaluatedArgs::BytesInt(Some(b"HOUR".to_vec()), Some(3_723_000_000_000))
+            }
+            EvaluatedBytesOp::ExtractMixedDurationNative => EvaluatedArgs::BytesBytesInt(
+                Some(b"DAY_SECOND".to_vec()),
+                Some(b"2024-03-15 02:03:04".to_vec()),
+                Some(0),
+            ),
+            EvaluatedBytesOp::ExtractMixedFinishNative => {
+                EvaluatedArgs::BytesInt(Some(mixed.to_vec()), Some(0))
+            }
+            EvaluatedBytesOp::ExtractCompositeNative => EvaluatedArgs::Bytes2(
+                Some(b"DAY_SECOND".to_vec()),
+                Some(b"2024-03-15 02:03:04".to_vec()),
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn extract_workers_keep_actual_cast_requests_mixed_handoff_and_predispatch_resources() {
+        let mut stage_one = prepare(
+            EvaluatedBytesOp::ExtractMixedDurationNative,
+            ExecutionLimits::default(),
+        );
+        let mixed = bytes(
+            stage_one
+                .eval_args(ready(EvaluatedBytesOp::ExtractMixedDurationNative, &[]))
+                .unwrap(),
+        )
+        .unwrap();
+        let Some(Reply::NeedMixedDatetime(whole)) = decode_native_extract_result(&mixed) else {
+            panic!("actual datetime fixture must request mixed finish");
+        };
+        assert_eq!(whole, mixed.as_slice());
+        assert_eq!(stage_one.kernel_invocations(), 1);
+        assert!(stage_one.is_healthy());
+        for operation in [
+            EvaluatedBytesOp::ExtractSelectNative,
+            EvaluatedBytesOp::ExtractDatetimeNative,
+            EvaluatedBytesOp::ExtractDurationNative,
+            EvaluatedBytesOp::ExtractMixedDurationNative,
+            EvaluatedBytesOp::ExtractMixedFinishNative,
+            EvaluatedBytesOp::ExtractCompositeNative,
+        ] {
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Int(None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            let invalid = match operation {
+                EvaluatedBytesOp::ExtractSelectNative => {
+                    EvaluatedArgs::BytesIntInt(Some(b"YEAR".to_vec()), None, Some(19))
+                }
+                EvaluatedBytesOp::ExtractDatetimeNative => EvaluatedArgs::TimeCoreBitsBytes {
+                    core: 0,
+                    bytes: None,
+                },
+                EvaluatedBytesOp::ExtractDurationNative => EvaluatedArgs::BytesInt(None, Some(0)),
+                EvaluatedBytesOp::ExtractMixedDurationNative => EvaluatedArgs::BytesBytesInt(
+                    Some(b"DAY_SECOND".to_vec()),
+                    Some(b"2024-03-15 02:03:04".to_vec()),
+                    Some(2),
+                ),
+                EvaluatedBytesOp::ExtractMixedFinishNative => {
+                    EvaluatedArgs::BytesInt(Some(Vec::new()), Some(0))
+                }
+                _ => EvaluatedArgs::Bytes2(Some(vec![255]), None),
+            };
+            assert!(matches!(
+                worker.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            let mut oversized = ready(operation, &mixed);
+            let owner = match &mut oversized {
+                EvaluatedArgs::BytesIntInt(value, ..) | EvaluatedArgs::BytesInt(value, _) => {
+                    value.as_mut().unwrap()
+                }
+                EvaluatedArgs::TimeCoreBitsBytes { bytes, .. } => bytes.as_mut().unwrap(),
+                EvaluatedArgs::BytesBytesInt(_, text, _) | EvaluatedArgs::Bytes2(_, text) => {
+                    text.as_mut().unwrap()
+                }
+                _ => unreachable!(),
+            };
+            owner.reserve_exact(128 * 1024);
+            assert!(owner.capacity() > 64 * 1024);
+            assert!(matches!(
+                worker.eval_args(oversized),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let output = bytes(worker.eval_args(ready(operation, &mixed)).unwrap()).unwrap();
+            match (operation, decode_native_extract_result(&output).unwrap()) {
+                (EvaluatedBytesOp::ExtractSelectNative, Reply::NeedDatetimeCast) => {}
+                (EvaluatedBytesOp::ExtractDatetimeNative, Reply::Value(value)) => {
+                    assert_eq!(value, 2024)
+                }
+                (EvaluatedBytesOp::ExtractDurationNative, Reply::Value(value)) => {
+                    assert_eq!(value, 1)
+                }
+                (EvaluatedBytesOp::ExtractMixedDurationNative, Reply::NeedMixedDatetime(whole)) => {
+                    assert_eq!(whole, output.as_slice())
+                }
+                (
+                    EvaluatedBytesOp::ExtractMixedFinishNative
+                    | EvaluatedBytesOp::ExtractCompositeNative,
+                    Reply::Value(value),
+                ) => assert_eq!(value, 15_020_304),
+                _ => panic!("unexpected EXTRACT stage report"),
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            let mut calls = 1;
+            if operation == EvaluatedBytesOp::ExtractCompositeNative {
+                assert_eq!(
+                    bytes(
+                        worker
+                            .eval_args(EvaluatedArgs::Bytes2(Some(b"DAY_SECOND".to_vec()), None))
+                            .unwrap()
+                    ),
+                    None
+                );
+                calls += 1;
+            } else if matches!(
+                operation,
+                EvaluatedBytesOp::ExtractDatetimeNative | EvaluatedBytesOp::ExtractDurationNative
+            ) {
+                let args = if operation == EvaluatedBytesOp::ExtractDatetimeNative {
+                    EvaluatedArgs::TimeCoreBitsBytes {
+                        core: Time::native_core_from_fields(2024, 3, 15, 0, 0, 0, 0),
+                        bytes: Some(b"BOGUS".to_vec()),
+                    }
+                } else {
+                    EvaluatedArgs::BytesInt(Some(b"BOGUS".to_vec()), Some(0))
+                };
+                let output = bytes(worker.eval_args(args).unwrap()).unwrap();
+                let Some(Reply::InvalidUnit(message)) = decode_native_extract_result(&output)
+                else {
+                    panic!("unknown UTF-8 unit is a computed error, not invalid framing");
+                };
+                assert!(!message.is_empty());
+                calls += 1;
+            }
+            assert_eq!(worker.kernel_invocations(), calls);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            // CPP max_steps is not a frontend pool-slot proof. The same real
+            // ready operands, including the entire stage-one report, are used.
+            let mut stopped = prepare(
+                operation,
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = stopped.retained_storage().unwrap();
+            assert!(matches!(
+                stopped.eval_args(ready(operation, &mixed)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(stopped.kernel_invocations(), 0);
+            assert!(stopped.is_healthy());
+            assert_eq!(stopped.retained_storage().unwrap(), storage);
+        }
+    }
+}

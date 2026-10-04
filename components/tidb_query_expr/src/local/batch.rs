@@ -1593,6 +1593,12 @@ pub enum EvaluatedBytesOp {
     StrToDateFinishNative,
     StrToDateTypedFinishNative,
     JsonSumCrc32SerdeNative,
+    ExtractSelectNative,
+    ExtractDatetimeNative,
+    ExtractDurationNative,
+    ExtractMixedDurationNative,
+    ExtractMixedFinishNative,
+    ExtractCompositeNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1656,6 +1662,36 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::ExtractSelectNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtractSelectNative,
+                );
+            }
+            Self::ExtractDatetimeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtractDatetimeNative,
+                );
+            }
+            Self::ExtractDurationNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtractDurationNative,
+                );
+            }
+            Self::ExtractMixedDurationNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtractMixedDurationNative,
+                );
+            }
+            Self::ExtractMixedFinishNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtractMixedFinishNative,
+                );
+            }
+            Self::ExtractCompositeNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ExtractCompositeNative,
+                );
+            }
             Self::JsonSumCrc32SerdeNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::JsonSumCrc32SerdeNative,
@@ -4002,7 +4038,9 @@ impl EvaluatedBytesOp {
             | Self::RegexpNullBytesNative
             | Self::UnaryNullNative => EvaluatedArgsRole::NullWitness,
             Self::DateDiffCoreNative => EvaluatedArgsRole::TimeCoreBits2,
-            Self::DateFormatCoreNative => EvaluatedArgsRole::TimeCoreBitsBytes,
+            Self::DateFormatCoreNative | Self::ExtractDatetimeNative => {
+                EvaluatedArgsRole::TimeCoreBitsBytes
+            }
             Self::CharNative => EvaluatedArgsRole::CharReady,
             Self::ConvNative | Self::ConvBinaryLiteralNative => EvaluatedArgsRole::ConvNative,
             Self::ConvLegacy => EvaluatedArgsRole::ConvLegacy,
@@ -4364,6 +4402,12 @@ impl EvaluatedBytesOp {
             Self::JsonSumCrc32SerdeNative => {
                 crate::native_json_sum_crc32::json_sum_crc32_serde_native_fn_meta()
             }
+            Self::ExtractSelectNative => crate::extract_select_native_fn_meta(),
+            Self::ExtractDatetimeNative => crate::extract_datetime_native_fn_meta(),
+            Self::ExtractDurationNative => crate::extract_duration_native_fn_meta(),
+            Self::ExtractMixedDurationNative => crate::extract_mixed_duration_native_fn_meta(),
+            Self::ExtractMixedFinishNative => crate::extract_mixed_finish_native_fn_meta(),
+            Self::ExtractCompositeNative => crate::extract_composite_native_fn_meta(),
             Self::ToBinaryNative => crate::to_binary_native_fn_meta(),
             Self::FromBinaryNative => crate::from_binary_native_fn_meta(),
             Self::ConvertUsingNative => crate::convert_using_native_fn_meta(),
@@ -5013,6 +5057,12 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::ExtractSelectNative
+            | Self::ExtractDatetimeNative
+            | Self::ExtractDurationNative
+            | Self::ExtractMixedDurationNative
+            | Self::ExtractMixedFinishNative
+            | Self::ExtractCompositeNative => EvalType::Bytes,
             Self::JsonSumCrc32SerdeNative => EvalType::Bytes,
             Self::StrToDateHeadNative
             | Self::StrToDateFinishNative
@@ -5475,6 +5525,14 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::ExtractSelectNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
+            Self::ExtractDatetimeNative | Self::ExtractCompositeNative => {
+                &[EvalType::Bytes, EvalType::Bytes]
+            }
+            Self::ExtractDurationNative | Self::ExtractMixedFinishNative => {
+                &[EvalType::Bytes, EvalType::Int]
+            }
+            Self::ExtractMixedDurationNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
             Self::JsonSumCrc32SerdeNative => &[EvalType::Bytes],
             Self::StrToDateHeadNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
             Self::StrToDateFinishNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
@@ -6992,6 +7050,61 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::ExtractSelectNative {
+            return match self {
+                Self::BytesIntInt(unit, source, kind) => {
+                    crate::extract_select_native_args_valid(unit.as_deref(), *source, *kind)
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::ExtractDatetimeNative {
+            return match self {
+                Self::TimeCoreBitsBytes { core, bytes } => {
+                    crate::extract_datetime_native_args_valid(
+                        Some(&core.to_le_bytes()),
+                        bytes.as_deref(),
+                    )
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::ExtractDurationNative {
+            return match self {
+                Self::BytesInt(unit, nanos) => {
+                    crate::extract_duration_native_args_valid(unit.as_deref(), *nanos)
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::ExtractMixedDurationNative {
+            return match self {
+                Self::BytesBytesInt(unit, text, allow) => {
+                    crate::extract_mixed_duration_native_args_valid(
+                        unit.as_deref(),
+                        text.as_deref(),
+                        *allow,
+                    )
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::ExtractMixedFinishNative {
+            return match self {
+                Self::BytesInt(state, allow) => {
+                    crate::extract_mixed_finish_native_args_valid(state.as_deref(), *allow)
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::ExtractCompositeNative {
+            return match self {
+                Self::Bytes2(unit, text) => {
+                    crate::extract_composite_native_args_valid(unit.as_deref(), text.as_deref())
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::JsonSumCrc32SerdeNative {
             return match self {
                 Self::Bytes(value) => {
@@ -10295,6 +10408,85 @@ impl EvaluatedBytesWorker {
             // classification remain in the real producer invoked below.
             budget.check_output(bound, input_bytes)?;
         }
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::ExtractSelectNative
+                | EvaluatedBytesOp::ExtractDatetimeNative
+                | EvaluatedBytesOp::ExtractDurationNative
+                | EvaluatedBytesOp::ExtractMixedDurationNative
+                | EvaluatedBytesOp::ExtractMixedFinishNative
+                | EvaluatedBytesOp::ExtractCompositeNative
+        ) {
+            let (first, second) = match (self.operation, &ready[..arity]) {
+                (
+                    EvaluatedBytesOp::ExtractSelectNative,
+                    [
+                        ScalarValue::Bytes(unit),
+                        ScalarValue::Int(source),
+                        ScalarValue::Int(kind),
+                    ],
+                ) if crate::extract_select_native_args_valid(unit.as_deref(), *source, *kind) => {
+                    (unit.as_deref(), None)
+                }
+                (
+                    EvaluatedBytesOp::ExtractDatetimeNative,
+                    [ScalarValue::Bytes(core), ScalarValue::Bytes(unit)],
+                ) if crate::extract_datetime_native_args_valid(
+                    core.as_deref(),
+                    unit.as_deref(),
+                ) =>
+                {
+                    (core.as_deref(), unit.as_deref())
+                }
+                (
+                    EvaluatedBytesOp::ExtractDurationNative,
+                    [ScalarValue::Bytes(unit), ScalarValue::Int(nanos)],
+                ) if crate::extract_duration_native_args_valid(unit.as_deref(), *nanos) => {
+                    (unit.as_deref(), None)
+                }
+                (
+                    EvaluatedBytesOp::ExtractMixedDurationNative,
+                    [
+                        ScalarValue::Bytes(unit),
+                        ScalarValue::Bytes(text),
+                        ScalarValue::Int(allow),
+                    ],
+                ) if crate::extract_mixed_duration_native_args_valid(
+                    unit.as_deref(),
+                    text.as_deref(),
+                    *allow,
+                ) =>
+                {
+                    (unit.as_deref(), text.as_deref())
+                }
+                (
+                    EvaluatedBytesOp::ExtractMixedFinishNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Int(allow)],
+                ) if crate::extract_mixed_finish_native_args_valid(state.as_deref(), *allow) => {
+                    (state.as_deref(), None)
+                }
+                (
+                    EvaluatedBytesOp::ExtractCompositeNative,
+                    [ScalarValue::Bytes(unit), ScalarValue::Bytes(text)],
+                ) if crate::extract_composite_native_args_valid(
+                    unit.as_deref(),
+                    text.as_deref(),
+                ) =>
+                {
+                    (unit.as_deref(), text.as_deref())
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "EXTRACT operands differ from their fixed stage domain".into(),
+                    ));
+                }
+            };
+            let bound = crate::native_extract::native_extract_output_bound(first, second)
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // Keep original units, text and whole SDK stage reports live. Only
+            // size planning precedes the real producer, never host extraction.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -10710,6 +10902,32 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::ExtractSelectNative
+                        | EvaluatedBytesOp::ExtractDatetimeNative
+                        | EvaluatedBytesOp::ExtractDurationNative
+                        | EvaluatedBytesOp::ExtractMixedDurationNative
+                        | EvaluatedBytesOp::ExtractMixedFinishNative
+                        | EvaluatedBytesOp::ExtractCompositeNative
+                ) {
+                    let expects_null = self.operation == EvaluatedBytesOp::ExtractCompositeNative
+                        && matches!(
+                            &ready[..arity],
+                            [ScalarValue::Bytes(_), ScalarValue::Bytes(None)]
+                        );
+                    let valid = match value {
+                        None => expects_null,
+                        Some(bytes) => {
+                            !expects_null && crate::decode_native_extract_result(bytes).is_some()
+                        }
+                    };
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "EXTRACT returned an invalid report or changed input presence".into(),
+                        ));
+                    }
+                }
                 if self.operation == EvaluatedBytesOp::JsonSumCrc32SerdeNative {
                     let valid = match (&ready[..arity], value) {
                         ([ScalarValue::Bytes(None)], None) => true,
