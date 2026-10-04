@@ -15,6 +15,39 @@ use crate::{
     expr::{EvalContext, Flag},
 };
 
+/// Native diagnostic subjects retain at most 128 bytes, rounded down to a
+/// UTF-8 boundary. Trimming and NUL handling belong to the caller's policy.
+pub fn native_warning_subject_byte_cap(input: &str) -> &str {
+    let end = input.len().min(128);
+    let mut cut = end;
+    while cut > 0 && !input.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &input[..cut]
+}
+
+#[cfg(test)]
+mod native_warning_subject_tests {
+    use super::native_warning_subject_byte_cap;
+
+    #[test]
+    fn native_warning_subject_keeps_byte_boundary_and_caller_whitespace_nul() {
+        for (text, length) in [
+            ("x".repeat(129), 128),
+            (format!("{}é", "x".repeat(127)), 127),
+            (format!("{}中", "x".repeat(126)), 126),
+            (format!("{}😀", "x".repeat(124)), 128),
+            ("  a\0b  ".to_owned(), 7),
+            (String::new(), 0),
+        ] {
+            let value = native_warning_subject_byte_cap(&text);
+            assert_eq!(value.len(), length);
+            assert_eq!(value.as_ptr(), text.as_ptr());
+            assert_eq!(value, &text[..length]);
+        }
+    }
+}
+
 /// A trait for converting a value to an `Int`.
 pub trait ToInt {
     /// Converts the given value to an `i64`

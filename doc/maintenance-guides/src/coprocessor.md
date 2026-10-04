@@ -407,6 +407,16 @@ short-circuit admission policy described above.
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
+  Native Decimal presentation uses datatype-owned `native_format_visible`,
+  `native_format_go_shortest_float` and `native_from_f64` methods. Visible
+  HalfUp formatting is distinct from retained storage and the wire formatter.
+  Float conversion uses the original Ryu Go-g spelling and MySQL nine-word
+  parser; only the native finite-underflow empty-word zero is materialized as
+  canonical logical zero. The wire float/parser/shift policies do not change.
+  `codec::convert::native_warning_subject_byte_cap` owns the 128-byte UTF-8
+  boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
+  existing 1.0.23 package with a moved direct dependency. These datatype
+  prerequisites do not by themselves close FROM_UNIXTIME or its staged callers.
   UNIX_TIMESTAMP adds six closed profiles in `native_unix_timestamp.rs`.
   Ordinary parsing uses actual TemporalParseText/source-kind/zone1, then returns
   NULL, a terminal numeric identity, a computed warning, or an actual Time frame

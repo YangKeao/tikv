@@ -2017,6 +2017,144 @@ impl Default for Decimal {
 }
 
 impl Decimal {
+    /// Native value-layer Display, including its raw coefficient and
+    /// signed-zero domain. Only hidden storage digits demand the shared
+    /// arithmetic bridge; the equal-storage path deliberately does not
+    /// validate ASCII or normalize.
+    pub fn native_format_visible(
+        negative: bool,
+        digits: &[u8],
+        scale: u32,
+        storage_scale: u32,
+    ) -> String {
+        let digits = std::str::from_utf8(digits).expect("decimal coefficients are ASCII digits");
+        if storage_scale > scale {
+            let target = scale as i32;
+            let retained_storage = target.max(0) as u32;
+            let (negative, digits, scale, storage_scale) = Self::try_from_native_digits(
+                negative,
+                digits.as_bytes(),
+                storage_scale,
+                scale,
+                usize::MAX,
+            )
+            .and_then(|value| {
+                value.try_native_round_with_storage(target, true, retained_storage, usize::MAX)
+            })
+            .and_then(|value| {
+                value.check_native_math_value(usize::MAX)?;
+                let mut digits = value.native_coefficient_digits(usize::MAX)?;
+                // Same logical coefficient projection as the native
+                // bridge: retain at least storage_scale (or one) digits.
+                let removable = digits.len().saturating_sub(value.frac_cnt.max(1));
+                let leading = digits[..removable]
+                    .iter()
+                    .take_while(|digit| **digit == b'0')
+                    .count();
+                digits.drain(..leading);
+                Ok((
+                    value.negative,
+                    digits,
+                    value.result_frac_cnt as u32,
+                    value.frac_cnt as u32,
+                ))
+            })
+            .expect("shared native decimal rounding failed");
+            return Self::native_format_visible(negative, &digits, scale, storage_scale);
+        }
+        let sign = if negative { "-" } else { "" };
+        if scale == 0 {
+            let split = digits.len() - storage_scale as usize;
+            let int_part = if split == 0 { "0" } else { &digits[..split] };
+            return format!("{sign}{int_part}");
+        }
+        let split = digits.len() - storage_scale as usize;
+        let int_part = &digits[..split];
+        let int_part = if int_part.is_empty() { "0" } else { int_part };
+        let frac_end = split + scale as usize;
+        format!("{sign}{int_part}.{}", &digits[split..frac_end])
+    }
+
+    /// The original native Ryu-backed strconv.FormatFloat('g', -1) spelling.
+    /// Callers of the native float constructor check finiteness first.
+    pub fn native_format_go_shortest_float(value: f64) -> String {
+        let mut buffer = ryu::Buffer::new();
+        let rendered = buffer.format_finite(value);
+        let (negative, rendered) = rendered
+            .strip_prefix('-')
+            .map_or((false, rendered), |value| (true, value));
+        let (mantissa, exponent) = rendered
+            .split_once(['e', 'E'])
+            .map_or((rendered, 0), |(mantissa, exponent)| {
+                (mantissa, exponent.parse::<i32>().expect("ryu exponent"))
+            });
+        let mantissa = mantissa.strip_suffix(".0").unwrap_or(mantissa);
+        let decimal_index = mantissa.find('.').unwrap_or(mantissa.len());
+        let digits: String = mantissa
+            .chars()
+            .filter(|character| *character != '.')
+            .collect();
+        let Some(first_nonzero) = digits.bytes().position(|digit| digit != b'0') else {
+            return "0".to_owned();
+        };
+        let significant = digits[first_nonzero..].trim_end_matches('0');
+        let exponent = exponent + decimal_index as i32 - first_nonzero as i32 - 1;
+        let prefix = if negative { "-" } else { "" };
+
+        // strconv.FormatFloat with `g`, -1 chooses scientific notation below
+        // -4 or at/above six significant-digit positions.
+        if !(-4..6).contains(&exponent) {
+            let mut output = format!("{prefix}{}", &significant[..1]);
+            if significant.len() > 1 {
+                output.push('.');
+                output.push_str(&significant[1..]);
+            }
+            output.push('e');
+            output.push(if exponent >= 0 { '+' } else { '-' });
+            output.push_str(&format!("{:02}", exponent.unsigned_abs()));
+            return output;
+        }
+
+        let digits_before_decimal = exponent + 1;
+        let mut output = prefix.to_owned();
+        if digits_before_decimal <= 0 {
+            output.push_str("0.");
+            output.push_str(&"0".repeat((-digits_before_decimal) as usize));
+            output.push_str(significant);
+        } else if digits_before_decimal as usize >= significant.len() {
+            output.push_str(significant);
+            output.push_str(&"0".repeat(digits_before_decimal as usize - significant.len()));
+        } else {
+            let split = digits_before_decimal as usize;
+            output.push_str(&significant[..split]);
+            output.push('.');
+            output.push_str(&significant[split..]);
+        }
+        output
+    }
+
+    /// Native MyDecimal.FromFloat64: finite Go-g text parsed with the source
+    /// nine-word MySQL policy, retaining overflow/truncation value payloads.
+    /// This intentionally does not use the independent wire float constructor.
+    pub fn native_from_f64(value: f64) -> Option<Self> {
+        if !value.is_finite() {
+            return None;
+        }
+        let rendered = Self::native_format_go_shortest_float(value);
+        let value = Self::parse_mysql(rendered.as_bytes())
+            .expect("shared native float-to-decimal parsing failed")
+            .value;
+        // MySQL's physical underflow zero can have no active digits. The
+        // original native value is a logical coefficient "0"; initialize only
+        // this zero header for the native word bridge, without normalizing any
+        // other status payload or changing the old parser's representation.
+        Some(if value.int_cnt == 0 && value.frac_cnt == 0 {
+            Self::zero()
+        } else {
+            value
+        })
+    }
+
     /// Projects the native raw coefficient using its original signed text
     /// parser. Storage scale is returned verbatim; visible scale and column
     /// shape do not participate. Invalid UTF-8 retains the native
@@ -5461,6 +5599,105 @@ mod native_exact_integer_division_tests {
                 .unwrap();
             assert_eq!(quotient.as_i64(), expected);
             assert_eq!((quotient.storage_scale(), quotient.result_scale()), (0, 0));
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_presentation_tests {
+    use super::Decimal;
+
+    #[test]
+    fn native_visible_format_keeps_raw_sign_substrings_and_hidden_rounding() {
+        for (negative, digits, scale, storage, expected) in [
+            (false, b"".as_slice(), 0, 0, "0"),
+            (true, b"".as_slice(), 0, 0, "-0"),
+            (true, b"000".as_slice(), 2, 2, "-0.00"),
+            (false, b"001250".as_slice(), 2, 2, "0012.50"),
+            (false, b"12x".as_slice(), 0, 0, "12x"),
+            (false, "é1".as_bytes(), 1, 1, "é.1"),
+            (false, b"1250".as_slice(), 2, 3, "1.25"),
+            (true, b"1255".as_slice(), 2, 3, "-1.26"),
+            (false, b"9995".as_slice(), 2, 3, "10.00"),
+            (true, b"000".as_slice(), 1, 2, "0.0"),
+        ] {
+            assert_eq!(
+                Decimal::native_format_visible(negative, digits, scale, storage),
+                expected
+            );
+        }
+        for (digits, scale, storage) in [
+            (b"\xff".as_slice(), 0, 0),
+            (b"\xff".as_slice(), 0, 1),
+            ("é1".as_bytes(), 2, 2),
+            (b"123".as_slice(), 2, 1),
+            (b"".as_slice(), 1, 1),
+            (b"12x".as_slice(), 0, 1),
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| Decimal::native_format_visible(
+                    false, digits, scale, storage
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn native_float_presentation_keeps_go_g_and_mysql_nine_word_values() {
+        for (value, expected) in [
+            (-0.0, "0"),
+            (0.0, "0"),
+            (1e-5, "1e-05"),
+            (1e-4, "0.0001"),
+            (100_000.0, "100000"),
+            (1_000_000.0, "1e+06"),
+            (1_234_500.0, "1.2345e+06"),
+            (f64::from_bits(1), "5e-324"),
+            (f64::MAX, "1.7976931348623157e+308"),
+        ] {
+            assert_eq!(Decimal::native_format_go_shortest_float(value), expected);
+        }
+        // These values include the original native test_from_float and the
+        // source's pinned exponent/word-cap cases; no wire parser is an oracle.
+        for (value, expected) in [
+            (12_345.0, "12345".to_owned()),
+            (123.45, "123.45".to_owned()),
+            (-123.45, "-123.45".to_owned()),
+            (0.000_123_450_000_987_65, "0.00012345000098765".to_owned()),
+            (1_234_500_009_876.5, "1234500009876.5".to_owned()),
+            (-0.0, "0".to_owned()),
+            (f64::from_bits(1), "0".to_owned()),
+            (-f64::from_bits(1), "0".to_owned()),
+            (f64::MIN_POSITIVE, "0".to_owned()),
+            (1e-73, format!("0.{}1", "0".repeat(72))),
+            (1e-81, format!("0.{}1", "0".repeat(80))),
+            (1e-82, "0".to_owned()),
+            (5e-82, "0".to_owned()),
+            (1e80, format!("1{}", "0".repeat(80))),
+            (1e81, "9".repeat(81)),
+            (f64::MAX, "9".repeat(81)),
+            (-f64::MAX, format!("-{}", "9".repeat(81))),
+        ] {
+            let decimal = Decimal::native_from_f64(value).expect("finite native decimal");
+            // A's native consumer imports this logical word view. In particular,
+            // finite subnormal zero must have an initialized active word.
+            decimal.check_native_math_value(usize::MAX).unwrap();
+            let digits = decimal.native_coefficient_digits(usize::MAX).unwrap();
+            assert_eq!(
+                Decimal::native_format_visible(
+                    decimal.negative,
+                    &digits,
+                    decimal.result_frac_cnt as u32,
+                    decimal.frac_cnt as u32
+                ),
+                expected,
+                "{value:?}"
+            );
+            assert_eq!(decimal.storage_scale(), decimal.result_scale());
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(Decimal::native_from_f64(value).is_none());
         }
     }
 }
