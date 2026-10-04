@@ -207,7 +207,7 @@ pub(crate) use self::{
     batch::{
         EvaluatedArgsRole, EvaluatedKernelKind, NativeDecimalDivisionCallMetadata,
         NativeDecimalDivisionKind, NativeLikeCallMetadata, NativeRegexpCallMetadata,
-        NativeRegexpKind,
+        NativeRegexpKind, NativeTemporalCallMetadata,
     },
     diagnostic::FailureRecorder,
     lineage::CheckedResultFlow,
@@ -239,3 +239,268 @@ pub use crate::{
     },
     types::function::PreparedOrdinaryCall,
 };
+
+#[cfg(test)]
+mod temporal_literal_tests {
+    use tidb_query_datatype::codec::mysql::{
+        Time, TimeType,
+        time::{NativeSessionTimeZone, NativeTemporalValue},
+    };
+
+    use super::*;
+    use crate::{NativeTemporalLiteralResult, decode_native_temporal_literal_result};
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+
+    fn args(value: &str, modes: i64, zone: NativeSessionTimeZone) -> EvaluatedArgs {
+        EvaluatedArgs::TemporalText {
+            value: value.as_bytes().to_vec(),
+            modes,
+            zone,
+        }
+    }
+
+    fn computed_bytes(value: ComputedValue) -> Vec<u8> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("literal must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value
+            .into_option()
+            .expect("a literal report is never SQL NULL")
+    }
+
+    #[test]
+    fn temporal_literals_admit_only_actual_text_modes_and_business_calendar_failures() {
+        let payload = NativeTemporalCallMetadata::new();
+        assert!(payload.is_unbound());
+        assert!(matches!(payload.zone(), Err(LocalError::InvalidSpec(_))));
+        for (operation, invalid, valid, kind, hour, minute, second, message) in [
+            (
+                EvaluatedBytesOp::DateLiteralNative,
+                "2020-02-30",
+                "2020-01-01",
+                TimeType::Date,
+                0,
+                0,
+                0,
+                // Original date_literal parse-error branch uses its unpadded
+                // datetime diagnostic, not the regex gate's date diagnostic.
+                "Incorrect datetime value: '2020-2-30'",
+            ),
+            (
+                EvaluatedBytesOp::TimestampLiteralNative,
+                "2020-02-30 12:00:00",
+                "2020-01-01 12:34:56",
+                TimeType::DateTime,
+                12,
+                34,
+                56,
+                "Incorrect datetime value: '2020-02-30 12:00:00'",
+            ),
+        ] {
+            let mut worker = prepare(operation, ExecutionLimits::default());
+            let storage = worker.retained_storage().unwrap();
+            for refused in [
+                EvaluatedArgs::BytesInt(Some(valid.as_bytes().to_vec()), Some(0)),
+                EvaluatedArgs::BytesInt(None, Some(0)),
+                EvaluatedArgs::TemporalText {
+                    value: vec![255],
+                    modes: 0,
+                    zone: NativeSessionTimeZone::utc(),
+                },
+                args(valid, -1, NativeSessionTimeZone::utc()),
+                args(valid, 8, NativeSessionTimeZone::utc()),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(refused),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            // An invalid calendar is admitted, dispatched and returned as the
+            // actual hard-error report, not preflight refusal or a fake NULL.
+            let output = computed_bytes(
+                worker
+                    .eval_args(args(invalid, 0, NativeSessionTimeZone::utc()))
+                    .unwrap(),
+            );
+            assert!(matches!(decode_native_temporal_literal_result(&output),
+                Some(NativeTemporalLiteralResult::WrongValue { code: 1292, message: actual }) if actual == message));
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            for modes in 0..=7 {
+                let output = computed_bytes(
+                    worker
+                        .eval_args(args(valid, modes, NativeSessionTimeZone::utc()))
+                        .unwrap(),
+                );
+                let Some(NativeTemporalLiteralResult::Value(value)) =
+                    decode_native_temporal_literal_result(&output)
+                else {
+                    panic!("all three actual mode bits admit a valid calendar");
+                };
+                assert_eq!(
+                    value,
+                    NativeTemporalValue {
+                        raw: Time::native_core_from_fields(2020, 1, 1, hour, minute, second, 0),
+                        kind,
+                        fsp: 0,
+                    }
+                );
+                assert_eq!(worker.kernel_invocations(), modes as u64 + 2);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+        }
+    }
+
+    #[test]
+    fn temporal_literals_rebind_actual_zones_and_release_name_owners_on_every_exit() {
+        let named = |name: &str| NativeSessionTimeZone::Named(name.parse().unwrap());
+        let fixed = || NativeSessionTimeZone::Fixed {
+            // Deliberately an IANA-looking name that disagrees with the actual
+            // offset, including seconds that SQL offset-text reparsing loses.
+            name: "America/Los_Angeles".to_owned(),
+            offset_secs: 20_715,
+        };
+        let mut worker = prepare(
+            EvaluatedBytesOp::TimestampLiteralNative,
+            ExecutionLimits::default(),
+        );
+        let storage = worker.retained_storage().unwrap();
+        let summer = "2020-07-01 00:00:00+00:00";
+        let mut calls = 0;
+        for (text, zone, expected) in [
+            (
+                "2011-03-13 01:59:59.9999999",
+                named("America/Los_Angeles"),
+                Some((2011, 3, 13, 3, 0, 0, 6)),
+            ),
+            (
+                summer,
+                named("Europe/London"),
+                Some((2020, 7, 1, 1, 0, 0, 0)),
+            ),
+            ("2020-01-01", fixed(), None),
+            (summer, fixed(), Some((2020, 7, 1, 5, 45, 15, 0))),
+            (
+                summer,
+                named("America/Los_Angeles"),
+                Some((2020, 6, 30, 17, 0, 0, 0)),
+            ),
+            (
+                summer,
+                named("Europe/London"),
+                Some((2020, 7, 1, 1, 0, 0, 0)),
+            ),
+        ] {
+            let output = computed_bytes(worker.eval_args(args(text, 0, zone)).unwrap());
+            calls += 1;
+            match (decode_native_temporal_literal_result(&output), expected) {
+                (
+                    Some(NativeTemporalLiteralResult::Value(value)),
+                    Some((year, month, day, hour, minute, second, fsp)),
+                ) => {
+                    assert_eq!(
+                        value,
+                        NativeTemporalValue {
+                            raw: Time::native_core_from_fields(
+                                year, month, day, hour, minute, second, 0
+                            ),
+                            kind: TimeType::DateTime,
+                            fsp,
+                        }
+                    );
+                }
+                (
+                    Some(NativeTemporalLiteralResult::WrongValue {
+                        code: 1525,
+                        message,
+                    }),
+                    None,
+                ) => {
+                    assert_eq!(message, "Incorrect datetime value: '2020-01-01'");
+                }
+                _ => panic!("unexpected literal value/error outcome"),
+            }
+            assert_eq!(worker.kernel_invocations(), calls);
+            // Storage observation checks that the invocation-owned zone is no
+            // longer bound, including after the WrongValue business result.
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let mut bounded = prepare(
+            EvaluatedBytesOp::TimestampLiteralNative,
+            ExecutionLimits {
+                max_retained_bytes: 64 * 1024,
+                ..ExecutionLimits::default()
+            },
+        );
+        let storage = bounded.retained_storage().unwrap();
+        let mut name = String::with_capacity(128 * 1024);
+        name.push_str("UTC");
+        assert!(name.capacity() > 64 * 1024 && name.len() == 3);
+        assert!(matches!(
+            bounded.eval_args(args(
+                summer,
+                0,
+                NativeSessionTimeZone::Fixed {
+                    name,
+                    offset_secs: 0,
+                }
+            )),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(
+            bounded.kernel_invocations(),
+            0,
+            "charge actual Fixed name capacity before the kernel"
+        );
+        assert!(bounded.is_healthy());
+        assert_eq!(bounded.retained_storage().unwrap(), storage);
+        let output = computed_bytes(
+            bounded
+                .eval_args(args(summer, 0, NativeSessionTimeZone::utc()))
+                .unwrap(),
+        );
+        assert!(matches!(
+            decode_native_temporal_literal_result(&output),
+            Some(NativeTemporalLiteralResult::Value(_))
+        ));
+        assert_eq!(bounded.kernel_invocations(), 1);
+        assert!(bounded.is_healthy());
+        assert_eq!(bounded.retained_storage().unwrap(), storage);
+        // This layer has execution steps, not the frontend's pool slots. A
+        // zero-step refusal proves cleanup before dispatch without inventing
+        // NULL data or claiming a frontend zero-slot lifecycle test.
+        let mut stopped = prepare(
+            EvaluatedBytesOp::TimestampLiteralNative,
+            ExecutionLimits {
+                max_steps: 0,
+                ..ExecutionLimits::default()
+            },
+        );
+        let storage = stopped.retained_storage().unwrap();
+        for zone in [fixed(), named("Europe/London")] {
+            assert!(matches!(
+                stopped.eval_args(args(summer, 0, zone)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(stopped.kernel_invocations(), 0);
+            assert!(stopped.is_healthy());
+            assert_eq!(stopped.retained_storage().unwrap(), storage);
+        }
+    }
+}

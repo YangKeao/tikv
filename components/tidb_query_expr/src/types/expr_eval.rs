@@ -316,6 +316,14 @@ fn evaluated_ready_args_match(
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
         (
+            EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative,
+            EvaluatedArgsRole::TemporalText,
+        ) => types.len() == 2 && operation.call_count() == 1,
+        (_, EvaluatedArgsRole::TemporalText)
+        | (EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative, _) => {
+            false
+        }
+        (
             EvaluatedBytesOp::LikeNative
             | EvaluatedBytesOp::IlikeNative
             | EvaluatedBytesOp::LikeLegacyNative,
@@ -652,6 +660,13 @@ fn evaluated_ready_args_match(
                         }
                         _ => false,
                     })
+            }
+            EvaluatedArgsRole::TemporalText => {
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative
+                ) && matches!(values, [ScalarValue::Bytes(value), ScalarValue::Int(modes)]
+                        if crate::temporal_literal_native_args_valid(value.as_deref(), *modes))
             }
             EvaluatedArgsRole::Values => {
                 operation != EvaluatedBytesOp::UuidToBinSwapNative
@@ -1041,6 +1056,14 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative,
+            EvaluatedArgsRole::TemporalText,
+        ) => arity == 2 && calls == 1,
+        (_, EvaluatedArgsRole::TemporalText)
+        | (EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative, _) => {
+            false
+        }
         (
             EvaluatedBytesOp::LikeNative
             | EvaluatedBytesOp::IlikeNative

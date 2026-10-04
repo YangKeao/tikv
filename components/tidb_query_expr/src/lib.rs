@@ -123,6 +123,12 @@ pub use native_time_diff::{
     native_format_time_diff, native_time_diff, native_time_diff_needs_right,
 };
 
+mod native_time_literal;
+pub use native_time_literal::{
+    NativeTemporalLiteralResult, decode_native_temporal_literal_result,
+    temporal_literal_native_args_valid,
+};
+
 mod native_time_parse;
 pub use native_time_parse::{NativeDurationDateTime, parse_native_duration_datetime};
 
@@ -220,13 +226,13 @@ pub use self::{
         NativeTimeResult, add_time_native_fn_meta, current_date_native_fn_meta,
         current_time_with_fsp_native_fn_meta, current_time_without_fsp_native_fn_meta,
         date_core_native_args_valid, date_core_native_fn_meta, date_core_predicate_legacy_fn_meta,
-        decode_native_time_result, microsecond_legacy_fn_meta, microsecond_native_fn_meta,
-        native_clock_args_valid, native_clock_fsp_args_valid, native_time_diff_args_valid,
-        native_time_result_valid, native_tso_args_valid, now_native_fn_meta,
-        sub_time_native_fn_meta, sysdate_native_fn_meta, time_add_right_datetime_native_fn_meta,
-        time_native_fn_meta, timestamp_add_native_fn_meta,
-        timestamp_add_prefix_null_native_fn_meta, utc_date_native_fn_meta,
-        utc_time_null_native_fn_meta, utc_time_with_fsp_native_fn_meta,
+        date_literal_native_fn_meta, decode_native_time_result, microsecond_legacy_fn_meta,
+        microsecond_native_fn_meta, native_clock_args_valid, native_clock_fsp_args_valid,
+        native_time_diff_args_valid, native_time_result_valid, native_tso_args_valid,
+        now_native_fn_meta, sub_time_native_fn_meta, sysdate_native_fn_meta,
+        time_add_right_datetime_native_fn_meta, time_native_fn_meta, timestamp_add_native_fn_meta,
+        timestamp_add_prefix_null_native_fn_meta, timestamp_literal_native_fn_meta,
+        utc_date_native_fn_meta, utc_time_null_native_fn_meta, utc_time_with_fsp_native_fn_meta,
         utc_time_without_fsp_native_fn_meta, utc_timestamp_native_fn_meta,
     },
     types::*,

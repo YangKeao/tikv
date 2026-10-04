@@ -407,6 +407,25 @@ short-circuit admission policy described above.
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
+  DATE/TIMESTAMP literals now use two closed profiles backed by
+  `native_time_literal.rs`, owning their regex, parser, date-mode and hard-error
+  policy. Their dedicated TemporalText role supplies raw text and actual mode
+  bits as BytesInt, plus an owned shared NativeSessionTimeZone bound privately
+  for one invocation. ZoneOnly metadata uses `new()`/`zone()` and Like-style
+  cleanup; no wire Tz, name reparse, offset snapshot or EvalConfig change.
+  Fixed name capacity participates in logical input/retained/output-overlap
+  budgets before the kernel; this is not physical heap accounting. Successful
+  reports reuse the exact native identity Time tag15/raw/kind/FSP frame; error
+  tag0 carries u16 code and UTF8 message, never a business NULL. Native adapters
+  only restore raw Time, declared FieldType and the original hard error.
+  Admission remains rewrite-only constant folding, including ODBC spellings;
+  mangled registry arity metadata does not create runtime/PB/unistore dispatch.
+  Original wrappers retain explicit one-shot NoColumns ownership; `_in` scope
+  tests do not prove resolver-to-worker M6 ownership propagation. Ordinary
+  TIMESTAMP() is separate because right coercion depends on left parsing.
+  The old native table-projection resolver still omits date_modes forwarding,
+  supplying strict defaults despite session SET; worker tests cover actual mode
+  bits, but SQL refusal-boundary tests do not claim that caller gap repaired.
   Temporal datatype prerequisites live in `codec/mysql/time/native_datetime.rs`
   and `native_parse.rs`. They share native raw-calendar validation, generic
   timezone/DST resolution and +500ns-to-raw packing, plus lexical suffix,

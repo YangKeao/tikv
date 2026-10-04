@@ -18,7 +18,7 @@ use tidb_query_datatype::{
         mysql::{
             DEFAULT_DIV_FRAC_INCR, Decimal, NativeVectorError, NativeVectorFloat32, Tz,
             decimal::NativeDecimalError, deserialize_native_vector_float32,
-            peek_native_vector_float32,
+            peek_native_vector_float32, time::NativeSessionTimeZone,
         },
     },
     expr::{EvalConfig, EvalContext},
@@ -48,6 +48,63 @@ use crate::{
     },
     types::expr_eval::{EvalInput, EvaluatedAsciiWitness, FrameResult, evaluated_bytes_shape},
 };
+
+#[derive(Debug)]
+pub(crate) struct NativeTemporalCallMetadata {
+    zone: RefCell<Option<NativeSessionTimeZone>>,
+}
+
+impl NativeTemporalCallMetadata {
+    pub(crate) fn new() -> Self {
+        Self {
+            zone: RefCell::new(None),
+        }
+    }
+
+    pub(crate) fn zone(&self) -> LocalResult<std::cell::Ref<'_, NativeSessionTimeZone>> {
+        let zone = self
+            .zone
+            .try_borrow()
+            .map_err(|_| LocalError::InvalidSpec("temporal zone borrow conflict".into()))?;
+        std::cell::Ref::filter_map(zone, Option::as_ref)
+            .map_err(|_| LocalError::InvalidSpec("temporal call has no bound zone".into()))
+    }
+
+    pub(crate) fn is_unbound(&self) -> bool {
+        self.zone.try_borrow().is_ok_and(|zone| zone.is_none())
+    }
+
+    fn bind(&self, zone: NativeSessionTimeZone) -> LocalResult<()> {
+        let mut target = self
+            .zone
+            .try_borrow_mut()
+            .map_err(|_| LocalError::InvalidSpec("temporal zone bind conflict".into()))?;
+        if target.is_some() {
+            return Err(LocalError::InvalidSpec(
+                "temporal zone is already bound".into(),
+            ));
+        }
+        *target = Some(zone);
+        Ok(())
+    }
+
+    fn unbind(&self) -> LocalResult<()> {
+        let owned = self
+            .zone
+            .try_borrow_mut()
+            .map_err(|_| LocalError::InvalidSpec("temporal zone unbind conflict".into()))?
+            .take();
+        drop(owned);
+        Ok(())
+    }
+}
+
+fn temporal_zone_heap_bytes(zone: &NativeSessionTimeZone) -> usize {
+    match zone {
+        NativeSessionTimeZone::Fixed { name, .. } => name.capacity(),
+        _ => 0,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NativeRegexpKind {
@@ -1500,6 +1557,8 @@ pub enum EvaluatedBytesOp {
     TimestampAddNative,
     TimestampAddPrefixNullNative,
     JsonSearchSerdeNative,
+    DateLiteralNative,
+    TimestampLiteralNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1514,6 +1573,7 @@ pub(crate) enum EvaluatedKernelKind {
 /// one another, including when their physical value is NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EvaluatedArgsRole {
+    TemporalText,
     Values,
     DecimalBinary,
     DecimalDivision,
@@ -1560,6 +1620,16 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::DateLiteralNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DateLiteralNative,
+                );
+            }
+            Self::TimestampLiteralNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TimestampLiteralNative,
+                );
+            }
             Self::Ascii => ScalarFuncSig::Ascii,
             Self::Length => ScalarFuncSig::Length,
             Self::BitLength => ScalarFuncSig::BitLength,
@@ -3568,7 +3638,14 @@ impl EvaluatedBytesOp {
         )
     }
 
+    pub(crate) fn is_temporal_literal(self) -> bool {
+        matches!(self, Self::DateLiteralNative | Self::TimestampLiteralNative)
+    }
+
     pub(crate) fn metadata_matches(self, metadata: &(dyn std::any::Any + Send)) -> bool {
+        if self.is_temporal_literal() {
+            return metadata.is::<NativeTemporalCallMetadata>();
+        }
         if let Some(kind) = self.decimal_division_kind() {
             return metadata
                 .downcast_ref::<NativeDecimalDivisionCallMetadata>()
@@ -3588,6 +3665,9 @@ impl EvaluatedBytesOp {
     }
 
     pub(crate) fn input_role(self) -> EvaluatedArgsRole {
+        if self.is_temporal_literal() {
+            return EvaluatedArgsRole::TemporalText;
+        }
         // A private identity does not determine its carrier or packet policy.
         // In particular, value-only FROM_BASE64 keeps the ordinary Bytes role.
         match self {
@@ -4036,6 +4116,8 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::DateLiteralNative => crate::impl_time::date_literal_native_fn_meta(),
+            Self::TimestampLiteralNative => crate::impl_time::timestamp_literal_native_fn_meta(),
             Self::AddIntSsNative => crate::impl_arithmetic::add_int_ss_native_fn_meta(),
             Self::AddIntSuNative => crate::impl_arithmetic::add_int_su_native_fn_meta(),
             Self::AddIntUsNative => crate::impl_arithmetic::add_int_us_native_fn_meta(),
@@ -4649,6 +4731,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::DateLiteralNative | Self::TimestampLiteralNative => EvalType::Bytes,
             Self::JsonSearchSerdeNative => EvalType::Bytes,
             Self::TimestampAddNative | Self::TimestampAddPrefixNullNative => EvalType::Bytes,
             Self::AddTimeNative | Self::SubTimeNative | Self::TimeAddRightDatetimeNative => {
@@ -5078,6 +5161,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::DateLiteralNative | Self::TimestampLiteralNative => {
+                &[EvalType::Bytes, EvalType::Int]
+            }
             Self::JsonSearchSerdeNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::TimestampAddNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Int],
             Self::TimestampAddPrefixNullNative => &[EvalType::Bytes, EvalType::Int],
@@ -6190,6 +6276,11 @@ pub fn prepare_json_raw_values_args(values: &[(u8, &[u8])]) -> LocalResult<Evalu
 /// NULL.
 #[derive(Debug)]
 pub enum EvaluatedArgs {
+    TemporalText {
+        value: Vec<u8>,
+        modes: i64,
+        zone: NativeSessionTimeZone,
+    },
     /// Actual value operands plus an invocation-bound precision increment.
     /// NULL/missing uses the existing terminal recipes, not this carrier.
     DecimalDivision {
@@ -6393,6 +6484,7 @@ pub enum EvaluatedArgs {
 impl EvaluatedArgs {
     fn role(&self) -> EvaluatedArgsRole {
         match self {
+            Self::TemporalText { .. } => EvaluatedArgsRole::TemporalText,
             Self::Decimal2 { .. } => EvaluatedArgsRole::DecimalBinary,
             Self::DecimalDivision { .. } => EvaluatedArgsRole::DecimalDivision,
             Self::Int1282(..) => EvaluatedArgsRole::Int1282,
@@ -6446,6 +6538,7 @@ impl EvaluatedArgs {
 
     fn input_types(&self) -> &'static [EvalType] {
         match self {
+            Self::TemporalText { .. } => &[EvalType::Bytes, EvalType::Int],
             Self::Like { .. } => EvaluatedBytesOp::LikeNative.input_types(),
             Self::RegexpLike { .. } => EvaluatedBytesOp::RegexpLikeNative.input_types(),
             Self::RegexpSubstr { .. } => EvaluatedBytesOp::RegexpSubstrNative.input_types(),
@@ -6517,6 +6610,14 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation.is_temporal_literal() {
+            return match self {
+                Self::TemporalText { value, modes, .. } => {
+                    crate::temporal_literal_native_args_valid(Some(value), Some(*modes))
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::TimestampAddNative {
             return match self {
                 Self::BytesBytesInt(unit, date, amount) => crate::native_timestamp_add_args_valid(
@@ -7100,6 +7201,11 @@ impl EvaluatedArgs {
         // handles are real semantic context, never hidden ScalarValue operands.
         use ScalarValue::{Bytes, Int};
         let (ready, arity) = match self {
+            Self::TemporalText { .. } => {
+                return Err(LocalError::InvalidSpec(
+                    "temporal operands require their guarded zone projection".into(),
+                ));
+            }
             Self::Like {
                 text,
                 pattern,
@@ -8612,6 +8718,23 @@ impl Drop for RegexpBindingGuard<'_> {
     }
 }
 
+struct TemporalBindingGuard<'a> {
+    worker: &'a mut EvaluatedBytesWorker,
+}
+
+impl Drop for TemporalBindingGuard<'_> {
+    fn drop(&mut self) {
+        if self
+            .worker
+            .temporal_metadata()
+            .and_then(NativeTemporalCallMetadata::unbind)
+            .is_err()
+        {
+            self.worker.poisoned = true;
+        }
+    }
+}
+
 struct LikeBindingGuard<'a> {
     worker: &'a mut EvaluatedBytesWorker,
 }
@@ -8647,6 +8770,23 @@ impl Drop for DecimalDivisionBindingGuard<'_> {
 }
 
 impl EvaluatedBytesWorker {
+    fn temporal_metadata(&self) -> LocalResult<&NativeTemporalCallMetadata> {
+        if !self.operation.is_temporal_literal() {
+            return Err(LocalError::InvalidSpec(
+                "only temporal literals bind a session zone".into(),
+            ));
+        }
+        let nodes: &[RpnExpressionNode] = self.program.expression.as_ref();
+        match nodes.get(self.operation.input_types().len()) {
+            Some(RpnExpressionNode::FnCall { metadata, .. }) => metadata
+                .downcast_ref::<NativeTemporalCallMetadata>()
+                .ok_or_else(|| LocalError::InvalidSpec("temporal call metadata changed".into())),
+            _ => Err(LocalError::InvalidSpec(
+                "temporal literal call is absent".into(),
+            )),
+        }
+    }
+
     fn decimal_division_metadata(&self) -> LocalResult<&NativeDecimalDivisionCallMetadata> {
         let kind = self.operation.decimal_division_kind().ok_or_else(|| {
             LocalError::InvalidSpec("only Decimal division may bind its precision/report".into())
@@ -8758,7 +8898,14 @@ impl EvaluatedBytesWorker {
                 "evaluated ASCII worker metadata was not prewarmed".into(),
             ));
         }
-        let payload_bytes = if self.operation.regexp_kind().is_some() {
+        let payload_bytes = if self.operation.is_temporal_literal() {
+            if !self.temporal_metadata()?.is_unbound() {
+                return Err(LocalError::InvalidSpec(
+                    "temporal worker retains a session zone".into(),
+                ));
+            }
+            mem::size_of::<NativeTemporalCallMetadata>()
+        } else if self.operation.regexp_kind().is_some() {
             let payload = self.regexp_metadata()?;
             if !payload.is_unbound() {
                 return Err(LocalError::InvalidSpec(
@@ -8901,9 +9048,47 @@ impl EvaluatedBytesWorker {
                 EvaluatedArgs::DecimalDivision { frac_increment, .. } => Some(*frac_increment),
                 _ => None,
             };
-            let (ready, arity, invocation) =
-                args.into_values_for_operation(self.operation, materialization_available)?;
-            if let Some(increment) = division_increment {
+            let (ready, arity, invocation, temporal_zone) = match args {
+                EvaluatedArgs::TemporalText { value, modes, zone } => {
+                    let input_bytes = value
+                        .capacity()
+                        .checked_add(temporal_zone_heap_bytes(&zone))
+                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    let bound = value
+                        .len()
+                        .checked_add(64)
+                        .map(|bytes| bytes.max(11))
+                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    // The name is an owned invocation input, not a SQL slot. Check
+                    // it with the reply bound before installing or invoking anything.
+                    EvalBudget::exact(self.state.limits)?.check_output(bound, input_bytes)?;
+                    (
+                        [
+                            ScalarValue::Bytes(Some(value)),
+                            ScalarValue::Int(Some(modes)),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                        ],
+                        2,
+                        None,
+                        Some(zone),
+                    )
+                }
+                args => {
+                    let (ready, arity, invocation) =
+                        args.into_values_for_operation(self.operation, materialization_available)?;
+                    (ready, arity, invocation, None)
+                }
+            };
+            if let Some(zone) = temporal_zone {
+                // Install the cleanup guard before bind; unwind drops the kernel's
+                // Ref first, then takes/drops the actual owned zone before lease finish.
+                let guard = TemporalBindingGuard { worker: self };
+                guard.worker.temporal_metadata()?.bind(zone)?;
+                guard.worker.eval_ready(ready, arity, &mut sql_failure)
+            } else if let Some(increment) = division_increment {
                 let guard = DecimalDivisionBindingGuard { worker: self };
                 guard.worker.decimal_division_metadata()?.bind(increment)?;
                 let before = guard.worker.witness.invocations();
@@ -9021,8 +9206,19 @@ impl EvaluatedBytesWorker {
                 .checked_add(bytes)
                 .ok_or_else(evaluated_ascii_storage_overflow)
         })?;
+        let input_bytes = if self.operation.is_temporal_literal() {
+            let zone = self.temporal_metadata()?.zone()?;
+            input_bytes
+                .checked_add(temporal_zone_heap_bytes(&zone))
+                .ok_or_else(evaluated_ascii_storage_overflow)?
+        } else {
+            input_bytes
+        };
         self.state.row = [0];
         let mut budget = EvalBudget::exact(self.state.limits)?;
+        if self.operation.is_temporal_literal() {
+            budget.check_output(0, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -9438,6 +9634,15 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation.is_temporal_literal()
+                    && value.is_none_or(|bytes| {
+                        crate::decode_native_temporal_literal_result(bytes).is_none()
+                    })
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "temporal literal returned NULL or an invalid reply".into(),
+                    ));
+                }
                 if self.operation == EvaluatedBytesOp::TimestampAddNative
                     && value.is_some_and(|bytes| !crate::native_timestamp_add_result_valid(bytes))
                 {

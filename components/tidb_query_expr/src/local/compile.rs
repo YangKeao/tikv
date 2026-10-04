@@ -138,6 +138,11 @@ fn check_evaluated_bytes_source(
     };
     let arity_matches = match (operation, operation.input_role()) {
         (
+            EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative,
+            EvaluatedArgsRole::TemporalText,
+        ) => arity == 2 && calls == 1,
+        (_, EvaluatedArgsRole::TemporalText) => false,
+        (
             EvaluatedBytesOp::LikeNative
             | EvaluatedBytesOp::IlikeNative
             | EvaluatedBytesOp::LikeLegacyNative,

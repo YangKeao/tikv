@@ -25,7 +25,70 @@ use tidb_query_datatype::{
     expr::{EvalContext, SqlMode},
 };
 
-use crate::RpnFnCallExtra;
+use crate::{
+    RpnFnCallExtra,
+    local::{LocalError, NativeTemporalCallMetadata},
+    types::function::CallBuild,
+};
+
+fn temporal_literal_infrastructure_error(error: LocalError) -> tidb_query_common::Error {
+    EvaluateError::Caused(Box::new(error)).into()
+}
+
+fn init_native_temporal_literal_data(_expr: &mut CallBuild) -> Result<NativeTemporalCallMetadata> {
+    Ok(NativeTemporalCallMetadata::new())
+}
+
+fn native_temporal_literal_text(value: &[u8], modes: i64) -> Result<&str> {
+    if !crate::temporal_literal_native_args_valid(Some(value), Some(modes)) {
+        return Err(temporal_literal_infrastructure_error(
+            LocalError::InvalidBatch(
+                "temporal literals require UTF-8 text and mode bits 0 through 7".into(),
+            ),
+        ));
+    }
+    Ok(from_utf8(value).expect("temporal literal transport UTF-8 was validated"))
+}
+
+#[rpn_fn(capture = [metadata], metadata_mapper = init_native_temporal_literal_data)]
+fn date_literal_native(
+    metadata: &NativeTemporalCallMetadata,
+    value: BytesRef,
+    modes: &Int,
+) -> Result<Option<Bytes>> {
+    let text = native_temporal_literal_text(value, *modes)?;
+    let zone = metadata
+        .zone()
+        .map_err(temporal_literal_infrastructure_error)?;
+    crate::native_time_literal::evaluate_native_date_literal(text, &zone, *modes)
+        .map(Some)
+        .map_err(|error| {
+            other_err!(
+                "Unable to encode native temporal literal output: {:?}",
+                error
+            )
+        })
+}
+
+#[rpn_fn(capture = [metadata], metadata_mapper = init_native_temporal_literal_data)]
+fn timestamp_literal_native(
+    metadata: &NativeTemporalCallMetadata,
+    value: BytesRef,
+    modes: &Int,
+) -> Result<Option<Bytes>> {
+    let text = native_temporal_literal_text(value, *modes)?;
+    let zone = metadata
+        .zone()
+        .map_err(temporal_literal_infrastructure_error)?;
+    crate::native_time_literal::evaluate_native_timestamp_literal(text, &zone, *modes)
+        .map(Some)
+        .map_err(|error| {
+            other_err!(
+                "Unable to encode native temporal literal output: {:?}",
+                error
+            )
+        })
+}
 
 /// Only the actual clock tuple's transport width is constrained. Raw nanos and
 /// timestamp/offset domains retain the original pure clock implementation's
