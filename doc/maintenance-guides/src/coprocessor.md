@@ -407,6 +407,18 @@ short-circuit admission policy described above.
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
+  CONVERT_TZ uses one closed ConvertTzNative profile with existing nullable
+  Bytes3, not session-zone metadata. `native_convert_tz.rs` owns canonical
+  datetime composition, exact SQL-zone parsing, conversion and fraction text.
+  Named zones use the shared native 0.10.4 identity; SYSTEM retains its separate
+  LocalResult later-overlap/NULL-gap behavior. Source datetime failure precedes
+  both zone parsers; once reached, both zone parsers run even if the first is
+  unknown. The original Unicode-digit offset-regex panic is not repaired.
+  The generic legacy NaiveDateTime instant/gap helper is shared with the native
+  UNIX_TIMESTAMP facade, without crediting that evaluator. Do not substitute
+  narrower packed-core or second-stepping gap algorithms for its wide calendar,
+  fractional bisection and original arithmetic behavior. No new carrier, zone
+  binding, EvalConfig, dependency, wire signature or runtime admission is needed.
   DATE/TIMESTAMP literals now use two closed profiles backed by
   `native_time_literal.rs`, owning their regex, parser, date-mode and hard-error
   policy. Their dedicated TemporalText role supplies raw text and actual mode

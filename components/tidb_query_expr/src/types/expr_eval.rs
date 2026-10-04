@@ -396,6 +396,19 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::ConvertTzNative
+            || match values {
+                [
+                    ScalarValue::Bytes(datetime),
+                    ScalarValue::Bytes(from),
+                    ScalarValue::Bytes(to),
+                ] => crate::convert_tz_native_args_valid(
+                    datetime.as_deref(),
+                    from.as_deref(),
+                    to.as_deref(),
+                ),
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::TimestampAddNative
             || match values {
                 [

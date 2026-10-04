@@ -1559,6 +1559,7 @@ pub enum EvaluatedBytesOp {
     JsonSearchSerdeNative,
     DateLiteralNative,
     TimestampLiteralNative,
+    ConvertTzNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1620,6 +1621,9 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::ConvertTzNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ConvertTzNative);
+            }
             Self::DateLiteralNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::DateLiteralNative,
@@ -4116,6 +4120,7 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::ConvertTzNative => crate::impl_time::convert_tz_native_fn_meta(),
             Self::DateLiteralNative => crate::impl_time::date_literal_native_fn_meta(),
             Self::TimestampLiteralNative => crate::impl_time::timestamp_literal_native_fn_meta(),
             Self::AddIntSsNative => crate::impl_arithmetic::add_int_ss_native_fn_meta(),
@@ -4731,6 +4736,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::ConvertTzNative => EvalType::Bytes,
             Self::DateLiteralNative | Self::TimestampLiteralNative => EvalType::Bytes,
             Self::JsonSearchSerdeNative => EvalType::Bytes,
             Self::TimestampAddNative | Self::TimestampAddPrefixNullNative => EvalType::Bytes,
@@ -5161,6 +5167,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::ConvertTzNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::DateLiteralNative | Self::TimestampLiteralNative => {
                 &[EvalType::Bytes, EvalType::Int]
             }
@@ -6610,6 +6617,16 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::ConvertTzNative {
+            return match self {
+                Self::Bytes3([datetime, from, to]) => crate::convert_tz_native_args_valid(
+                    datetime.as_deref(),
+                    from.as_deref(),
+                    to.as_deref(),
+                ),
+                _ => false,
+            };
+        }
         if operation.is_temporal_literal() {
             return match self {
                 Self::TemporalText { value, modes, .. } => {
@@ -9634,6 +9651,13 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation == EvaluatedBytesOp::ConvertTzNative
+                    && value.is_some_and(|bytes| std::str::from_utf8(bytes).is_err())
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native CONVERT_TZ returned invalid UTF-8".into(),
+                    ));
+                }
                 if self.operation.is_temporal_literal()
                     && value.is_none_or(|bytes| {
                         crate::decode_native_temporal_literal_result(bytes).is_none()

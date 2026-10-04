@@ -31,6 +31,28 @@ use crate::{
     types::function::CallBuild,
 };
 
+#[rpn_fn(nullable)]
+fn convert_tz_native(
+    datetime: Option<BytesRef>,
+    from: Option<BytesRef>,
+    to: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    if !crate::convert_tz_native_args_valid(datetime, from, to) {
+        return Err(other_err!(
+            "Native CONVERT_TZ requires UTF-8 in every present operand"
+        ));
+    }
+    let (Some(datetime), Some(from), Some(to)) = (datetime, from, to) else {
+        return Ok(None);
+    };
+    Ok(crate::native_convert_tz::evaluate_native_convert_tz(
+        from_utf8(datetime).expect("CONVERT_TZ datetime transport UTF-8 was validated"),
+        from_utf8(from).expect("CONVERT_TZ from-zone transport UTF-8 was validated"),
+        from_utf8(to).expect("CONVERT_TZ to-zone transport UTF-8 was validated"),
+    )
+    .map(String::into_bytes))
+}
+
 fn temporal_literal_infrastructure_error(error: LocalError) -> tidb_query_common::Error {
     EvaluateError::Caused(Box::new(error)).into()
 }

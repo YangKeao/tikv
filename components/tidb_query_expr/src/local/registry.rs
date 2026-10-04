@@ -445,7 +445,8 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::TimestampAddPrefixNullNative
         | LocalFunctionId::JsonSearchSerdeNative
         | LocalFunctionId::DateLiteralNative
-        | LocalFunctionId::TimestampLiteralNative => Err(other_err!(
+        | LocalFunctionId::TimestampLiteralNative
+        | LocalFunctionId::ConvertTzNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

@@ -53,6 +53,9 @@ pub use native_clock::{
     native_utc_time_without_fsp, native_utc_timestamp,
 };
 
+mod native_convert_tz;
+pub use native_convert_tz::{convert_tz_native_args_valid, native_legacy_local_to_instant};
+
 mod native_decimal_int_div;
 pub use native_decimal_int_div::{
     NativeIntDivOutcome, NativeIntDivReport, decode_native_intdiv_report, native_intdiv_args_valid,
@@ -223,14 +226,15 @@ pub use self::{
         weight_string_native_fn_meta, weight_string_numeric_native_fn_meta,
     },
     impl_time::{
-        NativeTimeResult, add_time_native_fn_meta, current_date_native_fn_meta,
-        current_time_with_fsp_native_fn_meta, current_time_without_fsp_native_fn_meta,
-        date_core_native_args_valid, date_core_native_fn_meta, date_core_predicate_legacy_fn_meta,
-        date_literal_native_fn_meta, decode_native_time_result, microsecond_legacy_fn_meta,
-        microsecond_native_fn_meta, native_clock_args_valid, native_clock_fsp_args_valid,
-        native_time_diff_args_valid, native_time_result_valid, native_tso_args_valid,
-        now_native_fn_meta, sub_time_native_fn_meta, sysdate_native_fn_meta,
-        time_add_right_datetime_native_fn_meta, time_native_fn_meta, timestamp_add_native_fn_meta,
+        NativeTimeResult, add_time_native_fn_meta, convert_tz_native_fn_meta,
+        current_date_native_fn_meta, current_time_with_fsp_native_fn_meta,
+        current_time_without_fsp_native_fn_meta, date_core_native_args_valid,
+        date_core_native_fn_meta, date_core_predicate_legacy_fn_meta, date_literal_native_fn_meta,
+        decode_native_time_result, microsecond_legacy_fn_meta, microsecond_native_fn_meta,
+        native_clock_args_valid, native_clock_fsp_args_valid, native_time_diff_args_valid,
+        native_time_result_valid, native_tso_args_valid, now_native_fn_meta,
+        sub_time_native_fn_meta, sysdate_native_fn_meta, time_add_right_datetime_native_fn_meta,
+        time_native_fn_meta, timestamp_add_native_fn_meta,
         timestamp_add_prefix_null_native_fn_meta, timestamp_literal_native_fn_meta,
         utc_date_native_fn_meta, utc_time_null_native_fn_meta, utc_time_with_fsp_native_fn_meta,
         utc_time_without_fsp_native_fn_meta, utc_timestamp_native_fn_meta,

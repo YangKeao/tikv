@@ -495,6 +495,7 @@ pub enum LocalFunctionId {
     JsonSearchSerdeNative,
     DateLiteralNative,
     TimestampLiteralNative,
+    ConvertTzNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

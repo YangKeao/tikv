@@ -504,3 +504,129 @@ mod temporal_literal_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod convert_tz_tests {
+    use super::*;
+
+    #[test]
+    fn convert_tz_bytes3_admission_nullable_dispatch_and_owned_results() {
+        let prepare = |limits| {
+            prepare_evaluated_bytes(
+                EvaluatedBytesOp::ConvertTzNative,
+                LocalCompileContext::default(),
+                limits,
+                usize::MAX,
+            )
+            .unwrap()
+        };
+        let ready = |date: &str, from: &str, to: &str| {
+            EvaluatedArgs::Bytes3([
+                Some(date.as_bytes().to_vec()),
+                Some(from.as_bytes().to_vec()),
+                Some(to.as_bytes().to_vec()),
+            ])
+        };
+        let mut worker = prepare(ExecutionLimits::default());
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Bytes(None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        for malformed_slot in 0..3 {
+            // A real NULL elsewhere must not mask malformed present UTF-8 in
+            // the physical carrier admission check.
+            let mut values = [None, None, None];
+            values[malformed_slot] = Some(vec![255]);
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes3(values)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let mut calls = 0;
+        for null_slot in 0..3 {
+            let mut values = [
+                Some(b"2004-01-01 12:00:00".to_vec()),
+                Some(b"+00:00".to_vec()),
+                Some(b"GMT".to_vec()),
+            ];
+            values[null_slot] = None;
+            let ComputedValue::Bytes(output) =
+                worker.eval_args(EvaluatedArgs::Bytes3(values)).unwrap()
+            else {
+                panic!("CONVERT_TZ NULL must remain owned Bytes");
+            };
+            assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(output.into_option(), None);
+            calls += 1;
+            assert_eq!(worker.kernel_invocations(), calls);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        // Fixed expected rows retained from native time_fn/convert_tz.rs:
+        // identity offset, original fraction truncation, and the autumn overlap.
+        for (date, from, to, expected) in [
+            (
+                "2004-01-01 12:00:00",
+                "+00:00",
+                "GMT",
+                Some("2004-01-01 12:00:00"),
+            ),
+            (
+                "2004-01-01 12:00:00.11111111111",
+                "-00:00",
+                "+12:34",
+                Some("2004-01-02 00:34:00.111111"),
+            ),
+            (
+                "2021-10-31 03:00:00",
+                "+02:00",
+                "Europe/Amsterdam",
+                Some("2021-10-31 02:00:00"),
+            ),
+            ("2004-01-01 12:00:00", "not/a/time_zone", "+00:00", None),
+            ("2004-01-01 12:00:00", "+00:00", "not/a/time_zone", None),
+            ("2004-02-30 12:00:00", "+00:00", "GMT", None),
+        ] {
+            let ComputedValue::Bytes(output) = worker.eval_args(ready(date, from, to)).unwrap()
+            else {
+                panic!("CONVERT_TZ must own nullable UTF-8 Bytes");
+            };
+            assert_eq!(output.metadata(), ComputedBytesMetadata::OwnBytes);
+            assert_eq!(output.value(), expected.map(str::as_bytes));
+            assert_eq!(
+                output.into_option(),
+                expected.map(|value| value.as_bytes().to_vec())
+            );
+            calls += 1;
+            assert_eq!(
+                worker.kernel_invocations(),
+                calls,
+                "unknown zones and bad calendars are business NULLs"
+            );
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let mut stopped = prepare(ExecutionLimits {
+            max_steps: 0,
+            ..ExecutionLimits::default()
+        });
+        let storage = stopped.retained_storage().unwrap();
+        for args in [
+            ready("2004-01-01 12:00:00", "+00:00", "GMT"),
+            EvaluatedArgs::Bytes3([None, Some(b"+00:00".to_vec()), Some(b"GMT".to_vec())]),
+        ] {
+            assert!(matches!(
+                stopped.eval_args(args),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(stopped.kernel_invocations(), 0);
+            assert!(stopped.is_healthy());
+            assert_eq!(stopped.retained_storage().unwrap(), storage);
+        }
+        // The local step budget is not the frontend pool's zero-slot policy.
+    }
+}
