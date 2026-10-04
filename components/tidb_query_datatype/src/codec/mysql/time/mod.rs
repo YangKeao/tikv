@@ -5,6 +5,7 @@ pub mod interval;
 mod native_datetime;
 mod native_parse;
 mod native_session_time_zone;
+mod native_str_to_date;
 mod native_time_parser;
 mod native_timestamp_diff;
 mod native_value;
@@ -39,6 +40,9 @@ pub use self::{
     native_session_time_zone::{
         SessionTimeZone as NativeSessionTimeZone,
         SessionTimeZoneOffset as NativeSessionTimeZoneOffset,
+    },
+    native_str_to_date::{
+        native_is_go_punctuation, native_parse_str_to_date, native_str_to_date_format_type,
     },
     native_time_parser::{
         NativeParsedTime, NativeTimeParseOutcome, native_parse_time,

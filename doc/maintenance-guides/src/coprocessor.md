@@ -417,6 +417,13 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  The native public datatype STR_TO_DATE parser now lives in
+  `codec/mysql/time/native_str_to_date.rs`, alongside its format classifier and
+  Go-compatible punctuation predicate. It preserves the original raw packing and
+  trailing-input flag; the frontend keeps its existing Time construction then
+  validation adapters. The exact unicode-general-category 1.1.0 dependency and Go-version table
+  exclusions move with this policy. This grammar is distinct from both wire and
+  ordinary expression parsing; no new evaluator profile/admission is implied.
   Native charset expression workers in `native_convert_charset.rs` use
   ToBinary/FromBinary Bytes2 and ConvertUsing Bytes4, one Values call each.
   The latter retains exact source spelling, effective field charset and target
