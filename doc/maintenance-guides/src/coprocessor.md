@@ -416,7 +416,25 @@ short-circuit admission policy described above.
   `codec::convert::native_warning_subject_byte_cap` owns the 128-byte UTF-8
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
-  prerequisites do not by themselves close FROM_UNIXTIME or its staged callers.
+  prerequisites do not by themselves earn evaluator-family credit.
+  FROM_UNIXTIME uses five closed profiles in `native_from_unixtime.rs`: actual
+  numeric identity, coerced UTF8 text, local-zone continuation, typed legacy
+  Decimal and actual NULL. Epoch output is tag0+secondsLE8+microsLE4+FSP, or
+  tag1 with the same fields plus a computed truncate message. The frontend
+  handles that warning policy before reading the zone and forwards the whole
+  original report in existing TemporalValue metadata. Only valid local UTF8
+  reaches lazy layout coercion and the existing DateFormatTextNative worker.
+  Numeric14/Text(max14,inputlen+64)/Null0 reply preflight lives in the common
+  ready path; Local/Legacy retain existing64-byte preflight and owned-zone
+  capacity/RAII checks. Raw Decimal representation is not math admission.
+  Legacy instead keeps its original f64 range (whose upper literal rounds to
+  MAX+1), ordinary u32 nanos-times1000 and DateTime FSP0 with retained raw
+  microseconds. The native generic scoped callback projects actual Time/NULL;
+  successful two-argument legacy then evaluates lossy layout and reuses
+  DateFormatCoreNative under selected raw_columns. It preserves missing-first
+  panic and does not override SimpleExpr::Shared's own context: broader M6
+  propagation remains open. Native PB's extra return-time cast and outer
+  declared-family conversion remain separate; wire kernels are unchanged.
   UNIX_TIMESTAMP adds six closed profiles in `native_unix_timestamp.rs`.
   Ordinary parsing uses actual TemporalParseText/source-kind/zone1, then returns
   NULL, a terminal numeric identity, a computed warning, or an actual Time frame

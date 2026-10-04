@@ -140,7 +140,9 @@ fn check_evaluated_bytes_source(
         (
             EvaluatedBytesOp::UnixTimestampValueNative
             | EvaluatedBytesOp::UnixTimestampIntLegacy
-            | EvaluatedBytesOp::UnixTimestampDecLegacy,
+            | EvaluatedBytesOp::UnixTimestampDecLegacy
+            | EvaluatedBytesOp::FromUnixTimeLocalNative
+            | EvaluatedBytesOp::FromUnixTimeLegacy,
             EvaluatedArgsRole::TemporalValue,
         ) => arity == 1 && calls == 1,
         (_, EvaluatedArgsRole::TemporalValue) => false,

@@ -318,14 +318,18 @@ fn evaluated_ready_args_match(
         (
             EvaluatedBytesOp::UnixTimestampValueNative
             | EvaluatedBytesOp::UnixTimestampIntLegacy
-            | EvaluatedBytesOp::UnixTimestampDecLegacy,
+            | EvaluatedBytesOp::UnixTimestampDecLegacy
+            | EvaluatedBytesOp::FromUnixTimeLocalNative
+            | EvaluatedBytesOp::FromUnixTimeLegacy,
             EvaluatedArgsRole::TemporalValue,
         ) => types.len() == 1 && operation.call_count() == 1,
         (_, EvaluatedArgsRole::TemporalValue)
         | (
             EvaluatedBytesOp::UnixTimestampValueNative
             | EvaluatedBytesOp::UnixTimestampIntLegacy
-            | EvaluatedBytesOp::UnixTimestampDecLegacy,
+            | EvaluatedBytesOp::UnixTimestampDecLegacy
+            | EvaluatedBytesOp::FromUnixTimeLocalNative
+            | EvaluatedBytesOp::FromUnixTimeLegacy,
             _,
         ) => false,
         (
@@ -422,6 +426,27 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::FromUnixTimeNumericNative
+            || match values {
+                [ScalarValue::Bytes(value)] => {
+                    crate::from_unixtime_numeric_native_args_valid(value.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::FromUnixTimeTextNative
+            || match values {
+                [ScalarValue::Bytes(value)] => {
+                    crate::from_unixtime_text_native_args_valid(value.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::FromUnixTimeNullNative
+            || match values {
+                [ScalarValue::Bytes(value)] => {
+                    crate::from_unixtime_null_native_args_valid(value.as_deref())
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::UnixTimestampNowNative
             || match values {
                 [ScalarValue::Int(secs), ScalarValue::Int(nanos)] => {
@@ -740,6 +765,12 @@ fn evaluated_ready_args_match(
                 _ => false,
             },
             EvaluatedArgsRole::TemporalValue => match (operation, values) {
+                (EvaluatedBytesOp::FromUnixTimeLocalNative, [ScalarValue::Bytes(value)]) => {
+                    crate::from_unixtime_local_native_args_valid(value.as_deref())
+                }
+                (EvaluatedBytesOp::FromUnixTimeLegacy, [ScalarValue::Bytes(value)]) => {
+                    crate::from_unixtime_legacy_args_valid(value.as_deref())
+                }
                 (EvaluatedBytesOp::UnixTimestampValueNative, [ScalarValue::Bytes(value)]) => {
                     crate::unix_timestamp_value_native_args_valid(value.as_deref())
                 }
@@ -1148,14 +1179,18 @@ pub(crate) fn evaluated_bytes_shape(
         (
             EvaluatedBytesOp::UnixTimestampValueNative
             | EvaluatedBytesOp::UnixTimestampIntLegacy
-            | EvaluatedBytesOp::UnixTimestampDecLegacy,
+            | EvaluatedBytesOp::UnixTimestampDecLegacy
+            | EvaluatedBytesOp::FromUnixTimeLocalNative
+            | EvaluatedBytesOp::FromUnixTimeLegacy,
             EvaluatedArgsRole::TemporalValue,
         ) => arity == 1 && calls == 1,
         (_, EvaluatedArgsRole::TemporalValue)
         | (
             EvaluatedBytesOp::UnixTimestampValueNative
             | EvaluatedBytesOp::UnixTimestampIntLegacy
-            | EvaluatedBytesOp::UnixTimestampDecLegacy,
+            | EvaluatedBytesOp::UnixTimestampDecLegacy
+            | EvaluatedBytesOp::FromUnixTimeLocalNative
+            | EvaluatedBytesOp::FromUnixTimeLegacy,
             _,
         ) => false,
         (

@@ -304,6 +304,92 @@ fn unix_timestamp_dec_legacy(
         .map_err(native_unix_timestamp_output_error)
 }
 
+fn native_from_unixtime_output_error(
+    error: crate::NativeIdentityFrameError,
+) -> tidb_query_common::Error {
+    other_err!("Unable to encode native FROM_UNIXTIME output: {:?}", error)
+}
+
+#[rpn_fn(nullable)]
+fn from_unixtime_numeric_native(value: Option<BytesRef>) -> Result<Option<Bytes>> {
+    if !crate::from_unixtime_numeric_native_args_valid(value) {
+        return Err(other_err!(
+            "FROM_UNIXTIME numeric profile requires an actual numeric identity"
+        ));
+    }
+    let value =
+        crate::decode_native_identity(value.expect("numeric identity presence was validated"))
+            .expect("FROM_UNIXTIME numeric identity was validated");
+    crate::native_from_unixtime::evaluate_from_unixtime_numeric_native(value)
+        .map_err(native_from_unixtime_output_error)
+}
+
+#[rpn_fn(nullable)]
+fn from_unixtime_text_native(value: Option<BytesRef>) -> Result<Option<Bytes>> {
+    if !crate::from_unixtime_text_native_args_valid(value) {
+        return Err(other_err!(
+            "FROM_UNIXTIME text profile requires non-NULL UTF-8"
+        ));
+    }
+    let text = from_utf8(value.expect("FROM_UNIXTIME text presence was validated"))
+        .expect("FROM_UNIXTIME text UTF-8 was validated");
+    crate::native_from_unixtime::evaluate_from_unixtime_text_native(text)
+        .map_err(native_from_unixtime_output_error)
+}
+
+#[rpn_fn(nullable, capture = [metadata], metadata_mapper = init_native_temporal_literal_data)]
+fn from_unixtime_local_native(
+    metadata: &NativeTemporalCallMetadata,
+    value: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    if !crate::from_unixtime_local_native_args_valid(value) {
+        return Err(other_err!(
+            "FROM_UNIXTIME local profile requires the actual computed epoch report"
+        ));
+    }
+    let result = crate::decode_native_from_unixtime_result(
+        value.expect("epoch report presence was validated"),
+    )
+    .expect("FROM_UNIXTIME epoch report was validated");
+    let zone = metadata
+        .zone()
+        .map_err(temporal_literal_infrastructure_error)?;
+    Ok(
+        crate::native_from_unixtime::evaluate_from_unixtime_local_native(result, &zone)
+            .map(String::into_bytes),
+    )
+}
+
+#[rpn_fn(nullable, capture = [metadata], metadata_mapper = init_native_temporal_literal_data)]
+fn from_unixtime_legacy(
+    metadata: &NativeTemporalCallMetadata,
+    value: Option<BytesRef>,
+) -> Result<Option<Bytes>> {
+    if !crate::from_unixtime_legacy_args_valid(value) {
+        return Err(other_err!(
+            "Legacy FROM_UNIXTIME requires an actual Decimal identity"
+        ));
+    }
+    let value =
+        crate::decode_native_identity(value.expect("legacy Decimal presence was validated"))
+            .expect("Legacy FROM_UNIXTIME Decimal identity was validated");
+    let zone = metadata
+        .zone()
+        .map_err(temporal_literal_infrastructure_error)?;
+    crate::native_from_unixtime::evaluate_from_unixtime_legacy(value, &zone)
+        .map_err(native_from_unixtime_output_error)
+}
+
+#[rpn_fn(nullable)]
+fn from_unixtime_null_native(value: Option<BytesRef>) -> Result<Option<Bytes>> {
+    if !crate::from_unixtime_null_native_args_valid(value) {
+        return Err(other_err!(
+            "FROM_UNIXTIME NULL profile requires the actual NULL operand"
+        ));
+    }
+    Ok(None)
+}
+
 /// Only the actual clock tuple's transport width is constrained. Raw nanos and
 /// timestamp/offset domains retain the original pure clock implementation's
 /// arithmetic and panic behavior rather than being normalized by admission.

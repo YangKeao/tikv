@@ -1386,3 +1386,450 @@ mod unix_timestamp_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod from_unixtime_worker_tests {
+    use tidb_query_datatype::codec::mysql::{Time, time::NativeSessionTimeZone};
+
+    use super::*;
+    use crate::{
+        NativeFromUnixTimeResult, NativeIdentityRef, decode_native_from_unixtime_result,
+        decode_native_identity, encode_native_identity,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn bytes(value: ComputedValue) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("FROM_UNIXTIME must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+    fn decimal(negative: bool, coefficient: &[u8], scale: u32) -> Vec<u8> {
+        encode_native_identity(NativeIdentityRef::Decimal {
+            negative,
+            scale,
+            storage_scale: scale,
+            declared_shape: None,
+            coefficient,
+        })
+        .unwrap()
+    }
+    fn continuation(output: &[u8], seconds: i64, micros: u32, fsp: usize) {
+        let Some(NativeFromUnixTimeResult::Continue(epoch)) =
+            decode_native_from_unixtime_result(output)
+        else {
+            panic!("expected actual epoch continuation");
+        };
+        assert_eq!(
+            (epoch.seconds, epoch.micros, epoch.fsp as usize),
+            (seconds, micros, fsp)
+        );
+    }
+
+    #[test]
+    fn from_unixtime_heads_keep_actual_numeric_text_domains_and_truncate_handoff() {
+        let mut numeric = prepare(
+            EvaluatedBytesOp::FromUnixTimeNumericNative,
+            ExecutionLimits::default(),
+        );
+        let storage = numeric.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Int(Some(1)),
+            EvaluatedArgs::Bytes(Some(vec![255])),
+            EvaluatedArgs::Bytes(Some(
+                encode_native_identity(NativeIdentityRef::Bytes(b"1")).unwrap(),
+            )),
+        ] {
+            assert!(matches!(
+                numeric.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(numeric.kernel_invocations(), 0);
+        }
+        let mut calls = 0;
+        for (frame, expected) in [
+            (
+                encode_native_identity(NativeIdentityRef::Int(1)).unwrap(),
+                Some((1, 0, 0)),
+            ),
+            (
+                encode_native_identity(NativeIdentityRef::UInt(u64::MAX)).unwrap(),
+                None,
+            ),
+            (decimal(true, b"1", 1), Some((0, 100_000, 1))),
+            (
+                encode_native_identity(NativeIdentityRef::Real((-0.1_f64).to_bits())).unwrap(),
+                Some((0, 100_000, 6)),
+            ),
+            (
+                encode_native_identity(NativeIdentityRef::Float32(16_777_217.0_f64.to_bits()))
+                    .unwrap(),
+                Some((16_777_217, 0, 6)),
+            ),
+            (
+                encode_native_identity(NativeIdentityRef::Real(f64::NAN.to_bits())).unwrap(),
+                None,
+            ),
+            (
+                encode_native_identity(NativeIdentityRef::Real(f64::INFINITY.to_bits())).unwrap(),
+                None,
+            ),
+            (
+                encode_native_identity(NativeIdentityRef::Real(f64::NEG_INFINITY.to_bits()))
+                    .unwrap(),
+                None,
+            ),
+            (
+                decimal(false, concat!("32536771199", "9999999").as_bytes(), 7),
+                Some((32_536_771_200, 0, 6)),
+            ),
+        ] {
+            let output = bytes(
+                numeric
+                    .eval_args(EvaluatedArgs::Bytes(Some(frame)))
+                    .unwrap(),
+            );
+            match (output, expected) {
+                (Some(output), Some((seconds, micros, fsp))) => {
+                    continuation(&output, seconds, micros, fsp)
+                }
+                (None, None) => {}
+                _ => panic!("numeric source must retain its original epoch/NULL policy"),
+            }
+            calls += 1;
+            assert_eq!(numeric.kernel_invocations(), calls);
+            assert!(numeric.is_healthy());
+            assert_eq!(numeric.retained_storage().unwrap(), storage);
+        }
+        let mut text = prepare(
+            EvaluatedBytesOp::FromUnixTimeTextNative,
+            ExecutionLimits::default(),
+        );
+        let text_storage = text.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Bytes(Some(vec![255])),
+            EvaluatedArgs::Int(Some(1)),
+        ] {
+            assert!(matches!(
+                text.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(text.kernel_invocations(), 0);
+        }
+        for (index, (input, expected)) in [
+            ("-0.1", Some((0, 100_000, 6))),
+            ("1.123456789tail", Some((1, 123_457, 6))),
+            ("1.12345678xtail", None),
+            ("32536771199.9999999", Some((32_536_771_200, 0, 6))),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = bytes(
+                text.eval_args(EvaluatedArgs::Bytes(Some(input.as_bytes().to_vec())))
+                    .unwrap(),
+            );
+            match (output, expected) {
+                (Some(output), Some((seconds, micros, fsp))) => {
+                    continuation(&output, seconds, micros, fsp)
+                }
+                (None, None) => {}
+                _ => panic!("text fraction handling changed"),
+            }
+            assert_eq!(text.kernel_invocations(), index as u64 + 1);
+            assert!(text.is_healthy());
+            assert_eq!(text.retained_storage().unwrap(), text_storage);
+        }
+        // Unlike actual UInt(MAX), its textual spelling produces a truncation
+        // report with a real epoch-zero payload. Do not fabricate that payload.
+        let truncate = bytes(
+            text.eval_args(EvaluatedArgs::Bytes(Some(b"18446744073709551615".to_vec())))
+                .unwrap(),
+        )
+        .unwrap();
+        let Some(NativeFromUnixTimeResult::Truncate { epoch, message }) =
+            decode_native_from_unixtime_result(&truncate)
+        else {
+            panic!("text integer overflow must report truncation");
+        };
+        assert_eq!((epoch.seconds, epoch.micros, epoch.fsp as usize), (0, 0, 0));
+        assert_eq!(
+            message,
+            "Truncated incorrect DECIMAL value: '18446744073709551615'"
+        );
+        let mut local = prepare(
+            EvaluatedBytesOp::FromUnixTimeLocalNative,
+            ExecutionLimits::default(),
+        );
+        let local_storage = local.retained_storage().unwrap();
+        let mut invalid_message = truncate.clone();
+        *invalid_message.last_mut().unwrap() = 255;
+        assert!(matches!(
+            local.eval_args(EvaluatedArgs::TemporalValue {
+                value: invalid_message,
+                zone: NativeSessionTimeZone::utc(),
+            }),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(local.kernel_invocations(), 0);
+        let output = bytes(
+            local
+                .eval_args(EvaluatedArgs::TemporalValue {
+                    value: truncate,
+                    zone: NativeSessionTimeZone::Fixed {
+                        name: "UTC".to_owned(),
+                        offset_secs: 3600,
+                    },
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output.as_slice(), b"1970-01-01 01:00:00");
+        assert_eq!(local.kernel_invocations(), 1);
+        assert!(local.is_healthy());
+        assert_eq!(local.retained_storage().unwrap(), local_storage);
+        assert_eq!(text.kernel_invocations(), 5);
+        assert!(text.is_healthy());
+        assert_eq!(text.retained_storage().unwrap(), text_storage);
+        let mut null = prepare(
+            EvaluatedBytesOp::FromUnixTimeNullNative,
+            ExecutionLimits::default(),
+        );
+        assert!(matches!(
+            null.eval_args(EvaluatedArgs::Bytes(Some(Vec::new()))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(null.kernel_invocations(), 0);
+        assert_eq!(
+            bytes(null.eval_args(EvaluatedArgs::Bytes(None)).unwrap()),
+            None
+        );
+        assert_eq!(null.kernel_invocations(), 1);
+        assert!(null.is_healthy());
+    }
+
+    #[test]
+    fn from_unixtime_local_and_legacy_keep_actual_frames_precision_and_zone_owner_cleanup() {
+        let mut head = prepare(
+            EvaluatedBytesOp::FromUnixTimeNumericNative,
+            ExecutionLimits::default(),
+        );
+        let actual = bytes(
+            head.eval_args(EvaluatedArgs::Bytes(Some(
+                encode_native_identity(NativeIdentityRef::Int(1)).unwrap(),
+            )))
+            .unwrap(),
+        )
+        .unwrap();
+        continuation(&actual, 1, 0, 0);
+        assert_eq!(actual.len(), 14);
+        // Framing alone admits the full signed seconds domain. These modified
+        // frames are validator probes only, never fabricated business inputs.
+        let mut any_seconds = actual.clone();
+        for seconds in [i64::MIN, i64::MAX] {
+            any_seconds[1..9].copy_from_slice(&seconds.to_le_bytes());
+            assert!(crate::from_unixtime_local_native_args_valid(Some(
+                &any_seconds
+            )));
+        }
+        let mut local = prepare(
+            EvaluatedBytesOp::FromUnixTimeLocalNative,
+            ExecutionLimits::default(),
+        );
+        let storage = local.retained_storage().unwrap();
+        let mut short = actual.clone();
+        short.pop();
+        let mut bad_micro = actual.clone();
+        bad_micro[9..13].copy_from_slice(&1_000_000_u32.to_le_bytes());
+        let mut bad_fsp = actual.clone();
+        bad_fsp[13] = 7;
+        let mut trailing = actual.clone();
+        trailing.push(0);
+        assert!(matches!(
+            local.eval_args(EvaluatedArgs::Bytes(Some(actual.clone()))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        for frame in [short, bad_micro, bad_fsp, trailing] {
+            assert!(matches!(
+                local.eval_args(EvaluatedArgs::TemporalValue {
+                    value: frame,
+                    zone: NativeSessionTimeZone::utc()
+                }),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(local.kernel_invocations(), 0);
+        }
+        for (index, (zone, expected)) in [
+            (NativeSessionTimeZone::utc(), "1970-01-01 00:00:01"),
+            (
+                NativeSessionTimeZone::Fixed {
+                    name: "UTC".to_owned(),
+                    offset_secs: 3600,
+                },
+                "1970-01-01 01:00:01",
+            ),
+            (NativeSessionTimeZone::utc(), "1970-01-01 00:00:01"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = bytes(
+                local
+                    .eval_args(EvaluatedArgs::TemporalValue {
+                        value: actual.clone(),
+                        zone,
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(output, expected.as_bytes());
+            assert_eq!(local.kernel_invocations(), index as u64 + 1);
+            assert!(local.is_healthy());
+            assert_eq!(local.retained_storage().unwrap(), storage);
+        }
+        let mut legacy = prepare(
+            EvaluatedBytesOp::FromUnixTimeLegacy,
+            ExecutionLimits::default(),
+        );
+        let legacy_storage = legacy.retained_storage().unwrap();
+        // Raw coefficients retain at least their storage width; the original
+        // constructor's 0.000000001 has these nine coefficient bytes.
+        let tiny = decimal(false, b"000000001", 9);
+        let mut broken_decimal = tiny.clone();
+        // Removing coefficient bytes is still a valid raw representation.
+        // This invalid-frame probe must instead truncate the fixed header.
+        broken_decimal.truncate(26);
+        for invalid in [
+            EvaluatedArgs::Bytes(Some(tiny.clone())),
+            EvaluatedArgs::TemporalValue {
+                value: broken_decimal,
+                zone: NativeSessionTimeZone::utc(),
+            },
+            EvaluatedArgs::TemporalValue {
+                value: actual.clone(),
+                zone: NativeSessionTimeZone::utc(),
+            },
+            EvaluatedArgs::TemporalValue {
+                value: encode_native_identity(NativeIdentityRef::Int(1)).unwrap(),
+                zone: NativeSessionTimeZone::utc(),
+            },
+        ] {
+            assert!(matches!(
+                legacy.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(legacy.kernel_invocations(), 0);
+        }
+        for (index, (zone, hour)) in [
+            (NativeSessionTimeZone::utc(), 0),
+            (
+                NativeSessionTimeZone::Fixed {
+                    name: "UTC".to_owned(),
+                    offset_secs: 3600,
+                },
+                1,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Actual Decimal 0.000000001: retain the legacy nanos*1000 path,
+            // which produces one hidden microsecond while result FSP stays 0.
+            let output = bytes(
+                legacy
+                    .eval_args(EvaluatedArgs::TemporalValue {
+                        value: tiny.clone(),
+                        zone,
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            let NativeIdentityRef::Time { core, kind, fsp } =
+                decode_native_identity(&output).unwrap()
+            else {
+                panic!("legacy must return actual Time identity");
+            };
+            assert_eq!(
+                core,
+                Time::native_core_from_fields(1970, 1, 1, hour, 0, 0, 1)
+            );
+            assert_eq!((kind, fsp), (1, 0));
+            assert_eq!(legacy.kernel_invocations(), index as u64 + 1);
+            assert!(legacy.is_healthy());
+            assert_eq!(legacy.retained_storage().unwrap(), legacy_storage);
+        }
+        assert_eq!(
+            bytes(
+                legacy
+                    .eval_args(EvaluatedArgs::TemporalValue {
+                        value: decimal(true, b"1", 0),
+                        zone: NativeSessionTimeZone::utc(),
+                    })
+                    .unwrap()
+            ),
+            None
+        );
+        assert_eq!(legacy.kernel_invocations(), 3);
+        assert!(legacy.is_healthy());
+        assert_eq!(legacy.retained_storage().unwrap(), legacy_storage);
+        for operation in [
+            EvaluatedBytesOp::FromUnixTimeLocalNative,
+            EvaluatedBytesOp::FromUnixTimeLegacy,
+        ] {
+            let mut bounded = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = bounded.retained_storage().unwrap();
+            let frame = if operation == EvaluatedBytesOp::FromUnixTimeLocalNative {
+                actual.clone()
+            } else {
+                tiny.clone()
+            };
+            let mut name = String::with_capacity(128 * 1024);
+            name.push_str("UTC");
+            assert!(name.capacity() > 64 * 1024 && name.len() == 3);
+            assert!(matches!(
+                bounded.eval_args(EvaluatedArgs::TemporalValue {
+                    value: frame.clone(),
+                    zone: NativeSessionTimeZone::Fixed {
+                        name,
+                        offset_secs: 0
+                    },
+                }),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(bounded.kernel_invocations(), 0);
+            assert!(bounded.is_healthy());
+            assert_eq!(bounded.retained_storage().unwrap(), storage);
+            assert!(
+                bytes(
+                    bounded
+                        .eval_args(EvaluatedArgs::TemporalValue {
+                            value: frame,
+                            zone: NativeSessionTimeZone::utc()
+                        })
+                        .unwrap()
+                )
+                .is_some()
+            );
+            assert_eq!(bounded.kernel_invocations(), 1);
+            assert!(bounded.is_healthy());
+            assert_eq!(bounded.retained_storage().unwrap(), storage);
+        }
+    }
+}

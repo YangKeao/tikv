@@ -1570,6 +1570,11 @@ pub enum EvaluatedBytesOp {
     UnixTimestampValueNative,
     UnixTimestampIntLegacy,
     UnixTimestampDecLegacy,
+    FromUnixTimeNumericNative,
+    FromUnixTimeTextNative,
+    FromUnixTimeLocalNative,
+    FromUnixTimeLegacy,
+    FromUnixTimeNullNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1633,6 +1638,31 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::FromUnixTimeNumericNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FromUnixTimeNumericNative,
+                );
+            }
+            Self::FromUnixTimeTextNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FromUnixTimeTextNative,
+                );
+            }
+            Self::FromUnixTimeLocalNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FromUnixTimeLocalNative,
+                );
+            }
+            Self::FromUnixTimeLegacy => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FromUnixTimeLegacy,
+                );
+            }
+            Self::FromUnixTimeNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FromUnixTimeNullNative,
+                );
+            }
             Self::UnixTimestampNowNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::UnixTimestampNowNative,
@@ -3718,6 +3748,8 @@ impl EvaluatedBytesOp {
                     | Self::UnixTimestampValueNative
                     | Self::UnixTimestampIntLegacy
                     | Self::UnixTimestampDecLegacy
+                    | Self::FromUnixTimeLocalNative
+                    | Self::FromUnixTimeLegacy
             )
     }
 
@@ -3749,6 +3781,8 @@ impl EvaluatedBytesOp {
             Self::UnixTimestampValueNative
                 | Self::UnixTimestampIntLegacy
                 | Self::UnixTimestampDecLegacy
+                | Self::FromUnixTimeLocalNative
+                | Self::FromUnixTimeLegacy
         ) {
             return EvaluatedArgsRole::TemporalValue;
         }
@@ -4209,6 +4243,13 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::FromUnixTimeNumericNative => {
+                crate::impl_time::from_unixtime_numeric_native_fn_meta()
+            }
+            Self::FromUnixTimeTextNative => crate::impl_time::from_unixtime_text_native_fn_meta(),
+            Self::FromUnixTimeLocalNative => crate::impl_time::from_unixtime_local_native_fn_meta(),
+            Self::FromUnixTimeLegacy => crate::impl_time::from_unixtime_legacy_fn_meta(),
+            Self::FromUnixTimeNullNative => crate::impl_time::from_unixtime_null_native_fn_meta(),
             Self::UnixTimestampNowNative => crate::impl_time::unix_timestamp_now_native_fn_meta(),
             Self::UnixTimestampNullNative => crate::impl_time::unix_timestamp_null_native_fn_meta(),
             Self::UnixTimestampParseNative => {
@@ -4839,6 +4880,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::FromUnixTimeNumericNative
+            | Self::FromUnixTimeTextNative
+            | Self::FromUnixTimeLocalNative
+            | Self::FromUnixTimeLegacy
+            | Self::FromUnixTimeNullNative => EvalType::Bytes,
             Self::UnixTimestampNowNative
             | Self::UnixTimestampNullNative
             | Self::UnixTimestampParseNative
@@ -5280,6 +5326,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::FromUnixTimeNumericNative
+            | Self::FromUnixTimeTextNative
+            | Self::FromUnixTimeLocalNative
+            | Self::FromUnixTimeLegacy
+            | Self::FromUnixTimeNullNative => &[EvalType::Bytes],
             Self::UnixTimestampNowNative => &[EvalType::Int, EvalType::Int],
             Self::UnixTimestampParseNative => &[EvalType::Bytes, EvalType::Int],
             Self::UnixTimestampNullNative
@@ -6754,6 +6805,49 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        match operation {
+            EvaluatedBytesOp::FromUnixTimeNumericNative => {
+                return match self {
+                    Self::Bytes(value) => {
+                        crate::from_unixtime_numeric_native_args_valid(value.as_deref())
+                    }
+                    _ => false,
+                };
+            }
+            EvaluatedBytesOp::FromUnixTimeTextNative => {
+                return match self {
+                    Self::Bytes(value) => {
+                        crate::from_unixtime_text_native_args_valid(value.as_deref())
+                    }
+                    _ => false,
+                };
+            }
+            EvaluatedBytesOp::FromUnixTimeNullNative => {
+                return match self {
+                    Self::Bytes(value) => {
+                        crate::from_unixtime_null_native_args_valid(value.as_deref())
+                    }
+                    _ => false,
+                };
+            }
+            EvaluatedBytesOp::FromUnixTimeLocalNative => {
+                return match self {
+                    Self::TemporalValue { value, .. } => {
+                        crate::from_unixtime_local_native_args_valid(Some(value))
+                    }
+                    _ => false,
+                };
+            }
+            EvaluatedBytesOp::FromUnixTimeLegacy => {
+                return match self {
+                    Self::TemporalValue { value, .. } => {
+                        crate::from_unixtime_legacy_args_valid(Some(value))
+                    }
+                    _ => false,
+                };
+            }
+            _ => {}
+        }
         if operation == EvaluatedBytesOp::UnixTimestampNowNative {
             return match self {
                 Self::Int2(secs, nanos) => {
@@ -9498,6 +9592,52 @@ impl EvaluatedBytesWorker {
         if self.operation.uses_native_temporal_zone() {
             budget.check_output(0, input_bytes)?;
         }
+        // These Values recipes have bounded replies but no invocation metadata.
+        // Keep the domain preflight in the common ready path so facade and direct
+        // ready calls both check the actual input capacity before any dispatch.
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::FromUnixTimeNumericNative
+                | EvaluatedBytesOp::FromUnixTimeTextNative
+                | EvaluatedBytesOp::FromUnixTimeNullNative
+        ) {
+            let [ScalarValue::Bytes(value)] = &ready[..arity] else {
+                return Err(LocalError::InvalidSpec(
+                    "FROM_UNIXTIME requires its unary Bytes shape".into(),
+                ));
+            };
+            let bound = match self.operation {
+                EvaluatedBytesOp::FromUnixTimeNumericNative
+                    if crate::from_unixtime_numeric_native_args_valid(value.as_deref()) =>
+                {
+                    14
+                }
+                EvaluatedBytesOp::FromUnixTimeTextNative
+                    if crate::from_unixtime_text_native_args_valid(value.as_deref()) =>
+                {
+                    value
+                        .as_ref()
+                        .ok_or_else(|| {
+                            LocalError::InvalidSpec("FROM_UNIXTIME text is absent".into())
+                        })?
+                        .len()
+                        .checked_add(64)
+                        .map(|bytes| bytes.max(14))
+                        .ok_or_else(evaluated_ascii_storage_overflow)?
+                }
+                EvaluatedBytesOp::FromUnixTimeNullNative
+                    if crate::from_unixtime_null_native_args_valid(value.as_deref()) =>
+                {
+                    0
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "FROM_UNIXTIME operand differs from its bounded domain".into(),
+                    ));
+                }
+            };
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -9913,6 +10053,55 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::FromUnixTimeNumericNative
+                        | EvaluatedBytesOp::FromUnixTimeTextNative
+                ) {
+                    let valid = match value {
+                        None => true,
+                        Some(bytes) => match crate::decode_native_from_unixtime_result(bytes) {
+                            Some(crate::NativeFromUnixTimeResult::Continue(_)) => true,
+                            Some(crate::NativeFromUnixTimeResult::Truncate { .. }) => {
+                                self.operation == EvaluatedBytesOp::FromUnixTimeTextNative
+                            }
+                            None => false,
+                        },
+                    };
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "native FROM_UNIXTIME returned the wrong epoch report".into(),
+                        ));
+                    }
+                }
+                if self.operation == EvaluatedBytesOp::FromUnixTimeLocalNative
+                    && value.is_some_and(|bytes| std::str::from_utf8(bytes).is_err())
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native FROM_UNIXTIME local result is not UTF-8".into(),
+                    ));
+                }
+                if self.operation == EvaluatedBytesOp::FromUnixTimeLegacy
+                    && value.is_some_and(|bytes| {
+                        !matches!(
+                            crate::decode_native_identity(bytes),
+                            Ok(crate::NativeIdentityRef::Time {
+                                kind: 1,
+                                fsp: 0,
+                                ..
+                            })
+                        )
+                    })
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "legacy FROM_UNIXTIME returned the wrong temporal identity".into(),
+                    ));
+                }
+                if self.operation == EvaluatedBytesOp::FromUnixTimeNullNative && value.is_some() {
+                    return Err(LocalError::InvalidBatch(
+                        "native FROM_UNIXTIME NULL returned a value".into(),
+                    ));
+                }
                 if matches!(
                     self.operation,
                     EvaluatedBytesOp::UnixTimestampNowNative

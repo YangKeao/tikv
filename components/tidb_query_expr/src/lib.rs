@@ -70,6 +70,14 @@ pub use native_duration_parse::{
 
 mod native_format;
 
+mod native_from_unixtime;
+pub use native_from_unixtime::{
+    NativeFromUnixTimeEpoch, NativeFromUnixTimeResult, decode_native_from_unixtime_result,
+    from_unixtime_legacy_args_valid, from_unixtime_local_native_args_valid,
+    from_unixtime_null_native_args_valid, from_unixtime_numeric_native_args_valid,
+    from_unixtime_text_native_args_valid, native_from_unixtime_instant_to_local,
+};
+
 mod native_identity;
 pub use native_identity::{
     NativeIdentityFrameError, NativeIdentityRef, decode_native_identity, encode_native_identity,
@@ -244,11 +252,13 @@ pub use self::{
         current_date_native_fn_meta, current_time_with_fsp_native_fn_meta,
         current_time_without_fsp_native_fn_meta, date_core_native_args_valid,
         date_core_native_fn_meta, date_core_predicate_legacy_fn_meta, date_literal_native_fn_meta,
-        decode_native_time_result, microsecond_legacy_fn_meta, microsecond_native_fn_meta,
-        native_clock_args_valid, native_clock_fsp_args_valid, native_time_diff_args_valid,
-        native_time_result_valid, native_tso_args_valid, now_native_fn_meta,
-        sub_time_native_fn_meta, sysdate_native_fn_meta, time_add_right_datetime_native_fn_meta,
-        time_native_fn_meta, timestamp_add_native_fn_meta,
+        decode_native_time_result, from_unixtime_legacy_fn_meta,
+        from_unixtime_local_native_fn_meta, from_unixtime_null_native_fn_meta,
+        from_unixtime_numeric_native_fn_meta, from_unixtime_text_native_fn_meta,
+        microsecond_legacy_fn_meta, microsecond_native_fn_meta, native_clock_args_valid,
+        native_clock_fsp_args_valid, native_time_diff_args_valid, native_time_result_valid,
+        native_tso_args_valid, now_native_fn_meta, sub_time_native_fn_meta, sysdate_native_fn_meta,
+        time_add_right_datetime_native_fn_meta, time_native_fn_meta, timestamp_add_native_fn_meta,
         timestamp_add_prefix_null_native_fn_meta, timestamp_literal_native_fn_meta,
         timestamp_null_native_fn_meta, timestamp1_native_fn_meta, timestamp2_add_native_fn_meta,
         timestamp2_base_native_fn_meta, unix_timestamp_dec_legacy_fn_meta,
