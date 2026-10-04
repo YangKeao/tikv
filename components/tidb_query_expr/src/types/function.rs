@@ -515,6 +515,7 @@ pub enum LocalFunctionId {
     IfNullFinishNative,
     IfHeadNative,
     IfFinishNative,
+    CoalesceEndNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

@@ -2233,3 +2233,221 @@ mod if_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod coalesce_worker_tests {
+    use super::*;
+    use crate::{
+        NativeIdentityRef, NativeIfNullHeadResult, decode_native_if_null_head_result,
+        encode_native_identity,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn bytes(value: ComputedValue) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("COALESCE stages must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+
+    #[test]
+    fn coalesce_empty_tail_is_one_real_zero_arity_call_after_actual_candidate_reports() {
+        assert!(matches!(
+            prepare_evaluated_bytes(
+                EvaluatedBytesOp::CoalesceEndNative,
+                LocalCompileContext {
+                    limits: CompileLimits {
+                        max_nodes: 0,
+                        max_depth: 1
+                    }
+                },
+                ExecutionLimits::default(),
+                usize::MAX,
+            ),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        // One node/depth suffices: no fabricated input slot, constant result or
+        // extra finish call may replace the real zero-argument terminal call.
+        let mut end = prepare_evaluated_bytes(
+            EvaluatedBytesOp::CoalesceEndNative,
+            LocalCompileContext {
+                limits: CompileLimits {
+                    max_nodes: 1,
+                    max_depth: 1,
+                },
+            },
+            ExecutionLimits::default(),
+            usize::MAX,
+        )
+        .unwrap();
+        let end_storage = end.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Bytes(Some(Vec::new())),
+            EvaluatedArgs::Bytes(Some(
+                encode_native_identity(NativeIdentityRef::Int(0)).unwrap(),
+            )),
+            EvaluatedArgs::Int(None),
+            EvaluatedArgs::Bytes2(None, None),
+            EvaluatedArgs::NullWitness(None),
+        ] {
+            assert!(matches!(
+                end.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(end.kernel_invocations(), 0);
+        }
+        assert!(matches!(
+            end.eval_one(None),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(end.kernel_invocations(), 0);
+        let mut head = prepare(
+            EvaluatedBytesOp::IfNullHeadNative,
+            ExecutionLimits::default(),
+        );
+        let head_storage = head.retained_storage().unwrap();
+        let opaque = encode_native_identity(NativeIdentityRef::Decimal {
+            negative: true,
+            scale: u32::MAX,
+            storage_scale: 9,
+            declared_shape: Some((-1, 99)),
+            coefficient: b"\xff\0+",
+        })
+        .unwrap();
+        for (candidates, expected, head_calls, end_calls) in [
+            (
+                vec![None, None, Some(opaque.clone()), None],
+                Some(opaque.clone()),
+                3,
+                0,
+            ),
+            (vec![None, None], None, 5, 1),
+            (vec![], None, 5, 2),
+        ] {
+            let mut selected = None;
+            for candidate in candidates {
+                let report =
+                    bytes(head.eval_args(EvaluatedArgs::Bytes(candidate)).unwrap()).unwrap();
+                match decode_native_if_null_head_result(&report).unwrap() {
+                    NativeIfNullHeadResult::NeedSecond => {}
+                    NativeIfNullHeadResult::Done(frame) => {
+                        selected = Some(frame.to_vec());
+                        break;
+                    }
+                }
+            }
+            let result = match selected {
+                Some(frame) => Some(frame),
+                None => bytes(end.eval_args(EvaluatedArgs::NoArgs).unwrap()),
+            };
+            assert_eq!(result, expected);
+            assert_eq!(head.kernel_invocations(), head_calls);
+            assert_eq!(end.kernel_invocations(), end_calls);
+            assert!(head.is_healthy() && end.is_healthy());
+            assert_eq!(head.retained_storage().unwrap(), head_storage);
+            assert_eq!(end.retained_storage().unwrap(), end_storage);
+        }
+    }
+
+    #[test]
+    fn coalesce_empty_output_and_candidate_capacity_budgets_preserve_dispatch_and_reuse() {
+        let zero_bytes = ExecutionLimits {
+            max_retained_bytes: 0,
+            ..ExecutionLimits::default()
+        };
+        let mut end = prepare(EvaluatedBytesOp::CoalesceEndNative, zero_bytes);
+        let storage = end.retained_storage().unwrap();
+        // The End payload bound is zero, but the existing driver precharges
+        // bytes_min_storage_bytes(1, 0): NULL still owns offset/bitmap row
+        // metadata. Its leaf result_precharge refuses zero retained budget
+        // before the wrapper; do not special-case away that shared floor.
+        for _ in 0..2 {
+            assert!(matches!(
+                end.eval_args(EvaluatedArgs::NoArgs),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(end.kernel_invocations(), 0);
+            assert!(end.is_healthy());
+            assert_eq!(end.retained_storage().unwrap(), storage);
+        }
+        let mut end = prepare(
+            EvaluatedBytesOp::CoalesceEndNative,
+            ExecutionLimits::default(),
+        );
+        let storage = end.retained_storage().unwrap();
+        for calls in 1..=2 {
+            assert_eq!(bytes(end.eval_args(EvaluatedArgs::NoArgs).unwrap()), None);
+            assert_eq!(end.kernel_invocations(), calls);
+            assert!(end.is_healthy());
+            assert_eq!(end.retained_storage().unwrap(), storage);
+        }
+        let mut head_zero = prepare(EvaluatedBytesOp::IfNullHeadNative, zero_bytes);
+        assert!(matches!(
+            head_zero.eval_one(None),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(
+            head_zero.kernel_invocations(),
+            0,
+            "a candidate NeedSecond report still needs its real output byte"
+        );
+        assert!(head_zero.is_healthy());
+        let mut stopped = prepare(
+            EvaluatedBytesOp::CoalesceEndNative,
+            ExecutionLimits {
+                max_steps: 0,
+                ..ExecutionLimits::default()
+            },
+        );
+        let storage = stopped.retained_storage().unwrap();
+        assert!(matches!(
+            stopped.eval_args(EvaluatedArgs::NoArgs),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(stopped.kernel_invocations(), 0);
+        assert!(stopped.is_healthy());
+        assert_eq!(stopped.retained_storage().unwrap(), storage);
+        // The CPP worker has execution limits, not the frontend's pool slots.
+        let mut head = prepare(
+            EvaluatedBytesOp::IfNullHeadNative,
+            ExecutionLimits {
+                max_retained_bytes: 64 * 1024,
+                ..ExecutionLimits::default()
+            },
+        );
+        let storage = head.retained_storage().unwrap();
+        let prefix = bytes(head.eval_one(None).unwrap()).unwrap();
+        assert!(matches!(
+            decode_native_if_null_head_result(&prefix),
+            Some(NativeIfNullHeadResult::NeedSecond)
+        ));
+        let mut candidate = encode_native_identity(NativeIdentityRef::MaxValue).unwrap();
+        candidate.reserve_exact(128 * 1024);
+        assert!(candidate.capacity() > 64 * 1024 && candidate.len() == 1);
+        assert!(matches!(
+            head.eval_one(Some(candidate)),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert_eq!(head.kernel_invocations(), 1);
+        assert!(head.is_healthy());
+        assert_eq!(head.retained_storage().unwrap(), storage);
+        let candidate = encode_native_identity(NativeIdentityRef::MaxValue).unwrap();
+        let output = bytes(head.eval_one(Some(candidate.clone())).unwrap()).unwrap();
+        assert!(
+            matches!(decode_native_if_null_head_result(&output), Some(NativeIfNullHeadResult::Done(frame)) if frame == candidate.as_slice())
+        );
+        assert_eq!(head.kernel_invocations(), 2);
+        assert!(head.is_healthy());
+        assert_eq!(head.retained_storage().unwrap(), storage);
+    }
+}

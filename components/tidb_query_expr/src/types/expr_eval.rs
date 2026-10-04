@@ -315,6 +315,10 @@ fn evaluated_ready_args_match(
     use tidb_query_datatype::codec::collation::native::NativeCollation;
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::CoalesceEndNative, EvaluatedArgsRole::NoArgs) => {
+            types.is_empty() && operation.call_count() == 1
+        }
+        (EvaluatedBytesOp::CoalesceEndNative, _) => false,
         (EvaluatedBytesOp::IfHeadNative, EvaluatedArgsRole::Values) => {
             types.len() == 1 && operation.call_count() == 1
         }
@@ -1216,6 +1220,10 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::CoalesceEndNative, EvaluatedArgsRole::NoArgs) => {
+            arity == 0 && calls == 1
+        }
+        (EvaluatedBytesOp::CoalesceEndNative, _) => false,
         (EvaluatedBytesOp::IfHeadNative, EvaluatedArgsRole::Values) => arity == 1 && calls == 1,
         (EvaluatedBytesOp::IfFinishNative, EvaluatedArgsRole::Values) => arity == 2 && calls == 1,
         (EvaluatedBytesOp::IfHeadNative | EvaluatedBytesOp::IfFinishNative, _) => false,

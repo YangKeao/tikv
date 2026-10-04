@@ -417,6 +417,16 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  COALESCE composes the unchanged IFNULL head for actual candidates with one
+  `CoalesceEndNative` NoArgs/zero-input/one-call/OwnBytes profile for a genuine
+  empty suffix. Its wrapper delegates `impl_compare::coalesce_bytes(&[])`;
+  three wire COALESCE loops share the existing nullable chooser. Computed head
+  reports drive iteration, not a host non-NULL scan or a fabricated NULL operand.
+  The first scoped pack holds the selected columns across successive heads and
+  End without recursive continuation growth. End must return SQL NULL and has
+  zero payload preflight, but retains the existing Bytes FnCall row-metadata
+  storage floor and postflight. No new carrier, codec, ControlKind or PB admission
+  is introduced; native typed return-FSP projection stays an explicit adapter.
   IF adds two closed Values/OwnBytes profiles in `native_if.rs` and
   `impl_control.rs`: Head accepts only an actually normalized Int condition
   (None/0/1), returning present [1] Else or [0] Then; Finish accepts the entire

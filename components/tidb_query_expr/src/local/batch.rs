@@ -1579,6 +1579,7 @@ pub enum EvaluatedBytesOp {
     IfNullFinishNative,
     IfHeadNative,
     IfFinishNative,
+    CoalesceEndNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1642,6 +1643,11 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::CoalesceEndNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::CoalesceEndNative,
+                );
+            }
             Self::IfHeadNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::IfHeadNative);
             }
@@ -3796,6 +3802,9 @@ impl EvaluatedBytesOp {
     }
 
     pub(crate) fn input_role(self) -> EvaluatedArgsRole {
+        if self == Self::CoalesceEndNative {
+            return EvaluatedArgsRole::NoArgs;
+        }
         if matches!(
             self,
             Self::UnixTimestampValueNative
@@ -4263,6 +4272,7 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::CoalesceEndNative => crate::impl_compare::coalesce_end_native_fn_meta(),
             Self::IfHeadNative => crate::impl_control::if_head_native_fn_meta(),
             Self::IfFinishNative => crate::impl_control::if_finish_native_fn_meta(),
             Self::IfNullHeadNative => crate::impl_control::if_null_head_native_fn_meta(),
@@ -4904,6 +4914,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::CoalesceEndNative => EvalType::Bytes,
             Self::IfHeadNative | Self::IfFinishNative => EvalType::Bytes,
             Self::IfNullHeadNative | Self::IfNullFinishNative => EvalType::Bytes,
             Self::FromUnixTimeNumericNative
@@ -5352,6 +5363,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::CoalesceEndNative => &[],
             Self::IfHeadNative => &[EvalType::Int],
             Self::IfFinishNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::IfNullHeadNative => &[EvalType::Bytes],
@@ -6835,6 +6847,9 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::CoalesceEndNative {
+            return matches!(self, Self::NoArgs);
+        }
         if operation == EvaluatedBytesOp::IfHeadNative {
             return match self {
                 Self::Int(value) => crate::if_head_native_args_valid(*value),
@@ -9754,6 +9769,14 @@ impl EvaluatedBytesWorker {
             // The original branch report and selected operand both remain live.
             budget.check_output(bound, input_bytes)?;
         }
+        if self.operation == EvaluatedBytesOp::CoalesceEndNative {
+            if arity != 0 {
+                return Err(LocalError::InvalidSpec(
+                    "COALESCE end requires the actual empty argument suffix".into(),
+                ));
+            }
+            budget.check_output(0, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -10169,6 +10192,11 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation == EvaluatedBytesOp::CoalesceEndNative && value.is_some() {
+                    return Err(LocalError::InvalidBatch(
+                        "COALESCE end returned a present value".into(),
+                    ));
+                }
                 if self.operation == EvaluatedBytesOp::IfHeadNative
                     && value
                         .is_none_or(|bytes| crate::decode_native_if_head_result(bytes).is_none())

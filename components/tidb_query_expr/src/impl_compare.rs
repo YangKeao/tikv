@@ -516,8 +516,9 @@ impl CmpOp for CmpOpNullEq {
 #[inline]
 pub fn coalesce<T: Evaluable + EvaluableRet>(args: &[Option<&T>]) -> Result<Option<T>> {
     for arg in args {
-        if arg.is_some() {
-            return Ok(arg.cloned());
+        match crate::native_if_null_choose_first(*arg) {
+            crate::NativeIfNullChoice::Done(value) => return Ok(Some(value).cloned()),
+            crate::NativeIfNullChoice::NeedSecond => continue,
         }
     }
     Ok(None)
@@ -527,8 +528,9 @@ pub fn coalesce<T: Evaluable + EvaluableRet>(args: &[Option<&T>]) -> Result<Opti
 #[inline]
 pub fn coalesce_bytes(args: &[Option<BytesRef>]) -> Result<Option<Bytes>> {
     for arg in args {
-        if arg.is_some() {
-            return Ok(arg.map(|x| x.to_vec()));
+        match crate::native_if_null_choose_first(*arg) {
+            crate::NativeIfNullChoice::Done(value) => return Ok(Some(value.to_vec())),
+            crate::NativeIfNullChoice::NeedSecond => continue,
         }
     }
     Ok(None)
@@ -538,11 +540,19 @@ pub fn coalesce_bytes(args: &[Option<BytesRef>]) -> Result<Option<Bytes>> {
 #[inline]
 pub fn coalesce_json(args: &[Option<JsonRef>]) -> Result<Option<Json>> {
     for arg in args {
-        if arg.is_some() {
-            return Ok(arg.map(|x| x.to_owned()));
+        match crate::native_if_null_choose_first(*arg) {
+            crate::NativeIfNullChoice::Done(value) => return Ok(Some(value.to_owned())),
+            crate::NativeIfNullChoice::NeedSecond => continue,
         }
     }
     Ok(None)
+}
+
+/// The actual remaining candidate list is empty; no nullable operand is
+/// fabricated to witness exhaustion. Use the existing empty-list policy.
+#[rpn_fn(nullable)]
+fn coalesce_end_native() -> Result<Option<Bytes>> {
+    coalesce_bytes(&[])
 }
 
 #[rpn_fn(nullable, varg, min_args = 2)]
@@ -1625,6 +1635,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn coalesce_native_end_and_shared_wire_selection_keep_ownership() {
+        assert_eq!(coalesce_end_native().unwrap(), None);
+        assert_eq!(coalesce::<Int>(&[]).unwrap(), None);
+        assert_eq!(coalesce_bytes(&[]).unwrap(), None);
+        assert_eq!(coalesce_json(&[]).unwrap(), None);
+        assert_eq!(
+            coalesce::<Int>(&[None, Some(&0), Some(&i64::MAX)]).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            coalesce_bytes(&[None, Some(b""), Some(b"dead")]).unwrap(),
+            Some(Vec::new())
+        );
+
+        let mut chosen = vec![255, 0, 7];
+        let dead = vec![9, 8, 6];
+        let bytes = coalesce_bytes(&[None, Some(&chosen), Some(&dead)])
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, chosen);
+        assert_ne!(bytes.as_ptr(), chosen.as_ptr());
+        // Only the winning value is owned by the output. Candidate borrows do
+        // not consume either input, and later input mutation/drop cannot alter it.
+        chosen[0] = 1;
+        assert_eq!(dead, [9, 8, 6]);
+        drop(chosen);
+        drop(dead);
+        assert_eq!(bytes, [255, 0, 7]);
+
+        let decimal = Decimal::from(7_i64);
+        let decimal_dead = Decimal::from(9_i64);
+        assert_eq!(
+            coalesce::<Decimal>(&[None, Some(&decimal), Some(&decimal_dead)]).unwrap(),
+            Some(decimal.clone())
+        );
+        let json_null: Json = "null".parse().unwrap();
+        let json_dead: Json = "true".parse().unwrap();
+        let json =
+            coalesce_json(&[None, Some(json_null.as_ref()), Some(json_dead.as_ref())]).unwrap();
+        assert_eq!(json, Some(json_null)); // JSON null is a present first value.
     }
 
     #[test]
