@@ -135,6 +135,12 @@ pub use native_time_literal::{
 mod native_time_parse;
 pub use native_time_parse::{NativeDurationDateTime, parse_native_duration_datetime};
 
+mod native_timestamp;
+pub use native_timestamp::{
+    NativeTimestampResult, decode_native_timestamp_result, timestamp_add_native_args_valid,
+    timestamp_null_native_args_valid, timestamp_parse_native_args_valid,
+};
+
 mod native_timestamp_add;
 pub use native_timestamp_add::{
     NativeTimestampAddResult, decode_native_timestamp_add_result, native_timestamp_add_args_valid,
@@ -236,8 +242,10 @@ pub use self::{
         sub_time_native_fn_meta, sysdate_native_fn_meta, time_add_right_datetime_native_fn_meta,
         time_native_fn_meta, timestamp_add_native_fn_meta,
         timestamp_add_prefix_null_native_fn_meta, timestamp_literal_native_fn_meta,
-        utc_date_native_fn_meta, utc_time_null_native_fn_meta, utc_time_with_fsp_native_fn_meta,
-        utc_time_without_fsp_native_fn_meta, utc_timestamp_native_fn_meta,
+        timestamp_null_native_fn_meta, timestamp1_native_fn_meta, timestamp2_add_native_fn_meta,
+        timestamp2_base_native_fn_meta, utc_date_native_fn_meta, utc_time_null_native_fn_meta,
+        utc_time_with_fsp_native_fn_meta, utc_time_without_fsp_native_fn_meta,
+        utc_timestamp_native_fn_meta,
     },
     types::*,
 };

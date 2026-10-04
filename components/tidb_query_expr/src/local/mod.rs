@@ -630,3 +630,344 @@ mod convert_tz_tests {
         // The local step budget is not the frontend pool's zero-slot policy.
     }
 }
+
+#[cfg(test)]
+mod timestamp_worker_tests {
+    use tidb_query_datatype::codec::mysql::time::NativeSessionTimeZone;
+
+    use super::*;
+    use crate::{
+        NativeIdentityRef, NativeTimestampResult, decode_native_timestamp_result,
+        encode_native_identity,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+
+    fn parse_args(value: &str, is_float: bool, zone: NativeSessionTimeZone) -> EvaluatedArgs {
+        EvaluatedArgs::TemporalParseText {
+            value: value.as_bytes().to_vec(),
+            is_float,
+            zone,
+        }
+    }
+
+    fn bytes(value: ComputedValue) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("TIMESTAMP must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+
+    #[test]
+    fn timestamp_heads_preserve_source_kind_zone_rebinding_and_resource_cleanup() {
+        for operation in [
+            EvaluatedBytesOp::Timestamp1Native,
+            EvaluatedBytesOp::Timestamp2BaseNative,
+        ] {
+            let mut worker = prepare(operation, ExecutionLimits::default());
+            let storage = worker.retained_storage().unwrap();
+            for invalid in [
+                EvaluatedArgs::BytesInt(Some(b"2020-01-01".to_vec()), Some(0)),
+                EvaluatedArgs::BytesInt(None, Some(1)),
+                EvaluatedArgs::TemporalText {
+                    value: b"2020-01-01".to_vec(),
+                    modes: 0,
+                    zone: NativeSessionTimeZone::utc(),
+                },
+                EvaluatedArgs::TemporalParseText {
+                    value: vec![255],
+                    is_float: false,
+                    zone: NativeSessionTimeZone::utc(),
+                },
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            // Same source text, distinct actual SQL source kinds. The numeric
+            // result is pinned by the native timestamp(0.123) source test.
+            let output = bytes(
+                worker
+                    .eval_args(parse_args("0.123", true, NativeSessionTimeZone::utc()))
+                    .unwrap(),
+            )
+            .expect("head reports are non-NULL");
+            match decode_native_timestamp_result(&output) {
+                Some(NativeTimestampResult::Value(value))
+                    if operation == EvaluatedBytesOp::Timestamp1Native =>
+                {
+                    assert_eq!(value, "0000-00-00 00:00:00.123");
+                }
+                Some(NativeTimestampResult::Base(value))
+                    if operation == EvaluatedBytesOp::Timestamp2BaseNative =>
+                {
+                    assert_eq!(output.len(), 11);
+                    assert_eq!(output[0], 15);
+                    assert_eq!(value.fsp, 3);
+                }
+                _ => panic!("unexpected numeric-source TIMESTAMP head report"),
+            }
+            let output = bytes(
+                worker
+                    .eval_args(parse_args("0.123", false, NativeSessionTimeZone::utc()))
+                    .unwrap(),
+            )
+            .expect("warnings are non-NULL reports");
+            assert!(
+                matches!(decode_native_timestamp_result(&output), Some(NativeTimestampResult::Warning { code: 1292, message })
+                if message == "Incorrect datetime value: '0.123'")
+            );
+            assert_eq!(worker.kernel_invocations(), 2);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        let named = |name: &str| NativeSessionTimeZone::Named(name.parse().unwrap());
+        let mut worker = prepare(
+            EvaluatedBytesOp::Timestamp1Native,
+            ExecutionLimits::default(),
+        );
+        let storage = worker.retained_storage().unwrap();
+        let summer = "2020-07-01 00:00:00+00:00";
+        for (index, (text, zone, expected)) in [
+            (summer, named("Europe/London"), Some("2020-07-01 01:00:00")),
+            ("bad", named("America/Los_Angeles"), None),
+            (
+                summer,
+                NativeSessionTimeZone::Fixed {
+                    name: "America/Los_Angeles".to_owned(),
+                    offset_secs: 20_715,
+                },
+                Some("2020-07-01 05:45:15"),
+            ),
+            (
+                summer,
+                named("America/Los_Angeles"),
+                Some("2020-06-30 17:00:00"),
+            ),
+            (summer, named("Europe/London"), Some("2020-07-01 01:00:00")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = bytes(worker.eval_args(parse_args(text, false, zone)).unwrap())
+                .expect("head reports are non-NULL");
+            match (decode_native_timestamp_result(&output), expected) {
+                (Some(NativeTimestampResult::Value(value)), Some(expected)) => {
+                    assert_eq!(value, expected)
+                }
+                (
+                    Some(NativeTimestampResult::Warning {
+                        code: 1292,
+                        message,
+                    }),
+                    None,
+                ) => assert_eq!(message, "Incorrect datetime value: 'bad'"),
+                _ => panic!("unexpected zone-bound TIMESTAMP result"),
+            }
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        for operation in [
+            EvaluatedBytesOp::Timestamp1Native,
+            EvaluatedBytesOp::Timestamp2BaseNative,
+        ] {
+            let mut bounded = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = bounded.retained_storage().unwrap();
+            let mut name = String::with_capacity(128 * 1024);
+            name.push_str("UTC");
+            assert!(name.capacity() > 64 * 1024 && name.len() == 3);
+            assert!(matches!(
+                bounded.eval_args(parse_args(
+                    summer,
+                    false,
+                    NativeSessionTimeZone::Fixed {
+                        name,
+                        offset_secs: 0
+                    }
+                )),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(bounded.kernel_invocations(), 0);
+            assert!(bounded.is_healthy());
+            assert_eq!(bounded.retained_storage().unwrap(), storage);
+            let output = bytes(
+                bounded
+                    .eval_args(parse_args(summer, false, named("Europe/London")))
+                    .unwrap(),
+            )
+            .expect("head reports are non-NULL");
+            assert!(matches!(
+                decode_native_timestamp_result(&output),
+                Some(NativeTimestampResult::Value(_)) | Some(NativeTimestampResult::Base(_))
+            ));
+            assert_eq!(bounded.kernel_invocations(), 1);
+            assert!(bounded.is_healthy());
+            assert_eq!(bounded.retained_storage().unwrap(), storage);
+        }
+    }
+
+    #[test]
+    fn timestamp_actual_head_frames_feed_add_and_null_profiles_without_fabricated_bases() {
+        let mut null = prepare(
+            EvaluatedBytesOp::TimestampNullNative,
+            ExecutionLimits::default(),
+        );
+        let storage = null.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(Some(Vec::new())),
+            EvaluatedArgs::Bytes(Some(b"x".to_vec())),
+            EvaluatedArgs::BytesInt(None, None),
+        ] {
+            assert!(matches!(
+                null.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(null.kernel_invocations(), 0);
+        }
+        assert_eq!(
+            bytes(null.eval_args(EvaluatedArgs::Bytes(None)).unwrap()),
+            None
+        );
+        assert_eq!(null.kernel_invocations(), 1);
+        assert!(null.is_healthy());
+        assert_eq!(null.retained_storage().unwrap(), storage);
+
+        let mut head = prepare(
+            EvaluatedBytesOp::Timestamp2BaseNative,
+            ExecutionLimits::default(),
+        );
+        let head_storage = head.retained_storage().unwrap();
+        let base = bytes(
+            head.eval_args(parse_args(
+                "2020-01-01 10:00:00",
+                false,
+                NativeSessionTimeZone::utc(),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_native_timestamp_result(&base),
+            Some(NativeTimestampResult::Base(_))
+        ));
+        assert_eq!(base.len(), 11);
+        let mut add = prepare(
+            EvaluatedBytesOp::Timestamp2AddNative,
+            ExecutionLimits::default(),
+        );
+        let storage = add.retained_storage().unwrap();
+        let other_kind = encode_native_identity(NativeIdentityRef::Int(1)).unwrap();
+        let mut short = base.clone();
+        short.pop();
+        let mut trailing = base.clone();
+        trailing.push(0);
+        for invalid in [
+            EvaluatedArgs::Bytes2(None, None),
+            EvaluatedArgs::Bytes2(Some(other_kind), None),
+            EvaluatedArgs::Bytes2(Some(short), Some(b"01:00:00".to_vec())),
+            EvaluatedArgs::Bytes2(Some(trailing), None),
+            EvaluatedArgs::Bytes2(Some(base.clone()), Some(vec![255])),
+        ] {
+            assert!(matches!(
+                add.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(add.kernel_invocations(), 0);
+            assert!(add.is_healthy());
+            assert_eq!(add.retained_storage().unwrap(), storage);
+        }
+        for (index, (rhs, expected)) in [
+            (Some("01:00:00.5"), Some("2020-01-01 11:00:00.5")),
+            (None, None),
+            (Some("bad"), None),
+            (Some("2020-01-01 05:00:00"), None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Forward the actual complete Base report from the first worker.
+            // No native calendar formatting or reconstructed identity packet.
+            let output = bytes(
+                add.eval_args(EvaluatedArgs::Bytes2(
+                    Some(base.clone()),
+                    rhs.map(|value| value.as_bytes().to_vec()),
+                ))
+                .unwrap(),
+            );
+            assert_eq!(output.as_deref(), expected.map(str::as_bytes));
+            assert_eq!(add.kernel_invocations(), index as u64 + 1);
+            assert!(add.is_healthy());
+            assert_eq!(add.retained_storage().unwrap(), storage);
+        }
+        let zero_year = bytes(
+            head.eval_args(parse_args(
+                "0000-12-31 00:00:00",
+                false,
+                NativeSessionTimeZone::utc(),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_native_timestamp_result(&zero_year),
+            Some(NativeTimestampResult::Base(_))
+        ));
+        // The real RHS is already present. Year zero returns NULL even though
+        // adding 838 hours could otherwise land in an in-range year-one value.
+        assert_eq!(
+            bytes(
+                add.eval_args(EvaluatedArgs::Bytes2(
+                    Some(zero_year.clone()),
+                    Some(b"838:00:00".to_vec())
+                ))
+                .unwrap()
+            ),
+            None
+        );
+        assert_eq!(add.kernel_invocations(), 5);
+        assert!(matches!(
+            add.eval_args(EvaluatedArgs::Bytes2(Some(zero_year), Some(vec![255]))),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(add.kernel_invocations(), 5);
+        let warning = bytes(
+            head.eval_args(parse_args("bad", false, NativeSessionTimeZone::utc()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_native_timestamp_result(&warning),
+            Some(NativeTimestampResult::Warning { code: 1292, .. })
+        ));
+        assert!(matches!(
+            add.eval_args(EvaluatedArgs::Bytes2(Some(warning), None)),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        assert_eq!(add.kernel_invocations(), 5);
+        assert!(add.is_healthy());
+        assert_eq!(add.retained_storage().unwrap(), storage);
+        assert_eq!(head.kernel_invocations(), 3);
+        assert!(head.is_healthy());
+        assert_eq!(head.retained_storage().unwrap(), head_storage);
+    }
+}

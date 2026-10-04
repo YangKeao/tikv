@@ -112,6 +112,80 @@ fn timestamp_literal_native(
         })
 }
 
+fn native_timestamp_head_text<'a>(
+    value: Option<&'a [u8]>,
+    is_float: Option<&Int>,
+) -> Result<(&'a str, bool)> {
+    if !crate::timestamp_parse_native_args_valid(value, is_float.copied()) {
+        return Err(temporal_literal_infrastructure_error(
+            LocalError::InvalidBatch(
+                "TIMESTAMP requires non-NULL UTF-8 text and numeric-kind bit 0 or 1".into(),
+            ),
+        ));
+    }
+    Ok((
+        from_utf8(value.expect("TIMESTAMP text presence was validated"))
+            .expect("TIMESTAMP text UTF-8 was validated"),
+        *is_float.expect("TIMESTAMP numeric-kind bit was validated") == 1,
+    ))
+}
+
+#[rpn_fn(nullable, capture = [metadata], metadata_mapper = init_native_temporal_literal_data)]
+fn timestamp1_native(
+    metadata: &NativeTemporalCallMetadata,
+    value: Option<BytesRef>,
+    is_float: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    let (text, is_float) = native_timestamp_head_text(value, is_float)?;
+    let zone = metadata
+        .zone()
+        .map_err(temporal_literal_infrastructure_error)?;
+    crate::native_timestamp::evaluate_timestamp1_native(text, is_float, &zone)
+        .map(Some)
+        .map_err(|error| other_err!("Unable to encode native TIMESTAMP output: {:?}", error))
+}
+
+#[rpn_fn(nullable, capture = [metadata], metadata_mapper = init_native_temporal_literal_data)]
+fn timestamp2_base_native(
+    metadata: &NativeTemporalCallMetadata,
+    value: Option<BytesRef>,
+    is_float: Option<&Int>,
+) -> Result<Option<Bytes>> {
+    let (text, is_float) = native_timestamp_head_text(value, is_float)?;
+    let zone = metadata
+        .zone()
+        .map_err(temporal_literal_infrastructure_error)?;
+    crate::native_timestamp::evaluate_timestamp2_base_native(text, is_float, &zone)
+        .map(Some)
+        .map_err(|error| other_err!("Unable to encode native TIMESTAMP base output: {:?}", error))
+}
+
+#[rpn_fn(nullable)]
+fn timestamp2_add_native(base: Option<BytesRef>, rhs: Option<BytesRef>) -> Result<Option<Bytes>> {
+    if !crate::timestamp_add_native_args_valid(base, rhs) {
+        return Err(other_err!(
+            "Native TIMESTAMP addition requires a DateTime base and nullable UTF-8 RHS"
+        ));
+    }
+    let Some(crate::NativeTimestampResult::Base(base)) =
+        crate::decode_native_timestamp_result(base.expect("TIMESTAMP base presence was validated"))
+    else {
+        unreachable!("TIMESTAMP base identity was validated")
+    };
+    let rhs = rhs.map(|bytes| from_utf8(bytes).expect("TIMESTAMP RHS UTF-8 was validated"));
+    Ok(crate::native_timestamp::evaluate_timestamp2_add_native(base, rhs).map(String::into_bytes))
+}
+
+#[rpn_fn(nullable)]
+fn timestamp_null_native(value: Option<BytesRef>) -> Result<Option<Bytes>> {
+    if !crate::timestamp_null_native_args_valid(value) {
+        return Err(other_err!(
+            "Native TIMESTAMP NULL profile requires the actual NULL first operand"
+        ));
+    }
+    Ok(None)
+}
+
 /// Only the actual clock tuple's transport width is constrained. Raw nanos and
 /// timestamp/offset domains retain the original pure clock implementation's
 /// arithmetic and panic behavior rather than being normalized by admission.

@@ -316,6 +316,12 @@ fn evaluated_ready_args_match(
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
         (
+            EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative,
+            EvaluatedArgsRole::TemporalParseText,
+        ) => types.len() == 2 && operation.call_count() == 1,
+        (_, EvaluatedArgsRole::TemporalParseText)
+        | (EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative, _) => false,
+        (
             EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative,
             EvaluatedArgsRole::TemporalText,
         ) => types.len() == 2 && operation.call_count() == 1,
@@ -396,6 +402,20 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::Timestamp2AddNative
+            || match values {
+                [ScalarValue::Bytes(base), ScalarValue::Bytes(rhs)] => {
+                    crate::timestamp_add_native_args_valid(base.as_deref(), rhs.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::TimestampNullNative
+            || match values {
+                [ScalarValue::Bytes(value)] => {
+                    crate::timestamp_null_native_args_valid(value.as_deref())
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::ConvertTzNative
             || match values {
                 [
@@ -673,6 +693,13 @@ fn evaluated_ready_args_match(
                         }
                         _ => false,
                     })
+            }
+            EvaluatedArgsRole::TemporalParseText => {
+                matches!(
+                    operation,
+                    EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative
+                ) && matches!(values, [ScalarValue::Bytes(value), ScalarValue::Int(is_float)]
+                        if crate::timestamp_parse_native_args_valid(value.as_deref(), *is_float))
             }
             EvaluatedArgsRole::TemporalText => {
                 matches!(
@@ -1069,6 +1096,12 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative,
+            EvaluatedArgsRole::TemporalParseText,
+        ) => arity == 2 && calls == 1,
+        (_, EvaluatedArgsRole::TemporalParseText)
+        | (EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative, _) => false,
         (
             EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative,
             EvaluatedArgsRole::TemporalText,

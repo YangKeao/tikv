@@ -407,6 +407,22 @@ short-circuit admission policy described above.
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
+  Ordinary TIMESTAMP uses four closed profiles in `native_timestamp.rs`:
+  actual-NULL, one-argument parse/format, two-argument parse/base and duration
+  addition. Nonnull heads carry actual TemporalParseText text/source-kind/zone,
+  not fake literal modes; zone-only binding/accounting is shared while literal
+  admission and result policies remain distinct. Value/Warning head reports use
+  tags16/17 and the two-argument base is the original tag15 Time identity frame.
+  Native forwards that actual frame unchanged and only then coerces the RHS,
+  even for year-zero bases. The second worker owns all remaining predicates,
+  duration parsing, addition, range/FSP and formatting. Raw field projection
+  uses `Time::native_core_fields`, also reused by the DATE-specific view after
+  its existing clock clear. There is no second bit-layout implementation.
+  Native staged callbacks run after lease finish under the existing guard and
+  borrow the same selected scope without another discovery call. One-shot
+  ownership spans both stages, and one slot can retire/rebind the worker.
+  Ordinary NULL never synthesizes a timezone. No new wire signature, runtime
+  admission, pool, EvalConfig or resource cause is introduced.
   CONVERT_TZ uses one closed ConvertTzNative profile with existing nullable
   Bytes3, not session-zone metadata. `native_convert_tz.rs` owns canonical
   datetime composition, exact SQL-zone parsing, conversion and fraction text.

@@ -1560,6 +1560,10 @@ pub enum EvaluatedBytesOp {
     DateLiteralNative,
     TimestampLiteralNative,
     ConvertTzNative,
+    Timestamp1Native,
+    Timestamp2BaseNative,
+    Timestamp2AddNative,
+    TimestampNullNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1574,6 +1578,7 @@ pub(crate) enum EvaluatedKernelKind {
 /// one another, including when their physical value is NULL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EvaluatedArgsRole {
+    TemporalParseText,
     TemporalText,
     Values,
     DecimalBinary,
@@ -1621,6 +1626,26 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::Timestamp1Native => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Timestamp1Native,
+                );
+            }
+            Self::Timestamp2BaseNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Timestamp2BaseNative,
+                );
+            }
+            Self::Timestamp2AddNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::Timestamp2AddNative,
+                );
+            }
+            Self::TimestampNullNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::TimestampNullNative,
+                );
+            }
             Self::ConvertTzNative => {
                 return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ConvertTzNative);
             }
@@ -3646,8 +3671,13 @@ impl EvaluatedBytesOp {
         matches!(self, Self::DateLiteralNative | Self::TimestampLiteralNative)
     }
 
+    pub(crate) fn uses_native_temporal_zone(self) -> bool {
+        self.is_temporal_literal()
+            || matches!(self, Self::Timestamp1Native | Self::Timestamp2BaseNative)
+    }
+
     pub(crate) fn metadata_matches(self, metadata: &(dyn std::any::Any + Send)) -> bool {
-        if self.is_temporal_literal() {
+        if self.uses_native_temporal_zone() {
             return metadata.is::<NativeTemporalCallMetadata>();
         }
         if let Some(kind) = self.decimal_division_kind() {
@@ -3669,6 +3699,9 @@ impl EvaluatedBytesOp {
     }
 
     pub(crate) fn input_role(self) -> EvaluatedArgsRole {
+        if matches!(self, Self::Timestamp1Native | Self::Timestamp2BaseNative) {
+            return EvaluatedArgsRole::TemporalParseText;
+        }
         if self.is_temporal_literal() {
             return EvaluatedArgsRole::TemporalText;
         }
@@ -4120,6 +4153,10 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::Timestamp1Native => crate::impl_time::timestamp1_native_fn_meta(),
+            Self::Timestamp2BaseNative => crate::impl_time::timestamp2_base_native_fn_meta(),
+            Self::Timestamp2AddNative => crate::impl_time::timestamp2_add_native_fn_meta(),
+            Self::TimestampNullNative => crate::impl_time::timestamp_null_native_fn_meta(),
             Self::ConvertTzNative => crate::impl_time::convert_tz_native_fn_meta(),
             Self::DateLiteralNative => crate::impl_time::date_literal_native_fn_meta(),
             Self::TimestampLiteralNative => crate::impl_time::timestamp_literal_native_fn_meta(),
@@ -4736,6 +4773,10 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::Timestamp1Native
+            | Self::Timestamp2BaseNative
+            | Self::Timestamp2AddNative
+            | Self::TimestampNullNative => EvalType::Bytes,
             Self::ConvertTzNative => EvalType::Bytes,
             Self::DateLiteralNative | Self::TimestampLiteralNative => EvalType::Bytes,
             Self::JsonSearchSerdeNative => EvalType::Bytes,
@@ -5167,6 +5208,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::Timestamp1Native | Self::Timestamp2BaseNative => {
+                &[EvalType::Bytes, EvalType::Int]
+            }
+            Self::Timestamp2AddNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::TimestampNullNative => &[EvalType::Bytes],
             Self::ConvertTzNative => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
             Self::DateLiteralNative | Self::TimestampLiteralNative => {
                 &[EvalType::Bytes, EvalType::Int]
@@ -6283,6 +6329,11 @@ pub fn prepare_json_raw_values_args(values: &[(u8, &[u8])]) -> LocalResult<Evalu
 /// NULL.
 #[derive(Debug)]
 pub enum EvaluatedArgs {
+    TemporalParseText {
+        value: Vec<u8>,
+        is_float: bool,
+        zone: NativeSessionTimeZone,
+    },
     TemporalText {
         value: Vec<u8>,
         modes: i64,
@@ -6491,6 +6542,7 @@ pub enum EvaluatedArgs {
 impl EvaluatedArgs {
     fn role(&self) -> EvaluatedArgsRole {
         match self {
+            Self::TemporalParseText { .. } => EvaluatedArgsRole::TemporalParseText,
             Self::TemporalText { .. } => EvaluatedArgsRole::TemporalText,
             Self::Decimal2 { .. } => EvaluatedArgsRole::DecimalBinary,
             Self::DecimalDivision { .. } => EvaluatedArgsRole::DecimalDivision,
@@ -6545,6 +6597,7 @@ impl EvaluatedArgs {
 
     fn input_types(&self) -> &'static [EvalType] {
         match self {
+            Self::TemporalParseText { .. } => &[EvalType::Bytes, EvalType::Int],
             Self::TemporalText { .. } => &[EvalType::Bytes, EvalType::Int],
             Self::Like { .. } => EvaluatedBytesOp::LikeNative.input_types(),
             Self::RegexpLike { .. } => EvaluatedBytesOp::RegexpLikeNative.input_types(),
@@ -6617,6 +6670,34 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if matches!(
+            operation,
+            EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative
+        ) {
+            return match self {
+                Self::TemporalParseText {
+                    value, is_float, ..
+                } => crate::timestamp_parse_native_args_valid(
+                    Some(value),
+                    Some(i64::from(*is_float)),
+                ),
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::Timestamp2AddNative {
+            return match self {
+                Self::Bytes2(base, rhs) => {
+                    crate::timestamp_add_native_args_valid(base.as_deref(), rhs.as_deref())
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::TimestampNullNative {
+            return match self {
+                Self::Bytes(value) => crate::timestamp_null_native_args_valid(value.as_deref()),
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::ConvertTzNative {
             return match self {
                 Self::Bytes3([datetime, from, to]) => crate::convert_tz_native_args_valid(
@@ -7218,7 +7299,7 @@ impl EvaluatedArgs {
         // handles are real semantic context, never hidden ScalarValue operands.
         use ScalarValue::{Bytes, Int};
         let (ready, arity) = match self {
-            Self::TemporalText { .. } => {
+            Self::TemporalText { .. } | Self::TemporalParseText { .. } => {
                 return Err(LocalError::InvalidSpec(
                     "temporal operands require their guarded zone projection".into(),
                 ));
@@ -8788,7 +8869,7 @@ impl Drop for DecimalDivisionBindingGuard<'_> {
 
 impl EvaluatedBytesWorker {
     fn temporal_metadata(&self) -> LocalResult<&NativeTemporalCallMetadata> {
-        if !self.operation.is_temporal_literal() {
+        if !self.operation.uses_native_temporal_zone() {
             return Err(LocalError::InvalidSpec(
                 "only temporal literals bind a session zone".into(),
             ));
@@ -8915,7 +8996,7 @@ impl EvaluatedBytesWorker {
                 "evaluated ASCII worker metadata was not prewarmed".into(),
             ));
         }
-        let payload_bytes = if self.operation.is_temporal_literal() {
+        let payload_bytes = if self.operation.uses_native_temporal_zone() {
             if !self.temporal_metadata()?.is_unbound() {
                 return Err(LocalError::InvalidSpec(
                     "temporal worker retains a session zone".into(),
@@ -9066,6 +9147,35 @@ impl EvaluatedBytesWorker {
                 _ => None,
             };
             let (ready, arity, invocation, temporal_zone) = match args {
+                EvaluatedArgs::TemporalParseText {
+                    value,
+                    is_float,
+                    zone,
+                } => {
+                    let input_bytes = value
+                        .capacity()
+                        .checked_add(temporal_zone_heap_bytes(&zone))
+                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    let bound = value
+                        .len()
+                        .checked_add(64)
+                        .map(|bytes| bytes.max(11))
+                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    EvalBudget::exact(self.state.limits)?.check_output(bound, input_bytes)?;
+                    (
+                        [
+                            ScalarValue::Bytes(Some(value)),
+                            ScalarValue::Int(Some(i64::from(is_float))),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                            ScalarValue::Int(None),
+                        ],
+                        2,
+                        None,
+                        Some(zone),
+                    )
+                }
                 EvaluatedArgs::TemporalText { value, modes, zone } => {
                     let input_bytes = value
                         .capacity()
@@ -9223,7 +9333,7 @@ impl EvaluatedBytesWorker {
                 .checked_add(bytes)
                 .ok_or_else(evaluated_ascii_storage_overflow)
         })?;
-        let input_bytes = if self.operation.is_temporal_literal() {
+        let input_bytes = if self.operation.uses_native_temporal_zone() {
             let zone = self.temporal_metadata()?.zone()?;
             input_bytes
                 .checked_add(temporal_zone_heap_bytes(&zone))
@@ -9233,7 +9343,7 @@ impl EvaluatedBytesWorker {
         };
         self.state.row = [0];
         let mut budget = EvalBudget::exact(self.state.limits)?;
-        if self.operation.is_temporal_literal() {
+        if self.operation.uses_native_temporal_zone() {
             budget.check_output(0, input_bytes)?;
         }
         let calls_before = self.witness.invocations();
@@ -9651,6 +9761,38 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::Timestamp1Native | EvaluatedBytesOp::Timestamp2BaseNative
+                ) {
+                    let valid = match value.and_then(crate::decode_native_timestamp_result) {
+                        Some(crate::NativeTimestampResult::Value(_)) => {
+                            self.operation == EvaluatedBytesOp::Timestamp1Native
+                        }
+                        Some(crate::NativeTimestampResult::Base(_)) => {
+                            self.operation == EvaluatedBytesOp::Timestamp2BaseNative
+                        }
+                        Some(crate::NativeTimestampResult::Warning { .. }) => true,
+                        None => false,
+                    };
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "native TIMESTAMP returned NULL or the wrong stage report".into(),
+                        ));
+                    }
+                }
+                if self.operation == EvaluatedBytesOp::Timestamp2AddNative
+                    && value.is_some_and(|bytes| std::str::from_utf8(bytes).is_err())
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native TIMESTAMP addition returned invalid UTF-8".into(),
+                    ));
+                }
+                if self.operation == EvaluatedBytesOp::TimestampNullNative && value.is_some() {
+                    return Err(LocalError::InvalidBatch(
+                        "native TIMESTAMP NULL returned a value".into(),
+                    ));
+                }
                 if self.operation == EvaluatedBytesOp::ConvertTzNative
                     && value.is_some_and(|bytes| std::str::from_utf8(bytes).is_err())
                 {

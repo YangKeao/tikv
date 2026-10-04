@@ -1482,15 +1482,22 @@ impl Time {
     /// the representation view used by the typed-clock SDK, not another
     /// implementation that independently clears the clock fields.
     pub fn native_date_fields(raw: u64) -> [i32; 7] {
-        let date = Self(Self::native_date_core(raw));
+        Self::native_core_fields(Self::native_date_core(raw))
+    }
+
+    /// Observe all seven native calendar/clock fields without validation,
+    /// normalization or changing reserved bits. This keeps representation
+    /// projection in the datatype owner for consumers of actual SDK values.
+    pub fn native_core_fields(raw: u64) -> [i32; 7] {
+        let value = Self(raw);
         [
-            date.year() as i32,
-            date.month() as i32,
-            date.day() as i32,
-            date.hour() as i32,
-            date.minute() as i32,
-            date.second() as i32,
-            date.micro() as i32,
+            value.year() as i32,
+            value.month() as i32,
+            value.day() as i32,
+            value.hour() as i32,
+            value.minute() as i32,
+            value.second() as i32,
+            value.micro() as i32,
         ]
     }
 
@@ -4839,6 +4846,19 @@ mod tests {
             Time::native_split_date_components("1-03-15"),
             Some(vec![(1, 1), (3, 2), (15, 2)])
         );
+    }
+
+    #[test]
+    fn test_native_core_fields_preserve_clock_and_noncalendar_bits() {
+        // Observed fields, not calendar validation: all storage-width maxima
+        // remain visible and the independent low metadata bits are ignored.
+        let raw = Time::native_core_from_fields(16383, 15, 31, 31, 63, 63, 1048575) | 15;
+        assert_eq!(
+            Time::native_core_fields(raw),
+            [16383, 15, 31, 31, 63, 63, 1048575]
+        );
+        assert_eq!(Time::native_date_fields(raw), [16383, 15, 31, 0, 0, 0, 0]);
+        assert_eq!(Time::native_core_fields(15), [0; 7]);
     }
 
     #[test]

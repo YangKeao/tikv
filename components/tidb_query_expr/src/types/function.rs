@@ -496,6 +496,10 @@ pub enum LocalFunctionId {
     DateLiteralNative,
     TimestampLiteralNative,
     ConvertTzNative,
+    Timestamp1Native,
+    Timestamp2BaseNative,
+    Timestamp2AddNative,
+    TimestampNullNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.
