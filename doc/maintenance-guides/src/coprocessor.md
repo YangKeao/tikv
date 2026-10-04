@@ -432,8 +432,10 @@ short-circuit admission policy described above.
   microseconds. The native generic scoped callback projects actual Time/NULL;
   successful two-argument legacy then evaluates lossy layout and reuses
   DateFormatCoreNative under selected raw_columns. It preserves missing-first
-  panic and does not override SimpleExpr::Shared's own context: broader M6
-  propagation remains open. Native PB's extra return-time cast and outer
+  panic. Native eval_shared borrows an available parent scope/execution with
+  the existing lexical binding while keeping the Shared child's semantic
+  context; an already-active child scope wins, and no-capability callers keep
+  their old path. Live DAG request-owner lifecycle remains M6 work. Native PB's extra return-time cast and outer
   declared-family conversion remain separate; wire kernels are unchanged.
   UNIX_TIMESTAMP adds six closed profiles in `native_unix_timestamp.rs`.
   Ordinary parsing uses actual TemporalParseText/source-kind/zone1, then returns
@@ -492,9 +494,12 @@ short-circuit admission policy described above.
   only restore raw Time, declared FieldType and the original hard error.
   Admission remains rewrite-only constant folding, including ODBC spellings;
   mangled registry arity metadata does not create runtime/PB/unistore dispatch.
-  Original wrappers retain explicit one-shot NoColumns ownership; `_in` scope
-  tests do not prove resolver-to-worker M6 ownership propagation. Ordinary
-  TIMESTAMP() is separate because right coercion depends on left parsing.
+  Native ColumnResolver now exposes an optional literal execution context,
+  forwarded through &T; PlanScopeResolver supplies its existing warning_context
+  to the `_in` roots without changing explicit zone/mode capture or ordinary
+  fold diagnostics. No-context/before-owner preparation retains the default
+  path; old bare wrappers are test-only. Ordinary TIMESTAMP() is separate
+  because right coercion depends on left parsing.
   The old native table-projection resolver still omits date_modes forwarding,
   supplying strict defaults despite session SET; worker tests cover actual mode
   bits, but SQL refusal-boundary tests do not claim that caller gap repaired.
