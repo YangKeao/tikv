@@ -417,6 +417,17 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  IF adds two closed Values/OwnBytes profiles in `native_if.rs` and
+  `impl_control.rs`: Head accepts only an actually normalized Int condition
+  (None/0/1), returning present [1] Else or [0] Then; Finish accepts the entire
+  original report and actual chosen nullable identity. Caller-specific condition
+  coercion and warnings remain before admission, but only the computed report
+  selects a branch. The common pure selector also serves three wire IF workers
+  (their full Int domain still normalizes by nonzero) and two native optimizer
+  sites whose truth-error policies differ. No new carrier or signature is added.
+  Common ready preflight covers the one-byte head and selected reply length,
+  input capacities and direct-ready calls. Scope/first-preparation precedence
+  matches IFNULL; no worker borrow crosses chosen-child evaluation.
   IFNULL adds two closed Values/OwnBytes profiles in `native_if_null.rs` and
   `impl_control.rs`. Actual first identity/SQL absence yields a present report:
   [0] demands the second operand; [1] plus the original non-NULL frame completes

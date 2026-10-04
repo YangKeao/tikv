@@ -2023,3 +2023,213 @@ mod if_null_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod if_worker_tests {
+    use tidb_query_datatype::codec::mysql::Time;
+
+    use super::*;
+    use crate::{
+        NativeIdentityRef, NativeIfBranch, decode_native_if_head_result, encode_native_identity,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limit: usize) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            ExecutionLimits {
+                max_retained_bytes: limit,
+                ..ExecutionLimits::default()
+            },
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn bytes(value: ComputedValue) -> Option<Vec<u8>> {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("IF stages must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value.into_option()
+    }
+
+    #[test]
+    fn if_workers_keep_canonical_native_conditions_and_actual_selected_identities() {
+        let mut head = prepare(EvaluatedBytesOp::IfHeadNative, 64 * 1024 * 1024);
+        let head_storage = head.retained_storage().unwrap();
+        // Only this native ready-condition profile is canonicalized; these
+        // refusals do not narrow any existing wire Int/IF signature's domain.
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Int2(None, None),
+            EvaluatedArgs::Int(Some(2)),
+            EvaluatedArgs::Int(Some(-1)),
+        ] {
+            assert!(matches!(
+                head.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(head.kernel_invocations(), 0);
+        }
+        let mut reports = Vec::new();
+        for (index, (condition, expected)) in [
+            (None, NativeIfBranch::Else),
+            (Some(0), NativeIfBranch::Else),
+            (Some(1), NativeIfBranch::Then),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let report = bytes(head.eval_args(EvaluatedArgs::Int(condition)).unwrap())
+                .expect("even real NULL must produce a branch report");
+            assert_eq!(decode_native_if_head_result(&report), Some(expected));
+            assert_eq!(
+                report.as_slice(),
+                if condition == Some(1) {
+                    &[0][..]
+                } else {
+                    &[1][..]
+                }
+            );
+            reports.push(report);
+            assert_eq!(head.kernel_invocations(), index as u64 + 1);
+            assert!(head.is_healthy());
+            assert_eq!(head.retained_storage().unwrap(), head_storage);
+        }
+        let mut finish = prepare(EvaluatedBytesOp::IfFinishNative, 64 * 1024 * 1024);
+        let storage = finish.retained_storage().unwrap();
+        for invalid in [
+            EvaluatedArgs::Bytes(None),
+            EvaluatedArgs::Bytes2(None, None),
+            EvaluatedArgs::Bytes2(Some(Vec::new()), None),
+            EvaluatedArgs::Bytes2(Some(vec![2]), None),
+            EvaluatedArgs::Bytes2(Some(vec![0, 0]), None),
+            EvaluatedArgs::Bytes2(Some(reports[0].clone()), Some(vec![0])),
+        ] {
+            assert!(matches!(
+                finish.eval_args(invalid),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(finish.kernel_invocations(), 0);
+        }
+        let views = [
+            NativeIdentityRef::MinNotNull,
+            NativeIdentityRef::MaxValue,
+            NativeIdentityRef::Int(0),
+            NativeIdentityRef::Float32(16_777_217.0_f64.to_bits()),
+            NativeIdentityRef::Decimal {
+                negative: false,
+                scale: 9,
+                storage_scale: 9,
+                declared_shape: None,
+                coefficient: b"",
+            },
+            NativeIdentityRef::Decimal {
+                negative: true,
+                scale: u32::MAX,
+                storage_scale: 9,
+                declared_shape: Some((-1, 99)),
+                coefficient: b"\xff\0+",
+            },
+            NativeIdentityRef::Time {
+                core: Time::native_core_from_fields(1970, 1, 1, 0, 0, 1, 7),
+                kind: 0,
+                fsp: 255,
+            },
+        ];
+        let mut calls = 0;
+        for report in reports {
+            // Only the actual selected value is supplied; all payload bytes,
+            // including raw Decimal tails and hidden temporal fields, survive.
+            for view in views {
+                let frame = encode_native_identity(view).unwrap();
+                assert_eq!(
+                    bytes(
+                        finish
+                            .eval_args(EvaluatedArgs::Bytes2(
+                                Some(report.clone()),
+                                Some(frame.clone())
+                            ))
+                            .unwrap()
+                    ),
+                    Some(frame)
+                );
+                calls += 1;
+                assert_eq!(finish.kernel_invocations(), calls);
+                assert!(finish.is_healthy());
+                assert_eq!(finish.retained_storage().unwrap(), storage);
+            }
+            assert_eq!(
+                bytes(
+                    finish
+                        .eval_args(EvaluatedArgs::Bytes2(Some(report), None))
+                        .unwrap()
+                ),
+                None
+            );
+            calls += 1;
+            assert_eq!(
+                finish.kernel_invocations(),
+                calls,
+                "selected SQL NULL still invokes the finish wrapper"
+            );
+            assert!(finish.is_healthy());
+            assert_eq!(finish.retained_storage().unwrap(), storage);
+        }
+    }
+
+    #[test]
+    fn if_workers_charge_output_and_both_ready_capacities_before_dispatch() {
+        let mut head = prepare(EvaluatedBytesOp::IfHeadNative, 0);
+        let storage = head.retained_storage().unwrap();
+        for condition in [None, Some(0), Some(1)] {
+            assert!(matches!(
+                head.eval_args(EvaluatedArgs::Int(condition)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(
+                head.kernel_invocations(),
+                0,
+                "every branch report needs one output byte before dispatch"
+            );
+            assert!(head.is_healthy());
+            assert_eq!(head.retained_storage().unwrap(), storage);
+        }
+        let mut producer = prepare(EvaluatedBytesOp::IfHeadNative, 64 * 1024 * 1024);
+        let actual_report =
+            bytes(producer.eval_args(EvaluatedArgs::Int(Some(1))).unwrap()).unwrap();
+        for enlarge_report in [true, false] {
+            let mut worker = prepare(EvaluatedBytesOp::IfFinishNative, 64 * 1024);
+            let storage = worker.retained_storage().unwrap();
+            let mut report = actual_report.clone();
+            let selected = if enlarge_report {
+                report.reserve_exact(128 * 1024);
+                assert!(report.capacity() > 64 * 1024 && report.len() == 1);
+                None
+            } else {
+                let mut frame = encode_native_identity(NativeIdentityRef::MaxValue).unwrap();
+                frame.reserve_exact(128 * 1024);
+                assert!(frame.capacity() > 64 * 1024 && frame.len() == 1);
+                Some(frame)
+            };
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Bytes2(Some(report), selected)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            assert_eq!(
+                bytes(
+                    worker
+                        .eval_args(EvaluatedArgs::Bytes2(Some(actual_report.clone()), None))
+                        .unwrap()
+                ),
+                None
+            );
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+}

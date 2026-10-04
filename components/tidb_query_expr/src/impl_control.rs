@@ -114,11 +114,12 @@ fn if_condition<T: Evaluable + EvaluableRet>(
     value_if_true: Option<&T>,
     value_if_false: Option<&T>,
 ) -> Result<Option<T>> {
-    Ok(if condition.cloned().unwrap_or(0) != 0 {
-        value_if_true.cloned()
-    } else {
-        value_if_false.cloned()
-    })
+    Ok(
+        match crate::native_if_choose_branch(condition.map(|value| *value != 0)) {
+            crate::NativeIfBranch::Then => value_if_true.cloned(),
+            crate::NativeIfBranch::Else => value_if_false.cloned(),
+        },
+    )
 }
 
 #[rpn_fn(nullable)]
@@ -128,11 +129,12 @@ fn if_condition_json(
     value_if_true: Option<JsonRef>,
     value_if_false: Option<JsonRef>,
 ) -> Result<Option<Json>> {
-    Ok(if condition.cloned().unwrap_or(0) != 0 {
-        value_if_true.map(|x| x.to_owned())
-    } else {
-        value_if_false.map(|x| x.to_owned())
-    })
+    Ok(
+        match crate::native_if_choose_branch(condition.map(|value| *value != 0)) {
+            crate::NativeIfBranch::Then => value_if_true.map(|x| x.to_owned()),
+            crate::NativeIfBranch::Else => value_if_false.map(|x| x.to_owned()),
+        },
+    )
 }
 
 #[rpn_fn(nullable)]
@@ -142,11 +144,27 @@ fn if_condition_bytes(
     value_if_true: Option<BytesRef>,
     value_if_false: Option<BytesRef>,
 ) -> Result<Option<Bytes>> {
-    Ok(if condition.cloned().unwrap_or(0) != 0 {
-        value_if_true.map(|x| x.to_vec())
-    } else {
-        value_if_false.map(|x| x.to_vec())
-    })
+    Ok(
+        match crate::native_if_choose_branch(condition.map(|value| *value != 0)) {
+            crate::NativeIfBranch::Then => value_if_true.map(|x| x.to_vec()),
+            crate::NativeIfBranch::Else => value_if_false.map(|x| x.to_vec()),
+        },
+    )
+}
+
+/// The actual normalized condition always produces a present branch report.
+#[rpn_fn(nullable)]
+fn if_head_native(condition: Option<&Int>) -> Result<Option<Bytes>> {
+    crate::native_if::evaluate_if_head_native(condition.copied())
+        .map(Some)
+        .map_err(|error| other_err!("Invalid native IF head transport: {:?}", error))
+}
+
+#[rpn_fn(nullable)]
+fn if_finish_native(report: Option<BytesRef>, value: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let value = crate::native_if::evaluate_if_finish_native(report, value)
+        .map_err(|error| other_err!("Invalid native IF finish transport: {:?}", error))?;
+    Ok(value.map(|value| value.to_vec()))
 }
 
 fn case_when_validator<T: EvaluableRet>(expr: &crate::types::function::CallShape) -> Result<()> {

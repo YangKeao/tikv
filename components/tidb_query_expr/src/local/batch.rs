@@ -1577,6 +1577,8 @@ pub enum EvaluatedBytesOp {
     FromUnixTimeNullNative,
     IfNullHeadNative,
     IfNullFinishNative,
+    IfHeadNative,
+    IfFinishNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1640,6 +1642,12 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::IfHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::IfHeadNative);
+            }
+            Self::IfFinishNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::IfFinishNative);
+            }
             Self::IfNullHeadNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::IfNullHeadNative,
@@ -4255,6 +4263,8 @@ impl EvaluatedBytesOp {
         // factory also uses the private getters to select a non-wire call;
         // no caller-supplied metadata or alternative algorithm is accepted.
         match self {
+            Self::IfHeadNative => crate::impl_control::if_head_native_fn_meta(),
+            Self::IfFinishNative => crate::impl_control::if_finish_native_fn_meta(),
             Self::IfNullHeadNative => crate::impl_control::if_null_head_native_fn_meta(),
             Self::IfNullFinishNative => crate::impl_control::if_null_finish_native_fn_meta(),
             Self::FromUnixTimeNumericNative => {
@@ -4894,6 +4904,7 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::IfHeadNative | Self::IfFinishNative => EvalType::Bytes,
             Self::IfNullHeadNative | Self::IfNullFinishNative => EvalType::Bytes,
             Self::FromUnixTimeNumericNative
             | Self::FromUnixTimeTextNative
@@ -5341,6 +5352,8 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::IfHeadNative => &[EvalType::Int],
+            Self::IfFinishNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::IfNullHeadNative => &[EvalType::Bytes],
             Self::IfNullFinishNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::FromUnixTimeNumericNative
@@ -6822,6 +6835,20 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::IfHeadNative {
+            return match self {
+                Self::Int(value) => crate::if_head_native_args_valid(*value),
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::IfFinishNative {
+            return match self {
+                Self::Bytes2(report, value) => {
+                    crate::if_finish_native_args_valid(report.as_deref(), value.as_deref())
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::IfNullHeadNative {
             return match self {
                 Self::Bytes(value) => crate::if_null_head_native_args_valid(value.as_deref()),
@@ -9702,6 +9729,31 @@ impl EvaluatedBytesWorker {
             // stay live through dispatch and the ordinary output-copy checks.
             budget.check_output(bound, input_bytes)?;
         }
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::IfHeadNative | EvaluatedBytesOp::IfFinishNative
+        ) {
+            let bound = match (self.operation, &ready[..arity]) {
+                (EvaluatedBytesOp::IfHeadNative, [ScalarValue::Int(value)])
+                    if crate::if_head_native_args_valid(*value) =>
+                {
+                    1
+                }
+                (
+                    EvaluatedBytesOp::IfFinishNative,
+                    [ScalarValue::Bytes(report), ScalarValue::Bytes(value)],
+                ) if crate::if_finish_native_args_valid(report.as_deref(), value.as_deref()) => {
+                    value.as_ref().map_or(0, Vec::len)
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "IF operands differ from their fixed stage domain".into(),
+                    ));
+                }
+            };
+            // The original branch report and selected operand both remain live.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -10117,6 +10169,21 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if self.operation == EvaluatedBytesOp::IfHeadNative
+                    && value
+                        .is_none_or(|bytes| crate::decode_native_if_head_result(bytes).is_none())
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native IF head returned an invalid branch report".into(),
+                    ));
+                }
+                if self.operation == EvaluatedBytesOp::IfFinishNative
+                    && !crate::native_identity_args_valid(value)
+                {
+                    return Err(LocalError::InvalidBatch(
+                        "native IF finish returned an invalid identity".into(),
+                    ));
+                }
                 if self.operation == EvaluatedBytesOp::IfNullHeadNative
                     && value.is_none_or(|bytes| {
                         crate::decode_native_if_null_head_result(bytes).is_none()
