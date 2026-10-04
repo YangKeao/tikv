@@ -472,7 +472,10 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::BoundedStalenessHeadNative
         | LocalFunctionId::BoundedStalenessFinishNative
         | LocalFunctionId::TimestampDiffTextNative
-        | LocalFunctionId::TimestampDiffCoreNative => Err(other_err!(
+        | LocalFunctionId::TimestampDiffCoreNative
+        | LocalFunctionId::ToBinaryNative
+        | LocalFunctionId::FromBinaryNative
+        | LocalFunctionId::ConvertUsingNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),

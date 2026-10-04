@@ -65,6 +65,13 @@ pub use native_clock::{
     native_utc_time_without_fsp, native_utc_timestamp,
 };
 
+mod native_convert_charset;
+pub use native_convert_charset::{
+    NativeConvertCharsetResult, convert_using_native_args_valid, convert_using_native_fn_meta,
+    decode_native_convert_charset_result, from_binary_native_args_valid,
+    from_binary_native_fn_meta, to_binary_native_args_valid, to_binary_native_fn_meta,
+};
+
 mod native_convert_tz;
 pub use native_convert_tz::{convert_tz_native_args_valid, native_legacy_local_to_instant};
 

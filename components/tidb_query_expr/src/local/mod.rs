@@ -3408,3 +3408,275 @@ mod timestamp_diff_worker_tests {
         // exact allocator-capacity success threshold is asserted here.
     }
 }
+
+#[cfg(test)]
+mod convert_charset_worker_tests {
+    use super::*;
+    use crate::{NativeConvertCharsetResult as Reply, decode_native_convert_charset_result};
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn pair(data: Option<&[u8]>, name: &str) -> EvaluatedArgs {
+        EvaluatedArgs::Bytes2(
+            data.map(|value| value.to_vec()),
+            Some(name.as_bytes().to_vec()),
+        )
+    }
+    fn convert(data: Option<&[u8]>, exact: &str, effective: &str, target: &str) -> EvaluatedArgs {
+        EvaluatedArgs::Bytes4([
+            data.map(|value| value.to_vec()),
+            Some(exact.as_bytes().to_vec()),
+            Some(effective.as_bytes().to_vec()),
+            Some(target.as_bytes().to_vec()),
+        ])
+    }
+    fn check(value: ComputedValue, expected: Option<Reply<'_>>) {
+        let ComputedValue::Bytes(value) = value else {
+            panic!("charset workers must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        let output = value.into_option();
+        let actual = output.as_deref().map(|frame| {
+            decode_native_convert_charset_result(frame).expect("valid charset report")
+        });
+        match (actual, expected) {
+            (Some(Reply::Bytes(actual)), Some(Reply::Bytes(expected)))
+            | (Some(Reply::RetagString(actual)), Some(Reply::RetagString(expected))) => {
+                assert_eq!(actual, expected)
+            }
+            (Some(Reply::InvalidCharacter), Some(Reply::InvalidCharacter))
+            | (Some(Reply::UnknownCharset), Some(Reply::UnknownCharset))
+            | (None, None) => {}
+            _ => panic!("unexpected charset report class"),
+        }
+    }
+
+    #[test]
+    fn charset_workers_preserve_exact_names_effective_charset_and_computed_null_reports() {
+        let mut helpers = [
+            prepare(EvaluatedBytesOp::ToBinaryNative, ExecutionLimits::default()),
+            prepare(
+                EvaluatedBytesOp::FromBinaryNative,
+                ExecutionLimits::default(),
+            ),
+        ];
+        let storage = [
+            helpers[0].retained_storage().unwrap(),
+            helpers[1].retained_storage().unwrap(),
+        ];
+        for worker in &mut helpers {
+            for invalid in [
+                EvaluatedArgs::Bytes(None),
+                EvaluatedArgs::Bytes2(None, None),
+                EvaluatedArgs::Bytes2(None, Some(vec![255])),
+            ] {
+                assert!(matches!(
+                    worker.eval_args(invalid),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+            }
+        }
+        let rows: [(usize, Option<&[u8]>, &str, Reply<'_>); 10] = [
+            (0, Some("一".as_bytes()), "gbk", Reply::Bytes(b"\xd2\xbb")),
+            (1, Some(b"\xd2\xbb"), "gbk", Reply::Bytes("一".as_bytes())),
+            (
+                0,
+                Some("é".as_bytes()),
+                "latin1",
+                Reply::Bytes("é".as_bytes()),
+            ),
+            (1, Some(b"\xe9"), "latin1", Reply::Bytes(b"\xe9")),
+            (
+                0,
+                Some("一".as_bytes()),
+                "GBK",
+                Reply::Bytes("一".as_bytes()),
+            ),
+            (1, Some(b"\xd2\xbb"), "unknown", Reply::Bytes(b"\xd2\xbb")),
+            (0, Some("😉".as_bytes()), "gbk", Reply::InvalidCharacter),
+            (1, Some(b"\x81"), "gbk", Reply::InvalidCharacter),
+            (0, None, "gbk", Reply::Bytes(b"")),
+            (1, None, "gbk", Reply::Bytes(b"")),
+        ];
+        let mut calls = [0_u64; 2];
+        for (index, data, name, expected) in rows {
+            check(
+                helpers[index].eval_args(pair(data, name)).unwrap(),
+                Some(expected),
+            );
+            calls[index] += 1;
+            assert_eq!(helpers[index].kernel_invocations(), calls[index]);
+            assert!(helpers[index].is_healthy());
+            assert_eq!(helpers[index].retained_storage().unwrap(), storage[index]);
+        }
+        let mut worker = prepare(
+            EvaluatedBytesOp::ConvertUsingNative,
+            ExecutionLimits::default(),
+        );
+        let storage = worker.retained_storage().unwrap();
+        assert!(matches!(
+            worker.eval_args(EvaluatedArgs::Bytes3([None, None, None])),
+            Err(LocalError::InvalidBatch(_))
+        ));
+        for position in 1..4 {
+            for bad in [None, Some(vec![255])] {
+                let EvaluatedArgs::Bytes4(mut values) = convert(None, "utf8mb4", "utf8mb4", "gbk")
+                else {
+                    unreachable!();
+                };
+                values[position] = bad;
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes4(values)),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+            }
+        }
+        for effective in ["GBK", "utf8mb3", "unknown"] {
+            assert!(matches!(
+                worker.eval_args(convert(None, "GBK", effective, "binary")),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+        }
+        let rows: [(Option<&[u8]>, &str, &str, &str, Option<Reply<'_>>); 11] = [
+            (
+                Some("一".as_bytes()),
+                "utf8mb4",
+                "utf8mb4",
+                "gbk",
+                Some(Reply::RetagString("一".as_bytes())),
+            ),
+            (
+                Some("😉".as_bytes()),
+                "utf8mb4",
+                "utf8mb4",
+                "gbk",
+                Some(Reply::RetagString(b"?")),
+            ),
+            (
+                Some(b"\xd2\xbb"),
+                "unknown-source",
+                "binary",
+                "gbk",
+                Some(Reply::Bytes("一".as_bytes())),
+            ),
+            (Some(b"\x81"), "binary", "binary", "gbk", None),
+            (
+                Some("一".as_bytes()),
+                "GBK",
+                "gbk",
+                "binary",
+                Some(Reply::Bytes("一".as_bytes())),
+            ),
+            (
+                Some("一".as_bytes()),
+                "gbk",
+                "gbk",
+                "binary",
+                Some(Reply::Bytes(b"\xd2\xbb")),
+            ),
+            (
+                Some(b"\xe9"),
+                "latin1",
+                "latin1",
+                "latin1",
+                Some(Reply::RetagString(b"\xe9")),
+            ),
+            (
+                None,
+                "utf8mb4",
+                "utf8mb4",
+                "gbk",
+                Some(Reply::RetagString(b"")),
+            ),
+            (None, "binary", "binary", "gbk", Some(Reply::Bytes(b""))),
+            (
+                None,
+                "utf8mb4",
+                "utf8mb4",
+                "GBK",
+                Some(Reply::UnknownCharset),
+            ),
+            (
+                Some("一".as_bytes()),
+                "utf8mb4",
+                "utf8mb4",
+                "utf8mb3",
+                Some(Reply::UnknownCharset),
+            ),
+        ];
+        for (index, (data, exact, effective, target, expected)) in rows.into_iter().enumerate() {
+            check(
+                worker
+                    .eval_args(convert(data, exact, effective, target))
+                    .unwrap(),
+                expected,
+            );
+            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+    }
+
+    #[test]
+    fn charset_workers_charge_data_and_every_actual_name_capacity_before_dispatch() {
+        for (operation, position) in [
+            (EvaluatedBytesOp::ToBinaryNative, 1),
+            (EvaluatedBytesOp::FromBinaryNative, 0),
+            (EvaluatedBytesOp::ConvertUsingNative, 0),
+            (EvaluatedBytesOp::ConvertUsingNative, 1),
+            (EvaluatedBytesOp::ConvertUsingNative, 2),
+            (EvaluatedBytesOp::ConvertUsingNative, 3),
+        ] {
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            let ready = || match operation {
+                EvaluatedBytesOp::ToBinaryNative => pair(Some("一".as_bytes()), "gbk"),
+                EvaluatedBytesOp::FromBinaryNative => pair(Some(b"\xd2\xbb"), "gbk"),
+                _ => convert(Some("一".as_bytes()), "utf8mb4", "utf8mb4", "gbk"),
+            };
+            let mut args = ready();
+            let owner = match (&mut args, position) {
+                (EvaluatedArgs::Bytes2(data, _), 0) => data.as_mut().unwrap(),
+                (EvaluatedArgs::Bytes2(_, name), 1) => name.as_mut().unwrap(),
+                (EvaluatedArgs::Bytes4(values), index) => values[index].as_mut().unwrap(),
+                _ => unreachable!(),
+            };
+            owner.reserve_exact(128 * 1024);
+            assert!(owner.capacity() > 64 * 1024);
+            assert!(matches!(
+                worker.eval_args(args),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(worker.kernel_invocations(), 0);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let expected = match operation {
+                EvaluatedBytesOp::ToBinaryNative => Reply::Bytes(b"\xd2\xbb"),
+                EvaluatedBytesOp::FromBinaryNative => Reply::Bytes("一".as_bytes()),
+                _ => Reply::RetagString("一".as_bytes()),
+            };
+            check(worker.eval_args(ready()).unwrap(), Some(expected));
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+        }
+        // The conservative 8*n+1 reply plan is not a total-retained threshold:
+        // every ready owner and the existing driver row metadata still count.
+    }
+}

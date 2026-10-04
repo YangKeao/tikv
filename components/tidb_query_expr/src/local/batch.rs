@@ -1586,6 +1586,9 @@ pub enum EvaluatedBytesOp {
     BoundedStalenessFinishNative,
     TimestampDiffTextNative,
     TimestampDiffCoreNative,
+    ToBinaryNative,
+    FromBinaryNative,
+    ConvertUsingNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1649,6 +1652,19 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::ToBinaryNative => {
+                return EvaluatedKernelKind::ClosedPrivate(crate::LocalFunctionId::ToBinaryNative);
+            }
+            Self::FromBinaryNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::FromBinaryNative,
+                );
+            }
+            Self::ConvertUsingNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::ConvertUsingNative,
+                );
+            }
             Self::TimestampDiffTextNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::TimestampDiffTextNative,
@@ -4312,6 +4328,9 @@ impl EvaluatedBytesOp {
             Self::BoundedStalenessFinishNative => {
                 crate::impl_time::bounded_staleness_finish_native_fn_meta()
             }
+            Self::ToBinaryNative => crate::to_binary_native_fn_meta(),
+            Self::FromBinaryNative => crate::from_binary_native_fn_meta(),
+            Self::ConvertUsingNative => crate::convert_using_native_fn_meta(),
             Self::TimestampDiffTextNative => crate::impl_time::timestamp_diff_text_native_fn_meta(),
             Self::TimestampDiffCoreNative => crate::impl_time::timestamp_diff_core_native_fn_meta(),
             Self::CastRealUnsignedNative => crate::impl_cast::cast_real_unsigned_native_fn_meta(),
@@ -4958,6 +4977,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::ToBinaryNative | Self::FromBinaryNative | Self::ConvertUsingNative => {
+                EvalType::Bytes
+            }
             Self::TimestampDiffTextNative | Self::TimestampDiffCoreNative => EvalType::Int,
             Self::BoundedStalenessHeadNative | Self::BoundedStalenessFinishNative => {
                 EvalType::Bytes
@@ -5413,6 +5435,13 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::ToBinaryNative | Self::FromBinaryNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::ConvertUsingNative => &[
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Bytes,
+            ],
             Self::TimestampDiffTextNative | Self::TimestampDiffCoreNative => {
                 &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes]
             }
@@ -6681,6 +6710,9 @@ pub enum EvaluatedArgs {
         count: ReadyIntArg,
     },
     Bytes3([Option<Vec<u8>>; 3]),
+    /// Four separate actual operands; only the closed CONVERT USING profile
+    /// admits this Values shape, without a packed descriptor or opcode slot.
+    Bytes4([Option<Vec<u8>>; 4]),
     Int2(Option<i64>, Option<i64>),
     /// Original ready value plus an explicit packet-policy decision.
     PacketInt {
@@ -6900,12 +6932,47 @@ impl EvaluatedArgs {
                 &[EvalType::Bytes, EvalType::Int]
             }
             Self::Bytes3(_) => &[EvalType::Bytes, EvalType::Bytes, EvalType::Bytes],
+            Self::Bytes4(_) => &[
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Bytes,
+            ],
             Self::Int2(..) | Self::PacketInt { .. } => &[EvalType::Int, EvalType::Int],
             Self::PacketBytesInt { .. } => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
         }
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::ToBinaryNative {
+            return match self {
+                Self::Bytes2(value, charset) => {
+                    crate::to_binary_native_args_valid(value.as_deref(), charset.as_deref())
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::FromBinaryNative {
+            return match self {
+                Self::Bytes2(value, charset) => {
+                    crate::from_binary_native_args_valid(value.as_deref(), charset.as_deref())
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::ConvertUsingNative {
+            return match self {
+                Self::Bytes4([value, source, effective, target]) => {
+                    crate::convert_using_native_args_valid(
+                        value.as_deref(),
+                        source.as_deref(),
+                        effective.as_deref(),
+                        target.as_deref(),
+                    )
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::TimestampDiffTextNative {
             return match self {
                 Self::Bytes3([unit, left, right]) => crate::timestamp_diff_text_native_args_valid(
@@ -8104,6 +8171,7 @@ impl EvaluatedArgs {
                 ([Bytes(bytes), Bytes(delimiter), Int(count), Int(None)], 3)
             }
             Self::Bytes3([a, b, c]) => ([Bytes(a), Bytes(b), Bytes(c), Int(None)], 3),
+            Self::Bytes4([a, b, c, d]) => ([Bytes(a), Bytes(b), Bytes(c), Bytes(d)], 4),
             Self::Int2(lhs, rhs) => ([Int(lhs), Int(rhs), Int(None), Int(None)], 2),
             Self::PacketInt { value, disposition } => (
                 [
@@ -10007,6 +10075,55 @@ impl EvaluatedBytesWorker {
             // then invoke the real generated wrapper below for its own reply.
             budget.check_output(bound, input_bytes)?;
         }
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::ToBinaryNative
+                | EvaluatedBytesOp::FromBinaryNative
+                | EvaluatedBytesOp::ConvertUsingNative
+        ) {
+            let value = match (self.operation, &ready[..arity]) {
+                (
+                    EvaluatedBytesOp::ToBinaryNative,
+                    [ScalarValue::Bytes(value), ScalarValue::Bytes(charset)],
+                ) if crate::to_binary_native_args_valid(value.as_deref(), charset.as_deref()) => {
+                    value.as_deref()
+                }
+                (
+                    EvaluatedBytesOp::FromBinaryNative,
+                    [ScalarValue::Bytes(value), ScalarValue::Bytes(charset)],
+                ) if crate::from_binary_native_args_valid(value.as_deref(), charset.as_deref()) => {
+                    value.as_deref()
+                }
+                (
+                    EvaluatedBytesOp::ConvertUsingNative,
+                    [
+                        ScalarValue::Bytes(value),
+                        ScalarValue::Bytes(source),
+                        ScalarValue::Bytes(effective),
+                        ScalarValue::Bytes(target),
+                    ],
+                ) if crate::convert_using_native_args_valid(
+                    value.as_deref(),
+                    source.as_deref(),
+                    effective.as_deref(),
+                    target.as_deref(),
+                ) =>
+                {
+                    value.as_deref()
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "charset operands differ from their fixed physical domain".into(),
+                    ));
+                }
+            };
+            let bound = crate::native_convert_charset::native_convert_charset_output_bound(value)
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // Bound the reply before conversion, while retaining every actual
+            // input owner (including all three separate charset operands).
+            // Codec-internal temporary allocation peaks are not claimed here.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -10422,6 +10539,22 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::ToBinaryNative
+                        | EvaluatedBytesOp::FromBinaryNative
+                        | EvaluatedBytesOp::ConvertUsingNative
+                ) {
+                    let valid = match value {
+                        Some(bytes) => crate::decode_native_convert_charset_result(bytes).is_some(),
+                        None => self.operation == EvaluatedBytesOp::ConvertUsingNative,
+                    };
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "native charset conversion returned an invalid report".into(),
+                        ));
+                    }
+                }
                 if self.operation == EvaluatedBytesOp::BoundedStalenessHeadNative
                     && value.is_none_or(|bytes| {
                         crate::decode_native_bounded_staleness_head(bytes).is_none()

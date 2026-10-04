@@ -417,6 +417,16 @@ short-circuit admission policy described above.
   boundary cut, without taking over callers' trim/NUL rules. Ryu remains the
   existing 1.0.23 package with a moved direct dependency. These datatype
   prerequisites do not by themselves earn evaluator-family credit.
+  Native charset expression workers in `native_convert_charset.rs` use
+  ToBinary/FromBinary Bytes2 and ConvertUsing Bytes4, one Values call each.
+  The latter retains exact source spelling, effective field charset and target
+  as separate actual inputs; its four-argument compile allowance is profile-only.
+  Reports distinguish Bytes, retag payload, conversion error and unknown target;
+  only ConvertUsing can compute NULL. Default-collation projection remains late
+  in the frontend because GB defaults observe the original global mode.
+  Checked `8*n+1` precharge bounds the retained reply; actual input/reply capacities
+  remain charged, without claiming codec temporary or physical allocation peaks.
+  Existing wire Encoding policies and native PB admission are unchanged.
   Native-compatible charset byte policy lives in
   `codec/collation/native_encoding.rs`, separate from wire Encoding traits.
   It owns TransformOp, generic first-error/trim/replace/collection policy,

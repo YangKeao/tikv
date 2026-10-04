@@ -316,6 +316,19 @@ fn evaluated_ready_args_match(
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
         (
+            EvaluatedBytesOp::ToBinaryNative | EvaluatedBytesOp::FromBinaryNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 2 && operation.call_count() == 1,
+        (EvaluatedBytesOp::ConvertUsingNative, EvaluatedArgsRole::Values) => {
+            types.len() == 4 && operation.call_count() == 1
+        }
+        (
+            EvaluatedBytesOp::ToBinaryNative
+            | EvaluatedBytesOp::FromBinaryNative
+            | EvaluatedBytesOp::ConvertUsingNative,
+            _,
+        ) => false,
+        (
             EvaluatedBytesOp::TimestampDiffTextNative | EvaluatedBytesOp::TimestampDiffCoreNative,
             EvaluatedArgsRole::Values,
         ) => types.len() == 3 && operation.call_count() == 1,
@@ -471,6 +484,35 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::ToBinaryNative
+            || match values {
+                [ScalarValue::Bytes(value), ScalarValue::Bytes(charset)] => {
+                    crate::to_binary_native_args_valid(value.as_deref(), charset.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::FromBinaryNative
+            || match values {
+                [ScalarValue::Bytes(value), ScalarValue::Bytes(charset)] => {
+                    crate::from_binary_native_args_valid(value.as_deref(), charset.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::ConvertUsingNative
+            || match values {
+                [
+                    ScalarValue::Bytes(value),
+                    ScalarValue::Bytes(source_exact),
+                    ScalarValue::Bytes(source_effective),
+                    ScalarValue::Bytes(target),
+                ] => crate::convert_using_native_args_valid(
+                    value.as_deref(),
+                    source_exact.as_deref(),
+                    source_effective.as_deref(),
+                    target.as_deref(),
+                ),
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::TimestampDiffTextNative
             || match values {
                 [
@@ -1310,6 +1352,19 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::ToBinaryNative | EvaluatedBytesOp::FromBinaryNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 2 && calls == 1,
+        (EvaluatedBytesOp::ConvertUsingNative, EvaluatedArgsRole::Values) => {
+            arity == 4 && calls == 1
+        }
+        (
+            EvaluatedBytesOp::ToBinaryNative
+            | EvaluatedBytesOp::FromBinaryNative
+            | EvaluatedBytesOp::ConvertUsingNative,
+            _,
+        ) => false,
         (
             EvaluatedBytesOp::TimestampDiffTextNative | EvaluatedBytesOp::TimestampDiffCoreNative,
             EvaluatedArgsRole::Values,

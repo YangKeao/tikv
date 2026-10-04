@@ -137,6 +137,9 @@ fn check_evaluated_bytes_source(
         )
     };
     let arity_matches = match (operation, operation.input_role()) {
+        (EvaluatedBytesOp::ConvertUsingNative, EvaluatedArgsRole::Values) => {
+            arity == 4 && calls == 1
+        }
         (
             EvaluatedBytesOp::UnixTimestampValueNative
             | EvaluatedBytesOp::UnixTimestampIntLegacy

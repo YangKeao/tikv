@@ -522,6 +522,9 @@ pub enum LocalFunctionId {
     BoundedStalenessFinishNative,
     TimestampDiffTextNative,
     TimestampDiffCoreNative,
+    ToBinaryNative,
+    FromBinaryNative,
+    ConvertUsingNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

@@ -253,6 +253,38 @@ impl SharedNativeEncoding {
     }
 }
 
+/// Exact native registry support check; aliases/case folding belong to callers.
+pub fn is_supported_encoding(charset: &str) -> bool {
+    matches!(
+        charset,
+        "utf8mb4" | "utf8" | "gbk" | "latin1" | "binary" | "ascii" | "gb18030"
+    )
+}
+
+/// Native lookup: empty and unknown exact names fall back to binary, and utf8
+/// selects the four-byte implementation rather than the separate strict leaf.
+pub fn find_encoding(charset: &str) -> SharedNativeEncoding {
+    match charset {
+        "utf8mb4" | "utf8" => SharedNativeEncoding::Utf8,
+        "gbk" => SharedNativeEncoding::Gbk,
+        "latin1" => SharedNativeEncoding::Latin1,
+        "binary" | "" => SharedNativeEncoding::Binary,
+        "ascii" => SharedNativeEncoding::Ascii,
+        "gb18030" => SharedNativeEncoding::Gb18030,
+        _ => SharedNativeEncoding::Binary,
+    }
+}
+
+/// The source lookup variant that treats UTF-8 as byte-preserving binary.
+pub fn find_encoding_take_utf8_as_noop(charset: &str) -> SharedNativeEncoding {
+    let encoding = find_encoding(charset);
+    if encoding == SharedNativeEncoding::Utf8 {
+        SharedNativeEncoding::Binary
+    } else {
+        encoding
+    }
+}
+
 /// Specialized ASCII transform's valid-input fast path is independent of flags.
 pub fn native_ascii_transform<E, F>(
     source: &[u8],
