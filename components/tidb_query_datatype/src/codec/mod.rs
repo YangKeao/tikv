@@ -22,6 +22,7 @@ pub mod datum;
 pub mod datum_codec;
 pub mod error;
 pub mod mysql;
+pub mod native_decimal_convert;
 pub mod native_duration_convert;
 pub mod native_eval_type;
 pub mod native_float_parse;

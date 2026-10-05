@@ -179,7 +179,7 @@ impl NativeDecimalParseValue {
         )
     }
 
-    fn from_shared(value: Decimal) -> Result<Self, NativeDecimalError> {
+    pub(crate) fn from_shared(value: Decimal) -> Result<Self, NativeDecimalError> {
         let digits = value.native_canonical_coefficient_digits(usize::MAX)?;
         let parts = value.words();
         Ok(Self {

@@ -677,6 +677,13 @@ short-circuit admission policy described above.
   Native methods project values/errors/events. Existing integer-controller
   callback interfaces remain, but their signed-datum business implementation is
   shared; this does not close all typed/write conversion controllers.
+  `codec/native_decimal_convert.rs` owns plain decimal-datum, text and JSON-decimal
+  conversion. It consumes actual numeric views and returns existing Decimal
+  transport with typed events. Hybrid ordinals, declared shape, lossy datum UTF-8
+  versus empty invalid JSON text, and distinct plain/JSON float paths are retained.
+  JSON floats reuse the existing crate-local canonical Decimal projector, not a
+  second coefficient formatter. Context-aware Decimal and typed/write selectors
+  remain separate, as do the unchanged integer-controller callback interfaces.
   `native_cast_duration.rs` owns ordinary, argument and computed TIME conversion.
   Its native bridge supplies only lazy zone metadata, applies a generic truncate
   effect and wraps raw parts. `codec/native_duration_convert.rs` owns rounding,
