@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round138收口（numeric-route-133）：numeric Head preserve/normalize/target/String admission/六route单owner SDK，native只selectedstorage/actualdata/既有conversion执行，无新C4gate。6matched全GREEN SDK9/native consumer4/旧Real1/arithmetic1/既有SQL2，无失败重试；3新tests，旧SDK7/native35逐体不变，SDK2/native2 Rust、无新Rustfile/SQLprobe。原renderer/finalconvert逐字不变；详numeric-route-checkpoint.md/summary.txt。fmt/diff过，B/A冻结，partialCAST一记录、族不变，配对Plan+DCO发布。finalfit/renderer等后续，238strict0remaining7不变，full/lint/perf未跑。
+
+round138启动（numeric-route-133）：B既有native_numeric_argument接管NULL/sameEval preserve、unsigned/F32 normalization、targetvalidation、String/hybrid admission与六route；A scalar_function只Head数据projection/selected执行+新consumer。保static_type.expect在先，真实metadata/actualkind与错误优先级，无新C4gate/fake descriptors；finalfit/renderer仍明确native。父exports/核心+既有SQL gates、配对Plan，238strict0remaining7不增族。
+
 round137收口（real-decimal-132）：RealDecimal prepare/demand/finish及unscaled Int/UInt SDK单owner；native原renderer逐字不变、仅SDK请求时取subject，仍明确待迁，fallback/message在SDK。6matched全GREEN SDK7/native consumer3/旧Real1/division1/既有SQL2，无失败重试；3新tests，旧SDK5/native34逐体不变，SDK2/native2 Rust、无新Rustfile/SQLprobe。新test锁ParamMarker lazy/error/veto、metadata及zone→flags顺序；详real-decimal-checkpoint.md/summary.txt。fmt/diff过，B/A冻结，partialCAST一记录、族不变，配对Plan+DCO发布。finalfit/renderer等后续，238strict0remaining7不变，full/lint/perf未跑。
 
 round137启动（real-decimal-132）：B既有native_numeric_argument共享RealDecimal exact/parse/error/demand/finish状态及unspecifiedscale Int/UInt构造；A scalar_function薄stateadapters+既有testfile新consumer。SDK决定lazy level/subject需求与warningfallback/message/veto→projection；现有numeric_expression_text仅按需提供实际表达式文本，renderer本身仍明确待迁，不引入formattercallback。父exports/core/既有SQL gates、配对Plan；finalfit等仍后续，238strict0remaining7不增族。

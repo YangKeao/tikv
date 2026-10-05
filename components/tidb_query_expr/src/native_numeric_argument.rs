@@ -20,6 +20,83 @@ use tidb_query_datatype::codec::{
     native_type_name::NativeTypeNameCode,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NativeNumericArgumentNormalization {
+    Keep,
+    UInt(u64),
+    Real(f64),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeNumericArgumentRoute {
+    String,
+    JsonReal,
+    JsonInt,
+    ContextDecimal,
+    RealDecimal,
+    Fit,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NativeNumericArgumentHead {
+    Preserve,
+    Cast {
+        normalization: NativeNumericArgumentNormalization,
+        route: NativeNumericArgumentRoute,
+        target_code: u8,
+    },
+}
+/// Initial numeric-argument policy only. NULL/same-evaluation identity precedes
+/// normalization and target validation. Routing inspects the actual normalized
+/// value, and nonhybrid String admission precedes every JSON/decimal route.
+pub fn native_numeric_argument_head(
+    input: NativeNumericInput<'_>,
+    source: NativeEvalType,
+    target: NativeEvalType,
+    unsigned: bool,
+    hybrid: bool,
+) -> Result<NativeNumericArgumentHead, &'static str> {
+    use NativeNumericArgumentNormalization as N;
+    use NativeNumericArgumentRoute as R;
+    use NativeNumericInput as I;
+    if matches!(input, I::Null) || source == target {
+        return Ok(NativeNumericArgumentHead::Preserve);
+    }
+    let (normalization, input) = match input {
+        I::Int(value) if unsigned => (N::UInt(value as u64), I::UInt(value as u64)),
+        I::Float32(value) => {
+            let value = f64::from(value as f32);
+            (N::Real(value), I::Real(value))
+        }
+        _ => (N::Keep, input),
+    };
+    let target_code = match target {
+        NativeEvalType::Int => 8,
+        NativeEvalType::Real => 5,
+        NativeEvalType::Decimal => 246,
+        _ => return Err("numeric argument cast domain"),
+    };
+    let route = if source == NativeEvalType::String && !hybrid {
+        match input {
+            I::String(_) | I::Bytes(_) => R::String,
+            _ => return Err("string arithmetic argument domain"),
+        }
+    } else {
+        match (input, target) {
+            (I::Json { .. }, NativeEvalType::Real) => R::JsonReal,
+            (I::Json { .. }, NativeEvalType::Int) => R::JsonInt,
+            (I::Time(_) | I::Duration(_) | I::Json { .. }, NativeEvalType::Decimal) => {
+                R::ContextDecimal
+            }
+            (I::Real(_), NativeEvalType::Decimal) => R::RealDecimal,
+            _ => R::Fit,
+        }
+    };
+    Ok(NativeNumericArgumentHead::Cast {
+        normalization,
+        route,
+        target_code,
+    })
+}
+
 /// Numeric-argument DECIMAL target shape. Source evaluation type selects the
 /// integer-width table; other sources use the target DECIMAL's shared caps.
 pub fn native_numeric_argument_decimal_shape(
@@ -263,6 +340,231 @@ pub fn native_numeric_argument_string_to_decimal<E>(
         }
     }
     Ok(native_decimal_from_my_decimal(decimal))
+}
+
+#[cfg(test)]
+mod head_tests {
+    use NativeEvalType as T;
+    use NativeNumericArgumentHead as H;
+    use NativeNumericArgumentNormalization as N;
+    use NativeNumericArgumentRoute as R;
+    use NativeNumericInput as I;
+
+    use super::*;
+    #[test]
+    fn numeric_argument_head_preserves_identity_before_normalization_and_validates_before_admission()
+     {
+        for target in T::ALL {
+            assert_eq!(
+                native_numeric_argument_head(I::Null, T::String, target, true, false),
+                Ok(H::Preserve)
+            );
+        }
+        for source in T::ALL {
+            for input in [
+                I::Int(-1),
+                I::Float32(16_777_217.0),
+                I::Float32(f64::NAN),
+                I::Raw(b"bad"),
+                I::MinNotNull,
+                I::MaxValue,
+            ] {
+                assert_eq!(
+                    native_numeric_argument_head(input, source, source, true, false),
+                    Ok(H::Preserve)
+                );
+            }
+        }
+        let json = I::Json {
+            type_code: 9,
+            value: &[],
+        };
+        assert_eq!(
+            native_numeric_argument_head(json, T::String, T::Datetime, false, false),
+            Err("numeric argument cast domain")
+        );
+        for target in [T::Int, T::Real, T::Decimal] {
+            for input in [
+                json,
+                I::Int(-1),
+                I::Float32(1.25),
+                I::Raw(b"1"),
+                I::MinNotNull,
+                I::MaxValue,
+            ] {
+                assert_eq!(
+                    native_numeric_argument_head(input, T::String, target, true, false),
+                    Err("string arithmetic argument domain")
+                );
+            }
+        }
+        for target in [
+            T::String,
+            T::Datetime,
+            T::Timestamp,
+            T::Duration,
+            T::Json,
+            T::VectorFloat32,
+        ] {
+            assert_eq!(
+                native_numeric_argument_head(I::Int(-1), T::Int, target, true, false),
+                Err("numeric argument cast domain")
+            );
+        }
+        assert_eq!(
+            native_numeric_argument_head(I::Int(-1), T::Int, T::Real, true, false),
+            Ok(H::Cast {
+                normalization: N::UInt(u64::MAX),
+                route: R::Fit,
+                target_code: 5
+            })
+        );
+        assert_eq!(
+            native_numeric_argument_head(I::Int(-1), T::Int, T::Real, false, false),
+            Ok(H::Cast {
+                normalization: N::Keep,
+                route: R::Fit,
+                target_code: 5
+            })
+        );
+        assert_eq!(
+            native_numeric_argument_head(I::UInt(u64::MAX), T::Int, T::Decimal, false, false),
+            Ok(H::Cast {
+                normalization: N::Keep,
+                route: R::Fit,
+                target_code: 246
+            })
+        );
+        for (raw, expected) in [
+            (16_777_217.0, 16_777_216.0),
+            (-0.0, -0.0),
+            (1e-50, 0.0),
+            (f64::MAX, f64::INFINITY),
+        ] {
+            let head =
+                native_numeric_argument_head(I::Float32(raw), T::Real, T::Decimal, false, false)
+                    .unwrap();
+            let H::Cast {
+                normalization: N::Real(value),
+                route: R::RealDecimal,
+                target_code: 246,
+            } = head
+            else {
+                panic!("actual normalized Real route");
+            };
+            assert_eq!(value.to_bits(), expected.to_bits());
+        }
+        let head =
+            native_numeric_argument_head(I::Float32(f64::NAN), T::Real, T::Int, false, false)
+                .unwrap();
+        let H::Cast {
+            normalization: N::Real(value),
+            route: R::Fit,
+            target_code: 8,
+        } = head
+        else {
+            panic!("NaN remains an actual Real value");
+        };
+        assert!(value.is_nan());
+    }
+    #[test]
+    fn numeric_argument_head_routes_actual_values_after_string_admission_and_hybrid_bypass() {
+        use tidb_query_datatype::codec::{
+            mysql::{
+                NativeDecimalParseRef, NativeVectorFloat32,
+                time::{NativeTemporalValue, TimeType},
+            },
+            native_duration_convert::NativeDurationParts,
+        };
+        let json = I::Json {
+            type_code: 4,
+            value: &[],
+        };
+        let time = I::Time(NativeTemporalValue {
+            raw: 0,
+            kind: TimeType::DateTime,
+            fsp: 255,
+        });
+        let duration = I::Duration(NativeDurationParts {
+            nanoseconds: 0,
+            fsp: -2,
+        });
+        let decimal = I::Decimal(NativeDecimalParseRef {
+            negative: true,
+            digits: &[255],
+            scale: 1,
+            storage_scale: 0,
+            declared_shape: None,
+        });
+        let vector = NativeVectorFloat32::default();
+        for (input, source, target, hybrid, route, code) in [
+            (I::String(b"1\xff"), T::String, T::Int, false, R::String, 8),
+            (I::Bytes(b"1"), T::String, T::Real, false, R::String, 5),
+            (
+                I::String(b"1"),
+                T::String,
+                T::Decimal,
+                false,
+                R::String,
+                246,
+            ),
+            (json, T::Json, T::Real, false, R::JsonReal, 5),
+            (json, T::Json, T::Int, false, R::JsonInt, 8),
+            (json, T::Json, T::Decimal, false, R::ContextDecimal, 246),
+            (json, T::String, T::Real, true, R::JsonReal, 5),
+            (time, T::Datetime, T::Decimal, false, R::ContextDecimal, 246),
+            (
+                duration,
+                T::Duration,
+                T::Decimal,
+                false,
+                R::ContextDecimal,
+                246,
+            ),
+            (
+                I::Real(1.25),
+                T::Real,
+                T::Decimal,
+                false,
+                R::RealDecimal,
+                246,
+            ),
+            (
+                I::Real(1.25),
+                T::String,
+                T::Decimal,
+                true,
+                R::RealDecimal,
+                246,
+            ),
+            (I::Enum(7), T::String, T::Real, true, R::Fit, 5),
+            (I::Set(3), T::String, T::Decimal, true, R::Fit, 246),
+            (I::String(b"1"), T::String, T::Real, true, R::Fit, 5),
+            (I::Bytes(b"1"), T::Json, T::Int, false, R::Fit, 8),
+            (time, T::Datetime, T::Real, false, R::Fit, 5),
+            (duration, T::Duration, T::Int, false, R::Fit, 8),
+            (decimal, T::Decimal, T::Real, false, R::Fit, 5),
+            (I::Bit(&[1; 9]), T::Int, T::Real, false, R::Fit, 5),
+            (I::Raw(b"1"), T::Real, T::Int, false, R::Fit, 8),
+            (
+                I::VectorFloat32(&vector),
+                T::VectorFloat32,
+                T::Decimal,
+                false,
+                R::Fit,
+                246,
+            ),
+        ] {
+            assert_eq!(
+                native_numeric_argument_head(input, source, target, false, hybrid),
+                Ok(H::Cast {
+                    normalization: N::Keep,
+                    route,
+                    target_code: code
+                })
+            );
+        }
+    }
 }
 
 #[cfg(test)]
