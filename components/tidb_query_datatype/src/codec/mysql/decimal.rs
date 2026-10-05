@@ -2949,7 +2949,10 @@ impl Decimal {
     // The native value bridge's exact coefficient projection: keep at least
     // storage-scale digits, or one digit for an integral zero. Shared by visible
     // formatting and precision casting rather than inventing a second count.
-    fn native_canonical_coefficient_digits(&self, limit: usize) -> NativeDecimalResult<Vec<u8>> {
+    pub(super) fn native_canonical_coefficient_digits(
+        &self,
+        limit: usize,
+    ) -> NativeDecimalResult<Vec<u8>> {
         self.check_native_math_value(limit)?;
         let mut digits = self.native_coefficient_digits(limit)?;
         let removable = digits.len().saturating_sub(self.frac_cnt.max(1));

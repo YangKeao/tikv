@@ -479,9 +479,16 @@ short-circuit admission policy described above.
   `mysql/native_mydecimal.rs` now owns the fixed-word algorithms, while native
   `MyDecimal` retains its original private 40-byte storage facade and safe
   raw-parts adaptation. `mysql/native_decimal_codec.rs` owns the required binary
-  writer/size primitives. Neither is an alias of wire Decimal, and the native
-  general Decimal parser and binary reader remain separate; this step does
-  not remove native value/word adapters. Datatype
+  writer/size primitives. `mysql/native_decimal_parse.rs` separately owns native
+  digit-string literal/integer construction, normalization, MySQL parse/status
+  and bounded-shift policy. Native Decimal keeps its private SmallVec24 and
+  five metadata fields; owned parts move the real coefficient, and unchanged
+  or overflow shifts retain raw storage and declared shape. Fresh values
+  clear shape as before. Shared rounding uses the existing Decimal rounder
+  and mysql-internal coefficient extractor, not a copied algorithm or text
+  round trip. Neither compatibility parser is an alias of wire Decimal.
+  Native binary reading, value/word adapters and ordinary CAST warning/source
+  orchestration remain separate; this is not whole-M2 completion. Datatype
   `time/native_core_arithmetic.rs` owns raw CoreTime date/duration arithmetic
   and the native day-number domain, distinct from wire limits. Existing eight
   child-free Duration-to-Datetime refusals and wrong-reader admission remain

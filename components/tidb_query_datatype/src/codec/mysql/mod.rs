@@ -33,6 +33,7 @@ pub mod enums;
 pub mod json;
 pub mod locale;
 mod native_decimal_codec;
+mod native_decimal_parse;
 mod native_mydecimal;
 pub mod set;
 pub mod time;
@@ -57,6 +58,11 @@ pub use self::{
         decimal_bin_size as native_decimal_bin_size,
         remove_leading_zeros as native_decimal_remove_leading_zeros,
         write_bin as native_decimal_write_bin,
+    },
+    native_decimal_parse::{
+        DecimalParseError as NativeDecimalParseError, NativeDecimalParseRef,
+        NativeDecimalParseValue, native_decimal_from_literal, native_decimal_normalize,
+        native_decimal_parse_mysql, native_decimal_shift_mysql,
     },
     native_mydecimal::{
         DecimalError as NativeMyDecimalError,
