@@ -83,6 +83,99 @@ pub enum NativeNumericArgumentError<E> {
     Effect(E),
     Conversion(NativeNumericArgumentConversionError),
 }
+#[derive(Debug)]
+enum RealDecimalValue {
+    Ready(NativeDecimalParseValue),
+    Parsed {
+        value: NativeMyDecimal,
+        overflow: Option<f64>,
+    },
+}
+/// Staged source conversion. The expression renderer remains outside this
+/// boundary and is demanded only after overflow has passed the level guard.
+#[derive(Debug)]
+pub struct NativeNumericArgumentRealDecimal {
+    value: RealDecimalValue,
+}
+impl NativeNumericArgumentRealDecimal {
+    pub fn requires_expression_subject(&self) -> bool {
+        matches!(
+            &self.value,
+            RealDecimalValue::Parsed {
+                overflow: Some(_),
+                ..
+            }
+        )
+    }
+    /// Accept the original diagnostic effect before projecting fixed-word
+    /// storage. A supplied subject (including empty text) is used unchanged;
+    /// only a missing subject demands the canonical shortest-float fallback.
+    pub fn finish<E>(
+        self,
+        subject: Option<&str>,
+        mut handle: impl FnMut(&str) -> Result<(), E>,
+    ) -> Result<NativeDecimalParseValue, E> {
+        match self.value {
+            RealDecimalValue::Ready(value) => Ok(value),
+            RealDecimalValue::Parsed { value, overflow } => {
+                if let Some(real) = overflow {
+                    let fallback;
+                    let subject = match subject {
+                        Some(subject) => subject,
+                        None => {
+                            fallback=tidb_query_datatype::codec::mysql::Decimal::native_format_float_g_shortest(real);
+                            &fallback
+                        }
+                    };
+                    handle(&format!("Truncated incorrect DECIMAL value: '{subject}'"))?;
+                }
+                Ok(native_decimal_from_my_decimal(value))
+            }
+        }
+    }
+}
+/// Exact integral doubles in the inclusive +/-2^53 interval use the original
+/// integer shortcut, except negative zero. Other values keep raw MyDecimal
+/// until finish, and only Overflow consults the supplied level effect.
+pub fn native_numeric_argument_real_decimal_prepare(
+    real: f64,
+    mut level: impl FnMut() -> NativeNumericArgumentLevel,
+) -> Result<NativeNumericArgumentRealDecimal, NativeNumericArgumentConversionError> {
+    if real.abs() <= 9_007_199_254_740_992.0
+        && real.fract() == 0.0
+        && (real != 0.0 || !real.is_sign_negative())
+    {
+        return Ok(NativeNumericArgumentRealDecimal {
+            value: RealDecimalValue::Ready(NativeDecimalParseValue::from_int(real as i64)),
+        });
+    }
+    let (value, error) = NativeMyDecimal::from_float64(real);
+    let overflow = match error {
+        Some(NativeMyDecimalError::Overflow) => {
+            if level() == NativeNumericArgumentLevel::Error {
+                return Err(NativeNumericArgumentConversionError::Overflow);
+            }
+            Some(real)
+        }
+        Some(NativeMyDecimalError::Truncated) | None => None,
+        Some(_) => return Err(NativeNumericArgumentConversionError::BadNumber),
+    };
+    Ok(NativeNumericArgumentRealDecimal {
+        value: RealDecimalValue::Parsed { value, overflow },
+    })
+}
+/// The unspecified-scale final arm constructs only actual signed/unsigned
+/// integers; every other datum remains the caller's original value.
+pub fn native_numeric_argument_unscaled_integer(
+    input: NativeNumericInput<'_>,
+) -> Option<NativeDecimalParseValue> {
+    match input {
+        NativeNumericInput::Int(value) => Some(NativeDecimalParseValue::from_int(value)),
+        NativeNumericInput::UInt(value) => Some(NativeDecimalParseValue::from_uint(value)),
+        _ => None,
+    }
+}
+
 struct JsonDisplay<'a> {
     type_code: u8,
     value: &'a [u8],
@@ -170,6 +263,215 @@ pub fn native_numeric_argument_string_to_decimal<E>(
         }
     }
     Ok(native_decimal_from_my_decimal(decimal))
+}
+
+#[cfg(test)]
+mod real_decimal_tests {
+    use NativeNumericArgumentConversionError as C;
+    use NativeNumericArgumentLevel as L;
+
+    use super::*;
+    fn visible(value: &NativeDecimalParseValue) -> String {
+        let value = value.as_ref();
+        tidb_query_datatype::codec::mysql::Decimal::native_format_visible(
+            value.negative,
+            value.digits,
+            value.scale,
+            value.storage_scale,
+        )
+    }
+    #[test]
+    fn real_decimal_stage_keeps_integral_bounds_negative_zero_raw_shape_and_unscaled_domains() {
+        for (real, expected) in [
+            (0.0, "0"),
+            (42.0, "42"),
+            (-42.0, "-42"),
+            (9_007_199_254_740_992.0, "9007199254740992"),
+            (-9_007_199_254_740_992.0, "-9007199254740992"),
+        ] {
+            let state = native_numeric_argument_real_decimal_prepare(real, || {
+                panic!("integral shortcut reads no level")
+            })
+            .unwrap();
+            assert!(matches!(&state.value, RealDecimalValue::Ready(_)));
+            assert!(!state.requires_expression_subject());
+            let value = state
+                .finish::<()>(Some("undemanded subject"), |_| panic!("undemanded handle"))
+                .unwrap();
+            assert_eq!(visible(&value), expected);
+            let parts = value.as_ref();
+            assert_eq!(
+                (parts.scale, parts.storage_scale, parts.declared_shape),
+                (0, 0, None)
+            );
+        }
+        for (real, expected) in [
+            (-0.0, "0"),
+            (1.25, "1.25"),
+            (9_007_199_254_740_994.0, "9007199254740994"),
+            (-9_007_199_254_740_994.0, "-9007199254740994"),
+            (1e-100, "0"),
+        ] {
+            let state = native_numeric_argument_real_decimal_prepare(real, || {
+                panic!("nonoverflow parser reads no level")
+            })
+            .unwrap();
+            assert!(matches!(
+                &state.value,
+                RealDecimalValue::Parsed { overflow: None, .. }
+            ));
+            assert!(!state.requires_expression_subject());
+            let value = state
+                .finish::<()>(Some("ignored even on parsed values"), |_| {
+                    panic!("undemanded handle")
+                })
+                .unwrap();
+            assert_eq!(visible(&value), expected);
+            if real == 1.25 {
+                let parts = value.as_ref();
+                assert_eq!(
+                    (
+                        parts.negative,
+                        parts.digits,
+                        parts.scale,
+                        parts.storage_scale,
+                        parts.declared_shape
+                    ),
+                    (false, &b"125"[..], 2, 2, None)
+                );
+            }
+            if real == 0.0 {
+                assert!(!value.as_ref().negative);
+            }
+        }
+        // Fixed-word shift discards fractions beyond its nine-word capacity
+        // with Truncated (native_mydecimal::shift), not an overflow effect.
+        assert_eq!(
+            NativeMyDecimal::from_float64(1e-100).1,
+            Some(NativeMyDecimalError::Truncated)
+        );
+        for real in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                native_numeric_argument_real_decimal_prepare(real, || panic!(
+                    "bad number reads no level"
+                ))
+                .unwrap_err(),
+                C::BadNumber
+            );
+        }
+        use NativeNumericInput as N;
+        for (input, expected) in [
+            (N::Int(i64::MIN), "-9223372036854775808"),
+            (N::UInt(u64::MAX), "18446744073709551615"),
+        ] {
+            let value = native_numeric_argument_unscaled_integer(input).unwrap();
+            assert_eq!(visible(&value), expected);
+            let parts = value.as_ref();
+            assert_eq!(
+                (parts.scale, parts.storage_scale, parts.declared_shape),
+                (0, 0, None)
+            );
+        }
+        let raw = tidb_query_datatype::codec::mysql::NativeDecimalParseRef {
+            negative: true,
+            digits: &[255],
+            scale: 1,
+            storage_scale: 0,
+            declared_shape: None,
+        };
+        let vector = tidb_query_datatype::codec::mysql::NativeVectorFloat32::default();
+        for input in [
+            N::Real(1.0),
+            N::Float32(1.0),
+            N::Enum(1),
+            N::Set(1),
+            N::Bit(&[1]),
+            N::BinaryLiteral(&[1]),
+            N::Decimal(raw),
+            N::String(b"1"),
+            N::Bytes(b"1"),
+            N::Json {
+                type_code: 9,
+                value: &[],
+            },
+            N::Raw(b"1"),
+            N::VectorFloat32(&vector),
+            N::Null,
+            N::MinNotNull,
+            N::MaxValue,
+        ] {
+            assert!(native_numeric_argument_unscaled_integer(input).is_none());
+        }
+    }
+    #[test]
+    fn real_decimal_overflow_stage_keeps_level_subject_handle_order_and_veto_before_projection() {
+        let mut calls = Vec::new();
+        let error = native_numeric_argument_real_decimal_prepare(1e100, || {
+            calls.push("level");
+            L::Error
+        })
+        .unwrap_err();
+        assert_eq!(error, C::Overflow);
+        assert_eq!(calls, ["level"]);
+        for level in [L::Warn, L::Ignore] {
+            let mut calls = Vec::new();
+            let state = native_numeric_argument_real_decimal_prepare(1e100, || {
+                calls.push("level".to_owned());
+                level
+            })
+            .unwrap();
+            assert!(state.requires_expression_subject());
+            assert!(matches!(
+                &state.value,
+                RealDecimalValue::Parsed {
+                    overflow: Some(_),
+                    ..
+                }
+            ));
+            assert_eq!(calls, ["level"]);
+            // The host's original expression renderer runs only at this point.
+            calls.push("subject".into());
+            let value = state.finish(Some(" expression + 1 "), |message| {
+                calls.push(format!("handle:{message}"));
+                Err("veto")
+            });
+            assert_eq!(value.unwrap_err(), "veto");
+            assert_eq!(
+                calls,
+                [
+                    "level",
+                    "subject",
+                    "handle:Truncated incorrect DECIMAL value: ' expression + 1 '"
+                ]
+            );
+        }
+        for (subject, expected) in [
+            (None, "1e+100"),
+            (Some(""), ""),
+            (Some("expression"), "expression"),
+        ] {
+            let state = native_numeric_argument_real_decimal_prepare(1e100, || L::Warn).unwrap();
+            let mut calls = Vec::new();
+            let value = state
+                .finish::<()>(subject, |message| {
+                    calls.push(message.to_owned());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                calls,
+                vec![format!("Truncated incorrect DECIMAL value: '{expected}'")]
+            );
+            // FromString handles shift Overflow by max_decimal(9*9, 0): the
+            // accepted raw MyDecimal projects to this exact unshaped payload.
+            assert_eq!(visible(&value), "9".repeat(81));
+            let parts = value.as_ref();
+            assert_eq!(
+                (parts.scale, parts.storage_scale, parts.declared_shape),
+                (0, 0, None)
+            );
+        }
+    }
 }
 
 #[cfg(test)]

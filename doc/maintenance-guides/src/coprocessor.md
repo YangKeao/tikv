@@ -772,8 +772,12 @@ short-circuit admission policy described above.
   error projection. Decimal target shape and JSON Display-to-Int warning/value
   composition also live here, reusing the original integer controllers and UTC.
   FieldType limit setters share `codec/native_eval_type.rs`; actual code/array
-  views and negative metadata remain intact. Final fitting and other controllers
-  remain separate.
+  views and negative metadata remain intact. Real-to-Decimal preparation now
+  owns exact-integer selection, parsing/error policy, lazy subject demand and
+  warning-before-projection finish. Only demanded expression text comes from
+  the original native renderer, whose implementation remains separate; fallback
+  float formatting and diagnostics are SDK-owned. Unspecified-scale Int/UInt
+  construction is shared too. Final fitting and other controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
