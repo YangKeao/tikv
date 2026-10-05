@@ -188,6 +188,14 @@ pub use native_in::{
     in_typed_values_native_fn_meta,
 };
 
+mod native_in_control;
+pub use native_in_control::{
+    NativeInCacheArg, NativeInCacheValue, NativeInControlEvalType, NativeInControlResult,
+    NativeInControlValue, NativeInRowCandidate, NativeInRowError, NativeInStringCache,
+    native_in_ast_rows, native_in_ast_scalar, native_in_build_string_cache, native_in_generic,
+    native_in_prepared, native_in_ready_values, native_row_equality,
+};
+
 mod native_interval;
 pub use native_interval::{
     NativeIntervalCast, NativeIntervalEvalType, NativeIntervalFieldType, NativeIntervalResult,

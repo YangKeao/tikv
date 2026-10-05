@@ -446,9 +446,18 @@ short-circuit admission policy described above.
   Typed identities retain representation metadata, while comparison reuses
   existing core-time, raw-duration and binary-JSON primitives. The checked
   input-length-sum-plus128 report bound is not a physical-memory claim.
-  AST scalar/row, generic typed/string-cache and ready-value IN remain outside
-  this slice; their distinct demand policies are not aliased to wire IN. No
-  shared-PB IN admission is added, including through an outer UnaryNotInt.
+  Adjacent `native_in_control.rs` owns AST scalar/row, generic typed,
+  prepared-string cache and ready-value IN control. Its synchronous SDK
+  services use the existing comparison/NOT workers as their data plane; they
+  add neither RPN profiles nor hidden facade calls. Exhaustive and first-match
+  policies, row shape/evaluation/error timing and late effective-collator
+  lookup remain distinct. SDK builds and probes the actual standard HashSet;
+  native nodes retain storage, literal metadata and original invalidation.
+  A common SDK row-equality primitive also backs native row equality outside
+  IN, without duplicating its loop. Pure-cache and empty-list paths retain
+  their original comparison-call counts and admission behavior, not a new
+  Head gate. No shared-PB IN admission is added, including through an outer
+  UnaryNotInt, and wire IN's different policies are not substituted.
 - Query_expr `native_date_arithmetic.rs` and private
   `native_date_arithmetic_helpers.rs` own ordinary calendar and typed-duration
   DATE_ADD/SUB policy. Two four-value heads, a generic preparation step and
