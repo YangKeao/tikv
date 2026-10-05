@@ -605,6 +605,17 @@ short-circuit admission policy described above.
   rounding/clip/boundary/NaN policy and is untouched. Other CAST domains, outer
   NULL and UNION's negative bypass are not covered by this slice, and no whole
   CAST family or new wire admission is credited.
+  DOUBLE/FLOAT CAST uses `native_cast_float.rs`, with a distinct value-only
+  entry for strict UTF8/Decimal-prefix conversion. Ordinary text instead uses
+  lossy UTF8 and `codec/native_float_parse.rs`; all ordinary JSON requests its
+  original Display. Only Real/Float32 FLOAT sources narrow; other sources keep
+  f64 within range and produce typed overflow after truncation handling. Actual
+  default conversion values/events/errors reach SDK disposition. The native
+  byte parser retains prefix/parse/range diagnostic order and full trimmed
+  reported subjects; ordinary CAST observes one final event and separately
+  applies trim/NUL/byte-cap formatting. Existing wire scanning is unchanged.
+  Decimal-to-f64 reuses the visible formatter and original Rust parse through
+  the borrowed Ref. No profile, admission gate or whole-CAST credit is added.
   Integer CAST uses `native_cast_integer.rs` for SIGNED, UNSIGNED and the
   static-eval-type UNION negative gate, plus the existing value-only and input
   warning entry contracts. SDK owns scanning, diagnostics and source choice.

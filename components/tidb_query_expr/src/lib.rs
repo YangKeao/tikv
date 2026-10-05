@@ -102,6 +102,12 @@ pub use native_cast_integer::{
     native_cast_integer_signed_value, native_cast_integer_unsigned_value,
 };
 
+mod native_cast_float;
+pub use native_cast_float::{
+    NativeCastFloatError, NativeCastFloatInput, NativeCastFloatTarget, native_cast_float,
+    native_cast_float_value,
+};
+
 mod native_legacy_date_arithmetic;
 pub use native_legacy_date_arithmetic::{
     NativeLegacyDateArithmeticChannel, NativeLegacyDateArithmeticDateKind,

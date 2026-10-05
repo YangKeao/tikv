@@ -22,6 +22,7 @@ pub mod datum;
 pub mod datum_codec;
 pub mod error;
 pub mod mysql;
+pub mod native_float_parse;
 mod overflow;
 pub mod row;
 pub mod table;

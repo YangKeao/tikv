@@ -192,6 +192,15 @@ impl NativeDecimalParseValue {
 }
 
 impl NativeDecimalParseRef<'_> {
+    /// Native decimal-to-float conversion through its existing visible Display
+    /// policy, including hidden-scale rounding and raw signed zero. Retains the
+    /// original formatting and parse panic domain; no SQL warning is invented.
+    pub fn to_f64(self) -> f64 {
+        Decimal::native_format_visible(self.negative, self.digits, self.scale, self.storage_scale)
+            .parse()
+            .expect("Decimal's own Display always produces valid float syntax")
+    }
+
     /// Native half-up signed integer projection over actual storage digits.
     /// Ignores visible scale and declared shape; preserves the original raw
     /// coefficient parsing and UTF-8/slicing panic domain without
@@ -794,5 +803,53 @@ fn native_decimal_rounded_integer_preserves_raw_storage_and_limits() {
         assert!(std::panic::catch_unwind(|| value.round_to_i64()).is_err());
         assert!(std::panic::catch_unwind(|| value.round_to_i64_saturating()).is_err());
         assert!(std::panic::catch_unwind(|| value.round_to_u64_saturating()).is_err());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn native_decimal_to_f64_keeps_visible_rounding_raw_sign_and_panic_domain() {
+    for (negative, digits, scale, storage_scale, expected) in [
+        (false, "12500", 1, 4, 1.3_f64),
+        (true, "12500", 1, 4, -1.3),
+        (false, "000125", 2, 2, 1.25),
+        (true, "000", 2, 2, -0.0),
+        (false, "", 0, 0, 0.0),
+        (true, "", 0, 0, -0.0),
+        (false, "+17", 0, 0, 17.0),
+    ] {
+        let value = NativeDecimalParseRef {
+            negative,
+            digits: digits.as_bytes(),
+            scale,
+            storage_scale,
+            declared_shape: Some((i64::MIN, i64::MAX)),
+        };
+        assert_eq!(
+            value.to_f64().to_bits(),
+            expected.to_bits(),
+            "{negative}/{digits}/{scale}/{storage_scale}"
+        );
+    }
+    let wide = [b'9'; 400];
+    let value = NativeDecimalParseRef {
+        negative: false,
+        digits: &wide,
+        scale: 0,
+        storage_scale: 0,
+        declared_shape: None,
+    };
+    assert_eq!(value.to_f64(), f64::INFINITY);
+    for (digits, scale, storage_scale) in
+        [(&[0xff][..], 0, 0), (&b"x"[..], 0, 0), (&b"1"[..], 2, 1)]
+    {
+        let value = NativeDecimalParseRef {
+            negative: false,
+            digits,
+            scale,
+            storage_scale,
+            declared_shape: None,
+        };
+        assert!(std::panic::catch_unwind(|| value.to_f64()).is_err());
     }
 }
