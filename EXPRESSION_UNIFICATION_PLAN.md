@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round135收口（numeric-argument-130）：三numeric argument策略SDK单owner，native仅data/effects/fixederrorprojection。8launch含1SDK新NUL预期RED、1native新import编译RED；native_float_parse66–83证明12\0tail quiet，改新test并加12x\0tail诊断；Expression用既有module路径，生产/旧test未改。6finalGREEN SDK3/新native1/旧division1/arithmetic1/既有SQL2；4新tests、旧native32逐体不变，SDK2/native3 Rust、2新file，test-onlypath测实际privatevector，不扩大生产API/不增SQLprobe。详numeric-argument-checkpoint.md/summary.txt；fmt/diff过，B/A冻结，partialCAST一记录/族不变，配对Plan+DCO发布。targetmetadata/finalfit/JSONInt/RealDecimal等仍后续，238strict0remaining7不变，full/lint/perf未跑。
+
+round135启动（numeric-argument-130）：批量迁移typednumeric string→Decimal解析/错误效果、bytes→Real与JSON→Real到SDK native_numeric_argument，复用原parser/JSON/warningformatter；B新SDK、A scalar_function/ops real_coerce薄adapters+新test。标量/vector截断区别、lazy level读取、JSON DOUBLE/FLOAT label与veto顺序保留；targetmetadata/finalconvert/JSONInt/RealDecimal仍原路径。父exports/mod、既有算术/SQL gate、配对Plan，238strict0remaining7不增族。
+
 round134收口（decimal-coerce-129）：Decimal default callback/productionselector删除，SDK内部组合；integer kind/mixedsigncmp/bits/decimal/f64与nullabletruth SDK单owner，native Integer alias+薄facade。7matched全GREEN SDK3/2、新native1/旧decimal1/coerce1、既有SQLdecimal1/comparison1，无失败重试；4新tests，旧SDK2/native1逐体不变，SDK3/native4 Rust、2新file，SQL/coerce测试file未改不增probe。详decimal-coerce-checkpoint.md/summary.txt；fmt/diff过，B/A冻结，type+partialCAST台账各增一记录、族对象不变，配对Plan+DCO发布。typed/write其它、M2/root/liveDAG/final后续，238strict0remaining7不变，full/lint/perf未跑。
 
 round134启动（decimal-coerce-129）：批量闭合ordinaryDecimal default转换（SDK内部接R129）及coerce整数kind/有符号比较/bits/decimal/f64、truthy Null/error/event策略（接R132）。B既有decimal模块+新native_coerce_numeric，A decimal桥/coerce别名薄facade+新test；literal只用原value投影。父exports/mod、既有decimal/comparison SQL与核心gate，无新SQLfixture；旧generic/旧test不改，238strict0remaining7不增族，typed/write其它后续。

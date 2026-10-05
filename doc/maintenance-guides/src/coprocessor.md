@@ -765,6 +765,11 @@ short-circuit admission policy described above.
   callers, without moving their negative bypass. No extra profile, C4 admission
   or carrier is added. Outer guards, numeric-argument/vector fast paths and
   other typed/write conversion controllers and targets remain separate work.
+  `native_numeric_argument.rs` owns String-to-Decimal numeric preparation and
+  byte/JSON-to-Real conversion. Existing datatype parsers/JSON/warning formatting
+  are reused; scalar/vector truncation distinctions, lazy level reads and JSON
+  diagnostic labels stay separate. Native supplies context effects and typed
+  error projection. Target fitting and other numeric controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
