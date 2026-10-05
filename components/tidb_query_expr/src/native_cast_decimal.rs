@@ -11,6 +11,8 @@ use tidb_query_datatype::codec::{
         NativeDecimalParseValue, native_decimal_cmp, native_decimal_from_literal,
         native_decimal_normalize, native_decimal_parse_mysql,
     },
+    native_decimal_convert::native_datum_to_decimal,
+    native_numeric::NativeNumericInput,
 };
 
 /// Actual source values. `Other` retains the original datum in the conversion
@@ -27,6 +29,46 @@ pub enum NativeCastDecimalInput<'a> {
     Bytes(&'a [u8]),
     Float32(f64),
     Other,
+}
+
+fn numeric_input(number: NativeNumericInput<'_>) -> NativeCastDecimalInput<'_> {
+    use NativeCastDecimalInput as I;
+    use NativeNumericInput as N;
+    match number {
+        N::Decimal(value) => I::Decimal(value),
+        N::Int(value) => I::Int(value),
+        N::UInt(value) => I::UInt(value),
+        N::Real(value) => I::Real(value),
+        N::String(value) => I::String(value),
+        N::Bytes(value) => I::Bytes(value),
+        N::Float32(value) => I::Float32(value),
+        _ => I::Other,
+    }
+}
+/// Closed ordinary DECIMAL composition: actual datatype conversion and its
+/// event/error folding stay in the SDK; the original warning sink is the
+/// effect.
+pub fn native_cast_decimal_numeric(
+    number: NativeNumericInput<'_>,
+    flen: u32,
+    scale: u32,
+    append: impl FnMut(u16, &str),
+) -> NativeDecimalParseValue {
+    native_cast_decimal(
+        numeric_input(number),
+        flen,
+        scale,
+        || native_datum_to_decimal(number).map(|converted| (converted.value, converted.event)),
+        append,
+    )
+}
+/// The existing UNION caller requests only the same source diagnostic, without
+/// constructing a decimal or imposing ordinary CAST's target fitting.
+pub fn native_cast_decimal_numeric_input_warning(
+    number: NativeNumericInput<'_>,
+    append: impl FnMut(u16, &str),
+) {
+    native_cast_decimal_input_warning(numeric_input(number), append)
 }
 
 /// The existing UNION warning-only helper and ordinary CAST share this policy.
@@ -204,6 +246,122 @@ fn exponent_prefix(s: &str) -> i32 {
     }
     let mag: i32 = digits.parse().unwrap_or(0);
     if negative { -mag } else { mag }
+}
+
+#[cfg(test)]
+mod numeric_tests {
+    use NativeNumericInput as N;
+
+    use super::*;
+    fn text(value: &NativeDecimalParseValue) -> String {
+        let value = value.as_ref();
+        Decimal::native_format_visible(
+            value.negative,
+            value.digits,
+            value.scale,
+            value.storage_scale,
+        )
+    }
+    fn cast(number: N<'_>, flen: u32, scale: u32) -> (NativeDecimalParseValue, Vec<(u16, String)>) {
+        let mut warnings = Vec::new();
+        let value = native_cast_decimal_numeric(number, flen, scale, |code, message| {
+            warnings.push((code, message.to_owned()))
+        });
+        (value, warnings)
+    }
+    #[test]
+    fn closed_decimal_composition_preserves_input_warning_order_raw_identity_and_actual_fallback() {
+        let input = N::String(b" \t1.239x ");
+        let (value, warnings) = cast(input, 10, 2);
+        assert_eq!(text(&value), "1.24");
+        assert_eq!(
+            warnings,
+            vec![
+                (1292, "Truncated incorrect DECIMAL value: '1.239x'".into()),
+                (1292, "Truncated incorrect DECIMAL value: '1.239'".into())
+            ]
+        );
+        let mut input_warnings = Vec::new();
+        native_cast_decimal_numeric_input_warning(input, |code, message| {
+            input_warnings.push((code, message.to_owned()))
+        });
+        assert_eq!(
+            input_warnings,
+            vec![(1292, "Truncated incorrect DECIMAL value: '1.239x'".into())]
+        );
+        let (value, warnings) = cast(N::String(b"99.99x"), 3, 1);
+        assert_eq!(text(&value), "99.9");
+        assert_eq!(
+            warnings,
+            vec![
+                (1292, "Truncated incorrect DECIMAL value: '99.99x'".into()),
+                (1690, "DECIMAL value is out of range in '(3, 1)'".into())
+            ]
+        );
+        for (input, expected) in [
+            (N::Real(16_777_217.0), "16777217"),
+            (N::Float32(16_777_217.0), "16777216"),
+            (
+                N::Json {
+                    type_code: 12,
+                    value: b"\x06123abc",
+                },
+                "123",
+            ),
+            (N::Bit(&[1; 9]), "18446744073709551615"),
+            (N::BinaryLiteral(&[1; 9]), "18446744073709551615"),
+            (N::Enum(u64::MAX), "18446744073709551615"),
+            (N::Set(3), "3"),
+            (N::String(b"12\xff"), "0"),
+            (N::Bytes(b"12\xff"), "0"),
+            (N::Raw(b"12"), "0"),
+            (N::Null, "0"),
+            (N::MinNotNull, "0"),
+            (N::MaxValue, "0"),
+        ] {
+            let (value, warnings) = cast(input, 0, u32::MAX);
+            assert_eq!(text(&value), expected);
+            assert!(warnings.is_empty());
+            native_cast_decimal_numeric_input_warning(input, |_, _| {
+                panic!("undemanded input warning")
+            });
+        }
+        let raw = NativeDecimalParseRef {
+            negative: true,
+            digits: b"000125",
+            scale: 1,
+            storage_scale: 2,
+            declared_shape: Some((65, 30)),
+        };
+        let (value, warnings) = cast(N::Decimal(raw), 1, u32::MAX);
+        assert!(warnings.is_empty());
+        let value = value.as_ref();
+        assert_eq!(
+            (
+                value.negative,
+                value.digits,
+                value.scale,
+                value.storage_scale,
+                value.declared_shape
+            ),
+            (
+                raw.negative,
+                raw.digits,
+                raw.scale,
+                raw.storage_scale,
+                raw.declared_shape
+            )
+        );
+        let events = std::cell::RefCell::new(Vec::new());
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            native_cast_decimal_numeric(input, 10, 2, |code, message| {
+                events.borrow_mut().push((code, message.to_owned()));
+                panic!("original warning sink");
+            })
+        }));
+        assert!(panic.is_err());
+        assert_eq!(*events.borrow(), input_warnings);
+    }
 }
 
 #[cfg(test)]

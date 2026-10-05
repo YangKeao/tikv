@@ -92,7 +92,8 @@ pub use native_date_arithmetic::{
 mod native_cast_decimal;
 pub use native_cast_decimal::{
     NativeCastDecimalInput, decimal_prefix as native_cast_decimal_prefix, native_cast_decimal,
-    native_cast_decimal_input_warning,
+    native_cast_decimal_input_warning, native_cast_decimal_numeric,
+    native_cast_decimal_numeric_input_warning,
 };
 
 mod native_cast_integer;
@@ -111,6 +112,12 @@ pub use native_cast_time::{NativeTimeCastModes, native_cast_arg_as_datetime, nat
 
 mod native_cast_year;
 pub use native_cast_year::native_cast_year;
+
+mod native_coerce_numeric;
+pub use native_coerce_numeric::{
+    NativeInteger, native_integer_bits, native_integer_cmp, native_integer_of,
+    native_integer_to_decimal, native_integer_to_f64, native_truthy,
+};
 
 mod native_coerce_string;
 pub use native_coerce_string::{native_coerce_bytes, native_coerce_string};

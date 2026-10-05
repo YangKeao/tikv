@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round134收口（decimal-coerce-129）：Decimal default callback/productionselector删除，SDK内部组合；integer kind/mixedsigncmp/bits/decimal/f64与nullabletruth SDK单owner，native Integer alias+薄facade。7matched全GREEN SDK3/2、新native1/旧decimal1/coerce1、既有SQLdecimal1/comparison1，无失败重试；4新tests，旧SDK2/native1逐体不变，SDK3/native4 Rust、2新file，SQL/coerce测试file未改不增probe。详decimal-coerce-checkpoint.md/summary.txt；fmt/diff过，B/A冻结，type+partialCAST台账各增一记录、族对象不变，配对Plan+DCO发布。typed/write其它、M2/root/liveDAG/final后续，238strict0remaining7不变，full/lint/perf未跑。
+
+round134启动（decimal-coerce-129）：批量闭合ordinaryDecimal default转换（SDK内部接R129）及coerce整数kind/有符号比较/bits/decimal/f64、truthy Null/error/event策略（接R132）。B既有decimal模块+新native_coerce_numeric，A decimal桥/coerce别名薄facade+新test；literal只用原value投影。父exports/mod、既有decimal/comparison SQL与核心gate，无新SQLfixture；旧generic/旧test不改，238strict0remaining7不增族，typed/write其它后续。
+
 round133收口（float-composition-128）：float两closednumeric入口内部组合JSONDisplay与sharedf64，native只data/truncate/errorprojection；旧generic兼容，旧input仅cfgtest。5matched全GREEN SDK4/新native1/旧float1/scalar1/既有SQL1，无失败重试；3新tests，旧SDK2/native1逐体不变，SDK2/native3 Rust、1新file，SQL文件未改/不增probe。详float-composition-checkpoint.md/summary.txt；fmt/diff过，B/A冻结，配对Plan+DCO发布。typed/write其它组合和M2/root/liveDAG/final后续，238strict0remaining7不变，full/lint/perf未跑。
 
 round133启动（float-composition-128）：B在既有native_cast_float组合actualNumeric→内部JSONDisplay/sharedtoF64，旧generic及test不改；A nativefloatbridge删两businesscallbacks/selector，只留data/truncate/errorprojection+新test。普通JSONDisplay与valueonlyJSONnumeric、lossy/strictUTF8、FLOATnarrow/overflow/panic区别保留；父exports/mod、复跑既有floatSQL与核心gate，无新SQLfixture，配对Plan发布。typed/write其它组合仍后续，238strict0remaining7不增族。

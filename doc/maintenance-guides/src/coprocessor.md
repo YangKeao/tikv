@@ -755,15 +755,20 @@ short-circuit admission policy described above.
   Ordinary DECIMAL CAST uses the pure synchronous `native_cast_decimal.rs`
   controller. SDK input warnings run before conversion; warning parsing trims
   Unicode while actual String/Bytes parsing keeps original bytes. Real retains
-  Rust Display plus its own prefix/exponent policy. Float32/Other request the
-  original default-context native conversion and return actual value/event/error;
-  SDK discards that event or folds the error, never a host-computed zero.
+  Rust Display plus its own prefix/exponent policy. Closed numeric entries compose
+  Float32/Other's default conversion through shared `native_datum_to_decimal`;
+  native supplies actual data and warning effects, not a conversion callback.
+  SDK discards the event or folds the error, never a host-computed zero.
   SDK also owns unspecified-scale bypass and precision diagnostics. Narrow
   SmallVec/five-field raw transport and DTO cast/round methods reuse existing
   datatype algorithms. The input-warning helper is shared with existing UNION
   callers, without moving their negative bypass. No extra profile, C4 admission
-  or carrier is added. Outer guards, numeric-argument/vector fast paths, native
-  datatype conversion actuators and other targets remain explicit separate work.
+  or carrier is added. Outer guards, numeric-argument/vector fast paths and
+  other typed/write conversion controllers and targets remain separate work.
+  `native_coerce_numeric.rs` owns general integer classification, mixed-signed
+  comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
+  Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
+  remain actual data, while truth reuses the shared Datum boolean selector.
   NULLIF adds one closed `NullIfNative` Values profile on existing BytesInt
   transport: actual left identity, then canonical nullable comparison result.
   `native_if.rs` validates both actual inputs even when equality selects NULL;
