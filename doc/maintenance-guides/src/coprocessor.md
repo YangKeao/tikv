@@ -648,7 +648,13 @@ short-circuit admission policy described above.
   metadata reset, round-time reprojection and duration-midnight behavior stay
   distinct. `native_coerce_string.rs` owns generic expression string coercion,
   including Rust float display and kind-specific UTF-8 errors; it is not SQL
-  float rendering. YEAR/DATE expression controllers remain native.
+  float rendering. DATE/DATETIME expression controllers remain native.
+  `native_cast_year.rs` owns YEAR selection, clock/zone/concat demand and exact
+  error folding. Native supplies only actual value views and lazy data getters.
+  Its non-duration path uses shared string/date parsing then UTC signed casting.
+  `native_cast_integer_signed_numeric` composes existing signed policy and the
+  datatype selector without a host conversion callback; numeric-to-integer-input
+  projection is shared with ordinary CAST.
   `codec/native_numeric.rs` owns signed-datum selection over actual raw values,
   including Enum/Set numeric ordinals, not names or fabricated descriptors.
   `native_integer_convert.rs` owns integer bounds, conversions, text prefixes and
@@ -659,7 +665,7 @@ short-circuit admission policy described above.
   outcome lives in `mysql/binary_literal.rs`, separate from wire-context parsing.
   Native methods project values/errors/events. Existing integer-controller
   callback interfaces remain, but their signed-datum business implementation is
-  shared; this does not close YEAR/DATE or all typed conversion controllers.
+  shared; this does not close DATE or all typed/write conversion controllers.
   `native_cast_duration.rs` owns ordinary, argument and computed TIME conversion.
   Its native bridge supplies only lazy zone metadata, applies a generic truncate
   effect and wraps raw parts. `codec/native_duration_convert.rs` owns rounding,

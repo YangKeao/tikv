@@ -3,9 +3,11 @@
 //! Ordinary integer CAST control. Datatype callbacks carry real conversion
 //! results/events, while the existing RealUnsigned facade retains its original
 //! execution and infrastructure errors. This module adds no facade entries.
+use chrono::TimeZone;
 use tidb_query_datatype::codec::{
     convert::native_warning_subject_byte_cap,
     mysql::{Decimal, JsonType, NativeDecimalParseRef, NativeDecimalParseValue},
+    native_numeric::{NativeNumericInput, native_datum_to_i64},
 };
 
 pub use crate::NativeIntervalEvalType as NativeCastIntegerEvalType;
@@ -37,6 +39,45 @@ pub enum NativeCastIntegerTarget {
 pub enum NativeCastIntegerResult {
     Signed(i64),
     Unsigned(u64),
+}
+
+/// Mechanical projection of actual numeric storage into the existing CAST
+/// selector. Hybrid ordinals and other default-path payloads remain in the
+/// original numeric view, not in this deliberately narrower selector view.
+pub fn native_cast_integer_input_from_numeric(
+    input: NativeNumericInput<'_>,
+) -> NativeCastIntegerInput<'_> {
+    use NativeCastIntegerInput as I;
+    use NativeNumericInput as N;
+    match input {
+        N::Int(value) => I::Int(value),
+        N::UInt(value) => I::UInt(value),
+        N::Decimal(value) => I::Decimal(value),
+        N::Real(value) => I::Real(value),
+        N::Float32(value) => I::Float32(value),
+        N::String(value) => I::String(value),
+        N::Bytes(value) => I::Bytes(value),
+        N::Time(_) => I::Time,
+        N::Duration(_) => I::Duration,
+        N::Json { type_code, .. } => I::Json { type_code },
+        N::Null => I::Null,
+        N::MinNotNull => I::MinNotNull,
+        N::MaxValue => I::MaxValue,
+        _ => I::Other,
+    }
+}
+/// Closed value-only signed conversion. Retain explicit CAST's UInt wrapping
+/// and string-prefix rules while its default branch uses the shared datatype
+/// selector, including the actual hybrid ordinal and temporal payloads.
+pub fn native_cast_integer_signed_numeric<TZ: TimeZone>(
+    input: NativeNumericInput<'_>,
+    zone: &TZ,
+) -> i64 {
+    native_cast_integer_signed_value(
+        native_cast_integer_input_from_numeric(input),
+        zone,
+        |zone| native_datum_to_i64(input, zone).map(|value| (value.value, value.event)),
+    )
 }
 
 fn text(input: NativeCastIntegerInput<'_>) -> Option<&str> {

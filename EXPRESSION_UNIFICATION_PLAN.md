@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round126收口（year-control-121）：YEAR controller及value-only signed组合/原integer-input投影已SDK单owner，native只actualviews/data getters/result/error。8matched全GREEN：SDKyear1/integer2、native4expr各1、SQL新1/旧calendar1；无失败/重试/零匹配。3新tests，旧SDK2/native221逐体不变；SDK3/native6 Rust、3新file。新SQL4SELECT/20cells（16Int4NULL），两vector/两zone/fixedclock，Duration跨年、date text、prefix42、UIntMAX→-1及YEAR4/0无warning。详year-control-checkpoint.md/year-control-summary.txt。旧ordinary integer callback接口保留；DATE/DATETIME、implicit/typed/write、广M2/root/liveDAG/final后续，238strict0remaining7不变，full/lint/perf后补。fmt/diff过，Plan配对DCO发布。
+
+round126启动（year-control-121）：基于4f507d65/18148b8共享YEAR controller；Duration保持now校验→zone→concat→calendar/year，其他先原string coercion/date解析再UTC signed fallback。SDK signed_numeric把原signed cast与新datatype selector串联，无宿主转换callback；原integer input映射亦单一SDK投影。B两SDK文件，A native薄桥/单test，父wiring/SQL/核心gate/配对发布。仅data getter/effect适配，不动DATE/typed/write其它controller，不增族；继续双writer节约quota。
+
 round125收口（signed-datum-120）：signed-datum actual19selector及整数bounds/text/JSON、temporal number、literal依赖已共享，native薄桥删旧私有算法。wire literal与native复用单一width/fold，原wire诊断仍独立。SDK6/native8 Rust、4新file；11新tests，旧SDK12/native264逐体不变。9次launch含1初始compile RED（父误删旧tests用BinaryLiteral import，恢复cfgtest import），8finalGREEN：SDK101/8，datatype477，expr新1/旧controller1/旧YEAR1，SQL新1/旧calendar1；无testfail/零匹配。新SQL两vector共2SELECT/8cells，Enum/Set真ordinal与DST/分钟carry，原YEARcontroller未迁。详signed-datum-checkpoint.md及signed-datum-summary.txt，raw RED保留，无改旧oracle。fmt/diff过，238strict0remaining7不增族。下一步YEAR/DATE及implicit/typed/write selectors；广M2/root/liveDAG/final和full/lint/perf等后补。用户quota减少并发/重复审计，双仓DCO+一致Plan发布，目标仍active。
 
 round125续作（signed-datum-120）：用户quota约束改用Medium、减少重复RO和agent并发。H/A已落盘冻结；仅恢复B整数SDK和D nativeconvert两writer；父接管E/C/G/F未落盘部分（numeric selector/Datum桥/expr与SQL小门），不启动额外并发。SDK native_101测试已过，wire binary gate单跑；native集成待。暂不将未验改动计完成，发布时仍双仓Plan一致。
