@@ -45,6 +45,25 @@ pub fn native_coerce_string(
     }
 }
 
+/// Expression byte coercion preserves byte-bearing storage verbatim. Other
+/// scalars retain expression Rust Display rather than SQL float formatting.
+pub fn native_coerce_bytes(
+    input: NativeSqlStringInput<'_>,
+) -> Result<Option<Vec<u8>>, &'static str> {
+    use NativeSqlStringInput as I;
+    match input {
+        I::String(bytes)
+        | I::Bytes(bytes)
+        | I::BinaryLiteral(bytes)
+        | I::Bit(bytes)
+        | I::Enum(bytes)
+        | I::Set(bytes)
+        | I::Raw(bytes) => Ok(Some(bytes.to_vec())),
+        I::MinNotNull | I::MaxValue => Err("range sentinel byte coercion"),
+        other => native_coerce_string(other).map(|value| value.map(String::into_bytes)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use NativeSqlStringInput as I;

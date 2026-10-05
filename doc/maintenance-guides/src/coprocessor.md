@@ -648,7 +648,13 @@ short-circuit admission policy described above.
   metadata reset, round-time reprojection and duration-midnight behavior stay
   distinct. `native_coerce_string.rs` owns generic expression string coercion,
   including Rust float display and kind-specific UTF-8 errors; it is not SQL
-  float rendering. `native_cast_time.rs` owns explicit/computed/argument temporal
+  float rendering. Its byte-coercion entry preserves raw bytes and the distinct
+  byte-sentinel error. `native_cast_arg_string.rs` owns argument string value/type
+  policy and the rewriter's shared string-cast width calculation. Explicit identity
+  results keep native Datum/FieldType collation and storage; BIT yields binary bytes.
+  Actual array-aware EvalType, physical code and field metadata choose widths and
+  charset/collation, with explicit collation preceding BIT's binary default.
+  `native_cast_time.rs` owns explicit/computed/argument temporal
   control, source-aware parser selection, warning classification and DATE clock
   finishing. Native supplies actual views/source metadata, lazy modes/clock/zone
   getters and warning effects. YEAR/Duration early returns and argument Time/NULL

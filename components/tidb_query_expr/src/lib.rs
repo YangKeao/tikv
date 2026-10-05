@@ -110,7 +110,13 @@ mod native_cast_year;
 pub use native_cast_year::native_cast_year;
 
 mod native_coerce_string;
-pub use native_coerce_string::native_coerce_string;
+pub use native_coerce_string::{native_coerce_bytes, native_coerce_string};
+
+mod native_cast_arg_string;
+pub use native_cast_arg_string::{
+    NativeArgStringResult, NativeArgStringSource, NativeArgStringType, native_cast_arg_as_string,
+    native_cast_arg_as_string_type, native_string_cast_flen,
+};
 
 mod native_cast_duration;
 pub use native_cast_duration::{
