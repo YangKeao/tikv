@@ -685,8 +685,13 @@ short-circuit admission policy described above.
   transport with typed events. Hybrid ordinals, declared shape, lossy datum UTF-8
   versus empty invalid JSON text, and distinct plain/JSON float paths are retained.
   JSON floats reuse the existing crate-local canonical Decimal projector, not a
-  second coefficient formatter. Context-aware Decimal and typed/write selectors
-  remain separate; closed integer composition invokes these dependencies in SDK.
+  second coefficient formatter. Closed integer composition invokes these in SDK.
+  Distinct `codec/native_decimal_context.rs` owns context-aware source selection,
+  MyDecimal parsing, diagnostic rendering and effect order. Native supplies typed
+  Terror construction and generic truncation effects, not parser/value/formatter
+  callbacks. `mysql/native_decimal_parse.rs` owns MyDecimal-to-Decimal projection
+  and scale padding; `mysql/binary_literal.rs` owns native literal Display shared
+  by diagnostics and the native facade. Other typed/write selectors remain open.
   `native_cast_duration.rs` owns ordinary, argument and computed TIME conversion.
   Its native bridge supplies only lazy zone metadata, applies a generic truncate
   effect and wraps raw parts. `codec/native_duration_convert.rs` owns rounding,

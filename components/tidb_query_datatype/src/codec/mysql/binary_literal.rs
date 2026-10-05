@@ -53,6 +53,22 @@ impl NativeBinaryLiteralIntOutcome {
     }
 }
 
+/// Native BinaryLiteral Display preserves every byte, including leading zeroes.
+/// Empty storage writes nothing; this is separate from the wire Display policy.
+pub fn native_format_binary_literal(
+    bytes: &[u8],
+    formatter: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    formatter.write_str("0x")?;
+    for byte in bytes {
+        write!(formatter, "{byte:02x}")?;
+    }
+    Ok(())
+}
+
 /// Native unsigned literal conversion, without wire context or signed policy.
 pub fn native_binary_literal_to_int(bytes: &[u8]) -> NativeBinaryLiteralIntOutcome {
     literal_int_from_trimmed_bytes(trim_leading_zero_bytes(bytes))

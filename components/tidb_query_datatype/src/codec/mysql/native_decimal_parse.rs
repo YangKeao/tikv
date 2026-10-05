@@ -351,6 +351,32 @@ pub fn native_decimal_normalize(
     }
 }
 
+/// Exact native coefficient padding. Preserve the source subtraction/allocation
+/// domain rather than clamping an invalid target scale.
+pub fn native_decimal_pad_scale(digits: &str, scale: u32, target: u32) -> String {
+    let mut result = digits.to_string();
+    result.push_str(&"0".repeat((target - scale) as usize));
+    result
+}
+
+/// Project the fixed-word MyDecimal into native value storage, retaining hidden
+/// fraction digits and extending storage for a wider visible result scale.
+pub fn native_decimal_from_my_decimal(value: super::NativeMyDecimal) -> NativeDecimalParseValue {
+    let (negative, digits, storage_scale, result_scale) = value.to_decimal_parts();
+    let storage_scale = storage_scale.max(result_scale);
+    let digits = if storage_scale == value.digits_frac().max(0) as u32 {
+        debug_assert!(digits.iter().all(u8::is_ascii_digit));
+        digits
+    } else {
+        digits_from_string(native_decimal_pad_scale(
+            std::str::from_utf8(&digits).expect("MyDecimal coefficients are ASCII digits"),
+            value.digits_frac().max(0) as u32,
+            storage_scale,
+        ))
+    };
+    native_decimal_normalize(negative, digits, result_scale, storage_scale, false)
+}
+
 /// Native canonical-literal constructor, including its original representation
 /// preconditions. Do not alias this to the stricter wire canonical parser.
 pub fn native_decimal_from_literal(text: &str) -> NativeDecimalParseValue {
