@@ -605,6 +605,15 @@ short-circuit admission policy described above.
   rounding/clip/boundary/NaN policy and is untouched. Other CAST domains, outer
   NULL and UNION's negative bypass are not covered by this slice, and no whole
   CAST family or new wire admission is credited.
+  `codec/native_json_construct.rs` owns typed JSON construction and shared
+  scalar primitives. A one-level borrowed representation view feeds the original
+  full-tree construction phase before the existing binary-node encoder; embedded
+  typed Binary decodes, unlike Datum JSON's raw clone. `codec/native_mysql_json.rs`
+  owns ordinary/source-aware Datum conversion using the shared SQL-string view.
+  Raw Float32/temporal values, source collation/code identity, resize and distinct
+  UTF8/fallback errors remain separate. Native text parsing, surrogate rewriting,
+  serde container traversal and expression JSON controllers are unchanged; no
+  whole JSON/M2 completion follows.
   VECTOR CAST uses `native_cast_vector.rs` over shared datatype
   `codec/native_vector_convert.rs`, also used by native convert_to_vector.
   Existing vectors clone without new finite/global-dimension validation; text
@@ -614,7 +623,8 @@ short-circuit admission policy described above.
   name before conversion, not a wire-canonicalized code or actual source charset.
   Outer AST/datatype NULL guards and range/diagnostic handling remain separate;
   the SDK controller also preserves the internal VECTOR arm's direct NULL result. JSON ordinary/typed/value
-  coercion and native typed construction are still pending and unchanged.
+  coercion remains pending and unchanged; typed datatype construction is shared
+  by the modules described above.
   `codec/native_sql_string.rs` owns native SQL byte/string source selection
   across19 actual variants, strict UTF8 stages, sentinel errors and fixed/scientific
   float primitives. Borrowed Decimal/Time/Duration/JSON/vector views reuse existing

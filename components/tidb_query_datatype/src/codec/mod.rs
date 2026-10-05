@@ -23,6 +23,8 @@ pub mod datum_codec;
 pub mod error;
 pub mod mysql;
 pub mod native_float_parse;
+pub mod native_json_construct;
+pub mod native_mysql_json;
 pub mod native_sql_string;
 pub mod native_string_type;
 pub mod native_type_name;
