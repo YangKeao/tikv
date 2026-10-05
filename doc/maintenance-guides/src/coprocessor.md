@@ -784,7 +784,13 @@ short-circuit admission policy described above.
   not a new C4 gate/profile. Target metadata, skip-fitting, String Real selection
   and generic/context-Decimal result policies are shared here too. Native builds
   actual storage and invokes existing contextful conversion in the original
-  order. The datatype engine, renderer and other controllers remain separate.
+  order. Remaining datatype paths, renderer and other controllers stay separate.
+  `codec/native_float_convert.rs` owns native float round/truncate/shift/max
+  foundations and ProduceFloat target fitting. Wire truncate_f64 has different
+  rounding/input-domain semantics. Native maps actual metadata/storage and typed
+  diagnostics; SDK preserves NaN/Inf, unsigned, precision-before-FLOAT-range and
+  lazy-message/event order, reusing canonical format/type-name primitives.
+  Fixed-shortest rendering, integer text parsing and other controllers remain.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

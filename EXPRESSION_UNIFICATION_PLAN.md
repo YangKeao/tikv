@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round140收口（float-target-135）：新datatype native_float_convert共享float foundations/ProduceFloat控制，native facade+原名Debug/Display alias+lazy typeddiagnostic；原wire rounding域不替代。5matched全GREEN SDK2/native datatype478/expr5/既有SQL2，无失败重试；3新tests，旧native30逐体不变(SDK touched0)，SDK2/native2 Rust、新SDKfile1。fixedshortest/stringparser/composition/eventmerge逐字不变、expr/SQLfile未改；详float-target-checkpoint.md/summary.txt。fmt/diff过，B/A冻结，type+partialCAST各一记录、族不变，配对Plan+DCO发布。其它datatype/renderer等后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
+
+round140启动（float-target-135）：B新datatype native_float_convert独占float round/truncate/shift/max/overflow及ProduceFloat控制；原wire truncate_f64舍入和u8域不同不可替代，复用std/canonicalformat/type-name。A native numeric_helper/datum_convert改薄facade/typeddiagnostic projection+新consumer，保按需message与原分支event/report顺序。父codecmod/fullnativeDatatype+expr/SQL核心、配对Plan。fixed_shortest/string_to_int/其它datatype及renderer仍后续，238strict0remaining7不增族。
+
 round139收口（numeric-completion-134）：target metadata/skipfitting、StringReal选择与两resultpolicy SDK单owner；native共用storage/finish adapter，旧numeric_decimal_cast_type为其它caller保留单行redirect，无底层datatype重写。6matched全GREEN SDK11/native consumer5/旧Real1/division1/既有SQL2，无失败重试；3新tests，旧SDK9/native36逐体不变，SDK2/native2 Rust、无新Rustfile/SQLprobe。renderer逐字不变、datatypeengine/SQLfile未改；详numeric-completion-checkpoint.md/summary.txt。fmt/diff过，B/A冻结，partialCAST一记录、族不变，配对Plan+DCO发布。datatypeengine/renderer等后续，238strict0remaining7不变，full/lint/perf未跑。
 
 round139启动（numeric-completion-134）：B既有native_numeric_argument接管target metadata/skipfitting、String Real选择、generic/contextDecimal result归并；A scalar_function构造实际FieldType并按SDK判断调用既有converter、固定error projection+新consumer。复用既有shape/unscaled构造，不重写datatype engine，不新增origin/profile/callback；renderer/底层datatype及其它controller仍后续。父exports/core+既有SQL gates/配对Plan，238strict0remaining7不增族。
