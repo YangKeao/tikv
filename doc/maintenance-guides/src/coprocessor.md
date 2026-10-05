@@ -451,8 +451,13 @@ short-circuit admission policy described above.
   bytes, folded integers stay full i128, and only the parse stage binds the
   existing captured native zone. SDK reports own original getter order,
   reformatting, arithmetic and explicit presence results. Native code actuates
-  requested channels and generic MyDecimal parse/round/render primitives; those
-  MyDecimal primitives are not declared shared. Datatype
+  requested channels and generic MyDecimal preparation. Datatype
+  `mysql/native_mydecimal.rs` now owns the fixed-word algorithms, while native
+  `MyDecimal` retains its original private 40-byte storage facade and safe
+  raw-parts adaptation. `mysql/native_decimal_codec.rs` owns the required binary
+  writer/size primitives. Neither is an alias of wire Decimal, and the native
+  general Decimal parser and binary reader remain separate; this step does
+  not remove native value/word adapters. Datatype
   `time/native_core_arithmetic.rs` owns raw CoreTime date/duration arithmetic
   and the native day-number domain, distinct from wire limits. Existing eight
   child-free Duration-to-Datetime refusals and wrong-reader admission remain

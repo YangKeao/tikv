@@ -32,6 +32,8 @@ pub mod duration;
 pub mod enums;
 pub mod json;
 pub mod locale;
+mod native_decimal_codec;
+mod native_mydecimal;
 pub mod set;
 pub mod time;
 pub mod vector;
@@ -47,6 +49,20 @@ pub use self::{
     json::{
         Json, JsonDatumPayloadChunkEncoder, JsonDecoder, JsonEncoder, JsonType, ModifyType,
         PathExpression, parse_json_path_expr,
+    },
+    native_decimal_codec::{
+        DecimalCodecError as NativeDecimalCodecError,
+        DecimalCodecWarning as NativeDecimalCodecWarning,
+        checked_bin_size as native_decimal_checked_bin_size,
+        decimal_bin_size as native_decimal_bin_size,
+        remove_leading_zeros as native_decimal_remove_leading_zeros,
+        write_bin as native_decimal_write_bin,
+    },
+    native_mydecimal::{
+        DecimalError as NativeMyDecimalError,
+        MAX_WORD_BUF_LEN as NATIVE_MYDECIMAL_MAX_WORD_BUF_LEN,
+        MYDECIMAL_STRUCT_SIZE as NATIVE_MYDECIMAL_STRUCT_SIZE, MyDecimal as NativeMyDecimal,
+        RoundMode as NativeMyDecimalRoundMode, digits_to_words as native_mydecimal_digits_to_words,
     },
     set::{Set, SetRef},
     time::{Time, TimeDecoder, TimeEncoder, TimeType, Tz},
