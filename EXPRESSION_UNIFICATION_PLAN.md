@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round141收口（numeric-text-136）：numeric_helper剩余算法全部薄SDKfacade/Erroralias，fixedlayout从既有Decimal factor复用非拷贝，parser/generator差异保留。6Cargo matched全GREEN SDKnew3/旧formatter1/nativeDatatype479/expr5/既有SQL2；首次fmt预检发现新parser少闭括号，父补齐后才跑Cargo，无Cargo失败重试。4新tests，旧SDK104/native7逐体不变，SDK4/native1 Rust、无新Rustfile/SQLprobe。详numeric-text-checkpoint.md/summary.txt；最终fmt/diff过，B/A冻结，type一记录、CAST历史/族不变，配对Plan+DCO发布。其它datatype/renderer等后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
+
+round141启动（numeric-text-136）：B既有integer/float/decimal_convert及mysql/decimal四owner共享numeric_helper剩余bestEffort parser/精度长度/截断浮点文本；固定layout从既有Go parts抽单leaf复用、数字generator/cutover不替换。A native numeric_helper薄facade+Error alias+新consumer，保trim/NUL/overflow/trailing先后及constquirks。父SDKnew/旧formatter/nativeDatatype/expr/SQL核心、配对Plan；其它datatype/renderer仍后续，238strict0remaining7不增族。
+
 round140收口（float-target-135）：新datatype native_float_convert共享float foundations/ProduceFloat控制，native facade+原名Debug/Display alias+lazy typeddiagnostic；原wire rounding域不替代。5matched全GREEN SDK2/native datatype478/expr5/既有SQL2，无失败重试；3新tests，旧native30逐体不变(SDK touched0)，SDK2/native2 Rust、新SDKfile1。fixedshortest/stringparser/composition/eventmerge逐字不变、expr/SQLfile未改；详float-target-checkpoint.md/summary.txt。fmt/diff过，B/A冻结，type+partialCAST各一记录、族不变，配对Plan+DCO发布。其它datatype/renderer等后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
 
 round140启动（float-target-135）：B新datatype native_float_convert独占float round/truncate/shift/max/overflow及ProduceFloat控制；原wire truncate_f64舍入和u8域不同不可替代，复用std/canonicalformat/type-name。A native numeric_helper/datum_convert改薄facade/typeddiagnostic projection+新consumer，保按需message与原分支event/report顺序。父codecmod/fullnativeDatatype+expr/SQL核心、配对Plan。fixed_shortest/string_to_int/其它datatype及renderer仍后续，238strict0remaining7不增族。

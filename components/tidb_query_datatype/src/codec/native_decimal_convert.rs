@@ -15,6 +15,35 @@ use super::{
     native_temporal_number::{native_duration_to_number, native_time_to_number},
 };
 
+/// Original display-length arithmetic, including its negative metadata and
+/// unchecked i32 operation domain. Do not replace with SQL shape clamping.
+pub const fn native_decimal_length_to_precision(
+    mut length: i32,
+    scale: i32,
+    unsigned: bool,
+) -> i32 {
+    if scale > 0 {
+        length -= 1;
+    }
+    if unsigned || length > 0 {
+        length -= 1;
+    }
+    length
+}
+pub const fn native_precision_to_length_no_truncation(
+    mut length: i32,
+    scale: i32,
+    unsigned: bool,
+) -> i32 {
+    if scale > 0 {
+        length += 1;
+    }
+    if unsigned || length > 0 {
+        length += 1;
+    }
+    length
+}
+
 #[derive(Clone, Debug)]
 pub struct NativeDecimalConverted {
     pub value: NativeDecimalParseValue,
@@ -145,6 +174,48 @@ pub fn native_datum_to_decimal(
             return Err(NativeNumericError::Unsupported);
         }
     })
+}
+
+#[cfg(test)]
+mod numeric_helper_tests {
+    use super::*;
+    #[test]
+    fn native_numeric_helpers_precision_keep_const_i32_sign_and_scale_arithmetic() {
+        const PRECISION: i32 = native_decimal_length_to_precision(12, 2, false);
+        const LENGTH: i32 = native_precision_to_length_no_truncation(PRECISION, 2, false);
+        assert_eq!((PRECISION, LENGTH), (10, 12));
+        for (length, scale, unsigned, precision, display) in [
+            (0, 0, false, 0, 0),
+            (0, 0, true, -1, 1),
+            (1, 1, false, 0, 3),
+            (0, 1, false, -1, 2),
+            (0, 1, true, -2, 2),
+            (-1, 1, false, -2, 0),
+            (-1, 1, true, -3, 1),
+            (-1, -1, false, -1, -1),
+            (-1, -1, true, -2, 0),
+            (12, 2, false, 10, 14),
+            (12, -1, false, 11, 13),
+            (i32::MIN, 0, false, i32::MIN, i32::MIN),
+        ] {
+            assert_eq!(
+                native_decimal_length_to_precision(length, scale, unsigned),
+                precision
+            );
+            assert_eq!(
+                native_precision_to_length_no_truncation(length, scale, unsigned),
+                display
+            );
+        }
+        assert_eq!(
+            native_decimal_length_to_precision(i32::MAX, 0, false),
+            i32::MAX - 1
+        );
+        assert_eq!(
+            native_precision_to_length_no_truncation(i32::MAX - 1, 0, false),
+            i32::MAX
+        );
+    }
 }
 
 #[cfg(test)]

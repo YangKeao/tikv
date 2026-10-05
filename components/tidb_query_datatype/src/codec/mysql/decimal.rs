@@ -2175,20 +2175,26 @@ impl Decimal {
             return output;
         }
 
-        let digits_before_decimal = exponent + 1;
+        Self::native_format_fixed_parts(negative, significant, exponent + 1)
+    }
+
+    /// Shared fixed layout only. Callers retain their own digit generator,
+    /// point calculation, scientific cutoff and special-value admission.
+    pub(crate) fn native_format_fixed_parts(negative: bool, digits: &str, point: i32) -> String {
+        let prefix = if negative { "-" } else { "" };
         let mut output = prefix.to_owned();
-        if digits_before_decimal <= 0 {
+        if point <= 0 {
             output.push_str("0.");
-            output.push_str(&"0".repeat((-digits_before_decimal) as usize));
-            output.push_str(significant);
-        } else if digits_before_decimal as usize >= significant.len() {
-            output.push_str(significant);
-            output.push_str(&"0".repeat(digits_before_decimal as usize - significant.len()));
+            output.push_str(&"0".repeat((-point) as usize));
+            output.push_str(digits);
+        } else if point as usize >= digits.len() {
+            output.push_str(digits);
+            output.push_str(&"0".repeat(point as usize - digits.len()));
         } else {
-            let split = digits_before_decimal as usize;
-            output.push_str(&significant[..split]);
+            let split = point as usize;
+            output.push_str(&digits[..split]);
             output.push('.');
-            output.push_str(&significant[split..]);
+            output.push_str(&digits[split..]);
         }
         output
     }

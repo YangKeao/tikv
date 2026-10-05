@@ -790,7 +790,12 @@ short-circuit admission policy described above.
   rounding/input-domain semantics. Native maps actual metadata/storage and typed
   diagnostics; SDK preserves NaN/Inf, unsigned, precision-before-FLOAT-range and
   lazy-message/event order, reusing canonical format/type-name primitives.
-  Fixed-shortest rendering, integer text parsing and other controllers remain.
+  Truncated fixed text shares a fixed-layout leaf factored from Decimal's
+  existing Go-g formatter, retaining distinct Display/Ryu/LowerExp generation
+  and cutovers. Native numeric_helper also delegates best-effort integer parsing
+  to native_integer_convert and const precision/length arithmetic to
+  native_decimal_convert. Its error enum is aliased; ordinary prefix parsing is
+  not substituted. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

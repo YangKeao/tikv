@@ -69,6 +69,27 @@ pub fn native_truncate_float(
         Ok(value)
     }
 }
+/// Native truncate-to-string keeps Rust Display's shortest digits and raw
+/// special values, not the independent Go-g digit generator/cutover policy.
+pub fn native_truncate_float_to_string(value: f64, decimal: i32) -> String {
+    fixed_shortest(native_truncate(value, decimal))
+}
+fn fixed_shortest(value: f64) -> String {
+    let shortest = value.to_string();
+    let Some((mantissa, exponent)) = shortest
+        .split_once('e')
+        .or_else(|| shortest.split_once('E'))
+    else {
+        return shortest;
+    };
+    let exponent: i32 = exponent.parse().expect("Rust exponent is numeric");
+    let negative = mantissa.starts_with('-');
+    let unsigned = mantissa.trim_start_matches('-');
+    let digits: String = unsigned.chars().filter(|ch| *ch != '.').collect();
+    let decimal = unsigned.find('.').map_or(1_i32, |index| index as i32);
+    Decimal::native_format_fixed_parts(negative, &digits, decimal + exponent)
+}
+
 fn decimal_shift(decimal: i32) -> f64 {
     if decimal > 308 {
         f64::INFINITY
@@ -178,6 +199,42 @@ pub fn native_produce_float(
         overflow = Some(source.to_string());
     }
     NativeFloatTargetValue { value, overflow }
+}
+
+#[cfg(test)]
+mod numeric_helper_tests {
+    use super::*;
+    #[test]
+    fn native_numeric_helpers_float_keep_rust_digits_raw_specials_and_shared_fixed_layout() {
+        for (value, scale, expected) in [
+            (1.75, 1, "1.7"),
+            (-1.75, 1, "-1.7"),
+            (-0.0, 0, "-0"),
+            (f64::NAN, 0, "NaN"),
+            (f64::INFINITY, 0, "inf"),
+            (f64::NEG_INFINITY, 0, "-inf"),
+            (1e6, 309, "1000000"),
+            (1e-5, 309, "0.00001"),
+            (1e-7, 309, "0.0000001"),
+        ] {
+            assert_eq!(native_truncate_float_to_string(value, scale), expected);
+        }
+        assert_eq!(Decimal::native_format_float_g_shortest(1e6), "1e+06");
+        assert_eq!(Decimal::native_format_float_g_shortest(1e-5), "1e-05");
+        assert_eq!(Decimal::native_format_float_g_shortest(1e-4), "0.0001");
+        for (negative, digits, point, expected) in [
+            (false, "123", 0, "0.123"),
+            (false, "123", -2, "0.00123"),
+            (true, "123", 1, "-1.23"),
+            (false, "123", 5, "12300"),
+            (false, "00120", 2, "00.120"),
+        ] {
+            assert_eq!(
+                Decimal::native_format_fixed_parts(negative, digits, point),
+                expected
+            );
+        }
+    }
 }
 
 #[cfg(test)]

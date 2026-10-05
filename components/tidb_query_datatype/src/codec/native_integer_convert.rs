@@ -9,6 +9,80 @@ use super::{
     native_type_name::NativeTypeNameCode,
 };
 
+/// Best-effort numeric-helper parsing errors, distinct from StrToInt's
+/// floating-prefix/scientific policy and its conversion diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeStringToIntError {
+    Truncated,
+    BadNumber,
+}
+impl std::fmt::Display for NativeStringToIntError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Truncated => "truncated",
+            Self::BadNumber => "bad number",
+        })
+    }
+}
+impl std::error::Error for NativeStringToIntError {}
+/// Native types.strToInt: Unicode trim, ASCII digit scan, and signed
+/// saturation. Accumulator/signed-limit failure takes precedence over trailing
+/// junk.
+pub fn native_string_to_int(value: &str) -> Result<i64, (i64, NativeStringToIntError)> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err((0, NativeStringToIntError::Truncated));
+    }
+    let bytes = value.as_bytes();
+    let (negative, mut index) = match bytes[0] {
+        b'-' => (true, 1),
+        b'+' => (false, 1),
+        _ => (false, 0),
+    };
+    let mut magnitude = 0_u64;
+    let mut has_number = false;
+    let mut trailing = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !byte.is_ascii_digit() {
+            trailing = true;
+            break;
+        }
+        has_number = true;
+        let Some(next) = magnitude
+            .checked_mul(10)
+            .and_then(|number| number.checked_add(u64::from(byte - b'0')))
+        else {
+            return Err((
+                if negative { i64::MIN } else { i64::MAX },
+                NativeStringToIntError::BadNumber,
+            ));
+        };
+        magnitude = next;
+        index += 1;
+    }
+    if !has_number {
+        return Err((0, NativeStringToIntError::Truncated));
+    }
+    let limit = i64::MAX as u64 + u64::from(negative);
+    if magnitude > limit {
+        return Err((
+            if negative { i64::MIN } else { i64::MAX },
+            NativeStringToIntError::BadNumber,
+        ));
+    }
+    let output = if negative {
+        (0_u64.wrapping_sub(magnitude)) as i64
+    } else {
+        magnitude as i64
+    };
+    if trailing {
+        Err((output, NativeStringToIntError::Truncated))
+    } else {
+        Ok(output)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeIntegerConverted<T> {
     pub value: T,
@@ -616,6 +690,52 @@ pub fn native_json_to_int64(
     flags: u16,
 ) -> NativeIntegerConverted<i64> {
     native_json_to_int(type_code, value, unsigned, Known(8), flags)
+}
+
+#[cfg(test)]
+mod numeric_helper_tests {
+    use super::*;
+    #[test]
+    fn native_numeric_helpers_integer_keep_best_effort_error_precedence_and_original_names() {
+        use NativeStringToIntError::{BadNumber, Truncated};
+        assert_eq!(Truncated.to_string(), "truncated");
+        assert_eq!(BadNumber.to_string(), "bad number");
+        assert_eq!(format!("{Truncated:?}"), "Truncated");
+        assert_eq!(format!("{BadNumber:?}"), "BadNumber");
+        for (text, expected) in [
+            ("\u{2003}+12\u{2003}", 12),
+            ("-0", 0),
+            ("9223372036854775807", i64::MAX),
+            ("-9223372036854775808", i64::MIN),
+        ] {
+            assert_eq!(native_string_to_int(text), Ok(expected));
+        }
+        assert_eq!(
+            native_string_to_int(&format!("{}1", "0".repeat(100))),
+            Ok(1)
+        );
+        for (text, value, error) in [
+            ("", 0, Truncated),
+            (" \t", 0, Truncated),
+            ("+", 0, Truncated),
+            ("-", 0, Truncated),
+            ("１２", 0, Truncated),
+            ("1e2", 1, Truncated),
+            (".5", 0, Truncated),
+            ("12\0tail", 12, Truncated),
+            ("1 2", 1, Truncated),
+            ("9223372036854775807x", i64::MAX, Truncated),
+            ("-9223372036854775808x", i64::MIN, Truncated),
+            ("9223372036854775808x", i64::MAX, BadNumber),
+            ("-9223372036854775809x", i64::MIN, BadNumber),
+            ("18446744073709551615", i64::MAX, BadNumber),
+            ("18446744073709551616x", i64::MAX, BadNumber),
+            ("-18446744073709551616x", i64::MIN, BadNumber),
+            ("x18446744073709551616", 0, Truncated),
+        ] {
+            assert_eq!(native_string_to_int(text), Err((value, error)), "{text:?}");
+        }
+    }
 }
 
 #[cfg(test)]
