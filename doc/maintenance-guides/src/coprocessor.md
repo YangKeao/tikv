@@ -616,8 +616,13 @@ short-circuit admission policy described above.
   Crate-only array/object writers in `mysql/json/native_codec.rs` share container
   layout while retaining serde key-before-child and typed-node child-before-key
   ordering, literal access and offset arithmetic. Datatype lenient parsing is
-  distinct from expression strict parsing; expression JSON controllers remain
-  unchanged and whole JSON/M2 completion does not follow.
+  distinct from expression strict parsing. `native_json_coercion.rs` owns the
+  eleven expression value-boundary entries, reusing the19-kind borrowed input
+  and actual source metadata/raw flags. Native wrappers project values/errors
+  only; NULL/bool/opaque ordering, Decimal/Float32 distinctions, temporal FSP
+  restamping and document/value mode stay in SDK. Typed row/batch preparation
+  and static Vector refusal remain separate; whole JSON/CAST/M2 completion
+  does not follow.
   VECTOR CAST uses `native_cast_vector.rs` over shared datatype
   `codec/native_vector_convert.rs`, also used by native convert_to_vector.
   Existing vectors clone without new finite/global-dimension validation; text
@@ -627,8 +632,8 @@ short-circuit admission policy described above.
   name before conversion, not a wire-canonicalized code or actual source charset.
   Outer AST/datatype NULL guards and range/diagnostic handling remain separate;
   the SDK controller also preserves the internal VECTOR arm's direct NULL result. JSON ordinary/typed/value
-  coercion remains pending and unchanged; typed datatype construction is shared
-  by the modules described above.
+  coercion and typed datatype construction are shared by the modules described
+  above; typed caller preparation and other CAST domains remain.
   `codec/native_sql_string.rs` owns native SQL byte/string source selection
   across19 actual variants, strict UTF8 stages, sentinel errors and fixed/scientific
   float primitives. Borrowed Decimal/Time/Duration/JSON/vector views reuse existing
