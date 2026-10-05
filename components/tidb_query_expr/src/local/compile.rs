@@ -141,6 +141,23 @@ fn check_evaluated_bytes_source(
             arity == 4 && calls == 1
         }
         (
+            EvaluatedBytesOp::DateArithmeticHeadNative
+            | EvaluatedBytesOp::DateArithmeticDurationHeadNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 4 && calls == 1,
+        (
+            EvaluatedBytesOp::DateArithmeticStepNative
+            | EvaluatedBytesOp::DateArithmeticOverflowNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 2 && calls == 1,
+        (
+            EvaluatedBytesOp::DateArithmeticHeadNative
+            | EvaluatedBytesOp::DateArithmeticDurationHeadNative
+            | EvaluatedBytesOp::DateArithmeticStepNative
+            | EvaluatedBytesOp::DateArithmeticOverflowNative,
+            _,
+        ) => false,
+        (
             EvaluatedBytesOp::UnixTimestampValueNative
             | EvaluatedBytesOp::UnixTimestampIntLegacy
             | EvaluatedBytesOp::UnixTimestampDecLegacy

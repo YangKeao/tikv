@@ -4878,3 +4878,311 @@ mod interval_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod date_arithmetic_worker_tests {
+    use super::*;
+    use crate::{
+        NativeDateArithmeticOutcome as Outcome, NativeDateArithmeticRequest as Request,
+        NativeIdentityRef, decode_native_date_arithmetic_result,
+        encode_native_date_arithmetic_duration_metadata, encode_native_date_arithmetic_metadata,
+        encode_native_identity,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn run(worker: &mut EvaluatedBytesWorker, args: EvaluatedArgs) -> Vec<u8> {
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("date arithmetic must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value
+            .into_option()
+            .expect("semantic NULL has a real report")
+    }
+    fn copy(args: &EvaluatedArgs) -> EvaluatedArgs {
+        match args {
+            EvaluatedArgs::Bytes4(values) => EvaluatedArgs::Bytes4(values.clone()),
+            EvaluatedArgs::Bytes2(state, value) => {
+                EvaluatedArgs::Bytes2(state.clone(), value.clone())
+            }
+            EvaluatedArgs::BytesInt(state, level) => EvaluatedArgs::BytesInt(state.clone(), *level),
+            _ => unreachable!(),
+        }
+    }
+    fn ordinary(date: Option<&[u8]>, amount: Option<&[u8]>, unit: &str) -> EvaluatedArgs {
+        EvaluatedArgs::Bytes4([
+            date.map(|v| v.to_vec()),
+            amount.map(|v| v.to_vec()),
+            Some(unit.as_bytes().to_vec()),
+            Some(encode_native_date_arithmetic_metadata(1, None).unwrap()),
+        ])
+    }
+    fn request(report: &[u8], expected: Request, at: usize) {
+        let result = decode_native_date_arithmetic_result(report).unwrap();
+        assert!(result.warning.is_none());
+        let Outcome::Request {
+            kind, index, state, ..
+        } = result.outcome
+        else {
+            panic!("expected actual generic preparation request");
+        };
+        assert_eq!(kind, expected);
+        assert_eq!(index, at);
+        assert_eq!(state, report);
+    }
+
+    #[test]
+    fn date_arithmetic_workers_keep_actual_preparation_overflow_policy_and_owner_lifecycles() {
+        let one = encode_native_identity(NativeIdentityRef::Int(1)).unwrap();
+        let date = encode_native_identity(NativeIdentityRef::Bytes(b"2024-01-31")).unwrap();
+        let duration = encode_native_identity(NativeIdentityRef::Duration {
+            nanos: 3_600_000_000_000,
+            fsp: 0,
+        })
+        .unwrap();
+        let mut head = prepare(
+            EvaluatedBytesOp::DateArithmeticHeadNative,
+            ExecutionLimits::default(),
+        );
+        let mut step = prepare(
+            EvaluatedBytesOp::DateArithmeticStepNative,
+            ExecutionLimits::default(),
+        );
+        let head_args = ordinary(Some(&date), Some(&one), "DAY");
+        let state = run(&mut head, copy(&head_args));
+        request(&state, Request::CoerceString, 0);
+        let final_value = run(
+            &mut step,
+            EvaluatedArgs::Bytes2(Some(state.clone()), Some(b"2024-01-31".to_vec())),
+        );
+        let result = decode_native_date_arithmetic_result(&final_value).unwrap();
+        assert!(result.warning.is_none());
+        assert_eq!(result.outcome, Outcome::Text("2024-02-01"));
+        let last_date = encode_native_identity(NativeIdentityRef::Bytes(b"9999-12-31")).unwrap();
+        let overflow_request = run(&mut head, ordinary(Some(&last_date), Some(&one), "DAY"));
+        request(&overflow_request, Request::CoerceString, 0);
+        let overflow = run(
+            &mut step,
+            EvaluatedArgs::Bytes2(Some(overflow_request), Some(b"9999-12-31".to_vec())),
+        );
+        let result = decode_native_date_arithmetic_result(&overflow).unwrap();
+        assert!(result.warning.is_none());
+        assert!(
+            matches!(result.outcome, Outcome::Overflow { state } if state == overflow.as_slice())
+        );
+        // Simple date NULL suppresses amount processing, whereas a composite
+        // requests its actual amount string FIRST even when date is NULL.
+        let sentinel = encode_native_identity(NativeIdentityRef::MinNotNull).unwrap();
+        let output = run(&mut head, ordinary(None, Some(&sentinel), "DAY"));
+        let result = decode_native_date_arithmetic_result(&output).unwrap();
+        assert_eq!(result.outcome, Outcome::Null);
+        assert!(result.warning.is_none());
+        let amount_text = encode_native_identity(NativeIdentityRef::Bytes(b"1:02")).unwrap();
+        let output = run(&mut head, ordinary(None, Some(&amount_text), "HOUR_MINUTE"));
+        request(&output, Request::CoerceString, 1);
+        // An amount NULL cannot erase an earlier bad-date warning.
+        let bad_date = encode_native_identity(NativeIdentityRef::Bytes(b"bad")).unwrap();
+        let bad_state = run(&mut head, ordinary(Some(&bad_date), None, "DAY"));
+        request(&bad_state, Request::CoerceString, 0);
+        let output = run(
+            &mut step,
+            EvaluatedArgs::Bytes2(Some(bad_state), Some(b"bad".to_vec())),
+        );
+        let result = decode_native_date_arithmetic_result(&output).unwrap();
+        assert_eq!(result.outcome, Outcome::Null);
+        assert_eq!(result.warning.unwrap().code, 1292);
+        assert!(result.warning.unwrap().message.contains("bad"));
+        let duration_args = EvaluatedArgs::Bytes4([
+            Some(duration),
+            Some(one.clone()),
+            Some(b"SECOND".to_vec()),
+            Some(encode_native_date_arithmetic_duration_metadata(1, 3, None).unwrap()),
+        ]);
+        for (operation, args) in [
+            (EvaluatedBytesOp::DateArithmeticHeadNative, head_args),
+            (
+                EvaluatedBytesOp::DateArithmeticDurationHeadNative,
+                duration_args,
+            ),
+            (
+                EvaluatedBytesOp::DateArithmeticStepNative,
+                EvaluatedArgs::Bytes2(Some(state.clone()), Some(b"2024-01-31".to_vec())),
+            ),
+            (
+                EvaluatedBytesOp::DateArithmeticOverflowNative,
+                EvaluatedArgs::BytesInt(Some(overflow.clone()), Some(1)),
+            ),
+        ] {
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Int(None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            let mut bad = copy(&args);
+            match &mut bad {
+                EvaluatedArgs::Bytes4(values) => values[3] = Some(Vec::new()),
+                EvaluatedArgs::Bytes2(first, _) => *first = Some(final_value.clone()),
+                EvaluatedArgs::BytesInt(first, _) => *first = Some(state.clone()),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                worker.eval_args(bad),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            if let EvaluatedArgs::Bytes4(values) = &args {
+                let mut bad = values.clone();
+                bad[2] = Some(vec![255]);
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes4(bad)),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                let mut bad = values.clone();
+                bad[3] = Some(if operation == EvaluatedBytesOp::DateArithmeticHeadNative {
+                    encode_native_date_arithmetic_duration_metadata(1, 3, None).unwrap()
+                } else {
+                    encode_native_date_arithmetic_metadata(1, None).unwrap()
+                });
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes4(bad)),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            } else if operation == EvaluatedBytesOp::DateArithmeticOverflowNative {
+                for level in [None, Some(-1), Some(3)] {
+                    assert!(matches!(
+                        worker.eval_args(EvaluatedArgs::BytesInt(Some(overflow.clone()), level)),
+                        Err(LocalError::InvalidBatch(_))
+                    ));
+                }
+            }
+            let owners = match &args {
+                EvaluatedArgs::Bytes4(_) => 4,
+                EvaluatedArgs::Bytes2(..) => 2,
+                _ => 1,
+            };
+            for position in 0..owners {
+                let mut oversized = copy(&args);
+                let owner = match (&mut oversized, position) {
+                    (EvaluatedArgs::Bytes4(values), index) => values[index].as_mut().unwrap(),
+                    (EvaluatedArgs::Bytes2(Some(value), _), 0)
+                    | (EvaluatedArgs::Bytes2(_, Some(value)), 1)
+                    | (EvaluatedArgs::BytesInt(Some(value), _), 0) => value,
+                    _ => unreachable!(),
+                };
+                owner.reserve_exact(128 * 1024);
+                assert!(owner.capacity() > 64 * 1024);
+                assert!(matches!(
+                    worker.eval_args(oversized),
+                    Err(LocalError::ResourceLimit(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            if operation == EvaluatedBytesOp::DateArithmeticDurationHeadNative {
+                let EvaluatedArgs::Bytes4(mut values) = copy(&args) else {
+                    unreachable!();
+                };
+                values[1] = Some(
+                    encode_native_identity(NativeIdentityRef::Real(1.5_f64.to_bits())).unwrap(),
+                );
+                values[2] = Some(b"HOUR_SECOND".to_vec());
+                values[3] = Some(
+                    encode_native_date_arithmetic_duration_metadata(1, 3, Some(128 * 1024))
+                        .unwrap(),
+                );
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes4(values)),
+                    Err(LocalError::ResourceLimit(_))
+                ));
+                assert_eq!(
+                    worker.kernel_invocations(),
+                    0,
+                    "precharge actual fixed float precision before formatting"
+                );
+            }
+            let output = run(&mut worker, copy(&args));
+            let result = decode_native_date_arithmetic_result(&output).unwrap();
+            match operation {
+                EvaluatedBytesOp::DateArithmeticHeadNative => {
+                    request(&output, Request::CoerceString, 0)
+                }
+                EvaluatedBytesOp::DateArithmeticDurationHeadNative => {
+                    assert!(result.warning.is_none());
+                    assert_eq!(
+                        result.outcome,
+                        Outcome::Duration {
+                            nanos: 3_601_000_000_000,
+                            fsp: 3
+                        }
+                    );
+                }
+                EvaluatedBytesOp::DateArithmeticStepNative => {
+                    assert!(result.warning.is_none());
+                    assert_eq!(result.outcome, Outcome::Text("2024-02-01"));
+                }
+                _ => {
+                    assert_eq!(result.outcome, Outcome::Null);
+                    assert_eq!(result.warning.unwrap().code, 1441);
+                }
+            }
+            let mut calls = 1;
+            if operation == EvaluatedBytesOp::DateArithmeticOverflowNative {
+                for level in [0, 2] {
+                    let output = run(
+                        &mut worker,
+                        EvaluatedArgs::BytesInt(Some(overflow.clone()), Some(level)),
+                    );
+                    let result = decode_native_date_arithmetic_result(&output).unwrap();
+                    assert!(result.warning.is_none());
+                    if level == 0 {
+                        assert_eq!(result.outcome, Outcome::Null);
+                    } else {
+                        assert!(matches!(
+                            result.outcome,
+                            Outcome::Error {
+                                code: 1441,
+                                message: "Datetime function: datetime field overflow"
+                            }
+                        ));
+                    }
+                    calls += 1;
+                }
+            }
+            assert_eq!(worker.kernel_invocations(), calls);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let mut stopped = prepare(
+                operation,
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = stopped.retained_storage().unwrap();
+            assert!(matches!(
+                stopped.eval_args(copy(&args)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(stopped.kernel_invocations(), 0);
+            assert!(stopped.is_healthy());
+            assert_eq!(stopped.retained_storage().unwrap(), storage);
+            // CPP instruction budget, not frontend pool slots or allocator
+            // peak.
+        }
+    }
+}

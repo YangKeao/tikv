@@ -1610,6 +1610,10 @@ pub enum EvaluatedBytesOp {
     IntervalEagerHeadNative,
     IntervalLazyHeadNative,
     IntervalStepNative,
+    DateArithmeticHeadNative,
+    DateArithmeticDurationHeadNative,
+    DateArithmeticStepNative,
+    DateArithmeticOverflowNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1673,6 +1677,26 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::DateArithmeticHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DateArithmeticHeadNative,
+                );
+            }
+            Self::DateArithmeticDurationHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DateArithmeticDurationHeadNative,
+                );
+            }
+            Self::DateArithmeticStepNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DateArithmeticStepNative,
+                );
+            }
+            Self::DateArithmeticOverflowNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::DateArithmeticOverflowNative,
+                );
+            }
             Self::IntervalEagerHeadNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::IntervalEagerHeadNative,
@@ -4486,6 +4510,12 @@ impl EvaluatedBytesOp {
             Self::IntervalEagerHeadNative => crate::interval_eager_head_native_fn_meta(),
             Self::IntervalLazyHeadNative => crate::interval_lazy_head_native_fn_meta(),
             Self::IntervalStepNative => crate::interval_step_native_fn_meta(),
+            Self::DateArithmeticHeadNative => crate::date_arithmetic_head_native_fn_meta(),
+            Self::DateArithmeticDurationHeadNative => {
+                crate::date_arithmetic_duration_head_native_fn_meta()
+            }
+            Self::DateArithmeticStepNative => crate::date_arithmetic_step_native_fn_meta(),
+            Self::DateArithmeticOverflowNative => crate::date_arithmetic_overflow_native_fn_meta(),
             Self::ToBinaryNative => crate::to_binary_native_fn_meta(),
             Self::FromBinaryNative => crate::from_binary_native_fn_meta(),
             Self::ConvertUsingNative => crate::convert_using_native_fn_meta(),
@@ -5135,6 +5165,10 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::DateArithmeticHeadNative
+            | Self::DateArithmeticDurationHeadNative
+            | Self::DateArithmeticStepNative
+            | Self::DateArithmeticOverflowNative => EvalType::Bytes,
             Self::IntervalEagerHeadNative
             | Self::IntervalLazyHeadNative
             | Self::IntervalStepNative => EvalType::Bytes,
@@ -5614,6 +5648,14 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::DateArithmeticHeadNative | Self::DateArithmeticDurationHeadNative => &[
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Bytes,
+                EvalType::Bytes,
+            ],
+            Self::DateArithmeticStepNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::DateArithmeticOverflowNative => &[EvalType::Bytes, EvalType::Int],
             Self::IntervalEagerHeadNative | Self::IntervalLazyHeadNative => &[EvalType::Bytes],
             Self::IntervalStepNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::ExtremumHeadNative => &[EvalType::Bytes, EvalType::Int, EvalType::Int],
@@ -6911,8 +6953,8 @@ pub enum EvaluatedArgs {
         count: ReadyIntArg,
     },
     Bytes3([Option<Vec<u8>>; 3]),
-    /// Four separate actual operands; only the closed CONVERT USING profile
-    /// admits this Values shape, without a packed descriptor or opcode slot.
+    /// Four separate actual operands for the explicitly whitelisted CONVERT
+    /// USING and date-arithmetic heads; no hidden operation-selector slot.
     Bytes4([Option<Vec<u8>>; 4]),
     Int2(Option<i64>, Option<i64>),
     /// Original ready value plus an explicit packet-policy decision.
@@ -7149,6 +7191,49 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if operation == EvaluatedBytesOp::DateArithmeticHeadNative {
+            return match self {
+                Self::Bytes4([date, amount, unit, metadata]) => {
+                    crate::date_arithmetic_head_native_args_valid(
+                        date.as_deref(),
+                        amount.as_deref(),
+                        unit.as_deref(),
+                        metadata.as_deref(),
+                    )
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::DateArithmeticDurationHeadNative {
+            return match self {
+                Self::Bytes4([date, amount, unit, metadata]) => {
+                    crate::date_arithmetic_duration_head_native_args_valid(
+                        date.as_deref(),
+                        amount.as_deref(),
+                        unit.as_deref(),
+                        metadata.as_deref(),
+                    )
+                }
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::DateArithmeticStepNative {
+            return match self {
+                Self::Bytes2(state, value) => crate::date_arithmetic_step_native_args_valid(
+                    state.as_deref(),
+                    value.as_deref(),
+                ),
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::DateArithmeticOverflowNative {
+            return match self {
+                Self::BytesInt(state, level) => {
+                    crate::date_arithmetic_overflow_native_args_valid(state.as_deref(), *level)
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::IntervalEagerHeadNative {
             return match self {
                 Self::Bytes(packet) => {
@@ -10807,6 +10892,91 @@ impl EvaluatedBytesWorker {
             // Cast order, NULL selection and search stay in the real SDK producer.
             budget.check_output(bound, input_bytes)?;
         }
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::DateArithmeticHeadNative
+                | EvaluatedBytesOp::DateArithmeticDurationHeadNative
+                | EvaluatedBytesOp::DateArithmeticStepNative
+                | EvaluatedBytesOp::DateArithmeticOverflowNative
+        ) {
+            let (a, b, c, d) = match (self.operation, &ready[..arity]) {
+                (
+                    EvaluatedBytesOp::DateArithmeticHeadNative,
+                    [
+                        ScalarValue::Bytes(date),
+                        ScalarValue::Bytes(amount),
+                        ScalarValue::Bytes(unit),
+                        ScalarValue::Bytes(metadata),
+                    ],
+                ) if crate::date_arithmetic_head_native_args_valid(
+                    date.as_deref(),
+                    amount.as_deref(),
+                    unit.as_deref(),
+                    metadata.as_deref(),
+                ) =>
+                {
+                    (
+                        date.as_deref(),
+                        amount.as_deref(),
+                        unit.as_deref(),
+                        metadata.as_deref(),
+                    )
+                }
+                (
+                    EvaluatedBytesOp::DateArithmeticDurationHeadNative,
+                    [
+                        ScalarValue::Bytes(date),
+                        ScalarValue::Bytes(amount),
+                        ScalarValue::Bytes(unit),
+                        ScalarValue::Bytes(metadata),
+                    ],
+                ) if crate::date_arithmetic_duration_head_native_args_valid(
+                    date.as_deref(),
+                    amount.as_deref(),
+                    unit.as_deref(),
+                    metadata.as_deref(),
+                ) =>
+                {
+                    (
+                        date.as_deref(),
+                        amount.as_deref(),
+                        unit.as_deref(),
+                        metadata.as_deref(),
+                    )
+                }
+                (
+                    EvaluatedBytesOp::DateArithmeticStepNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
+                ) if crate::date_arithmetic_step_native_args_valid(
+                    state.as_deref(),
+                    value.as_deref(),
+                ) =>
+                {
+                    (state.as_deref(), value.as_deref(), None, None)
+                }
+                (
+                    EvaluatedBytesOp::DateArithmeticOverflowNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Int(level)],
+                ) if crate::date_arithmetic_overflow_native_args_valid(
+                    state.as_deref(),
+                    *level,
+                ) =>
+                {
+                    (state.as_deref(), None, None, None)
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "date-arithmetic operands differ from their fixed stage domain".into(),
+                    ));
+                }
+            };
+            let bound =
+                crate::native_date_arithmetic::native_date_arithmetic_output_bound(a, b, c, d)
+                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // SDK planning includes precision-dependent expansion. All four head
+            // owners or the whole continuation report remain live and charged.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -11222,6 +11392,69 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::DateArithmeticHeadNative
+                        | EvaluatedBytesOp::DateArithmeticDurationHeadNative
+                        | EvaluatedBytesOp::DateArithmeticStepNative
+                        | EvaluatedBytesOp::DateArithmeticOverflowNative
+                ) {
+                    use crate::NativeDateArithmeticOutcome as Outcome;
+                    let valid = value
+                        .and_then(crate::decode_native_date_arithmetic_result)
+                        .is_some_and(|report| match self.operation {
+                            EvaluatedBytesOp::DateArithmeticHeadNative => {
+                                report.warning.is_none_or(|warning| warning.code == 1292)
+                                    && matches!(
+                                        report.outcome,
+                                        Outcome::Null
+                                            | Outcome::Text(_)
+                                            | Outcome::Unsupported(_)
+                                            | Outcome::Request { .. }
+                                            | Outcome::Overflow { .. }
+                                    )
+                            }
+                            EvaluatedBytesOp::DateArithmeticDurationHeadNative => {
+                                report.warning.is_none()
+                                    && matches!(
+                                        report.outcome,
+                                        Outcome::Null
+                                            | Outcome::Duration { .. }
+                                            | Outcome::Unsupported(_)
+                                            | Outcome::Request { .. }
+                                    )
+                            }
+                            EvaluatedBytesOp::DateArithmeticStepNative => {
+                                report.warning.is_none_or(|warning| warning.code == 1292)
+                                    && matches!(
+                                        report.outcome,
+                                        Outcome::Null
+                                            | Outcome::Text(_)
+                                            | Outcome::Duration { .. }
+                                            | Outcome::Unsupported(_)
+                                            | Outcome::Request { .. }
+                                            | Outcome::Overflow { .. }
+                                    )
+                            }
+                            EvaluatedBytesOp::DateArithmeticOverflowNative => {
+                                match report.outcome {
+                                    Outcome::Null => report.warning.is_none_or(|warning| {
+                                        warning.code == 1441
+                                            && warning.message
+                                                == "Datetime function: datetime field overflow"
+                                    }),
+                                    Outcome::Error { code: 1441, .. } => report.warning.is_none(),
+                                    _ => false,
+                                }
+                            }
+                            _ => false,
+                        });
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "date arithmetic returned an invalid report for its fixed stage".into(),
+                        ));
+                    }
+                }
                 if matches!(
                     self.operation,
                     EvaluatedBytesOp::IntervalEagerHeadNative

@@ -546,6 +546,10 @@ pub enum LocalFunctionId {
     IntervalEagerHeadNative,
     IntervalLazyHeadNative,
     IntervalStepNative,
+    DateArithmeticHeadNative,
+    DateArithmeticDurationHeadNative,
+    DateArithmeticStepNative,
+    DateArithmeticOverflowNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

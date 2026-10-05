@@ -3,6 +3,7 @@
 pub mod extension;
 pub mod interval;
 mod native_datetime;
+mod native_duration_interval;
 mod native_extract;
 mod native_parse;
 mod native_session_time_zone;
@@ -33,6 +34,9 @@ pub use self::{
     native_datetime::{
         NativeTimeConversionError, native_core_from_datetime, native_core_naive_datetime,
         native_core_to_datetime,
+    },
+    native_duration_interval::{
+        ParsedInterval, native_extract_duration_value, native_parse_duration_value,
     },
     native_extract::{
         native_extract_datetime_num, native_extract_duration_num, native_is_clock_unit,

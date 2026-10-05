@@ -75,6 +75,20 @@ pub use native_convert_charset::{
 mod native_convert_tz;
 pub use native_convert_tz::{convert_tz_native_args_valid, native_legacy_local_to_instant};
 
+mod native_date_arithmetic;
+mod native_date_arithmetic_helpers;
+pub use native_date_arithmetic::{
+    NativeDateArithmeticEvalType, NativeDateArithmeticFieldType, NativeDateArithmeticOutcome,
+    NativeDateArithmeticRequest, NativeDateArithmeticResult, NativeDateArithmeticWarning,
+    date_arithmetic_duration_head_native_args_valid, date_arithmetic_duration_head_native_fn_meta,
+    date_arithmetic_head_native_args_valid, date_arithmetic_head_native_fn_meta,
+    date_arithmetic_overflow_native_args_valid, date_arithmetic_overflow_native_fn_meta,
+    date_arithmetic_step_native_args_valid, date_arithmetic_step_native_fn_meta,
+    decode_native_date_arithmetic_result, encode_native_date_arithmetic_duration_metadata,
+    encode_native_date_arithmetic_metadata, native_date_arithmetic_result_fsp,
+    native_format_decimal_composite_interval,
+};
+
 mod native_decimal_int_div;
 pub use native_decimal_int_div::{
     NativeIntDivOutcome, NativeIntDivReport, decode_native_intdiv_report, native_intdiv_args_valid,

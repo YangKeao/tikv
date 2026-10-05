@@ -434,6 +434,20 @@ short-circuit admission policy described above.
   it is not a physical-memory or parser-temporary bound. Existing cast/NULL
   witnesses and original warning delivery remain native adapters, without
   PB/legacy admission or a new specialized vector kernel.
+- Query_expr `native_date_arithmetic.rs` and private
+  `native_date_arithmetic_helpers.rs` own ordinary calendar and typed-duration
+  DATE_ADD/SUB policy. Two four-value heads, a generic preparation step and
+  a late overflow-level step reuse existing Values carriers. Reports retain
+  original coercion order and deliver1292 before the next action; only the
+  overflow stage reads caller policy for1441. AST NoColumns semantics bind
+  actual execution authority, while typed callers retain their statement
+  context and outer temporal casts. Ordinary permissive composite parsing
+  remains distinct from datatype `time/native_duration_interval.rs`, which
+  shares ParsedInterval and the stricter parser used by TIME arithmetic and
+  existing native legacy consumers. Raw result FSP and the two different
+  duration limits remain distinct. This is a partial ordinary-domain migration:
+  legacy arithmetic/reformatting and CoreTime add_date/add_duration remain
+  pending; no new wire/PB admission or full-family credit follows.
 - Query_expr `native_interval.rs` owns eager and lazy native INTERVAL through
   two heads and one continuation step, all Values/OwnBytes/one-call profiles.
   Actual identities or complete evaluation-type/flags metadata drive SDK

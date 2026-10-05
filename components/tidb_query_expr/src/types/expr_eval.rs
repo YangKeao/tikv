@@ -401,6 +401,23 @@ fn evaluated_ready_args_match(
             types.len() == 4 && operation.call_count() == 1
         }
         (
+            EvaluatedBytesOp::DateArithmeticHeadNative
+            | EvaluatedBytesOp::DateArithmeticDurationHeadNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 4 && operation.call_count() == 1,
+        (
+            EvaluatedBytesOp::DateArithmeticStepNative
+            | EvaluatedBytesOp::DateArithmeticOverflowNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 2 && operation.call_count() == 1,
+        (
+            EvaluatedBytesOp::DateArithmeticHeadNative
+            | EvaluatedBytesOp::DateArithmeticDurationHeadNative
+            | EvaluatedBytesOp::DateArithmeticStepNative
+            | EvaluatedBytesOp::DateArithmeticOverflowNative,
+            _,
+        ) => false,
+        (
             EvaluatedBytesOp::ToBinaryNative
             | EvaluatedBytesOp::FromBinaryNative
             | EvaluatedBytesOp::ConvertUsingNative,
@@ -562,6 +579,53 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::DateArithmeticHeadNative
+            || match values {
+                [
+                    ScalarValue::Bytes(date),
+                    ScalarValue::Bytes(amount),
+                    ScalarValue::Bytes(unit),
+                    ScalarValue::Bytes(metadata),
+                ] => crate::date_arithmetic_head_native_args_valid(
+                    date.as_deref(),
+                    amount.as_deref(),
+                    unit.as_deref(),
+                    metadata.as_deref(),
+                ),
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::DateArithmeticDurationHeadNative
+            || match values {
+                [
+                    ScalarValue::Bytes(date),
+                    ScalarValue::Bytes(amount),
+                    ScalarValue::Bytes(unit),
+                    ScalarValue::Bytes(metadata),
+                ] => crate::date_arithmetic_duration_head_native_args_valid(
+                    date.as_deref(),
+                    amount.as_deref(),
+                    unit.as_deref(),
+                    metadata.as_deref(),
+                ),
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::DateArithmeticStepNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Bytes(value)] => {
+                    crate::date_arithmetic_step_native_args_valid(
+                        state.as_deref(),
+                        value.as_deref(),
+                    )
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::DateArithmeticOverflowNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Int(level)] => {
+                    crate::date_arithmetic_overflow_native_args_valid(state.as_deref(), *level)
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::IntervalEagerHeadNative
             || match values {
                 [ScalarValue::Bytes(packet)] => {
@@ -1688,6 +1752,23 @@ pub(crate) fn evaluated_bytes_shape(
         (EvaluatedBytesOp::ConvertUsingNative, EvaluatedArgsRole::Values) => {
             arity == 4 && calls == 1
         }
+        (
+            EvaluatedBytesOp::DateArithmeticHeadNative
+            | EvaluatedBytesOp::DateArithmeticDurationHeadNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 4 && calls == 1,
+        (
+            EvaluatedBytesOp::DateArithmeticStepNative
+            | EvaluatedBytesOp::DateArithmeticOverflowNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 2 && calls == 1,
+        (
+            EvaluatedBytesOp::DateArithmeticHeadNative
+            | EvaluatedBytesOp::DateArithmeticDurationHeadNative
+            | EvaluatedBytesOp::DateArithmeticStepNative
+            | EvaluatedBytesOp::DateArithmeticOverflowNative,
+            _,
+        ) => false,
         (
             EvaluatedBytesOp::ToBinaryNative
             | EvaluatedBytesOp::FromBinaryNative

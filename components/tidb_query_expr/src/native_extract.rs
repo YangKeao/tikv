@@ -441,7 +441,7 @@ fn parse_signed_duration_hms(input: &str) -> Option<(bool, u32, u32, u32, u32)> 
     Some((negative, hour, minute, second, microsecond))
 }
 
-fn time_parts_with_micros(suffix: Option<&str>) -> Option<(u32, u32, u32, u32)> {
+pub(crate) fn time_parts_with_micros(suffix: Option<&str>) -> Option<(u32, u32, u32, u32)> {
     let Some(suffix) = suffix else {
         return Some((0, 0, 0, 0));
     };
