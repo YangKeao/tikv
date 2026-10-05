@@ -316,6 +316,24 @@ fn evaluated_ready_args_match(
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
         (
+            EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 1 && operation.call_count() == 1,
+        (EvaluatedBytesOp::LegacyDateArithmeticStepNative, EvaluatedArgsRole::Values)
+        | (EvaluatedBytesOp::LegacyDateArithmeticParseNative, EvaluatedArgsRole::TemporalText) => {
+            types.len() == 2 && operation.call_count() == 1
+        }
+        (
+            EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticStepNative
+            | EvaluatedBytesOp::LegacyDateArithmeticParseNative,
+            _,
+        ) => false,
+        (
             EvaluatedBytesOp::IntervalEagerHeadNative | EvaluatedBytesOp::IntervalLazyHeadNative,
             EvaluatedArgsRole::Values,
         ) => types.len() == 1 && operation.call_count() == 1,
@@ -579,6 +597,39 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
+            || match values {
+                [ScalarValue::Bytes(metadata)] => {
+                    crate::legacy_date_arithmetic_text_head_native_args_valid(metadata.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
+            || match values {
+                [ScalarValue::Bytes(metadata)] => {
+                    crate::legacy_date_arithmetic_time_head_native_args_valid(metadata.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative
+            || match values {
+                [ScalarValue::Bytes(metadata)] => {
+                    crate::legacy_date_arithmetic_duration_head_native_args_valid(
+                        metadata.as_deref(),
+                    )
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::LegacyDateArithmeticStepNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Bytes(value)] => {
+                    crate::legacy_date_arithmetic_step_native_args_valid(
+                        state.as_deref(),
+                        value.as_deref(),
+                    )
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::DateArithmeticHeadNative
             || match values {
                 [
@@ -1267,6 +1318,12 @@ fn evaluated_ready_args_match(
             },
             EvaluatedArgsRole::TemporalText => match (operation, values) {
                 (
+                    EvaluatedBytesOp::LegacyDateArithmeticParseNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Int(flags)],
+                ) => {
+                    crate::legacy_date_arithmetic_parse_native_args_valid(state.as_deref(), *flags)
+                }
+                (
                     EvaluatedBytesOp::DateLiteralNative | EvaluatedBytesOp::TimestampLiteralNative,
                     [ScalarValue::Bytes(value), ScalarValue::Int(modes)],
                 ) => crate::temporal_literal_native_args_valid(value.as_deref(), *modes),
@@ -1667,6 +1724,24 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 1 && calls == 1,
+        (EvaluatedBytesOp::LegacyDateArithmeticStepNative, EvaluatedArgsRole::Values)
+        | (EvaluatedBytesOp::LegacyDateArithmeticParseNative, EvaluatedArgsRole::TemporalText) => {
+            arity == 2 && calls == 1
+        }
+        (
+            EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticStepNative
+            | EvaluatedBytesOp::LegacyDateArithmeticParseNative,
+            _,
+        ) => false,
         (
             EvaluatedBytesOp::IntervalEagerHeadNative | EvaluatedBytesOp::IntervalLazyHeadNative,
             EvaluatedArgsRole::Values,

@@ -137,6 +137,24 @@ fn check_evaluated_bytes_source(
         )
     };
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 1 && calls == 1,
+        (EvaluatedBytesOp::LegacyDateArithmeticStepNative, EvaluatedArgsRole::Values)
+        | (EvaluatedBytesOp::LegacyDateArithmeticParseNative, EvaluatedArgsRole::TemporalText) => {
+            arity == 2 && calls == 1
+        }
+        (
+            EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative
+            | EvaluatedBytesOp::LegacyDateArithmeticStepNative
+            | EvaluatedBytesOp::LegacyDateArithmeticParseNative,
+            _,
+        ) => false,
         (EvaluatedBytesOp::ConvertUsingNative, EvaluatedArgsRole::Values) => {
             arity == 4 && calls == 1
         }

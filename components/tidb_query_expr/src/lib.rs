@@ -89,6 +89,22 @@ pub use native_date_arithmetic::{
     native_format_decimal_composite_interval,
 };
 
+mod native_legacy_date_arithmetic;
+pub use native_legacy_date_arithmetic::{
+    NativeLegacyDateArithmeticChannel, NativeLegacyDateArithmeticDateKind,
+    NativeLegacyDateArithmeticIntervalKind, NativeLegacyDateArithmeticMetadata,
+    NativeLegacyDateArithmeticOutcome, NativeLegacyDateArithmeticResult,
+    decode_native_legacy_date_arithmetic_result, encode_native_legacy_date_arithmetic_metadata,
+    legacy_date_arithmetic_duration_head_native_args_valid,
+    legacy_date_arithmetic_duration_head_native_fn_meta,
+    legacy_date_arithmetic_parse_native_args_valid, legacy_date_arithmetic_parse_native_fn_meta,
+    legacy_date_arithmetic_step_native_args_valid, legacy_date_arithmetic_step_native_fn_meta,
+    legacy_date_arithmetic_text_head_native_args_valid,
+    legacy_date_arithmetic_text_head_native_fn_meta,
+    legacy_date_arithmetic_time_head_native_args_valid,
+    legacy_date_arithmetic_time_head_native_fn_meta,
+};
+
 mod native_decimal_int_div;
 pub use native_decimal_int_div::{
     NativeIntDivOutcome, NativeIntDivReport, decode_native_intdiv_report, native_intdiv_args_valid,

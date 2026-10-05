@@ -2,6 +2,7 @@
 
 pub mod extension;
 pub mod interval;
+mod native_core_arithmetic;
 mod native_datetime;
 mod native_duration_interval;
 mod native_extract;
@@ -31,6 +32,10 @@ use tipb::FieldType;
 pub use self::{
     extension::*,
     interval::IntervalUnit,
+    native_core_arithmetic::{
+        native_core_add_date, native_core_add_duration, native_core_fix_days,
+        native_get_date_from_daynr,
+    },
     native_datetime::{
         NativeTimeConversionError, native_core_from_datetime, native_core_naive_datetime,
         native_core_to_datetime,

@@ -1614,6 +1614,11 @@ pub enum EvaluatedBytesOp {
     DateArithmeticDurationHeadNative,
     DateArithmeticStepNative,
     DateArithmeticOverflowNative,
+    LegacyDateArithmeticTextHeadNative,
+    LegacyDateArithmeticTimeHeadNative,
+    LegacyDateArithmeticDurationHeadNative,
+    LegacyDateArithmeticStepNative,
+    LegacyDateArithmeticParseNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1677,6 +1682,31 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::LegacyDateArithmeticTextHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::LegacyDateArithmeticTextHeadNative,
+                );
+            }
+            Self::LegacyDateArithmeticTimeHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::LegacyDateArithmeticTimeHeadNative,
+                );
+            }
+            Self::LegacyDateArithmeticDurationHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::LegacyDateArithmeticDurationHeadNative,
+                );
+            }
+            Self::LegacyDateArithmeticStepNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::LegacyDateArithmeticStepNative,
+                );
+            }
+            Self::LegacyDateArithmeticParseNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::LegacyDateArithmeticParseNative,
+                );
+            }
             Self::DateArithmeticHeadNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::DateArithmeticHeadNative,
@@ -3965,8 +3995,10 @@ impl EvaluatedBytesOp {
     }
 
     pub(crate) fn uses_native_temporal_zone(self) -> bool {
-        self == Self::ExtremumTimeContextNative
-            || self.is_temporal_literal()
+        matches!(
+            self,
+            Self::ExtremumTimeContextNative | Self::LegacyDateArithmeticParseNative
+        ) || self.is_temporal_literal()
             || matches!(
                 self,
                 Self::Timestamp1Native
@@ -4022,7 +4054,12 @@ impl EvaluatedBytesOp {
         ) {
             return EvaluatedArgsRole::TemporalParseText;
         }
-        if self.is_temporal_literal() || self == Self::ExtremumTimeContextNative {
+        if self.is_temporal_literal()
+            || matches!(
+                self,
+                Self::ExtremumTimeContextNative | Self::LegacyDateArithmeticParseNative
+            )
+        {
             return EvaluatedArgsRole::TemporalText;
         }
         // A private identity does not determine its carrier or packet policy.
@@ -4516,6 +4553,21 @@ impl EvaluatedBytesOp {
             }
             Self::DateArithmeticStepNative => crate::date_arithmetic_step_native_fn_meta(),
             Self::DateArithmeticOverflowNative => crate::date_arithmetic_overflow_native_fn_meta(),
+            Self::LegacyDateArithmeticTextHeadNative => {
+                crate::legacy_date_arithmetic_text_head_native_fn_meta()
+            }
+            Self::LegacyDateArithmeticTimeHeadNative => {
+                crate::legacy_date_arithmetic_time_head_native_fn_meta()
+            }
+            Self::LegacyDateArithmeticDurationHeadNative => {
+                crate::legacy_date_arithmetic_duration_head_native_fn_meta()
+            }
+            Self::LegacyDateArithmeticStepNative => {
+                crate::legacy_date_arithmetic_step_native_fn_meta()
+            }
+            Self::LegacyDateArithmeticParseNative => {
+                crate::legacy_date_arithmetic_parse_native_fn_meta()
+            }
             Self::ToBinaryNative => crate::to_binary_native_fn_meta(),
             Self::FromBinaryNative => crate::from_binary_native_fn_meta(),
             Self::ConvertUsingNative => crate::convert_using_native_fn_meta(),
@@ -5165,6 +5217,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::LegacyDateArithmeticTextHeadNative
+            | Self::LegacyDateArithmeticTimeHeadNative
+            | Self::LegacyDateArithmeticDurationHeadNative
+            | Self::LegacyDateArithmeticStepNative
+            | Self::LegacyDateArithmeticParseNative => EvalType::Bytes,
             Self::DateArithmeticHeadNative
             | Self::DateArithmeticDurationHeadNative
             | Self::DateArithmeticStepNative
@@ -5648,6 +5705,11 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::LegacyDateArithmeticTextHeadNative
+            | Self::LegacyDateArithmeticTimeHeadNative
+            | Self::LegacyDateArithmeticDurationHeadNative => &[EvalType::Bytes],
+            Self::LegacyDateArithmeticStepNative => &[EvalType::Bytes, EvalType::Bytes],
+            Self::LegacyDateArithmeticParseNative => &[EvalType::Bytes, EvalType::Int],
             Self::DateArithmeticHeadNative | Self::DateArithmeticDurationHeadNative => &[
                 EvalType::Bytes,
                 EvalType::Bytes,
@@ -7191,6 +7253,51 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if matches!(
+            operation,
+            EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
+                | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
+                | EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative
+        ) {
+            return match self {
+                Self::Bytes(metadata) => match operation {
+                    EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative => {
+                        crate::legacy_date_arithmetic_text_head_native_args_valid(
+                            metadata.as_deref(),
+                        )
+                    }
+                    EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative => {
+                        crate::legacy_date_arithmetic_time_head_native_args_valid(
+                            metadata.as_deref(),
+                        )
+                    }
+                    EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative => {
+                        crate::legacy_date_arithmetic_duration_head_native_args_valid(
+                            metadata.as_deref(),
+                        )
+                    }
+                    _ => unreachable!(),
+                },
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::LegacyDateArithmeticStepNative {
+            return match self {
+                Self::Bytes2(state, value) => crate::legacy_date_arithmetic_step_native_args_valid(
+                    state.as_deref(),
+                    value.as_deref(),
+                ),
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::LegacyDateArithmeticParseNative {
+            return match self {
+                Self::TemporalText { value, modes, .. } => {
+                    crate::legacy_date_arithmetic_parse_native_args_valid(Some(value), Some(*modes))
+                }
+                _ => false,
+            };
+        }
         if operation == EvaluatedBytesOp::DateArithmeticHeadNative {
             return match self {
                 Self::Bytes4([date, amount, unit, metadata]) => {
@@ -10156,6 +10263,9 @@ impl EvaluatedBytesWorker {
                     let bound = if self.operation == EvaluatedBytesOp::ExtremumTimeContextNative {
                         crate::native_extremum::native_extremum_output_bound(Some(&value), None)
                             .ok_or_else(evaluated_ascii_storage_overflow)?
+                    } else if self.operation == EvaluatedBytesOp::LegacyDateArithmeticParseNative {
+                        crate::native_legacy_date_arithmetic::native_legacy_date_arithmetic_output_bound(Some(&value), None)
+                            .ok_or_else(evaluated_ascii_storage_overflow)?
                     } else {
                         value
                             .len()
@@ -10977,6 +11087,78 @@ impl EvaluatedBytesWorker {
             // owners or the whole continuation report remain live and charged.
             budget.check_output(bound, input_bytes)?;
         }
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
+                | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
+                | EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative
+                | EvaluatedBytesOp::LegacyDateArithmeticStepNative
+                | EvaluatedBytesOp::LegacyDateArithmeticParseNative
+        ) {
+            let (first, second) = match (self.operation, &ready[..arity]) {
+                (
+                    EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative,
+                    [ScalarValue::Bytes(metadata)],
+                ) if crate::legacy_date_arithmetic_text_head_native_args_valid(
+                    metadata.as_deref(),
+                ) =>
+                {
+                    (metadata.as_deref(), None)
+                }
+                (
+                    EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative,
+                    [ScalarValue::Bytes(metadata)],
+                ) if crate::legacy_date_arithmetic_time_head_native_args_valid(
+                    metadata.as_deref(),
+                ) =>
+                {
+                    (metadata.as_deref(), None)
+                }
+                (
+                    EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative,
+                    [ScalarValue::Bytes(metadata)],
+                ) if crate::legacy_date_arithmetic_duration_head_native_args_valid(
+                    metadata.as_deref(),
+                ) =>
+                {
+                    (metadata.as_deref(), None)
+                }
+                (
+                    EvaluatedBytesOp::LegacyDateArithmeticStepNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
+                ) if crate::legacy_date_arithmetic_step_native_args_valid(
+                    state.as_deref(),
+                    value.as_deref(),
+                ) =>
+                {
+                    (state.as_deref(), value.as_deref())
+                }
+                (
+                    EvaluatedBytesOp::LegacyDateArithmeticParseNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Int(flags)],
+                ) if crate::legacy_date_arithmetic_parse_native_args_valid(
+                    state.as_deref(),
+                    *flags,
+                ) =>
+                {
+                    (state.as_deref(), None)
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "legacy date-arithmetic operands differ from their fixed stage domain"
+                            .into(),
+                    ));
+                }
+            };
+            let bound =
+                crate::native_legacy_date_arithmetic::native_legacy_date_arithmetic_output_bound(
+                    first, second,
+                )
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // SDK planning owns visible-Decimal expansion; retain whole reports,
+            // actual operands and any bound legacy zone through real dispatch.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -11392,6 +11574,71 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
+                        | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
+                        | EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative
+                        | EvaluatedBytesOp::LegacyDateArithmeticStepNative
+                        | EvaluatedBytesOp::LegacyDateArithmeticParseNative
+                ) {
+                    use crate::{
+                        NativeLegacyDateArithmeticChannel as Channel,
+                        NativeLegacyDateArithmeticOutcome as Outcome,
+                    };
+                    let valid = value
+                        .and_then(crate::decode_native_legacy_date_arithmetic_result)
+                        .is_some_and(|report| match self.operation {
+                            EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative => {
+                                report.presence.is_none()
+                                    && matches!(
+                                        report.outcome,
+                                        Outcome::Request {
+                                            index: 2,
+                                            channel: Channel::Bytes,
+                                            ..
+                                        }
+                                    )
+                            }
+                            EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative => {
+                                report.presence.is_none()
+                                    && matches!(
+                                        report.outcome,
+                                        Outcome::Request {
+                                            index: 0,
+                                            channel: Channel::Time,
+                                            ..
+                                        }
+                                    )
+                            }
+                            EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative => {
+                                report.presence.is_none()
+                                    && matches!(
+                                        report.outcome,
+                                        Outcome::Request {
+                                            index: 0,
+                                            channel: Channel::Duration,
+                                            ..
+                                        }
+                                    )
+                            }
+                            EvaluatedBytesOp::LegacyDateArithmeticStepNative => true,
+                            EvaluatedBytesOp::LegacyDateArithmeticParseNative => {
+                                match report.outcome {
+                                    Outcome::Null => report.presence == Some(0),
+                                    Outcome::Request { index: 1, .. } => report.presence.is_none(),
+                                    _ => false,
+                                }
+                            }
+                            _ => false,
+                        });
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "legacy date arithmetic returned an invalid report for its fixed stage"
+                                .into(),
+                        ));
+                    }
+                }
                 if matches!(
                     self.operation,
                     EvaluatedBytesOp::DateArithmeticHeadNative

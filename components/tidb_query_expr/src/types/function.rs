@@ -550,6 +550,11 @@ pub enum LocalFunctionId {
     DateArithmeticDurationHeadNative,
     DateArithmeticStepNative,
     DateArithmeticOverflowNative,
+    LegacyDateArithmeticTextHeadNative,
+    LegacyDateArithmeticTimeHeadNative,
+    LegacyDateArithmeticDurationHeadNative,
+    LegacyDateArithmeticStepNative,
+    LegacyDateArithmeticParseNative,
 }
 
 /// Source provenance, not a deduction from the value's collation.

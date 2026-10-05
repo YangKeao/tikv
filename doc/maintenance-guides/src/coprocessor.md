@@ -445,9 +445,18 @@ short-circuit admission policy described above.
   remains distinct from datatype `time/native_duration_interval.rs`, which
   shares ParsedInterval and the stricter parser used by TIME arithmetic and
   existing native legacy consumers. Raw result FSP and the two different
-  duration limits remain distinct. This is a partial ordinary-domain migration:
-  legacy arithmetic/reformatting and CoreTime add_date/add_duration remain
-  pending; no new wire/PB admission or full-family credit follows.
+  duration limits remain distinct.
+  Legacy `native_legacy_date_arithmetic.rs` keeps separate text/time/duration
+  heads, a channel step and a TemporalText parse step. Actual metadata stays
+  bytes, folded integers stay full i128, and only the parse stage binds the
+  existing captured native zone. SDK reports own original getter order,
+  reformatting, arithmetic and explicit presence results. Native code actuates
+  requested channels and generic MyDecimal parse/round/render primitives; those
+  MyDecimal primitives are not declared shared. Datatype
+  `time/native_core_arithmetic.rs` owns raw CoreTime date/duration arithmetic
+  and the native day-number domain, distinct from wire limits. Existing eight
+  child-free Duration-to-Datetime refusals and wrong-reader admission remain
+  unchanged; no new wire/PB signature is enabled.
 - Query_expr `native_interval.rs` owns eager and lazy native INTERVAL through
   two heads and one continuation step, all Values/OwnBytes/one-call profiles.
   Actual identities or complete evaluation-type/flags metadata drive SDK

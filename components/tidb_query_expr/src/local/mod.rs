@@ -5186,3 +5186,372 @@ mod date_arithmetic_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod legacy_date_arithmetic_worker_tests {
+    use tidb_query_datatype::codec::mysql::{Time, time::NativeSessionTimeZone};
+
+    use super::*;
+    use crate::{
+        NativeIdentityRef, NativeLegacyDateArithmeticChannel as Channel,
+        NativeLegacyDateArithmeticDateKind as DateKind,
+        NativeLegacyDateArithmeticIntervalKind as IntervalKind, NativeLegacyDateArithmeticMetadata,
+        NativeLegacyDateArithmeticOutcome as Outcome, decode_native_identity,
+        decode_native_legacy_date_arithmetic_result, encode_native_identity,
+        encode_native_legacy_date_arithmetic_metadata,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn metadata(date: DateKind) -> Vec<u8> {
+        encode_native_legacy_date_arithmetic_metadata(NativeLegacyDateArithmeticMetadata {
+            date,
+            interval: IntervalKind::Int,
+            subtract: false,
+        })
+        .unwrap()
+    }
+    fn run(worker: &mut EvaluatedBytesWorker, args: EvaluatedArgs) -> Vec<u8> {
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("legacy date arithmetic must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value
+            .into_option()
+            .expect("all legacy outcomes carry an SDK report")
+    }
+    fn advance(
+        worker: &mut EvaluatedBytesWorker,
+        report: &[u8],
+        value: Option<Vec<u8>>,
+    ) -> Vec<u8> {
+        run(worker, EvaluatedArgs::Bytes2(Some(report.to_vec()), value))
+    }
+    fn request(report: &[u8], at: usize, expected: Channel) {
+        let result = decode_native_legacy_date_arithmetic_result(report).unwrap();
+        assert_eq!(result.presence, None);
+        let Outcome::Request {
+            index,
+            channel,
+            state,
+        } = result.outcome
+        else {
+            panic!("expected actual getter request");
+        };
+        assert_eq!(index, at);
+        assert_eq!(channel, expected);
+        assert_eq!(state, report);
+    }
+    fn null(report: &[u8]) {
+        let result = decode_native_legacy_date_arithmetic_result(report).unwrap();
+        assert_eq!(result.presence, Some(0));
+        assert_eq!(result.outcome, Outcome::Null);
+    }
+    fn parse_args(report: &[u8]) -> EvaluatedArgs {
+        EvaluatedArgs::TemporalText {
+            value: report.to_vec(),
+            modes: 0,
+            zone: NativeSessionTimeZone::Fixed {
+                name: "UTC".into(),
+                offset_secs: 0,
+            },
+        }
+    }
+    fn copy(args: &EvaluatedArgs) -> EvaluatedArgs {
+        match args {
+            EvaluatedArgs::Bytes(value) => EvaluatedArgs::Bytes(value.clone()),
+            EvaluatedArgs::Bytes2(state, value) => {
+                EvaluatedArgs::Bytes2(state.clone(), value.clone())
+            }
+            EvaluatedArgs::TemporalText { value, modes, zone } => EvaluatedArgs::TemporalText {
+                value: value.clone(),
+                modes: *modes,
+                zone: zone.clone(),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn legacy_date_arithmetic_workers_preserve_getter_order_presence_and_zone_lifecycles() {
+        let mut text_head = prepare(
+            EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative,
+            ExecutionLimits::default(),
+        );
+        let mut time_head = prepare(
+            EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative,
+            ExecutionLimits::default(),
+        );
+        let mut duration_head = prepare(
+            EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative,
+            ExecutionLimits::default(),
+        );
+        let mut step = prepare(
+            EvaluatedBytesOp::LegacyDateArithmeticStepNative,
+            ExecutionLimits::default(),
+        );
+        let mut parse = prepare(
+            EvaluatedBytesOp::LegacyDateArithmeticParseNative,
+            ExecutionLimits::default(),
+        );
+        let text_start = run(
+            &mut text_head,
+            EvaluatedArgs::Bytes(Some(metadata(DateKind::String))),
+        );
+        request(&text_start, 2, Channel::Bytes);
+        let date_request = advance(&mut step, &text_start, Some(b"DAY".to_vec()));
+        request(&date_request, 0, Channel::Bytes);
+        let parse_state = advance(&mut step, &date_request, Some(b"2024-03-15".to_vec()));
+        let decoded = decode_native_legacy_date_arithmetic_result(&parse_state).unwrap();
+        assert_eq!(decoded.presence, None);
+        assert!(
+            matches!(decoded.outcome, Outcome::Parse { state } if state == parse_state.as_slice())
+        );
+        let amount_request = run(&mut parse, parse_args(&parse_state));
+        request(&amount_request, 1, Channel::FoldedInt);
+        // FoldedInt is actual raw LE i128, NOT an Int identity or eight bytes.
+        let one = 1_i128.to_le_bytes().to_vec();
+        let output = advance(&mut step, &amount_request, Some(one.clone()));
+        let result = decode_native_legacy_date_arithmetic_result(&output).unwrap();
+        assert_eq!(result.presence, Some(1));
+        assert_eq!(result.outcome, Outcome::Text(b"2024-03-16"));
+        for state in [&text_start, &date_request, &amount_request] {
+            null(&advance(&mut step, state, None));
+        }
+        let bad_parse = advance(&mut step, &date_request, Some(b"bad".to_vec()));
+        null(&run(&mut parse, parse_args(&bad_parse)));
+        let time_start = run(
+            &mut time_head,
+            EvaluatedArgs::Bytes(Some(metadata(DateKind::Datetime))),
+        );
+        request(&time_start, 0, Channel::Time);
+        let time = encode_native_identity(NativeIdentityRef::Time {
+            core: Time::native_core_from_fields(2024, 3, 15, 0, 0, 0, 0),
+            kind: 1,
+            fsp: 0,
+        })
+        .unwrap();
+        let time_unit = advance(&mut step, &time_start, Some(time));
+        request(&time_unit, 2, Channel::Bytes);
+        let time_amount = advance(&mut step, &time_unit, Some(b"DAY".to_vec()));
+        request(&time_amount, 1, Channel::FoldedInt);
+        let output = advance(&mut step, &time_amount, Some(one.clone()));
+        let result = decode_native_legacy_date_arithmetic_result(&output).unwrap();
+        assert_eq!(result.presence, Some(1));
+        let Outcome::Time(frame) = result.outcome else {
+            panic!("expected typed Time");
+        };
+        assert_eq!(
+            decode_native_identity(frame).unwrap(),
+            NativeIdentityRef::Time {
+                core: Time::native_core_from_fields(2024, 3, 16, 0, 0, 0, 0),
+                kind: 1,
+                fsp: 0
+            }
+        );
+        // A typed zero is not a NULL getter and must still demand unit/amount.
+        let zero_time = encode_native_identity(NativeIdentityRef::Time {
+            core: 0,
+            kind: 1,
+            fsp: 0,
+        })
+        .unwrap();
+        let zero_unit = advance(&mut step, &time_start, Some(zero_time));
+        request(&zero_unit, 2, Channel::Bytes);
+        let zero_amount = advance(&mut step, &zero_unit, Some(b"DAY".to_vec()));
+        request(&zero_amount, 1, Channel::FoldedInt);
+        null(&advance(&mut step, &time_start, None));
+        let duration_start = run(
+            &mut duration_head,
+            EvaluatedArgs::Bytes(Some(metadata(DateKind::Duration))),
+        );
+        request(&duration_start, 0, Channel::Duration);
+        let duration = encode_native_identity(NativeIdentityRef::Duration {
+            nanos: 3_600_000_000_000,
+            fsp: 0,
+        })
+        .unwrap();
+        let duration_unit = advance(&mut step, &duration_start, Some(duration));
+        request(&duration_unit, 2, Channel::Bytes);
+        let duration_amount = advance(&mut step, &duration_unit, Some(b"SECOND".to_vec()));
+        request(&duration_amount, 1, Channel::FoldedInt);
+        let output = advance(&mut step, &duration_amount, Some(one.clone()));
+        let result = decode_native_legacy_date_arithmetic_result(&output).unwrap();
+        assert_eq!(result.presence, Some(1));
+        let Outcome::Duration(frame) = result.outcome else {
+            panic!("expected typed Duration");
+        };
+        assert_eq!(
+            decode_native_identity(frame).unwrap(),
+            NativeIdentityRef::Duration {
+                nanos: 3_601_000_000_000,
+                fsp: 0
+            }
+        );
+        for (operation, args, index, channel) in [
+            (
+                EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative,
+                EvaluatedArgs::Bytes(Some(metadata(DateKind::String))),
+                2,
+                Channel::Bytes,
+            ),
+            (
+                EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative,
+                EvaluatedArgs::Bytes(Some(metadata(DateKind::Datetime))),
+                0,
+                Channel::Time,
+            ),
+            (
+                EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative,
+                EvaluatedArgs::Bytes(Some(metadata(DateKind::Duration))),
+                0,
+                Channel::Duration,
+            ),
+            (
+                EvaluatedBytesOp::LegacyDateArithmeticStepNative,
+                EvaluatedArgs::Bytes2(Some(amount_request.clone()), Some(one.clone())),
+                0,
+                Channel::Bytes,
+            ),
+            (
+                EvaluatedBytesOp::LegacyDateArithmeticParseNative,
+                parse_args(&parse_state),
+                1,
+                Channel::FoldedInt,
+            ),
+        ] {
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Int(None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            let bad = match &args {
+                EvaluatedArgs::Bytes(_) => EvaluatedArgs::Bytes(Some(metadata(
+                    if operation == EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative {
+                        DateKind::String
+                    } else {
+                        DateKind::Datetime
+                    },
+                ))),
+                EvaluatedArgs::Bytes2(..) => {
+                    EvaluatedArgs::Bytes2(Some(parse_state.clone()), Some(one.clone()))
+                }
+                _ => parse_args(&text_start),
+            };
+            assert!(matches!(
+                worker.eval_args(bad),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            if operation == EvaluatedBytesOp::LegacyDateArithmeticStepNative {
+                let identity_int = encode_native_identity(NativeIdentityRef::Int(1)).unwrap();
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes2(
+                        Some(amount_request.clone()),
+                        Some(identity_int)
+                    )),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            } else if operation == EvaluatedBytesOp::LegacyDateArithmeticParseNative {
+                let mut bad = copy(&args);
+                let EvaluatedArgs::TemporalText { modes, .. } = &mut bad else {
+                    unreachable!();
+                };
+                *modes = 1;
+                assert!(matches!(
+                    worker.eval_args(bad),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            let owners = if matches!(&args, EvaluatedArgs::Bytes(_)) {
+                1
+            } else {
+                2
+            };
+            for position in 0..owners {
+                let mut oversized = copy(&args);
+                match (&mut oversized, position) {
+                    (EvaluatedArgs::Bytes(Some(value)), 0)
+                    | (EvaluatedArgs::Bytes2(Some(value), _), 0)
+                    | (EvaluatedArgs::Bytes2(_, Some(value)), 1)
+                    | (EvaluatedArgs::TemporalText { value, .. }, 0) => {
+                        value.reserve_exact(128 * 1024);
+                        assert!(value.capacity() > 64 * 1024);
+                    }
+                    (
+                        EvaluatedArgs::TemporalText {
+                            zone: NativeSessionTimeZone::Fixed { name, .. },
+                            ..
+                        },
+                        1,
+                    ) => {
+                        name.reserve_exact(128 * 1024);
+                        assert!(name.capacity() > 64 * 1024);
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    worker.eval_args(oversized),
+                    Err(LocalError::ResourceLimit(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            let output = run(&mut worker, copy(&args));
+            if operation == EvaluatedBytesOp::LegacyDateArithmeticStepNative {
+                let result = decode_native_legacy_date_arithmetic_result(&output).unwrap();
+                assert_eq!(result.presence, Some(1));
+                assert_eq!(result.outcome, Outcome::Text(b"2024-03-16"));
+            } else {
+                request(&output, index, channel);
+            }
+            let mut calls = 1;
+            if operation == EvaluatedBytesOp::LegacyDateArithmeticParseNative {
+                let mut named = copy(&args);
+                let EvaluatedArgs::TemporalText { zone, .. } = &mut named else {
+                    unreachable!();
+                };
+                *zone = NativeSessionTimeZone::Named("Europe/London".parse().unwrap());
+                request(&run(&mut worker, named), 1, Channel::FoldedInt);
+                null(&run(&mut worker, parse_args(&bad_parse)));
+                request(&run(&mut worker, copy(&args)), 1, Channel::FoldedInt);
+                calls += 3;
+            }
+            assert_eq!(worker.kernel_invocations(), calls);
+            // Observing retained storage also requires the borrowed full zone
+            // binding to be released after success and semantic NULL exits.
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let mut stopped = prepare(
+                operation,
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = stopped.retained_storage().unwrap();
+            assert!(matches!(
+                stopped.eval_args(copy(&args)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(stopped.kernel_invocations(), 0);
+            assert!(stopped.is_healthy());
+            assert_eq!(stopped.retained_storage().unwrap(), storage);
+            // CPP instructions are not frontend slots; no allocator-peak claim.
+        }
+    }
+}

@@ -500,7 +500,12 @@ pub(crate) fn map_local_call_to_rpn_func(
         | LocalFunctionId::DateArithmeticHeadNative
         | LocalFunctionId::DateArithmeticDurationHeadNative
         | LocalFunctionId::DateArithmeticStepNative
-        | LocalFunctionId::DateArithmeticOverflowNative => Err(other_err!(
+        | LocalFunctionId::DateArithmeticOverflowNative
+        | LocalFunctionId::LegacyDateArithmeticTextHeadNative
+        | LocalFunctionId::LegacyDateArithmeticTimeHeadNative
+        | LocalFunctionId::LegacyDateArithmeticDurationHeadNative
+        | LocalFunctionId::LegacyDateArithmeticStepNative
+        | LocalFunctionId::LegacyDateArithmeticParseNative => Err(other_err!(
             "Function {:?} requires the closed private factory",
             id
         )),
