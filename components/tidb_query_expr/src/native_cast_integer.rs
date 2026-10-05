@@ -7,7 +7,9 @@ use chrono::TimeZone;
 use tidb_query_datatype::codec::{
     convert::native_warning_subject_byte_cap,
     mysql::{Decimal, JsonType, NativeDecimalParseRef, NativeDecimalParseValue},
+    native_decimal_convert::native_datum_to_decimal,
     native_numeric::{NativeNumericInput, native_datum_to_i64},
+    native_sql_string::{NativeSqlStringInput, native_sql_string},
 };
 
 pub use crate::NativeIntervalEvalType as NativeCastIntegerEvalType;
@@ -78,6 +80,133 @@ pub fn native_cast_integer_signed_numeric<TZ: TimeZone>(
         zone,
         |zone| native_datum_to_i64(input, zone).map(|value| (value.value, value.event)),
     )
+}
+
+/// Closed ordinary CAST composition: datatype source selection and JSON
+/// Display stay inside the SDK. Only the original sealed RealUnsigned worker's
+/// execution/error boundary and genuine context effects remain callbacks.
+#[allow(clippy::too_many_arguments)]
+pub fn native_cast_integer_numeric<E, TZ: TimeZone>(
+    number: NativeNumericInput<'_>,
+    target: NativeCastIntegerTarget,
+    source: Option<NativeCastIntegerEvalType>,
+    zone: impl FnOnce() -> TZ,
+    real_unsigned: impl FnOnce() -> Result<u64, E>,
+    truncate: impl FnMut(&str) -> Result<(), E>,
+    warning: impl FnMut(u16, &str),
+) -> Result<NativeCastIntegerResult, E> {
+    native_cast_integer(
+        native_cast_integer_input_from_numeric(number),
+        target,
+        source,
+        || numeric_json_text(number),
+        zone,
+        |zone| {
+            native_datum_to_i64(number, zone).map(|converted| (converted.value, converted.event))
+        },
+        || native_datum_to_decimal(number).map(|converted| (converted.value, converted.event)),
+        real_unsigned,
+        truncate,
+        warning,
+    )
+}
+/// Warning-only admission preserves the original demand for JSON object/array
+/// Display; other JSON scalar payloads are not rendered by this helper.
+pub fn native_cast_integer_numeric_input_warning<E>(
+    number: NativeNumericInput<'_>,
+    truncate: impl FnMut(&str) -> Result<(), E>,
+) -> Result<(), E> {
+    native_cast_integer_input_warning(
+        native_cast_integer_input_from_numeric(number),
+        || numeric_json_text(number),
+        truncate,
+    )
+}
+/// Closed value-only unsigned helper. It intentionally does not add ordinary
+/// CAST's input warning or negative-string 8031 advisory.
+pub fn native_cast_integer_unsigned_numeric<E, TZ: TimeZone>(
+    number: NativeNumericInput<'_>,
+    zone: impl FnOnce() -> TZ,
+    real_unsigned: impl FnOnce() -> Result<u64, E>,
+    warning: impl FnMut(u16, &str),
+) -> Result<u64, E> {
+    native_cast_integer_unsigned_value(
+        native_cast_integer_input_from_numeric(number),
+        zone,
+        |zone| {
+            native_datum_to_i64(number, zone).map(|converted| (converted.value, converted.event))
+        },
+        || native_datum_to_decimal(number).map(|converted| (converted.value, converted.event)),
+        real_unsigned,
+        warning,
+    )
+}
+fn numeric_json_text(number: NativeNumericInput<'_>) -> String {
+    let NativeNumericInput::Json { type_code, value } = number else {
+        unreachable!("SDK JSON display request needs an actual JSON datum");
+    };
+    native_sql_string(NativeSqlStringInput::Json { type_code, value })
+        .expect("JSON Display produces UTF-8")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeArgIntegerResult {
+    Original,
+    Signed(i64),
+    Unsigned(u64),
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NativeArgIntegerError<E> {
+    Unsupported(&'static str),
+    Effect(E),
+}
+
+/// Argument wrapping preserves integer/NULL identity. JSON instead renders
+/// first, reports the computed string's input warning, then uses value-only
+/// signed UTC coercion irrespective of source unsignedness. Remaining kinds
+/// retain eval_cast's admission guards before ordinary target execution.
+pub fn native_cast_arg_as_int<E, TZ: TimeZone>(
+    number: NativeNumericInput<'_>,
+    source_unsigned: Option<bool>,
+    zone: impl FnOnce() -> TZ,
+    real_unsigned: impl FnOnce() -> Result<u64, E>,
+    truncate: impl FnMut(&str) -> Result<(), E>,
+    warning: impl FnMut(u16, &str),
+) -> Result<NativeArgIntegerResult, NativeArgIntegerError<E>> {
+    use NativeNumericInput as N;
+    if matches!(number, N::Int(_) | N::UInt(_) | N::Null) {
+        return Ok(NativeArgIntegerResult::Original);
+    }
+    if matches!(number, N::Json { .. }) {
+        let rendered = numeric_json_text(number);
+        let text = N::String(rendered.as_bytes());
+        native_cast_integer_numeric_input_warning(text, truncate)
+            .map_err(NativeArgIntegerError::Effect)?;
+        return Ok(NativeArgIntegerResult::Signed(
+            native_cast_integer_signed_numeric(text, &chrono::Utc),
+        ));
+    }
+    if matches!(number, N::MinNotNull | N::MaxValue) {
+        return Err(NativeArgIntegerError::Unsupported(
+            "range sentinel cast operand",
+        ));
+    }
+    if matches!(number, N::VectorFloat32(_)) {
+        return Err(NativeArgIntegerError::Unsupported(
+            "a vector can only be cast to string or vector",
+        ));
+    }
+    let target = if source_unsigned.unwrap_or(false) {
+        NativeCastIntegerTarget::Unsigned
+    } else {
+        NativeCastIntegerTarget::Signed
+    };
+    native_cast_integer_numeric(number, target, None, zone, real_unsigned, truncate, warning)
+        .map(|value| match value {
+            NativeCastIntegerResult::Signed(value) => NativeArgIntegerResult::Signed(value),
+            NativeCastIntegerResult::Unsigned(value) => NativeArgIntegerResult::Unsigned(value),
+        })
+        .map_err(NativeArgIntegerError::Effect)
 }
 
 fn text(input: NativeCastIntegerInput<'_>) -> Option<&str> {
@@ -370,6 +499,295 @@ pub fn native_cast_integer<E, EI, ED, WI, WD, Z>(
         append_warning,
     )
     .map(NativeCastIntegerResult::Unsigned)
+}
+
+#[cfg(test)]
+mod numeric_tests {
+    use std::cell::RefCell;
+
+    use NativeCastIntegerResult as R;
+    use NativeCastIntegerTarget as T;
+    use NativeNumericInput as N;
+    use chrono::Utc;
+
+    use super::*;
+    const EMPTY_OBJECT: &[u8] = &[0, 0, 0, 0, 8, 0, 0, 0];
+    fn numeric(
+        number: N<'_>,
+        target: T,
+        source: Option<NativeCastIntegerEvalType>,
+        reject: bool,
+    ) -> (Result<R, &'static str>, Vec<String>) {
+        let calls = RefCell::new(Vec::new());
+        let value = native_cast_integer_numeric(
+            number,
+            target,
+            source,
+            || {
+                calls.borrow_mut().push("zone".into());
+                Utc
+            },
+            || {
+                calls.borrow_mut().push("real worker".into());
+                Err("sealed execution error")
+            },
+            |message| {
+                calls.borrow_mut().push(format!("truncate {message}"));
+                if reject {
+                    Err("truncate error")
+                } else {
+                    Ok(())
+                }
+            },
+            |code, message| calls.borrow_mut().push(format!("append {code} {message}")),
+        );
+        (value, calls.into_inner())
+    }
+    #[test]
+    fn closed_integer_composition_keeps_datatype_values_effect_order_and_execution_errors() {
+        assert_eq!(
+            numeric(N::Enum(37), T::Signed, None, false),
+            (Ok(R::Signed(37)), vec!["zone".into()])
+        );
+        assert_eq!(
+            numeric(N::Enum(u64::MAX), T::Unsigned, None, false),
+            (Ok(R::Unsigned(u64::MAX)), vec![])
+        );
+        assert_eq!(
+            numeric(N::BinaryLiteral(&[1; 9]), T::Signed, None, false),
+            (Ok(R::Signed(0)), vec!["zone".into()])
+        );
+        assert_eq!(
+            numeric(N::BinaryLiteral(&[1; 9]), T::Unsigned, None, false),
+            (Ok(R::Unsigned(u64::MAX)), vec![])
+        );
+        assert_eq!(
+            numeric(N::Raw(b"not numeric"), T::Unsigned, None, false),
+            (Ok(R::Unsigned(0)), vec![])
+        );
+        assert_eq!(numeric(N::String(b"18446744073709551615"),T::Signed,None,false),(Ok(R::Signed(-1)),vec!["append 8030 Cast to signed converted positive out-of-range integer to its negative complement".into(),"zone".into()]));
+        assert_eq!(
+            numeric(N::Bytes(b"1x"), T::Signed, None, true),
+            (
+                Err("truncate error"),
+                vec!["truncate Truncated incorrect INTEGER value: '1x'".into()]
+            )
+        );
+        assert_eq!(
+            numeric(
+                N::Json {
+                    type_code: 1,
+                    value: EMPTY_OBJECT
+                },
+                T::Signed,
+                None,
+                true
+            ),
+            (
+                Err("truncate error"),
+                vec!["truncate Truncated incorrect INTEGER value: '{}'".into()]
+            )
+        );
+        assert_eq!(
+            numeric(N::Real(2.5), T::Unsigned, None, false),
+            (Err("sealed execution error"), vec!["real worker".into()])
+        );
+        assert_eq!(
+            numeric(
+                N::Real(-2.5),
+                T::UnsignedInUnion,
+                Some(NativeCastIntegerEvalType::Real),
+                true
+            ),
+            (Ok(R::Unsigned(0)), vec![])
+        );
+        // Scalar JSON input-warning admission does not request its Display;
+        // non-finite JSON's Display would panic if eagerly rendered here.
+        let inf = f64::INFINITY.to_le_bytes();
+        let quiet: Result<(), &str> = native_cast_integer_numeric_input_warning(
+            N::Json {
+                type_code: 11,
+                value: &inf,
+            },
+            |_| panic!("scalar JSON warning"),
+        );
+        assert_eq!(quiet, Ok(()));
+        assert_eq!(
+            numeric(
+                N::Json {
+                    type_code: 11,
+                    value: &inf
+                },
+                T::Signed,
+                None,
+                false
+            ),
+            (Ok(R::Signed(i64::MAX)), vec!["zone".into()])
+        );
+        let calls = RefCell::new(Vec::new());
+        let value: Result<u64, &str> = native_cast_integer_unsigned_numeric(
+            N::String(b"-5"),
+            || {
+                calls.borrow_mut().push("zone");
+                Utc
+            },
+            || panic!("unexpected real execution"),
+            |_, _| panic!("value-only helper added advisory"),
+        );
+        assert_eq!(value, Ok(18_446_744_073_709_551_611));
+        assert_eq!(*calls.borrow(), vec!["zone"]);
+    }
+    fn argument(
+        number: N<'_>,
+        source: Option<bool>,
+        reject: bool,
+    ) -> (
+        Result<NativeArgIntegerResult, NativeArgIntegerError<&'static str>>,
+        Vec<String>,
+    ) {
+        let calls = RefCell::new(Vec::new());
+        let value = native_cast_arg_as_int(
+            number,
+            source,
+            || {
+                calls.borrow_mut().push("zone".into());
+                Utc
+            },
+            || {
+                calls.borrow_mut().push("real worker".into());
+                Err("sealed execution error")
+            },
+            |message| {
+                calls.borrow_mut().push(format!("truncate {message}"));
+                if reject {
+                    Err("truncate error")
+                } else {
+                    Ok(())
+                }
+            },
+            |code, message| calls.borrow_mut().push(format!("append {code} {message}")),
+        );
+        (value, calls.into_inner())
+    }
+    #[test]
+    fn integer_argument_keeps_identity_guards_json_text_and_unsigned_metadata_policy() {
+        use NativeArgIntegerError as E;
+        use NativeArgIntegerResult as A;
+        for number in [N::Int(-3), N::UInt(u64::MAX), N::Null] {
+            assert_eq!(
+                argument(number, Some(true), true),
+                (Ok(A::Original), vec![])
+            );
+        }
+        for number in [N::MinNotNull, N::MaxValue] {
+            assert_eq!(
+                argument(number, Some(true), true),
+                (Err(E::Unsupported("range sentinel cast operand")), vec![])
+            );
+        }
+        let vector = tidb_query_datatype::codec::mysql::NativeVectorFloat32::must_create(vec![1.0]);
+        assert_eq!(
+            argument(N::VectorFloat32(&vector), Some(false), false),
+            (
+                Err(E::Unsupported(
+                    "a vector can only be cast to string or vector"
+                )),
+                vec![]
+            )
+        );
+        for source in [None, Some(false)] {
+            assert_eq!(
+                argument(N::String(b"-5"), source, false),
+                (Ok(A::Signed(-5)), vec!["zone".into()])
+            );
+        }
+        assert_eq!(argument(N::String(b"-5"),Some(true),false),(Ok(A::Unsigned(18_446_744_073_709_551_611)),vec!["append 8031 Cast to unsigned converted negative integer to it's positive complement".into(),"zone".into()]));
+        let negative = (-5i64).to_le_bytes();
+        assert_eq!(
+            argument(
+                N::Json {
+                    type_code: 9,
+                    value: &negative
+                },
+                Some(true),
+                false
+            ),
+            (Ok(A::Signed(-5)), vec![])
+        );
+        assert_eq!(
+            argument(
+                N::Json {
+                    type_code: 10,
+                    value: &[255; 8]
+                },
+                Some(true),
+                false
+            ),
+            (Ok(A::Signed(-1)), vec![])
+        ); // no ordinary signed 8030 advisory
+        let fraction = 1.5f64.to_le_bytes();
+        assert_eq!(
+            argument(
+                N::Json {
+                    type_code: 11,
+                    value: &fraction
+                },
+                Some(true),
+                false
+            ),
+            (
+                Ok(A::Signed(1)),
+                vec!["truncate Truncated incorrect INTEGER value: '1.5'".into()]
+            )
+        );
+        assert_eq!(
+            argument(
+                N::Json {
+                    type_code: 12,
+                    value: b"\x015"
+                },
+                None,
+                false
+            ),
+            (
+                Ok(A::Signed(0)),
+                vec!["truncate Truncated incorrect INTEGER value: '\"5\"'".into()]
+            )
+        );
+        assert_eq!(
+            argument(
+                N::Json {
+                    type_code: 1,
+                    value: EMPTY_OBJECT
+                },
+                None,
+                true
+            ),
+            (
+                Err(E::Effect("truncate error")),
+                vec!["truncate Truncated incorrect INTEGER value: '{}'".into()]
+            )
+        );
+        assert_eq!(
+            argument(N::Real(2.5), Some(true), false),
+            (
+                Err(E::Effect("sealed execution error")),
+                vec!["real worker".into()]
+            )
+        );
+        let inf = f64::INFINITY.to_le_bytes();
+        assert!(
+            std::panic::catch_unwind(|| argument(
+                N::Json {
+                    type_code: 11,
+                    value: &inf
+                },
+                Some(true),
+                false
+            ))
+            .is_err()
+        );
+    }
 }
 
 #[cfg(test)]

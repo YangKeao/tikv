@@ -674,16 +674,19 @@ short-circuit admission policy described above.
   `native_temporal_number.rs` shares temporal-to-decimal policy, backed by the
   existing Decimal math and canonical transport. BinaryLiteral's pure integer
   outcome lives in `mysql/binary_literal.rs`, separate from wire-context parsing.
-  Native methods project values/errors/events. Existing integer-controller
-  callback interfaces remain, but their signed-datum business implementation is
-  shared; this does not close all typed/write conversion controllers.
+  Native methods project values/errors/events. `native_cast_integer.rs` now
+  composes JSON rendering and signed/Decimal dependencies inside SDK and owns
+  integer-argument identity, JSON-prefix, source-unsigned and guard policy.
+  Native retains data/effect adapters and the original sealed real-unsigned worker
+  execution callback, preserving admission and infrastructure errors. Generic SDK
+  callback entries remain compatible; other typed/write selectors remain open.
   `codec/native_decimal_convert.rs` owns plain decimal-datum, text and JSON-decimal
   conversion. It consumes actual numeric views and returns existing Decimal
   transport with typed events. Hybrid ordinals, declared shape, lossy datum UTF-8
   versus empty invalid JSON text, and distinct plain/JSON float paths are retained.
   JSON floats reuse the existing crate-local canonical Decimal projector, not a
   second coefficient formatter. Context-aware Decimal and typed/write selectors
-  remain separate, as do the unchanged integer-controller callback interfaces.
+  remain separate; closed integer composition invokes these dependencies in SDK.
   `native_cast_duration.rs` owns ordinary, argument and computed TIME conversion.
   Its native bridge supplies only lazy zone metadata, applies a generic truncate
   effect and wraps raw parts. `codec/native_duration_convert.rs` owns rounding,

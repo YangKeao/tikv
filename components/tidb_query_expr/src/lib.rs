@@ -97,10 +97,13 @@ pub use native_cast_decimal::{
 
 mod native_cast_integer;
 pub use native_cast_integer::{
-    NativeCastIntegerEvalType, NativeCastIntegerInput, NativeCastIntegerResult,
-    NativeCastIntegerTarget, native_cast_integer, native_cast_integer_input_from_numeric,
-    native_cast_integer_input_warning, native_cast_integer_signed_numeric,
-    native_cast_integer_signed_value, native_cast_integer_unsigned_value,
+    NativeArgIntegerError, NativeArgIntegerResult, NativeCastIntegerEvalType,
+    NativeCastIntegerInput, NativeCastIntegerResult, NativeCastIntegerTarget,
+    native_cast_arg_as_int, native_cast_integer, native_cast_integer_input_from_numeric,
+    native_cast_integer_input_warning, native_cast_integer_numeric,
+    native_cast_integer_numeric_input_warning, native_cast_integer_signed_numeric,
+    native_cast_integer_signed_value, native_cast_integer_unsigned_numeric,
+    native_cast_integer_unsigned_value,
 };
 
 mod native_cast_time;
