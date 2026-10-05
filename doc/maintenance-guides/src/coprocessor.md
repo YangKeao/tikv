@@ -680,6 +680,12 @@ short-circuit admission policy described above.
   Native retains data/effect adapters and the original sealed real-unsigned worker
   execution callback, preserving admission and infrastructure errors. Generic SDK
   callback entries remain compatible; other typed/write selectors remain open.
+  `codec/native_scalar_convert.rs` owns plain Datum boolean/float and JSON-float
+  conversion. It reuses float parsing, Decimal/temporal rendering, vector checks
+  and actual JSON-zero parsing/comparison. Float32 boolean does not narrow;
+  float conversion does. Datum UTF-8 is strict, JSON invalid text becomes empty.
+  `NativeDecimalParseRef::is_zero` shares the native Decimal coefficient predicate,
+  retaining UTF-8 validation and empty/all-zero behavior. Native only maps results.
   `codec/native_decimal_convert.rs` owns plain decimal-datum, text and JSON-decimal
   conversion. It consumes actual numeric views and returns existing Decimal
   transport with typed events. Hybrid ordinals, declared shape, lossy datum UTF-8

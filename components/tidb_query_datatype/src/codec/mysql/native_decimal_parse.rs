@@ -218,6 +218,12 @@ impl NativeDecimalParseValue {
 }
 
 impl NativeDecimalParseRef<'_> {
+    /// Native coefficient zero predicate, retaining UTF-8 validation and the
+    /// original empty/all-zero coefficient behavior.
+    pub fn is_zero(self) -> bool {
+        digit_str(self.digits).bytes().all(|byte| byte == b'0')
+    }
+
     /// Native decimal-to-float conversion through its existing visible Display
     /// policy, including hidden-scale rounding and raw signed zero. Retains the
     /// original formatting and parse panic domain; no SQL warning is invented.
