@@ -12,12 +12,13 @@ use tidb_query_datatype::codec::{
         Time,
         json::{NativeJsonError, parse_native_json_document},
     },
+    native_eval_type::{NativeEvalType, native_field_eval_type},
     native_json_construct::native_json_from_opaque,
     native_json_parse::native_json_parse,
     native_mysql_json::{
         NativeDatumJsonSource, native_datum_to_mysql_json, native_datum_to_mysql_json_with_source,
     },
-    native_sql_string::{NativeSqlStringInput, native_sql_string},
+    native_sql_string::{NativeSqlStringInput, native_sql_bytes, native_sql_string},
     native_type_name::NativeTypeNameCode,
 };
 
@@ -46,6 +47,69 @@ pub enum NativeJsonCoercionError {
 }
 use NativeJsonCoercionError as E;
 use NativeSqlStringInput as I;
+
+/// Pre-child row admission. Batch capability probes consume this as a bool;
+/// they must not raise a runtime error or read a child while probing support.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeJsonCastAdmissionError {
+    MissingSource,
+    Vector,
+}
+impl NativeJsonCastAdmissionError {
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::MissingSource => "a JSON cast with no source type",
+            Self::Vector => "cannot cast from vector to json",
+        }
+    }
+}
+/// Checks actual static source metadata only. No child value is accepted, so
+/// even a would-be NULL vector row is refused before its evaluation begins.
+pub fn native_json_cast_admission(
+    source: Option<NativeJsonCoercionSource<'_>>,
+) -> Result<(), NativeJsonCastAdmissionError> {
+    let source = source.ok_or(NativeJsonCastAdmissionError::MissingSource)?;
+    if native_field_eval_type(source.datum.code, source.flags) == NativeEvalType::VectorFloat32 {
+        return Err(NativeJsonCastAdmissionError::Vector);
+    }
+    Ok(())
+}
+/// Finish a source-typed JSON argument after the generic evaluator produced it.
+/// Batch callers complete the ENTIRE source batch before invoking this per row.
+/// This intentionally does not repeat admission: the original prepared/PB path
+/// has no static-vector refusal of its own. Missing source still precedes NULL.
+pub fn native_cast_json_prepared_argument(
+    input: I<'_>,
+    source: Option<NativeJsonCoercionSource<'_>>,
+    target_flags: Option<u64>,
+) -> Result<Option<(u8, Vec<u8>)>, E> {
+    let source = source.ok_or(E::Unsupported(
+        NativeJsonCastAdmissionError::MissingSource.message(),
+    ))?;
+    let bytes;
+    let input = match input {
+        I::Int(value)
+            if source.flags & (1_u64 << 5) != 0
+                || source.datum.code == NativeTypeNameCode::Known(13) =>
+        {
+            I::UInt(value as u64)
+        }
+        I::Enum(_) | I::Set(_)
+            if native_field_eval_type(source.datum.code, source.flags)
+                == NativeEvalType::String =>
+        {
+            bytes = native_sql_bytes(input)
+                .map_err(|_| E::Unsupported("hybrid JSON string conversion"))?;
+            I::Bytes(&bytes)
+        }
+        input => input,
+    };
+    if target_flags.is_some_and(|flags| flags & (1_u64 << 18) != 0) {
+        native_cast_as_json_typed(input, Some(source))
+    } else {
+        native_cast_as_json_value_typed(input, Some(source))
+    }
+}
 
 fn boolean_flagged_int(input: I<'_>, source: Option<NativeJsonCoercionSource<'_>>) -> Option<i64> {
     if !source.is_some_and(|source| source.flags & (1_u64 << 19) != 0) {
@@ -617,5 +681,160 @@ mod tests {
             native_binary_json_datum(Json::Object(object)),
             Err(E::InvalidText)
         ); // folds datatype KeyTooLong instead of leaking it
+    }
+
+    #[test]
+    fn json_source_admission_is_metadata_only_and_prepared_path_does_not_repeat_it() {
+        use NativeJsonCastAdmissionError as A;
+        let vector = source(
+            NativeTypeNameCode::Known(225),
+            S::Other(225),
+            "binary",
+            -1,
+            u64::MAX,
+        );
+        let unknown_vector = source(
+            NativeTypeNameCode::Unknown(225),
+            S::Other(225),
+            "binary",
+            -1,
+            u64::MAX,
+        );
+        assert_eq!(native_json_cast_admission(None), Err(A::MissingSource));
+        assert_eq!(native_json_cast_admission(Some(vector)), Err(A::Vector));
+        assert_eq!(native_json_cast_admission(Some(unknown_vector)), Ok(()));
+        assert_eq!(
+            A::MissingSource.message(),
+            "a JSON cast with no source type"
+        );
+        assert_eq!(A::Vector.message(), "cannot cast from vector to json");
+        // Missing metadata wins even when conversion would return NULL or fail
+        // for a nonfinite value. Prepared/PB conversion has no vector guard.
+        for input in [I::Null, I::Real(f64::NAN)] {
+            assert_eq!(
+                native_cast_json_prepared_argument(input, None, Some(1_u64 << 18)),
+                Err(E::Unsupported("a JSON cast with no source type"))
+            );
+        }
+        assert_eq!(
+            native_cast_json_prepared_argument(I::Null, Some(vector), None),
+            Ok(None)
+        );
+        let values = tidb_query_datatype::codec::mysql::NativeVectorFloat32::must_create(vec![1.0]);
+        assert_eq!(
+            native_cast_json_prepared_argument(I::VectorFloat32(&values), Some(vector), None),
+            Ok(Some((12, vec![3, 91, 49, 93])))
+        );
+    }
+
+    #[test]
+    fn json_prepared_argument_keeps_unsigned_year_hybrid_and_target_flag_policies() {
+        let signed = source(NativeTypeNameCode::Known(8), S::Other(8), "binary", -1, 0);
+        let unsigned = source(
+            NativeTypeNameCode::Known(8),
+            S::Other(8),
+            "binary",
+            -1,
+            1_u64 << 5,
+        );
+        let year = source(NativeTypeNameCode::Known(13), S::Year, "binary", -1, 0);
+        let unknown_year = source(
+            NativeTypeNameCode::Unknown(13),
+            S::Other(13),
+            "binary",
+            -1,
+            0,
+        );
+        for source in [unsigned, year] {
+            assert_eq!(
+                native_cast_json_prepared_argument(I::Int(-1), Some(source), None),
+                Ok(Some((10, vec![255; 8])))
+            );
+        }
+        for source in [signed, unknown_year] {
+            assert_eq!(
+                native_cast_json_prepared_argument(I::Int(-1), Some(source), None),
+                Ok(Some((9, vec![255; 8])))
+            );
+        }
+        let parse = Some(1_u64 << 18);
+        for (input, code) in [(I::Enum(b"1"), 247), (I::Set(b"1"), 248)] {
+            let text_source = source(
+                NativeTypeNameCode::Known(code),
+                S::Other(code),
+                "utf8mb4_bin",
+                -1,
+                0,
+            );
+            let int_source = source(
+                NativeTypeNameCode::Known(code),
+                S::Other(code),
+                "utf8mb4_bin",
+                -1,
+                1_u64 << 21,
+            );
+            assert_eq!(
+                native_cast_json_prepared_argument(input, Some(text_source), parse),
+                Ok(Some((9, vec![1, 0, 0, 0, 0, 0, 0, 0])))
+            );
+            for flags in [None, Some(0), Some(1_u64 << 63)] {
+                assert_eq!(
+                    native_cast_json_prepared_argument(input, Some(text_source), flags),
+                    Ok(Some((12, vec![1, 49])))
+                );
+            }
+            assert_eq!(
+                native_cast_json_prepared_argument(input, Some(int_source), parse),
+                Ok(Some((12, vec![1, 49])))
+            );
+        }
+        let enum_string = source(
+            NativeTypeNameCode::Known(247),
+            S::Other(247),
+            "utf8mb4_bin",
+            -1,
+            0,
+        );
+        let enum_int = source(
+            NativeTypeNameCode::Known(247),
+            S::Other(247),
+            "utf8mb4_bin",
+            -1,
+            1_u64 << 21,
+        );
+        assert_eq!(
+            native_cast_json_prepared_argument(I::Enum(&[0xff]), Some(enum_string), parse),
+            Err(E::Unsupported("invalid UTF-8 string datum"))
+        );
+        assert_eq!(
+            native_cast_json_prepared_argument(I::Enum(&[0xff]), Some(enum_int), parse),
+            Err(E::Unsupported("datum JSON conversion"))
+        );
+        // Actual mixed metadata follows the shared classifier, not the datum
+        // kind or a blanket ENUM_SET_AS_INT test. NewDate/Unknown default String.
+        for source in [
+            unknown_year,
+            source(NativeTypeNameCode::Known(14), S::Other(14), "binary", -1, 0),
+        ] {
+            assert_eq!(
+                native_cast_json_prepared_argument(I::Enum(b"1"), Some(source), parse),
+                Ok(Some((9, vec![1, 0, 0, 0, 0, 0, 0, 0])))
+            );
+        }
+        assert_eq!(
+            native_cast_json_prepared_argument(I::Enum(b"1"), Some(year), parse),
+            Ok(Some((12, vec![1, 49])))
+        );
+        let binary = source(
+            NativeTypeNameCode::Known(253),
+            S::VarString,
+            "binary",
+            -1,
+            1_u64 << 21,
+        );
+        assert_eq!(
+            native_cast_json_prepared_argument(I::Enum(b"1"), Some(binary), parse),
+            Ok(Some((13, vec![253, 1, 49])))
+        );
     }
 }

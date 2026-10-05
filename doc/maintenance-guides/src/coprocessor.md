@@ -620,8 +620,16 @@ short-circuit admission policy described above.
   eleven expression value-boundary entries, reusing the19-kind borrowed input
   and actual source metadata/raw flags. Native wrappers project values/errors
   only; NULL/bool/opaque ordering, Decimal/Float32 distinctions, temporal FSP
-  restamping and document/value mode stay in SDK. Typed row/batch preparation
-  and static Vector refusal remain separate; whole JSON/CAST/M2 completion
+  restamping and document/value mode stay in SDK. Source admission and prepared
+  argument policy also live there: row refusal precedes child evaluation, while
+  batch conversion follows the entire source batch. Generic typed child evaluation,
+  target/arity routing and PB's separate NULL/arity behavior stay native.
+  `codec/native_eval_type.rs` owns the nine source EvalType variants, constants,
+  traits and effective-code/raw-flag classification; native aliases and the JSON
+  controller use that same table, not wire EvalType or another classification.
+  `native_mysql_json.rs` also owns datatype JSON-target selection: String/Bytes/
+  Enum/Set document parsing, BinaryLiteral refusal and ordinary fallback retain
+  their distinct errors and temporal policies. Whole JSON/CAST/M2 completion
   does not follow.
   VECTOR CAST uses `native_cast_vector.rs` over shared datatype
   `codec/native_vector_convert.rs`, also used by native convert_to_vector.
@@ -633,7 +641,7 @@ short-circuit admission policy described above.
   Outer AST/datatype NULL guards and range/diagnostic handling remain separate;
   the SDK controller also preserves the internal VECTOR arm's direct NULL result. JSON ordinary/typed/value
   coercion and typed datatype construction are shared by the modules described
-  above; typed caller preparation and other CAST domains remain.
+  above; generic typed child evaluation and other CAST domains remain.
   `codec/native_sql_string.rs` owns native SQL byte/string source selection
   across19 actual variants, strict UTF8 stages, sentinel errors and fixed/scientific
   float primitives. Borrowed Decimal/Time/Duration/JSON/vector views reuse existing

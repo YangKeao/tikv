@@ -10,6 +10,7 @@ use super::{
         native_json_from_i64, native_json_from_opaque, native_json_from_string,
         native_json_from_time, native_json_from_u64, native_json_literal,
     },
+    native_json_parse::{NativeJsonParseError, native_json_parse},
     native_sql_string::{NativeSqlStringInput, native_sql_string},
     native_string_type::NativeStringTypeCode,
     native_type_name::NativeTypeNameCode,
@@ -60,6 +61,33 @@ pub fn native_datum_to_mysql_json(
             let text = native_sql_string(other).map_err(|_| NativeDatumJsonError::Unsupported)?;
             Ok(native_json_from_string(&text))
         }
+    }
+}
+
+/// Errors of the native datatype JSON target, not expression CAST diagnostics.
+#[derive(Debug)]
+pub enum NativeJsonTargetError {
+    CannotCreateJsonFromBinary,
+    Parse(NativeJsonParseError),
+    Datum(NativeDatumJsonError),
+}
+
+/// Native ConvertTo's JSON-target selection. The outer conversion retains its
+/// SQL-NULL guard. This leaf has no metadata, flags, warnings or temporal FSP
+/// restamping; Enum/Set parse text, while Bit/Raw retain ordinary conversion.
+pub fn native_convert_to_json_target(
+    input: NativeSqlStringInput<'_>,
+) -> Result<(u8, Vec<u8>), NativeJsonTargetError> {
+    use NativeSqlStringInput as I;
+    match input {
+        I::String(bytes) | I::Bytes(bytes) | I::Enum(bytes) | I::Set(bytes) => {
+            let text = std::str::from_utf8(bytes).map_err(|error| {
+                NativeJsonTargetError::Datum(NativeDatumJsonError::InvalidUtf8(error))
+            })?;
+            native_json_parse(text).map_err(NativeJsonTargetError::Parse)
+        }
+        I::BinaryLiteral(_) => Err(NativeJsonTargetError::CannotCreateJsonFromBinary),
+        other => native_datum_to_mysql_json(other).map_err(NativeJsonTargetError::Datum),
     }
 }
 
@@ -250,4 +278,99 @@ fn native_mysql_json_keeps_raw_kinds_error_classes_and_source_resize_policy() {
         native_datum_to_mysql_json_with_source(I::String(&[0xff]), array_effective),
         Err(E::InvalidUtf8(_))
     ));
+}
+
+#[cfg(test)]
+#[test]
+fn native_json_target_preserves_parse_kinds_and_ordinary_fallback_errors() {
+    use NativeDatumJsonError as D;
+    use NativeJsonTargetError as E;
+    use NativeSqlStringInput as I;
+    for input in [I::String(b"1"), I::Bytes(b"1"), I::Enum(b"1"), I::Set(b"1")] {
+        assert_eq!(
+            native_convert_to_json_target(input).unwrap(),
+            (0x09, vec![1, 0, 0, 0, 0, 0, 0, 0])
+        );
+    }
+    for input in [
+        I::String(&[0xff]),
+        I::Bytes(&[0xff]),
+        I::Enum(&[0xff]),
+        I::Set(&[0xff]),
+    ] {
+        assert!(matches!(
+            native_convert_to_json_target(input),
+            Err(E::Datum(D::InvalidUtf8(_)))
+        ));
+    }
+    for (text, expected) in [
+        (b" ".as_slice(), NativeJsonParseError::EmptyDocument),
+        (b"1 2".as_slice(), NativeJsonParseError::TrailingValues),
+        (b"[".as_slice(), NativeJsonParseError::InvalidText),
+    ] {
+        assert!(
+            matches!(native_convert_to_json_target(I::String(text)), Err(E::Parse(error)) if error == expected)
+        );
+    }
+    for bytes in [b"1".as_slice(), &[0xff]] {
+        assert!(matches!(
+            native_convert_to_json_target(I::BinaryLiteral(bytes)),
+            Err(E::CannotCreateJsonFromBinary)
+        ));
+    }
+    for input in [I::Bit(b"1"), I::Raw(b"1")] {
+        assert_eq!(
+            native_convert_to_json_target(input).unwrap(),
+            (0x0c, vec![1, b'1'])
+        );
+    }
+    assert!(matches!(
+        native_convert_to_json_target(I::Bit(&[0xff])),
+        Err(E::Datum(D::InvalidUtf8(_)))
+    ));
+    for input in [I::Raw(&[0xff]), I::MinNotNull, I::MaxValue] {
+        assert!(matches!(
+            native_convert_to_json_target(input),
+            Err(E::Datum(D::Unsupported))
+        ));
+    }
+    assert!(matches!(
+        native_convert_to_json_target(I::Real(f64::INFINITY)),
+        Err(E::Datum(D::Construct(
+            NativeJsonConstructError::InvalidText
+        )))
+    ));
+    assert_eq!(
+        native_convert_to_json_target(I::Float32(16_777_217.0)).unwrap(),
+        (0x0b, 16_777_217.0_f64.to_bits().to_le_bytes().to_vec())
+    );
+    assert_eq!(
+        native_convert_to_json_target(I::Json {
+            type_code: 0x03,
+            value: &[0xff]
+        })
+        .unwrap(),
+        (0x03, vec![0xff])
+    );
+    assert_eq!(
+        native_convert_to_json_target(I::Duration {
+            nanoseconds: -1,
+            fsp: -1
+        })
+        .unwrap(),
+        (0x11, vec![0xff; 12])
+    );
+    assert_eq!(
+        native_convert_to_json_target(I::Time(super::mysql::time::NativeTemporalValue {
+            raw: u64::MAX,
+            kind: super::mysql::time::TimeType::DateTime,
+            fsp: u8::MAX
+        }))
+        .unwrap(),
+        (0x0f, vec![0xff; 8])
+    );
+    assert_eq!(
+        native_convert_to_json_target(I::Null).unwrap(),
+        (0x04, vec![0])
+    );
 }
