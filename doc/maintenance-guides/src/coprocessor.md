@@ -605,6 +605,16 @@ short-circuit admission policy described above.
   rounding/clip/boundary/NaN policy and is untouched. Other CAST domains, outer
   NULL and UNION's negative bypass are not covered by this slice, and no whole
   CAST family or new wire admission is credited.
+  VECTOR CAST uses `native_cast_vector.rs` over shared datatype
+  `codec/native_vector_convert.rs`, also used by native convert_to_vector.
+  Existing vectors clone without new finite/global-dimension validation; text
+  keeps strict UTF8 then the existing parser and column-dimension check.
+  `codec/native_type_name.rs` preserves Known/Unknown labels and exact binary
+  charset aliases. Expression errors use the effective source code's empty-charset
+  name before conversion, not a wire-canonicalized code or actual source charset.
+  Outer AST/datatype NULL guards and range/diagnostic handling remain separate;
+  the SDK controller also preserves the internal VECTOR arm's direct NULL result. JSON ordinary/typed/value
+  coercion and native typed construction are still pending and unchanged.
   `codec/native_sql_string.rs` owns native SQL byte/string source selection
   across19 actual variants, strict UTF8 stages, sentinel errors and fixed/scientific
   float primitives. Borrowed Decimal/Time/Duration/JSON/vector views reuse existing

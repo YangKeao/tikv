@@ -114,6 +114,9 @@ pub use native_cast_string::{
     NativeCastStringTarget, NativeCastStringTypeCode, native_cast_string,
 };
 
+mod native_cast_vector;
+pub use native_cast_vector::native_cast_vector;
+
 mod native_legacy_date_arithmetic;
 pub use native_legacy_date_arithmetic::{
     NativeLegacyDateArithmeticChannel, NativeLegacyDateArithmeticDateKind,

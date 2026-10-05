@@ -25,6 +25,8 @@ pub mod mysql;
 pub mod native_float_parse;
 pub mod native_sql_string;
 pub mod native_string_type;
+pub mod native_type_name;
+pub mod native_vector_convert;
 mod overflow;
 pub mod row;
 pub mod table;
