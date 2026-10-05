@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round136收口（numeric-shape-131）：targetshape/FieldType两limit/JSONinteger组合SDK单owner，canonical MAX_DECIMAL_WIDTH复用、MAX_FRACTION仅crate-private开放。7matched全GREEN SDKtype2/arg5、native datatype477/consumer2/旧Real1、既有SQL2，无失败重试；4新tests，旧SDK102/native56逐体不变，SDK4/native3 Rust、无新Rustfile/SQLprobe。详numeric-shape-checkpoint.md/summary.txt；fmt/diff过，B/A冻结，type+partialCAST各增一记录、族不变，配对Plan+DCO发布。finalfit/RealDecimal/其它typedwrite及M2/root/liveDAG/final后续，238strict0remaining7不变，full/lint/perf未跑。
+
+round136启动（numeric-shape-131）：B既有native_eval_type接管FieldType decimal限宽/限scale，native_numeric_argument共享targetshape及JSONDisplay→intwarning→signedUTC组合；A fieldsetters/scalar_function薄adapters+既有testfile增新consumer。真实code/array视图、negative metadata、warning/veto顺序保留；父exports、datatype/core/既有numeric SQL gates，无新SQLfixture。type+partialCAST不增族，238strict0remaining7；finalfit/RealDecimal及其它后续。
+
 round135收口（numeric-argument-130）：三numeric argument策略SDK单owner，native仅data/effects/fixederrorprojection。8launch含1SDK新NUL预期RED、1native新import编译RED；native_float_parse66–83证明12\0tail quiet，改新test并加12x\0tail诊断；Expression用既有module路径，生产/旧test未改。6finalGREEN SDK3/新native1/旧division1/arithmetic1/既有SQL2；4新tests、旧native32逐体不变，SDK2/native3 Rust、2新file，test-onlypath测实际privatevector，不扩大生产API/不增SQLprobe。详numeric-argument-checkpoint.md/summary.txt；fmt/diff过，B/A冻结，partialCAST一记录/族不变，配对Plan+DCO发布。targetmetadata/finalfit/JSONInt/RealDecimal等仍后续，238strict0remaining7不变，full/lint/perf未跑。
 
 round135启动（numeric-argument-130）：批量迁移typednumeric string→Decimal解析/错误效果、bytes→Real与JSON→Real到SDK native_numeric_argument，复用原parser/JSON/warningformatter；B新SDK、A scalar_function/ops real_coerce薄adapters+新test。标量/vector截断区别、lazy level读取、JSON DOUBLE/FLOAT label与veto顺序保留；targetmetadata/finalconvert/JSONInt/RealDecimal仍原路径。父exports/mod、既有算术/SQL gate、配对Plan，238strict0remaining7不增族。

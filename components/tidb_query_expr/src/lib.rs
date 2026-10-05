@@ -116,7 +116,8 @@ pub use native_cast_year::native_cast_year;
 mod native_numeric_argument;
 pub use native_numeric_argument::{
     NativeNumericArgumentConversionError, NativeNumericArgumentError, NativeNumericArgumentLevel,
-    native_numeric_argument_bytes_to_f64, native_numeric_argument_json_to_f64,
+    native_numeric_argument_bytes_to_f64, native_numeric_argument_decimal_shape,
+    native_numeric_argument_json_to_f64, native_numeric_argument_json_to_i64,
     native_numeric_argument_string_to_decimal,
 };
 

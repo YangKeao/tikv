@@ -234,7 +234,7 @@ const WORD_SIZE: usize = 4;
 const DIG_MASK: u32 = TEN_POW[8];
 const WORD_BASE: u32 = TEN_POW[9];
 const WORD_MAX: u32 = WORD_BASE - 1;
-const MAX_FRACTION: usize = 30;
+pub(crate) const MAX_FRACTION: usize = 30;
 const DIG_2_BYTES: &[usize] = &[0, 1, 1, 2, 2, 3, 3, 4, 4, 4];
 const FRAC_MAX: &[u32] = &[
     900000000, 990000000, 999000000, 999900000, 999990000, 999999000, 999999900, 999999990,

@@ -769,7 +769,11 @@ short-circuit admission policy described above.
   byte/JSON-to-Real conversion. Existing datatype parsers/JSON/warning formatting
   are reused; scalar/vector truncation distinctions, lazy level reads and JSON
   diagnostic labels stay separate. Native supplies context effects and typed
-  error projection. Target fitting and other numeric controllers remain separate.
+  error projection. Decimal target shape and JSON Display-to-Int warning/value
+  composition also live here, reusing the original integer controllers and UTC.
+  FieldType limit setters share `codec/native_eval_type.rs`; actual code/array
+  views and negative metadata remain intact. Final fitting and other controllers
+  remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

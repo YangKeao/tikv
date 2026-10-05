@@ -183,6 +183,59 @@ pub const fn native_field_eval_type(code: NativeTypeNameCode, flags: u64) -> Nat
     }
 }
 
+/// Source FieldType.SetFlenUnderLimit. The caller supplies its effective code
+/// (including ARRAY's JSON view); negative sentinels are not lower-clamped.
+pub fn native_field_flen_under_limit(code: NativeTypeNameCode, flen: i64) -> i64 {
+    if code == NativeTypeNameCode::Known(246) {
+        flen.min(crate::MAX_DECIMAL_WIDTH as i64)
+    } else {
+        flen
+    }
+}
+/// Source FieldType.SetDecimalUnderLimit, without interpreting an Unknown byte
+/// as its identically numbered known type or normalizing negative metadata.
+pub fn native_field_decimal_under_limit(code: NativeTypeNameCode, decimal: i64) -> i64 {
+    if code == NativeTypeNameCode::Known(246) {
+        decimal.min(crate::codec::mysql::decimal::MAX_FRACTION as i64)
+    } else {
+        decimal
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    #[test]
+    fn field_limits_cap_only_actual_decimal_and_preserve_negative_metadata() {
+        let decimal = NativeTypeNameCode::Known(246);
+        for (value, width, scale) in [
+            (i64::MIN, i64::MIN, i64::MIN),
+            (-2, -2, -2),
+            (-1, -1, -1),
+            (0, 0, 0),
+            (30, 30, 30),
+            (31, 31, 30),
+            (65, 65, 30),
+            (66, 65, 30),
+            (i64::MAX, 65, 30),
+        ] {
+            assert_eq!(native_field_flen_under_limit(decimal, value), width);
+            assert_eq!(native_field_decimal_under_limit(decimal, value), scale);
+        }
+        for code in [
+            NativeTypeNameCode::Known(245),
+            NativeTypeNameCode::Known(3),
+            NativeTypeNameCode::Known(253),
+            NativeTypeNameCode::Unknown(246),
+        ] {
+            for value in [i64::MIN, -1, 0, 66, i64::MAX] {
+                assert_eq!(native_field_flen_under_limit(code, value), value);
+                assert_eq!(native_field_decimal_under_limit(code, value), value);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

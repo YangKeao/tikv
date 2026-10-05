@@ -11,9 +11,60 @@ use tidb_query_datatype::codec::{
         json::{native_binary_json_string_bytes, write_native_binary_json_text},
         native_decimal_from_my_decimal,
     },
+    native_eval_type::{
+        NativeEvalType, native_field_decimal_under_limit, native_field_flen_under_limit,
+    },
     native_float_parse::{native_float_warning_input, native_str_to_float},
+    native_numeric::NativeNumericInput,
     native_scalar_convert::native_json_to_float,
+    native_type_name::NativeTypeNameCode,
 };
+
+/// Numeric-argument DECIMAL target shape. Source evaluation type selects the
+/// integer-width table; other sources use the target DECIMAL's shared caps.
+pub fn native_numeric_argument_decimal_shape(
+    source: NativeEvalType,
+    code: NativeTypeNameCode,
+    flen: i64,
+    decimal: i64,
+) -> (i64, i64) {
+    if source == NativeEvalType::Int {
+        let width = match code {
+            NativeTypeNameCode::Known(1) => 3,
+            NativeTypeNameCode::Known(2) => 5,
+            NativeTypeNameCode::Known(9) => 8,
+            NativeTypeNameCode::Known(3) => 10,
+            NativeTypeNameCode::Known(8) => 20,
+            NativeTypeNameCode::Known(13) => 4,
+            _ => 20,
+        };
+        (width, 0)
+    } else {
+        let target = NativeTypeNameCode::Known(246);
+        let width = if flen < 0 {
+            tidb_query_datatype::MAX_DECIMAL_WIDTH as i64
+        } else {
+            flen
+        };
+        (
+            native_field_flen_under_limit(target, width),
+            native_field_decimal_under_limit(target, decimal),
+        )
+    }
+}
+/// JSON integer arguments are document Display re-read as an ordinary String,
+/// not numeric JSON casts. Warn/veto precedes the value-only signed conversion;
+/// its actual UTC zone matches the original no-session-zone helper.
+pub fn native_numeric_argument_json_to_i64<E>(
+    type_code: u8,
+    value: &[u8],
+    handle: impl FnMut(&str) -> Result<(), E>,
+) -> Result<i64, E> {
+    let text = JsonDisplay { type_code, value }.to_string();
+    let input = NativeNumericInput::String(text.as_bytes());
+    crate::native_cast_integer::native_cast_integer_numeric_input_warning(input, handle)?;
+    Ok(crate::native_cast_integer::native_cast_integer_signed_numeric(input, &chrono::Utc))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeNumericArgumentLevel {
@@ -119,6 +170,124 @@ pub fn native_numeric_argument_string_to_decimal<E>(
         }
     }
     Ok(native_decimal_from_my_decimal(decimal))
+}
+
+#[cfg(test)]
+mod shape_integer_tests {
+    use super::*;
+    #[test]
+    fn numeric_argument_decimal_shape_keeps_integer_widths_and_noninteger_metadata_caps() {
+        use NativeTypeNameCode::{Known, Unknown};
+        for (code, width) in [
+            (Known(1), 3),
+            (Known(2), 5),
+            (Known(9), 8),
+            (Known(3), 10),
+            (Known(8), 20),
+            (Known(13), 4),
+            (Known(16), 20),
+            (Known(247), 20),
+            (Known(248), 20),
+            (Unknown(1), 20),
+        ] {
+            assert_eq!(
+                native_numeric_argument_decimal_shape(
+                    NativeEvalType::Int,
+                    code,
+                    i64::MAX,
+                    i64::MIN
+                ),
+                (width, 0)
+            );
+        }
+        for source in NativeEvalType::ALL {
+            if source == NativeEvalType::Int {
+                continue;
+            }
+            for code in [Known(246), Known(245), Known(1), Unknown(246)] {
+                for (flen, decimal, expected) in [
+                    (-1, -1, (65, -1)),
+                    (i64::MIN, i64::MIN, (65, i64::MIN)),
+                    (0, 31, (0, 30)),
+                    (66, 99, (65, 30)),
+                    (12, 2, (12, 2)),
+                    (15, -2, (15, -2)),
+                ] {
+                    assert_eq!(
+                        native_numeric_argument_decimal_shape(source, code, flen, decimal),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn json_integer_arguments_reparse_display_and_keep_warning_veto_and_panic_boundaries() {
+        use tidb_query_datatype::codec::native_json_parse::native_json_parse;
+        for (document, expected, subject) in [
+            ("3", 3, None),
+            ("18446744073709551615", -1, None),
+            ("1.5", 1, Some("1.5")),
+            ("1e20", 1, Some("1e20")),
+            ("\"3\"", 0, Some("\"3\"")),
+            ("false", 0, Some("false")),
+            ("null", 0, Some("null")),
+            ("[]", 0, Some("[]")),
+            ("{}", 0, Some("{}")),
+        ] {
+            let (tag, bytes) = native_json_parse(document).unwrap();
+            let mut calls = Vec::new();
+            let value = native_numeric_argument_json_to_i64::<()>(tag, &bytes, |message| {
+                calls.push(message.to_owned());
+                Ok(())
+            });
+            assert_eq!(value, Ok(expected));
+            assert_eq!(
+                calls,
+                subject
+                    .map(|subject| format!("Truncated incorrect INTEGER value: '{subject}'"))
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            );
+        }
+        let document = format!("\"{}\"", "界".repeat(50));
+        let (tag, bytes) = native_json_parse(&document).unwrap();
+        let mut calls = Vec::new();
+        let value = native_numeric_argument_json_to_i64(tag, &bytes, |message| {
+            calls.push(message.to_owned());
+            Err("veto")
+        });
+        assert_eq!(value, Err("veto"));
+        // The existing integer warning cap admits the opening quote plus 42
+        // complete three-byte characters (127 bytes), not a split character.
+        assert_eq!(
+            calls,
+            vec![format!(
+                "Truncated incorrect INTEGER value: '\"{}'",
+                "界".repeat(42)
+            )]
+        );
+        for tag in [4, 9, 10, 11] {
+            let mut calls = Vec::new();
+            let value = native_numeric_argument_json_to_i64::<()>(tag, &[], |message| {
+                calls.push(message.to_owned());
+                Ok(())
+            });
+            assert_eq!(value, Ok(0));
+            assert_eq!(calls, ["Truncated incorrect INTEGER value: ''"]);
+        }
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                native_numeric_argument_json_to_i64::<()>(11, &value.to_le_bytes(), |message| {
+                    calls.borrow_mut().push(message.to_owned());
+                    Ok(())
+                })
+            }));
+            assert!(panic.is_err());
+            assert!(calls.borrow().is_empty());
+        }
+    }
 }
 
 #[cfg(test)]
