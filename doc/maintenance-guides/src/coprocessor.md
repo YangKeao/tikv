@@ -605,6 +605,17 @@ short-circuit admission policy described above.
   rounding/clip/boundary/NaN policy and is untouched. Other CAST domains, outer
   NULL and UNION's negative bypass are not covered by this slice, and no whole
   CAST family or new wire admission is credited.
+  CHAR/BINARY CAST uses `native_cast_string.rs` for source/YEAR-zero choice,
+  charset demand, existing encoding DECODE, diagnostics and truncation/padding.
+  Exact explicit BINARY CHAR retains its early byte route without YEAR, charset
+  lookup or padding. Normal CHAR uses effective source code and exact collation
+  metadata. Binary padding alone demands the packet limit and original handler;
+  the handler's repeated limit/policy reads and errors are not cached away.
+  `codec/native_string_type.rs` owns native string classification, preserving
+  named versus Other codes and native array code views rather than canonicalizing
+  raw bytes through wire types. Native sql_string remains an actual datatype
+  service with its internal selector still pending; no whole-CAST/M2 or new
+  profile/admission claim follows.
   DOUBLE/FLOAT CAST uses `native_cast_float.rs`, with a distinct value-only
   entry for strict UTF8/Decimal-prefix conversion. Ordinary text instead uses
   lossy UTF8 and `codec/native_float_parse.rs`; all ordinary JSON requests its

@@ -108,6 +108,12 @@ pub use native_cast_float::{
     native_cast_float_value,
 };
 
+mod native_cast_string;
+pub use native_cast_string::{
+    NativeCastStringError, NativeCastStringInput, NativeCastStringResult, NativeCastStringSource,
+    NativeCastStringTarget, NativeCastStringTypeCode, native_cast_string,
+};
+
 mod native_legacy_date_arithmetic;
 pub use native_legacy_date_arithmetic::{
     NativeLegacyDateArithmeticChannel, NativeLegacyDateArithmeticDateKind,
