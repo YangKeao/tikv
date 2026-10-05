@@ -20,6 +20,75 @@ use tidb_query_datatype::codec::{
     native_type_name::NativeTypeNameCode,
 };
 
+/// Final target policy only. None leaves the native FieldType constructor's
+/// defaults untouched; unspecified scale bypasses fitting only for DECIMAL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeNumericArgumentTarget {
+    pub code: u8,
+    pub decimal_shape: Option<(i64, i64)>,
+    pub skip_fitting: bool,
+}
+/// Describe the selected target without materializing caller-owned FieldType
+/// storage.
+pub fn native_numeric_argument_target(
+    source: NativeEvalType,
+    source_code: NativeTypeNameCode,
+    flen: i64,
+    decimal: i64,
+    target_code: u8,
+) -> NativeNumericArgumentTarget {
+    let decimal_shape = if target_code == 246 {
+        Some(native_numeric_argument_decimal_shape(
+            source,
+            source_code,
+            flen,
+            decimal,
+        ))
+    } else {
+        None
+    };
+    NativeNumericArgumentTarget {
+        code: target_code,
+        decimal_shape,
+        skip_fitting: decimal_shape.is_some_and(|(_, scale)| scale < 0),
+    }
+}
+/// The existing String branch selects Real explicitly; every other admitted
+/// target, including Int, follows its original intermediate-Decimal path.
+pub fn native_numeric_argument_string_is_real(target: NativeEvalType) -> bool {
+    target == NativeEvalType::Real
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeNumericArgumentResultError<C> {
+    Unsupported(&'static str),
+    Conversion(C),
+}
+fn numeric_argument_result<T, C, E>(
+    result: Result<(T, Option<C>), E>,
+    unsupported: &'static str,
+) -> Result<T, NativeNumericArgumentResultError<C>> {
+    let (value, error) =
+        result.map_err(|_| NativeNumericArgumentResultError::Unsupported(unsupported))?;
+    match error {
+        Some(error) => Err(NativeNumericArgumentResultError::Conversion(error)),
+        None => Ok(value),
+    }
+}
+/// Fold the real final conversion result without formatting/replacing its
+/// typed conversion error or retaining an unsupported engine error.
+pub fn native_numeric_argument_conversion_result<T, C, E>(
+    result: Result<(T, Option<C>), E>,
+) -> Result<T, NativeNumericArgumentResultError<C>> {
+    numeric_argument_result(result, "numeric argument conversion failed")
+}
+/// The context-bearing decimal conversion has its own original failure subject
+/// but the same value/optional-conversion-error disposition.
+pub fn native_numeric_argument_context_decimal_result<T, C, E>(
+    result: Result<(T, Option<C>), E>,
+) -> Result<T, NativeNumericArgumentResultError<C>> {
+    numeric_argument_result(result, "numeric decimal argument conversion failed")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NativeNumericArgumentNormalization {
     Keep,
@@ -340,6 +409,134 @@ pub fn native_numeric_argument_string_to_decimal<E>(
         }
     }
     Ok(native_decimal_from_my_decimal(decimal))
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    #[test]
+    fn numeric_argument_target_keeps_decimal_only_fitting_and_string_int_intermediate_decimal() {
+        use NativeEvalType as T;
+        use NativeTypeNameCode::{Known, Unknown};
+        for (source, code, flen, scale, shape, skip) in [
+            (T::Int, Known(1), 99, -1, (3, 0), false),
+            (T::Int, Known(13), -1, -2, (4, 0), false),
+            (T::Int, Unknown(1), 0, i64::MIN, (20, 0), false),
+            (T::Decimal, Known(246), -1, -1, (65, -1), true),
+            (T::String, Known(253), 66, 31, (65, 30), false),
+            (T::Real, Known(5), 17, -2, (17, -2), true),
+            (
+                T::Json,
+                Known(245),
+                i64::MIN,
+                i64::MIN,
+                (65, i64::MIN),
+                true,
+            ),
+            (T::Datetime, Known(12), 0, 0, (0, 0), false),
+        ] {
+            assert_eq!(
+                native_numeric_argument_target(source, code, flen, scale, 246),
+                NativeNumericArgumentTarget {
+                    code: 246,
+                    decimal_shape: Some(shape),
+                    skip_fitting: skip
+                }
+            );
+        }
+        for code in [0, 5, 8, 245, 255] {
+            assert_eq!(
+                native_numeric_argument_target(T::Decimal, Known(246), i64::MAX, i64::MIN, code),
+                NativeNumericArgumentTarget {
+                    code,
+                    decimal_shape: None,
+                    skip_fitting: false
+                }
+            );
+        }
+        for target in T::ALL {
+            assert_eq!(
+                native_numeric_argument_string_is_real(target),
+                target == T::Real
+            );
+        }
+        // String-as-Int still takes the source's intermediate Decimal target;
+        // it must not adopt final BIGINT defaults just because Int was requested.
+        assert!(!native_numeric_argument_string_is_real(T::Int));
+        assert_eq!(
+            native_numeric_argument_target(T::String, Known(253), 9, -1, 246),
+            NativeNumericArgumentTarget {
+                code: 246,
+                decimal_shape: Some((9, -1)),
+                skip_fitting: true
+            }
+        );
+    }
+    #[test]
+    fn numeric_argument_result_policies_preserve_owned_value_error_and_distinct_failure_subjects() {
+        use std::{cell::Cell, rc::Rc};
+
+        use NativeNumericArgumentResultError as R;
+        // Neither the input engine error nor the typed conversion payload needs
+        // Clone/Display. Pointer identity pins transfer rather than rebuilding.
+        struct EngineError;
+        #[derive(Debug)]
+        struct Payload(Box<u64>);
+        #[derive(Debug)]
+        struct Dropped(Rc<Cell<usize>>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        for context in [false, true] {
+            let value = Box::new(37u64);
+            let pointer = &*value as *const u64;
+            let result: Result<_, EngineError> = Ok((value, None::<Payload>));
+            let value = if context {
+                native_numeric_argument_context_decimal_result(result)
+            } else {
+                native_numeric_argument_conversion_result(result)
+            }
+            .unwrap();
+            assert_eq!(&*value as *const u64, pointer);
+            assert_eq!(*value, 37);
+            let dropped = Rc::new(Cell::new(0));
+            let error = Payload(Box::new(99));
+            let pointer = &*error.0 as *const u64;
+            let result: Result<_, EngineError> = Ok((Dropped(dropped.clone()), Some(error)));
+            let error = if context {
+                native_numeric_argument_context_decimal_result(result)
+            } else {
+                native_numeric_argument_conversion_result(result)
+            }
+            .unwrap_err();
+            let R::Conversion(error) = error else {
+                panic!("typed conversion error must survive");
+            };
+            assert_eq!(&*error.0 as *const u64, pointer);
+            assert_eq!(*error.0, 99);
+            assert_eq!(dropped.get(), 1);
+            let result: Result<((), Option<Payload>), _> = Err(EngineError);
+            let error = if context {
+                native_numeric_argument_context_decimal_result(result)
+            } else {
+                native_numeric_argument_conversion_result(result)
+            }
+            .unwrap_err();
+            let R::Unsupported(message) = error else {
+                panic!("engine error maps to original unsupported subject");
+            };
+            assert_eq!(
+                message,
+                if context {
+                    "numeric decimal argument conversion failed"
+                } else {
+                    "numeric argument conversion failed"
+                }
+            );
+        }
+    }
 }
 
 #[cfg(test)]

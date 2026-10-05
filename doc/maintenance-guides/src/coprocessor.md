@@ -781,7 +781,10 @@ short-circuit admission policy described above.
   unsigned/Float32 normalization, target validation, String/hybrid admission and
   the conversion route from actual data/metadata. Native applies selected storage
   and executes existing conversions; static-type demand remains first. This is
-  not a new C4 gate/profile. Final fitting and other controllers remain separate.
+  not a new C4 gate/profile. Target metadata, skip-fitting, String Real selection
+  and generic/context-Decimal result policies are shared here too. Native builds
+  actual storage and invokes existing contextful conversion in the original
+  order. The datatype engine, renderer and other controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

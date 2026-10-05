@@ -117,11 +117,14 @@ mod native_numeric_argument;
 pub use native_numeric_argument::{
     NativeNumericArgumentConversionError, NativeNumericArgumentError, NativeNumericArgumentHead,
     NativeNumericArgumentLevel, NativeNumericArgumentNormalization,
-    NativeNumericArgumentRealDecimal, NativeNumericArgumentRoute,
-    native_numeric_argument_bytes_to_f64, native_numeric_argument_decimal_shape,
-    native_numeric_argument_head, native_numeric_argument_json_to_f64,
-    native_numeric_argument_json_to_i64, native_numeric_argument_real_decimal_prepare,
-    native_numeric_argument_string_to_decimal, native_numeric_argument_unscaled_integer,
+    NativeNumericArgumentRealDecimal, NativeNumericArgumentResultError, NativeNumericArgumentRoute,
+    NativeNumericArgumentTarget, native_numeric_argument_bytes_to_f64,
+    native_numeric_argument_context_decimal_result, native_numeric_argument_conversion_result,
+    native_numeric_argument_decimal_shape, native_numeric_argument_head,
+    native_numeric_argument_json_to_f64, native_numeric_argument_json_to_i64,
+    native_numeric_argument_real_decimal_prepare, native_numeric_argument_string_is_real,
+    native_numeric_argument_string_to_decimal, native_numeric_argument_target,
+    native_numeric_argument_unscaled_integer,
 };
 
 mod native_coerce_numeric;
