@@ -642,6 +642,16 @@ short-circuit admission policy described above.
   the SDK controller also preserves the internal VECTOR arm's direct NULL result. JSON ordinary/typed/value
   coercion and typed datatype construction are shared by the modules described
   above; generic typed child evaluation and other CAST domains remain.
+  `native_cast_duration.rs` owns ordinary, argument and computed TIME conversion.
+  Its native bridge supplies only lazy zone metadata, applies a generic truncate
+  effect and wraps raw parts. `codec/native_duration_convert.rs` owns rounding,
+  NumberToDuration, StrToDatetime/StrToDuration and datatype duration-target
+  policy. `mysql/json/native_text.rs::native_unquote_binary_json` is shared by
+  the duration target and the native BinaryJSON adapter, not duplicated.
+  Integer UTC fallback, raw rounding versus SQL clamping, JSON unquote,
+  numeric-NULL versus string-value event handling and double rendering remain
+  separate. YEAR/DATE calendar/coercion controllers and wire Duration are not
+  folded into this slice.
   `codec/native_sql_string.rs` owns native SQL byte/string source selection
   across19 actual variants, strict UTF8 stages, sentinel errors and fixed/scientific
   float primitives. Borrowed Decimal/Time/Duration/JSON/vector views reuse existing

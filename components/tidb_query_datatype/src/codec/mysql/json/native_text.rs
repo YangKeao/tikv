@@ -80,6 +80,30 @@ pub fn write_native_binary_json_text<W: fmt::Write + ?Sized>(
     }
 }
 
+/// Native BinaryJSON.Unquote: string projection admits UTF-8 before the
+/// optional second unescape; every other value uses the original Display path.
+pub fn native_unquote_binary_json(type_code: u8, value: &[u8]) -> Result<String, NativeJsonError> {
+    match native_binary_json_string_bytes(type_code, value) {
+        Some(bytes) => {
+            let text = std::str::from_utf8(bytes).map_err(|_| NativeJsonError::InvalidBinary)?;
+            unquote_native_json_string(text).map_err(|_| NativeJsonError::InvalidText)
+        }
+        None => Ok(NativeBinaryJsonDisplay { type_code, value }.to_string()),
+    }
+}
+
+// ToString's standard formatting-error panic is part of the original boundary.
+struct NativeBinaryJsonDisplay<'a> {
+    type_code: u8,
+    value: &'a [u8],
+}
+
+impl fmt::Display for NativeBinaryJsonDisplay<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_native_binary_json_text(formatter, self.type_code, self.value)
+    }
+}
+
 fn format_float64(value: f64) -> Option<String> {
     if !value.is_finite() {
         return None;
@@ -426,4 +450,44 @@ mod tests {
                 .unwrap();
         assert_eq!(text(kind, &payload).unwrap(), "");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn binary_json_unquote_keeps_projection_errors_second_unescape_and_display_panic() {
+    assert_eq!(
+        native_unquote_binary_json(0x0c, &[3, b'a', b'b', b'c', 0xff]).unwrap(),
+        "abc"
+    );
+    assert_eq!(
+        native_unquote_binary_json(0x0c, &[4, b'"', b'\\', b'n', b'"']).unwrap(),
+        "\n"
+    );
+    assert_eq!(
+        native_unquote_binary_json(0x09, &[41, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+        "41"
+    );
+    assert_eq!(
+        native_unquote_binary_json(0x0e, &[0; 8]).unwrap(),
+        "\"0000-00-00\""
+    );
+    assert_eq!(
+        native_unquote_binary_json(0x0c, &[1, 0xff]),
+        Err(NativeJsonError::InvalidBinary)
+    );
+    assert_eq!(
+        native_unquote_binary_json(0x0c, &[5, b'"', b'\\', b'u', b'x', b'"']),
+        Err(NativeJsonError::InvalidText)
+    );
+    assert_eq!(native_unquote_binary_json(0xfe, &[1]).unwrap(), "");
+    assert_eq!(native_unquote_binary_json(0x0c, &[2, b'a']).unwrap(), "");
+    let panic =
+        std::panic::catch_unwind(|| native_unquote_binary_json(0x0b, &f64::INFINITY.to_le_bytes()))
+            .unwrap_err();
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("standard formatting panic text");
+    assert!(message.contains("a Display implementation returned an error unexpectedly"));
 }

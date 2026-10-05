@@ -120,8 +120,8 @@ pub use self::{
     },
     native_text::{
         decode_native_json_escaped_unicode, native_binary_json_string_bytes,
-        quote_native_json_string, unquote_native_json_escaped_string, unquote_native_json_string,
-        write_native_binary_json_text,
+        native_unquote_binary_json, quote_native_json_string, unquote_native_json_escaped_string,
+        unquote_native_json_string, write_native_binary_json_text,
     },
     path_expr::{PathExpression, parse_json_path_expr},
 };
