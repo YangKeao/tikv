@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round133收口（float-composition-128）：float两closednumeric入口内部组合JSONDisplay与sharedf64，native只data/truncate/errorprojection；旧generic兼容，旧input仅cfgtest。5matched全GREEN SDK4/新native1/旧float1/scalar1/既有SQL1，无失败重试；3新tests，旧SDK2/native1逐体不变，SDK2/native3 Rust、1新file，SQL文件未改/不增probe。详float-composition-checkpoint.md/summary.txt；fmt/diff过，B/A冻结，配对Plan+DCO发布。typed/write其它组合和M2/root/liveDAG/final后续，238strict0remaining7不变，full/lint/perf未跑。
+
+round133启动（float-composition-128）：B在既有native_cast_float组合actualNumeric→内部JSONDisplay/sharedtoF64，旧generic及test不改；A nativefloatbridge删两businesscallbacks/selector，只留data/truncate/errorprojection+新test。普通JSONDisplay与valueonlyJSONnumeric、lossy/strictUTF8、FLOATnarrow/overflow/panic区别保留；父exports/mod、复跑既有floatSQL与核心gate，无新SQLfixture，配对Plan发布。typed/write其它组合仍后续，238strict0remaining7不增族。
+
 round132收口（scalar-datum-127）：plainbool/f64/JSONfloat与Decimal coefficient零谓词单owner SDK，原parser/comparator/vector等复用。8matched含2新SQL探针RED：JSONstring的CAST及arith插入Double都解析带quotes Display，不是想测的getter；源链确认，最终numericJSON fixture，生产/旧test无修复。6finalGREEN SDK2/datatype477/新expr1/旧coerce1/float1/SQL1；4新tests，旧SDK5/native251逐体不变，SDK3/native6 Rust、2新file。SQL两vector2SELECT/8Real cells含hybrid/BIT/numericJSON、Double/no warnings，JSONstring差异靠unit，不claim全SQL。详scalar-datum-checkpoint.md/summary.txt；fmt/diff过，B/A冻结，配对Plan+DCO发布。typed/write/controllers/lowering与广M2/final后续，238strict0remaining7不变，full/lint/perf未跑。
 
 round132启动（scalar-datum-127）：继续typed/write前置，B新codec/native_scalar_convert接管plainDatum.to_bool/to_f64与JSONfloat，复用现floatparser、Decimal/temporalnumber、literaloutcome、vector与JSONparse/compare；boolFloat32不narrow、f64会narrow、JSONbool比较实际JSON0不等于JSONfloattruth、strictDatumUTF8 vsJSON坏UTF8空串均保留。A两datatype薄facade+新consumer test，父mod/SQL/核心gate/配对Plan；typed numeric总controller及write仍待迁，238strict0remaining7不增族。

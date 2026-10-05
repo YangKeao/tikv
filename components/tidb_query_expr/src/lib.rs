@@ -130,7 +130,7 @@ pub use native_cast_duration::{
 mod native_cast_float;
 pub use native_cast_float::{
     NativeCastFloatError, NativeCastFloatInput, NativeCastFloatTarget, native_cast_float,
-    native_cast_float_value,
+    native_cast_float_numeric, native_cast_float_numeric_value, native_cast_float_value,
 };
 
 mod native_cast_string;

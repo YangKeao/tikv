@@ -732,8 +732,10 @@ short-circuit admission policy described above.
   lossy UTF8 and `codec/native_float_parse.rs`; all ordinary JSON requests its
   original Display. Only Real/Float32 FLOAT sources narrow; other sources keep
   f64 within range and produce typed overflow after truncation handling. Actual
-  default conversion values/events/errors reach SDK disposition. The native
-  byte parser retains prefix/parse/range diagnostic order and full trimmed
+  default conversion values/events/errors reach SDK disposition. Closed numeric
+  entries compose JSON Display and datatype float conversion entirely in SDK;
+  native retains only raw data, truncate effects and error projection. Generic
+  SDK APIs remain compatible. The native byte parser retains prefix/parse/range diagnostic order and full trimmed
   reported subjects; ordinary CAST observes one final event and separately
   applies trim/NUL/byte-cap formatting. Existing wire scanning is unchanged.
   Decimal-to-f64 reuses the visible formatter and original Rust parse through
