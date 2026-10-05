@@ -5555,3 +5555,303 @@ mod legacy_date_arithmetic_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod in_worker_tests {
+    use tidb_query_datatype::codec::mysql::{Json, Time};
+
+    use super::*;
+    use crate::{
+        NativeIdentityRef, NativeInRequest as Request, NativeInResult as Reply,
+        NativeInTypedDomain as Domain, decode_native_in_result, encode_native_identity,
+        encode_native_in_legacy_int_head, encode_native_in_legacy_string_head,
+        encode_native_in_typed_values,
+    };
+
+    fn prepare(operation: EvaluatedBytesOp, limits: ExecutionLimits) -> EvaluatedBytesWorker {
+        prepare_evaluated_bytes(
+            operation,
+            LocalCompileContext::default(),
+            limits,
+            usize::MAX,
+        )
+        .unwrap()
+    }
+    fn run(worker: &mut EvaluatedBytesWorker, args: EvaluatedArgs) -> Vec<u8> {
+        let ComputedValue::Bytes(value) = worker.eval_args(args).unwrap() else {
+            panic!("IN must own Bytes");
+        };
+        assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
+        value
+            .into_option()
+            .expect("SQL NULL is a computed IN report, never outer None")
+    }
+    fn request(report: &[u8], expected: Request) {
+        let Some(Reply::Request { kind, state }) = decode_native_in_result(report) else {
+            panic!("expected actual IN request");
+        };
+        assert_eq!(kind, expected);
+        assert_eq!(state, report);
+    }
+    fn advance(worker: &mut EvaluatedBytesWorker, state: &[u8], value: Option<Vec<u8>>) -> Vec<u8> {
+        run(worker, EvaluatedArgs::Bytes2(Some(state.to_vec()), value))
+    }
+    fn copy(args: &EvaluatedArgs) -> EvaluatedArgs {
+        match args {
+            EvaluatedArgs::Bytes(value) => EvaluatedArgs::Bytes(value.clone()),
+            EvaluatedArgs::Bytes2(state, value) => {
+                EvaluatedArgs::Bytes2(state.clone(), value.clone())
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn in_workers_keep_typed_identity_null_reports_and_legacy_getter_lifecycles() {
+        let mut typed = prepare(
+            EvaluatedBytesOp::InTypedValuesNative,
+            ExecutionLimits::default(),
+        );
+        let core = Time::native_core_from_fields(2024, 3, 15, 0, 0, 0, 0);
+        let time = encode_native_identity(NativeIdentityRef::Time {
+            core: core | 1,
+            kind: 1,
+            fsp: 0,
+        })
+        .unwrap();
+        let same = encode_native_identity(NativeIdentityRef::Time {
+            core: core | 9,
+            kind: 2,
+            fsp: 6,
+        })
+        .unwrap();
+        let duration = encode_native_identity(NativeIdentityRef::Duration {
+            nanos: 1_000_000_000,
+            fsp: 0,
+        })
+        .unwrap();
+        let same_duration = encode_native_identity(NativeIdentityRef::Duration {
+            nanos: 1_000_000_000,
+            fsp: 6,
+        })
+        .unwrap();
+        // Use actual binary JSON's type/value, not serde text or fabricated data.
+        let json = Json::from_i64(7).unwrap();
+        let json_ref = json.as_ref();
+        let json = encode_native_identity(NativeIdentityRef::Json {
+            type_code: json_ref.get_type() as u8,
+            bytes: json_ref.value(),
+        })
+        .unwrap();
+        assert!(encode_native_in_typed_values(Domain::Datetime, &[Some(&time)]).is_err());
+        for (index, (domain, left, right)) in [
+            (Domain::Datetime, &time, &same),
+            (Domain::Timestamp, &time, &same),
+            (Domain::Duration, &duration, &same_duration),
+            (Domain::Json, &json, &json),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let packet =
+                encode_native_in_typed_values(domain, &[Some(left), Some(right), None]).unwrap();
+            let output = run(&mut typed, EvaluatedArgs::Bytes(Some(packet)));
+            assert_eq!(decode_native_in_result(&output), Some(Reply::Bool(true)));
+            assert_eq!(typed.kernel_invocations(), index as u64 + 1);
+        }
+        for values in [[Some(time.as_slice()), None], [None, Some(time.as_slice())]] {
+            let output = run(
+                &mut typed,
+                EvaluatedArgs::Bytes(Some(
+                    encode_native_in_typed_values(Domain::Datetime, &values).unwrap(),
+                )),
+            );
+            assert_eq!(decode_native_in_result(&output), Some(Reply::Null));
+        }
+        let mut int_head = prepare(
+            EvaluatedBytesOp::InLegacyIntHeadNative,
+            ExecutionLimits::default(),
+        );
+        let mut string_head = prepare(
+            EvaluatedBytesOp::InLegacyStringHeadNative,
+            ExecutionLimits::default(),
+        );
+        let mut step = prepare(
+            EvaluatedBytesOp::InLegacyStepNative,
+            ExecutionLimits::default(),
+        );
+        let int_packet = encode_native_in_legacy_int_head(3).unwrap();
+        let int_start = run(
+            &mut int_head,
+            EvaluatedArgs::Bytes(Some(int_packet.clone())),
+        );
+        request(&int_start, Request::Int128 { index: 0 });
+        let mut state = advance(&mut step, &int_start, None);
+        request(&state, Request::Int128 { index: 1 });
+        state = advance(&mut step, &state, Some(1_i128.to_le_bytes().to_vec()));
+        request(&state, Request::Int128 { index: 2 });
+        state = advance(&mut step, &state, None);
+        assert_eq!(decode_native_in_result(&state), Some(Reply::Null));
+        assert_eq!(
+            step.kernel_invocations(),
+            3,
+            "NULL base still visits every RHS"
+        );
+        let state = advance(&mut step, &int_start, Some(5_i128.to_le_bytes().to_vec()));
+        request(&state, Request::Int128 { index: 1 });
+        let output = advance(&mut step, &state, Some(5_i128.to_le_bytes().to_vec()));
+        assert_eq!(decode_native_in_result(&output), Some(Reply::Bool(true)));
+        assert_eq!(
+            step.kernel_invocations(),
+            5,
+            "match ends before RHS index 2"
+        );
+        let string_packet = encode_native_in_legacy_string_head(3, 63).unwrap();
+        let string_start = run(
+            &mut string_head,
+            EvaluatedArgs::Bytes(Some(string_packet.clone())),
+        );
+        request(&string_start, Request::Bytes { index: 0 });
+        let state = advance(&mut step, &string_start, None);
+        request(&state, Request::Bytes { index: 1 });
+        let state = advance(&mut step, &state, Some(b"x".to_vec()));
+        request(&state, Request::Bytes { index: 2 });
+        assert_eq!(
+            decode_native_in_result(&advance(&mut step, &state, None)),
+            Some(Reply::Null)
+        );
+        let state = advance(&mut step, &string_start, Some(b"a".to_vec()));
+        request(&state, Request::Bytes { index: 1 });
+        let policy = advance(&mut step, &state, Some(b"a".to_vec()));
+        request(&policy, Request::Collation { collation_id: 63 });
+        let policy_reply = NativeCollation::Binary.tag().to_le_bytes().to_vec();
+        assert_eq!(
+            decode_native_in_result(&advance(&mut step, &policy, Some(policy_reply.clone()))),
+            Some(Reply::Bool(true))
+        );
+        request(
+            &run(
+                &mut int_head,
+                EvaluatedArgs::Bytes(Some(encode_native_in_legacy_int_head(0).unwrap())),
+            ),
+            Request::Int128 { index: 0 },
+        );
+        request(
+            &run(
+                &mut string_head,
+                EvaluatedArgs::Bytes(Some(encode_native_in_legacy_string_head(0, 63).unwrap())),
+            ),
+            Request::Bytes { index: 0 },
+        );
+        let typed_packet =
+            encode_native_in_typed_values(Domain::Datetime, &[Some(&time), Some(&same)]).unwrap();
+        for (operation, args) in [
+            (
+                EvaluatedBytesOp::InTypedValuesNative,
+                EvaluatedArgs::Bytes(Some(typed_packet)),
+            ),
+            (
+                EvaluatedBytesOp::InLegacyIntHeadNative,
+                EvaluatedArgs::Bytes(Some(int_packet)),
+            ),
+            (
+                EvaluatedBytesOp::InLegacyStringHeadNative,
+                EvaluatedArgs::Bytes(Some(string_packet)),
+            ),
+            (
+                EvaluatedBytesOp::InLegacyStepNative,
+                EvaluatedArgs::Bytes2(Some(policy.clone()), Some(policy_reply)),
+            ),
+        ] {
+            let mut worker = prepare(
+                operation,
+                ExecutionLimits {
+                    max_retained_bytes: 64 * 1024,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = worker.retained_storage().unwrap();
+            assert!(matches!(
+                worker.eval_args(EvaluatedArgs::Int(None)),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            let bad = if operation == EvaluatedBytesOp::InLegacyStepNative {
+                EvaluatedArgs::Bytes2(Some(Vec::new()), None)
+            } else {
+                EvaluatedArgs::Bytes(None)
+            };
+            assert!(matches!(
+                worker.eval_args(bad),
+                Err(LocalError::InvalidBatch(_))
+            ));
+            if operation == EvaluatedBytesOp::InLegacyStepNative {
+                let identity = encode_native_identity(NativeIdentityRef::Int(0)).unwrap();
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes2(
+                        Some(policy.clone()),
+                        Some(identity.clone())
+                    )),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+                assert!(matches!(
+                    worker.eval_args(EvaluatedArgs::Bytes2(
+                        Some(int_start.clone()),
+                        Some(identity)
+                    )),
+                    Err(LocalError::InvalidBatch(_))
+                ));
+            }
+            for position in 0..if operation == EvaluatedBytesOp::InLegacyStepNative {
+                2
+            } else {
+                1
+            } {
+                let mut oversized = copy(&args);
+                let owner = match (&mut oversized, position) {
+                    (EvaluatedArgs::Bytes(Some(value)), 0)
+                    | (EvaluatedArgs::Bytes2(Some(value), _), 0)
+                    | (EvaluatedArgs::Bytes2(_, Some(value)), 1) => value,
+                    _ => unreachable!(),
+                };
+                owner.reserve_exact(128 * 1024);
+                assert!(owner.capacity() > 64 * 1024);
+                assert!(matches!(
+                    worker.eval_args(oversized),
+                    Err(LocalError::ResourceLimit(_))
+                ));
+                assert_eq!(worker.kernel_invocations(), 0);
+                assert!(worker.is_healthy());
+                assert_eq!(worker.retained_storage().unwrap(), storage);
+            }
+            let output = run(&mut worker, copy(&args));
+            match operation {
+                EvaluatedBytesOp::InLegacyIntHeadNative => {
+                    request(&output, Request::Int128 { index: 0 })
+                }
+                EvaluatedBytesOp::InLegacyStringHeadNative => {
+                    request(&output, Request::Bytes { index: 0 })
+                }
+                _ => assert_eq!(decode_native_in_result(&output), Some(Reply::Bool(true))),
+            }
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), storage);
+            let mut stopped = prepare(
+                operation,
+                ExecutionLimits {
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+            );
+            let storage = stopped.retained_storage().unwrap();
+            assert!(matches!(
+                stopped.eval_args(copy(&args)),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert_eq!(stopped.kernel_invocations(), 0);
+            assert!(stopped.is_healthy());
+            assert_eq!(stopped.retained_storage().unwrap(), storage);
+            // CPP instruction zero is not frontend pool zero or allocator peak.
+        }
+    }
+}

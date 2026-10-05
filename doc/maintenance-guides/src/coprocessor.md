@@ -434,6 +434,21 @@ short-circuit admission policy described above.
   it is not a physical-memory or parser-temporary bound. Existing cast/NULL
   witnesses and original warning delivery remain native adapters, without
   PB/legacy admission or a new specialized vector kernel.
+- Query_expr `native_in.rs` owns a deliberately partial IN domain: eager
+  typed datetime/timestamp/duration/JSON membership after original native
+  evaluation and casts, plus the two admitted legacy integer/string loops.
+  Four closed Values profiles return non-NULL owned reports. Legacy heads
+  request index0 even for an empty source list; SDK continuation state owns
+  subsequent demand, NULL handling and early matches. Integer replies retain
+  full i128. String comparisons request the original collation ID only after
+  both real operands are non-NULL; the native adapter resolves its current
+  effective collator and returns that policy, never a comparison verdict.
+  Typed identities retain representation metadata, while comparison reuses
+  existing core-time, raw-duration and binary-JSON primitives. The checked
+  input-length-sum-plus128 report bound is not a physical-memory claim.
+  AST scalar/row, generic typed/string-cache and ready-value IN remain outside
+  this slice; their distinct demand policies are not aliased to wire IN. No
+  shared-PB IN admission is added, including through an outer UnaryNotInt.
 - Query_expr `native_date_arithmetic.rs` and private
   `native_date_arithmetic_helpers.rs` own ordinary calendar and typed-duration
   DATE_ADD/SUB policy. Two four-value heads, a generic preparation step and

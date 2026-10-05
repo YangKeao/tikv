@@ -1619,6 +1619,10 @@ pub enum EvaluatedBytesOp {
     LegacyDateArithmeticDurationHeadNative,
     LegacyDateArithmeticStepNative,
     LegacyDateArithmeticParseNative,
+    InTypedValuesNative,
+    InLegacyIntHeadNative,
+    InLegacyStringHeadNative,
+    InLegacyStepNative,
 }
 
 /// A private recipe identity, never a consumer-provided function descriptor.
@@ -1682,6 +1686,26 @@ impl EvaluatedBytesOp {
     pub(crate) fn kernel_kind(self) -> EvaluatedKernelKind {
         use tipb::ScalarFuncSig;
         let signature = match self {
+            Self::InTypedValuesNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::InTypedValuesNative,
+                );
+            }
+            Self::InLegacyIntHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::InLegacyIntHeadNative,
+                );
+            }
+            Self::InLegacyStringHeadNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::InLegacyStringHeadNative,
+                );
+            }
+            Self::InLegacyStepNative => {
+                return EvaluatedKernelKind::ClosedPrivate(
+                    crate::LocalFunctionId::InLegacyStepNative,
+                );
+            }
             Self::LegacyDateArithmeticTextHeadNative => {
                 return EvaluatedKernelKind::ClosedPrivate(
                     crate::LocalFunctionId::LegacyDateArithmeticTextHeadNative,
@@ -4568,6 +4592,10 @@ impl EvaluatedBytesOp {
             Self::LegacyDateArithmeticParseNative => {
                 crate::legacy_date_arithmetic_parse_native_fn_meta()
             }
+            Self::InTypedValuesNative => crate::in_typed_values_native_fn_meta(),
+            Self::InLegacyIntHeadNative => crate::in_legacy_int_head_native_fn_meta(),
+            Self::InLegacyStringHeadNative => crate::in_legacy_string_head_native_fn_meta(),
+            Self::InLegacyStepNative => crate::in_legacy_step_native_fn_meta(),
             Self::ToBinaryNative => crate::to_binary_native_fn_meta(),
             Self::FromBinaryNative => crate::from_binary_native_fn_meta(),
             Self::ConvertUsingNative => crate::convert_using_native_fn_meta(),
@@ -5217,6 +5245,10 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn eval_type(self) -> EvalType {
         match self {
+            Self::InTypedValuesNative
+            | Self::InLegacyIntHeadNative
+            | Self::InLegacyStringHeadNative
+            | Self::InLegacyStepNative => EvalType::Bytes,
             Self::LegacyDateArithmeticTextHeadNative
             | Self::LegacyDateArithmeticTimeHeadNative
             | Self::LegacyDateArithmeticDurationHeadNative
@@ -5705,6 +5737,10 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_types(self) -> &'static [EvalType] {
         match self {
+            Self::InTypedValuesNative
+            | Self::InLegacyIntHeadNative
+            | Self::InLegacyStringHeadNative => &[EvalType::Bytes],
+            Self::InLegacyStepNative => &[EvalType::Bytes, EvalType::Bytes],
             Self::LegacyDateArithmeticTextHeadNative
             | Self::LegacyDateArithmeticTimeHeadNative
             | Self::LegacyDateArithmeticDurationHeadNative => &[EvalType::Bytes],
@@ -7253,6 +7289,36 @@ impl EvaluatedArgs {
     }
 
     fn admission_matches(&self, operation: EvaluatedBytesOp) -> bool {
+        if matches!(
+            operation,
+            EvaluatedBytesOp::InTypedValuesNative
+                | EvaluatedBytesOp::InLegacyIntHeadNative
+                | EvaluatedBytesOp::InLegacyStringHeadNative
+        ) {
+            return match self {
+                Self::Bytes(raw) => match operation {
+                    EvaluatedBytesOp::InTypedValuesNative => {
+                        crate::in_typed_values_native_args_valid(raw.as_deref())
+                    }
+                    EvaluatedBytesOp::InLegacyIntHeadNative => {
+                        crate::in_legacy_int_head_native_args_valid(raw.as_deref())
+                    }
+                    EvaluatedBytesOp::InLegacyStringHeadNative => {
+                        crate::in_legacy_string_head_native_args_valid(raw.as_deref())
+                    }
+                    _ => unreachable!(),
+                },
+                _ => false,
+            };
+        }
+        if operation == EvaluatedBytesOp::InLegacyStepNative {
+            return match self {
+                Self::Bytes2(state, reply) => {
+                    crate::in_legacy_step_native_args_valid(state.as_deref(), reply.as_deref())
+                }
+                _ => false,
+            };
+        }
         if matches!(
             operation,
             EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
@@ -11159,6 +11225,51 @@ impl EvaluatedBytesWorker {
             // actual operands and any bound legacy zone through real dispatch.
             budget.check_output(bound, input_bytes)?;
         }
+        if matches!(
+            self.operation,
+            EvaluatedBytesOp::InTypedValuesNative
+                | EvaluatedBytesOp::InLegacyIntHeadNative
+                | EvaluatedBytesOp::InLegacyStringHeadNative
+                | EvaluatedBytesOp::InLegacyStepNative
+        ) {
+            let (first, second) = match (self.operation, &ready[..arity]) {
+                (EvaluatedBytesOp::InTypedValuesNative, [ScalarValue::Bytes(raw)])
+                    if crate::in_typed_values_native_args_valid(raw.as_deref()) =>
+                {
+                    (raw.as_deref(), None)
+                }
+                (EvaluatedBytesOp::InLegacyIntHeadNative, [ScalarValue::Bytes(raw)])
+                    if crate::in_legacy_int_head_native_args_valid(raw.as_deref()) =>
+                {
+                    (raw.as_deref(), None)
+                }
+                (EvaluatedBytesOp::InLegacyStringHeadNative, [ScalarValue::Bytes(raw)])
+                    if crate::in_legacy_string_head_native_args_valid(raw.as_deref()) =>
+                {
+                    (raw.as_deref(), None)
+                }
+                (
+                    EvaluatedBytesOp::InLegacyStepNative,
+                    [ScalarValue::Bytes(state), ScalarValue::Bytes(reply)],
+                ) if crate::in_legacy_step_native_args_valid(
+                    state.as_deref(),
+                    reply.as_deref(),
+                ) =>
+                {
+                    (state.as_deref(), reply.as_deref())
+                }
+                _ => {
+                    return Err(LocalError::InvalidSpec(
+                        "IN operands differ from their fixed stage domain".into(),
+                    ));
+                }
+            };
+            let bound = crate::native_in::native_in_output_bound(first, second)
+                .ok_or_else(evaluated_ascii_storage_overflow)?;
+            // Preserve complete SDK state and the actual reply owners; comparison
+            // and lazy request selection run only in the real producer below.
+            budget.check_output(bound, input_bytes)?;
+        }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
             self.operation,
@@ -11574,6 +11685,48 @@ impl EvaluatedBytesWorker {
                 )
             }
             ScalarValueRef::Bytes(value) => {
+                if matches!(
+                    self.operation,
+                    EvaluatedBytesOp::InTypedValuesNative
+                        | EvaluatedBytesOp::InLegacyIntHeadNative
+                        | EvaluatedBytesOp::InLegacyStringHeadNative
+                        | EvaluatedBytesOp::InLegacyStepNative
+                ) {
+                    use crate::{NativeInRequest as Request, NativeInResult as Report};
+                    let valid = match (
+                        self.operation,
+                        value.and_then(crate::decode_native_in_result),
+                    ) {
+                        (
+                            EvaluatedBytesOp::InTypedValuesNative,
+                            Some(Report::Null | Report::Bool(_)),
+                        ) => true,
+                        (
+                            EvaluatedBytesOp::InLegacyIntHeadNative,
+                            Some(Report::Request {
+                                kind: Request::Int128 { index: 0 },
+                                ..
+                            }),
+                        ) => true,
+                        (
+                            EvaluatedBytesOp::InLegacyStringHeadNative,
+                            Some(Report::Request {
+                                kind: Request::Bytes { index: 0 },
+                                ..
+                            }),
+                        ) => true,
+                        (
+                            EvaluatedBytesOp::InLegacyStepNative,
+                            Some(Report::Null | Report::Bool(_) | Report::Request { .. }),
+                        ) => true,
+                        _ => false,
+                    };
+                    if !valid {
+                        return Err(LocalError::InvalidBatch(
+                            "IN returned an invalid report for its fixed stage".into(),
+                        ));
+                    }
+                }
                 if matches!(
                     self.operation,
                     EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative

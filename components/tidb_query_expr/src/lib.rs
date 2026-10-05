@@ -177,6 +177,17 @@ pub use native_if_null::{
     if_null_finish_native_args_valid, if_null_head_native_args_valid, native_if_null_choose_first,
 };
 
+mod native_in;
+pub use native_in::{
+    NativeInRequest, NativeInResult, NativeInTypedDomain, decode_native_in_result,
+    encode_native_in_legacy_int_head, encode_native_in_legacy_string_head,
+    encode_native_in_typed_values, in_legacy_int_head_native_args_valid,
+    in_legacy_int_head_native_fn_meta, in_legacy_step_native_args_valid,
+    in_legacy_step_native_fn_meta, in_legacy_string_head_native_args_valid,
+    in_legacy_string_head_native_fn_meta, in_typed_values_native_args_valid,
+    in_typed_values_native_fn_meta,
+};
+
 mod native_interval;
 pub use native_interval::{
     NativeIntervalCast, NativeIntervalEvalType, NativeIntervalFieldType, NativeIntervalResult,

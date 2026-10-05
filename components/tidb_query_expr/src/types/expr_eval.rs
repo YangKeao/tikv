@@ -316,6 +316,22 @@ fn evaluated_ready_args_match(
     let types = operation.input_types();
     let arity_matches = match (operation, operation.input_role()) {
         (
+            EvaluatedBytesOp::InTypedValuesNative
+            | EvaluatedBytesOp::InLegacyIntHeadNative
+            | EvaluatedBytesOp::InLegacyStringHeadNative,
+            EvaluatedArgsRole::Values,
+        ) => types.len() == 1 && operation.call_count() == 1,
+        (EvaluatedBytesOp::InLegacyStepNative, EvaluatedArgsRole::Values) => {
+            types.len() == 2 && operation.call_count() == 1
+        }
+        (
+            EvaluatedBytesOp::InTypedValuesNative
+            | EvaluatedBytesOp::InLegacyIntHeadNative
+            | EvaluatedBytesOp::InLegacyStringHeadNative
+            | EvaluatedBytesOp::InLegacyStepNative,
+            _,
+        ) => false,
+        (
             EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
             | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
             | EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative,
@@ -597,6 +613,34 @@ fn evaluated_ready_args_match(
     operation.input_role() == role
         && arity_matches
         && values.len() == types.len()
+        && (operation != EvaluatedBytesOp::InTypedValuesNative
+            || match values {
+                [ScalarValue::Bytes(packet)] => {
+                    crate::in_typed_values_native_args_valid(packet.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::InLegacyIntHeadNative
+            || match values {
+                [ScalarValue::Bytes(packet)] => {
+                    crate::in_legacy_int_head_native_args_valid(packet.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::InLegacyStringHeadNative
+            || match values {
+                [ScalarValue::Bytes(packet)] => {
+                    crate::in_legacy_string_head_native_args_valid(packet.as_deref())
+                }
+                _ => false,
+            })
+        && (operation != EvaluatedBytesOp::InLegacyStepNative
+            || match values {
+                [ScalarValue::Bytes(state), ScalarValue::Bytes(value)] => {
+                    crate::in_legacy_step_native_args_valid(state.as_deref(), value.as_deref())
+                }
+                _ => false,
+            })
         && (operation != EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
             || match values {
                 [ScalarValue::Bytes(metadata)] => {
@@ -1724,6 +1768,22 @@ pub(crate) fn evaluated_bytes_shape(
     let arity = operation.input_types().len();
     let calls = operation.call_count();
     let arity_matches = match (operation, operation.input_role()) {
+        (
+            EvaluatedBytesOp::InTypedValuesNative
+            | EvaluatedBytesOp::InLegacyIntHeadNative
+            | EvaluatedBytesOp::InLegacyStringHeadNative,
+            EvaluatedArgsRole::Values,
+        ) => arity == 1 && calls == 1,
+        (EvaluatedBytesOp::InLegacyStepNative, EvaluatedArgsRole::Values) => {
+            arity == 2 && calls == 1
+        }
+        (
+            EvaluatedBytesOp::InTypedValuesNative
+            | EvaluatedBytesOp::InLegacyIntHeadNative
+            | EvaluatedBytesOp::InLegacyStringHeadNative
+            | EvaluatedBytesOp::InLegacyStepNative,
+            _,
+        ) => false,
         (
             EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative
             | EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative
