@@ -487,8 +487,8 @@ short-circuit admission policy described above.
   clear shape as before. Shared rounding uses the existing Decimal rounder
   and mysql-internal coefficient extractor, not a copied algorithm or text
   round trip. Neither compatibility parser is an alias of wire Decimal.
-  Native binary reading, value/word adapters and ordinary CAST warning/source
-  orchestration remain separate; this is not whole-M2 completion. Datatype
+  Native binary reading and value/word adapters remain separate; ordinary
+  DECIMAL CAST orchestration is shared below, not whole-M2 completion. Datatype
   `time/native_core_arithmetic.rs` owns raw CoreTime date/duration arithmetic
   and the native day-number domain, distinct from wire limits. Existing eight
   child-free Duration-to-Datetime refusals and wrong-reader admission remain
@@ -605,6 +605,18 @@ short-circuit admission policy described above.
   rounding/clip/boundary/NaN policy and is untouched. Other CAST domains, outer
   NULL and UNION's negative bypass are not covered by this slice, and no whole
   CAST family or new wire admission is credited.
+  Ordinary DECIMAL CAST uses the pure synchronous `native_cast_decimal.rs`
+  controller. SDK input warnings run before conversion; warning parsing trims
+  Unicode while actual String/Bytes parsing keeps original bytes. Real retains
+  Rust Display plus its own prefix/exponent policy. Float32/Other request the
+  original default-context native conversion and return actual value/event/error;
+  SDK discards that event or folds the error, never a host-computed zero.
+  SDK also owns unspecified-scale bypass and precision diagnostics. Narrow
+  SmallVec/five-field raw transport and DTO cast/round methods reuse existing
+  datatype algorithms. The input-warning helper is shared with existing UNION
+  callers, without moving their negative bypass. No extra profile, C4 admission
+  or carrier is added. Outer guards, numeric-argument/vector fast paths, native
+  datatype conversion actuators and other targets remain explicit separate work.
   NULLIF adds one closed `NullIfNative` Values profile on existing BytesInt
   transport: actual left identity, then canonical nullable comparison result.
   `native_if.rs` validates both actual inputs even when equality selects NULL;

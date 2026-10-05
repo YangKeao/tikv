@@ -89,6 +89,12 @@ pub use native_date_arithmetic::{
     native_format_decimal_composite_interval,
 };
 
+mod native_cast_decimal;
+pub use native_cast_decimal::{
+    NativeCastDecimalInput, decimal_prefix as native_cast_decimal_prefix, native_cast_decimal,
+    native_cast_decimal_input_warning,
+};
+
 mod native_legacy_date_arithmetic;
 pub use native_legacy_date_arithmetic::{
     NativeLegacyDateArithmeticChannel, NativeLegacyDateArithmeticDateKind,

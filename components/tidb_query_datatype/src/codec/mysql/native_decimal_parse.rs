@@ -5,7 +5,10 @@
 
 use smallvec::SmallVec;
 
-use super::{decimal::Decimal, native_decimal_codec::DecimalCodecWarning};
+use super::{
+    decimal::{Decimal, NativeDecimalError},
+    native_decimal_codec::DecimalCodecWarning,
+};
 
 const DIGITS_PER_WORD: usize = 9;
 
@@ -46,6 +49,26 @@ pub struct NativeDecimalParseValue {
 }
 
 impl NativeDecimalParseValue {
+    /// Takes ownership of exact coefficient storage and metadata without ASCII
+    /// or UTF-8 checks, normalization, or scale/shape validation. This
+    /// transport constructor does not admit the value to arithmetic or
+    /// formatting.
+    pub fn from_raw_parts(
+        negative: bool,
+        digits: SmallVec<[u8; 24]>,
+        scale: u32,
+        storage_scale: u32,
+        declared_shape: Option<(i64, i64)>,
+    ) -> Self {
+        Self {
+            negative,
+            digits,
+            scale,
+            storage_scale,
+            declared_shape,
+        }
+    }
+
     /// Moves the coefficient allocation (or inline bytes) to its native facade.
     pub fn into_raw_parts(self) -> (bool, SmallVec<[u8; 24]>, u32, u32, Option<(i64, i64)>) {
         (
@@ -57,7 +80,9 @@ impl NativeDecimalParseValue {
         )
     }
 
-    fn as_ref(&self) -> NativeDecimalParseRef<'_> {
+    /// Borrows the exact coefficient and all metadata without validation or
+    /// normalization, including raw values not admitted to decimal arithmetic.
+    pub fn as_ref(&self) -> NativeDecimalParseRef<'_> {
         NativeDecimalParseRef {
             negative: self.negative,
             digits: &self.digits,
@@ -118,10 +143,7 @@ impl NativeDecimalParseValue {
         )
     }
 
-    fn round_to_scale(&self, target_scale: i32) -> Self {
-        // Reuse the existing shared rounder and its exact coefficient extractor;
-        // never substitute visible text or the nine-word MyDecimal carrier.
-        let result_scale = target_scale.max(0) as u32;
+    fn try_to_shared(&self) -> Result<Decimal, NativeDecimalError> {
         Decimal::try_from_native_digits(
             self.negative,
             digit_str(&self.digits).as_bytes(),
@@ -129,26 +151,50 @@ impl NativeDecimalParseValue {
             self.scale,
             usize::MAX,
         )
-        .and_then(|value| {
-            value.try_native_round_with_storage(target_scale, true, result_scale, usize::MAX)
+    }
+
+    fn from_shared(value: Decimal) -> Result<Self, NativeDecimalError> {
+        let digits = value.native_canonical_coefficient_digits(usize::MAX)?;
+        let parts = value.words();
+        Ok(Self {
+            negative: parts.negative,
+            digits: SmallVec::from_vec(digits),
+            scale: parts.result_frac,
+            storage_scale: parts.storage_frac,
+            declared_shape: None,
         })
-        .and_then(|value| {
-            let digits = value.native_canonical_coefficient_digits(usize::MAX)?;
-            let parts = value.words();
-            Ok(Self {
-                negative: parts.negative,
-                digits: SmallVec::from_vec(digits),
-                scale: parts.result_frac,
-                storage_scale: parts.storage_frac,
-                declared_shape: None,
+    }
+
+    /// Applies the existing native half-up rounder with its original scale
+    /// policy. Produces a fresh value with no declared shape; invalid
+    /// arithmetic input or core/resource failure panics rather than
+    /// becoming a SQL warning.
+    pub fn round_to_scale(&self, target_scale: i32) -> Self {
+        let result_scale = target_scale.max(0) as u32;
+        self.try_to_shared()
+            .and_then(|value| {
+                value.try_native_round_with_storage(target_scale, true, result_scale, usize::MAX)
             })
-        })
-        .expect("shared native decimal rounding failed")
+            .and_then(Self::from_shared)
+            .expect("shared native decimal rounding failed")
+    }
+
+    /// Applies the existing native precision-cast primitive, without imposing
+    /// additional SQL precision/scale limits. The fresh result clears declared
+    /// shape. Source-specific warning decisions belong to the calling pipeline;
+    /// invalid arithmetic input or core/resource failure retains the panic API.
+    pub fn cast_to_precision(&self, flen: u32, scale: u32) -> Self {
+        self.try_to_shared()
+            .and_then(|value| value.try_native_cast_to_precision(flen, scale, usize::MAX))
+            .and_then(Self::from_shared)
+            .expect("shared native decimal precision cast failed")
     }
 }
 
 impl NativeDecimalParseRef<'_> {
-    fn copy_raw(self) -> NativeDecimalParseValue {
+    /// Copies raw bytes and every metadata field using the native SmallVec
+    /// inline width. Does not inspect UTF-8, normalize zero or clear shape.
+    pub fn copy_raw(self) -> NativeDecimalParseValue {
         NativeDecimalParseValue {
             negative: self.negative,
             digits: SmallVec::from_slice(self.digits),
