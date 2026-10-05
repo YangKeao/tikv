@@ -605,6 +605,18 @@ short-circuit admission policy described above.
   rounding/clip/boundary/NaN policy and is untouched. Other CAST domains, outer
   NULL and UNION's negative bypass are not covered by this slice, and no whole
   CAST family or new wire admission is credited.
+  Integer CAST uses `native_cast_integer.rs` for SIGNED, UNSIGNED and the
+  static-eval-type UNION negative gate, plus the existing value-only and input
+  warning entry contracts. SDK owns scanning, diagnostics and source choice.
+  Signed warning effects precede its unconditional zone read; unsigned requests
+  zone only on its original signed-conversion branches. Structured JSON alone
+  requests diagnostic rendering. Datatype conversions return actual values,
+  events and errors for SDK disposition; the existing RealUnsigned facade's
+  errors propagate, with no added or skipped facade. Borrowed rounded-integer
+  Decimal primitives live in `mysql/native_decimal_parse.rs`, preserving raw
+  storage, overflow/panic rules and differing signed/unsigned empty behavior.
+  They are not truncation or wire aliases. Outer guards and other targets or
+  typed/vector routes remain separate, with no whole-CAST credit.
   Ordinary DECIMAL CAST uses the pure synchronous `native_cast_decimal.rs`
   controller. SDK input warnings run before conversion; warning parsing trims
   Unicode while actual String/Bytes parsing keeps original bytes. Real retains

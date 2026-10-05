@@ -192,6 +192,75 @@ impl NativeDecimalParseValue {
 }
 
 impl NativeDecimalParseRef<'_> {
+    /// Native half-up signed integer projection over actual storage digits.
+    /// Ignores visible scale and declared shape; preserves the original raw
+    /// coefficient parsing and UTF-8/slicing panic domain without
+    /// normalization.
+    pub fn round_to_i64(self) -> Option<i64> {
+        let digits = digit_str(self.digits);
+        let split = digits.len() - self.storage_scale as usize;
+        let int_part = if split == 0 { "0" } else { &digits[..split] };
+        // The negative signed limit has magnitude i64::MAX + 1. Check the
+        // signed range only after half-up rounding the unsigned magnitude.
+        let mut magnitude: u64 = int_part.parse().ok()?;
+        if self.storage_scale != 0 && digits.as_bytes()[split] >= b'5' {
+            magnitude = magnitude.checked_add(1)?;
+        }
+        if self.negative && magnitude == i64::MIN.unsigned_abs() {
+            return Some(i64::MIN);
+        }
+        let magnitude = i64::try_from(magnitude).ok()?;
+        Some(if self.negative { -magnitude } else { magnitude })
+    }
+
+    /// The native signed projection with its original raw-sign saturation.
+    /// SQL warning decisions remain with the calling shared expression policy.
+    pub fn round_to_i64_saturating(self) -> i64 {
+        self.round_to_i64()
+            .unwrap_or(if self.negative { i64::MIN } else { i64::MAX })
+    }
+
+    /// Native unsigned half-up projection: negative nonzero results clamp to
+    /// zero, positive overflow to u64::MAX. A negative value rounding to zero
+    /// remains zero; this must not be replaced by the truncating ToUint policy.
+    #[must_use]
+    pub fn round_to_u64_saturating(self) -> u64 {
+        match self.rounded_magnitude_u64() {
+            Some(magnitude) => {
+                if self.negative && magnitude != 0 {
+                    0
+                } else {
+                    magnitude
+                }
+            }
+            None => {
+                if self.negative {
+                    0
+                } else {
+                    u64::MAX
+                }
+            }
+        }
+    }
+
+    fn rounded_magnitude_u64(self) -> Option<u64> {
+        let digits = digit_str(self.digits);
+        // Preserve the source's separate zero-scale path: an empty raw
+        // coefficient fails unsigned parsing, while round_to_i64 selects "0".
+        if self.storage_scale == 0 {
+            return digits.parse::<u64>().ok();
+        }
+        let split = digits.len() - self.storage_scale as usize;
+        let int_part = if split == 0 { "0" } else { &digits[..split] };
+        let round_up = digits.as_bytes()[split] >= b'5';
+        let magnitude: u64 = int_part.parse().ok()?;
+        if round_up {
+            magnitude.checked_add(1)
+        } else {
+            Some(magnitude)
+        }
+    }
+
     /// Copies raw bytes and every metadata field using the native SmallVec
     /// inline width. Does not inspect UTF-8, normalize zero or clear shape.
     pub fn copy_raw(self) -> NativeDecimalParseValue {
@@ -651,5 +720,79 @@ mod tests {
             rounded.into_raw_parts(),
             (false, SmallVec::from_slice(b"123456790"), 9, 9, None)
         );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn native_decimal_rounded_integer_preserves_raw_storage_and_limits() {
+    // Literal source expectations over raw storage, not a normalized decimal
+    // or an invocation of another provider's integer conversion.
+    for (negative, digits, storage_scale, signed, saturated, unsigned) in [
+        (false, "1499", 3, Some(1), 1, 1),
+        (false, "1500", 3, Some(2), 2, 2),
+        (true, "4", 1, Some(0), 0, 0),
+        (true, "5", 1, Some(-1), -1, 0),
+        (true, "0", 0, Some(0), 0, 0),
+        (
+            false,
+            "9223372036854775807",
+            0,
+            Some(i64::MAX),
+            i64::MAX,
+            9_223_372_036_854_775_807,
+        ),
+        (
+            false,
+            "92233720368547758075",
+            1,
+            None,
+            i64::MAX,
+            9_223_372_036_854_775_808,
+        ),
+        (true, "92233720368547758084", 1, Some(i64::MIN), i64::MIN, 0),
+        (true, "92233720368547758085", 1, None, i64::MIN, 0),
+        (false, "184467440737095516154", 1, None, i64::MAX, u64::MAX),
+        (false, "184467440737095516155", 1, None, i64::MAX, u64::MAX),
+        (false, "", 0, Some(0), 0, u64::MAX),
+        (true, "", 0, Some(0), 0, 0),
+        (false, "+17", 0, Some(17), 17, 17),
+        (false, "x", 0, None, i64::MAX, u64::MAX),
+        (true, "x", 0, None, i64::MIN, 0),
+    ] {
+        let value = NativeDecimalParseRef {
+            negative,
+            digits: digits.as_bytes(),
+            scale: u32::MAX,
+            storage_scale,
+            declared_shape: Some((i64::MIN, i64::MAX)),
+        };
+        assert_eq!(
+            value.round_to_i64(),
+            signed,
+            "{negative}/{digits}/{storage_scale}"
+        );
+        assert_eq!(
+            value.round_to_i64_saturating(),
+            saturated,
+            "{negative}/{digits}/{storage_scale}"
+        );
+        assert_eq!(
+            value.round_to_u64_saturating(),
+            unsigned,
+            "{negative}/{digits}/{storage_scale}"
+        );
+    }
+    for (digits, storage_scale) in [(&[0xff][..], 0), (&b"1"[..], 2), ("é".as_bytes(), 1)] {
+        let value = NativeDecimalParseRef {
+            negative: true,
+            digits,
+            scale: 0,
+            storage_scale,
+            declared_shape: None,
+        };
+        assert!(std::panic::catch_unwind(|| value.round_to_i64()).is_err());
+        assert!(std::panic::catch_unwind(|| value.round_to_i64_saturating()).is_err());
+        assert!(std::panic::catch_unwind(|| value.round_to_u64_saturating()).is_err());
     }
 }

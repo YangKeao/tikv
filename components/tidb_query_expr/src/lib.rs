@@ -95,6 +95,13 @@ pub use native_cast_decimal::{
     native_cast_decimal_input_warning,
 };
 
+mod native_cast_integer;
+pub use native_cast_integer::{
+    NativeCastIntegerEvalType, NativeCastIntegerInput, NativeCastIntegerResult,
+    NativeCastIntegerTarget, native_cast_integer, native_cast_integer_input_warning,
+    native_cast_integer_signed_value, native_cast_integer_unsigned_value,
+};
+
 mod native_legacy_date_arithmetic;
 pub use native_legacy_date_arithmetic::{
     NativeLegacyDateArithmeticChannel, NativeLegacyDateArithmeticDateKind,
