@@ -611,9 +611,13 @@ short-circuit admission policy described above.
   typed Binary decodes, unlike Datum JSON's raw clone. `codec/native_mysql_json.rs`
   owns ordinary/source-aware Datum conversion using the shared SQL-string view.
   Raw Float32/temporal values, source collation/code identity, resize and distinct
-  UTF8/fallback errors remain separate. Native text parsing, surrogate rewriting,
-  serde container traversal and expression JSON controllers are unchanged; no
-  whole JSON/M2 completion follows.
+  UTF8/fallback errors remain separate. `codec/native_json_parse.rs` owns the
+  datatype text parser, original global surrogate rewrite and serde traversal.
+  Crate-only array/object writers in `mysql/json/native_codec.rs` share container
+  layout while retaining serde key-before-child and typed-node child-before-key
+  ordering, literal access and offset arithmetic. Datatype lenient parsing is
+  distinct from expression strict parsing; expression JSON controllers remain
+  unchanged and whole JSON/M2 completion does not follow.
   VECTOR CAST uses `native_cast_vector.rs` over shared datatype
   `codec/native_vector_convert.rs`, also used by native convert_to_vector.
   Existing vectors clone without new finite/global-dimension validation; text

@@ -65,30 +65,227 @@ fn encode_node<T>(
     }
 }
 
+// These policies are private writer details, never tags carried by a value.
+#[derive(Clone, Copy)]
+enum LiteralPolicy {
+    Index,
+    Checked,
+}
+#[derive(Clone, Copy)]
+enum OffsetPolicy {
+    Plain,
+    Checked,
+}
+
+// One owner for value-entry layout, payload appending and final header writes.
+struct NativeJsonContainerLayout {
+    type_code: u8,
+    count: usize,
+    value_entry_start: usize,
+    value_data_start: usize,
+    output: Vec<u8>,
+    payload: Vec<u8>,
+}
+
+impl NativeJsonContainerLayout {
+    fn push(
+        &mut self,
+        index: usize,
+        type_code: u8,
+        value: &[u8],
+        literal_policy: LiteralPolicy,
+        offset_policy: OffsetPolicy,
+    ) -> Result<(), NativeBinaryJsonEncodeError> {
+        let entry = self.value_entry_start + index * VALUE_ENTRY_SIZE;
+        self.output[entry] = type_code;
+        if type_code == JSON_TYPE_CODE_LITERAL {
+            self.output[entry + 1] = match literal_policy {
+                LiteralPolicy::Index => value[0],
+                LiteralPolicy::Checked => *value
+                    .first()
+                    .ok_or(NativeBinaryJsonEncodeError::InvalidBinary)?,
+            };
+        } else {
+            let offset = match offset_policy {
+                OffsetPolicy::Plain => u32::try_from(self.value_data_start + self.payload.len())
+                    .map_err(|_| NativeBinaryJsonEncodeError::InvalidBinary)?,
+                OffsetPolicy::Checked => self
+                    .value_data_start
+                    .checked_add(self.payload.len())
+                    .and_then(|offset| u32::try_from(offset).ok())
+                    .ok_or(NativeBinaryJsonEncodeError::InvalidBinary)?,
+            };
+            self.output[entry + 1..entry + 5].copy_from_slice(&offset.to_le_bytes());
+            self.payload.extend_from_slice(value);
+        }
+        Ok(())
+    }
+
+    fn finish(mut self, keys: &[u8]) -> Result<(u8, Vec<u8>), NativeBinaryJsonEncodeError> {
+        self.output.extend_from_slice(keys);
+        self.output.extend_from_slice(&self.payload);
+        write_native_binary_json_header(&mut self.output, self.count)?;
+        Ok((self.type_code, self.output))
+    }
+}
+
+/// Staged native array layout. Callers retain their own child-conversion order.
+pub(crate) struct NativeJsonArrayWriter {
+    layout: NativeJsonContainerLayout,
+}
+
+impl NativeJsonArrayWriter {
+    pub(crate) fn new(count: usize) -> Self {
+        let data_start = HEADER_SIZE + count * VALUE_ENTRY_SIZE;
+        let output = vec![0; data_start];
+        let payload = Vec::new();
+        Self {
+            layout: NativeJsonContainerLayout {
+                type_code: JSON_TYPE_CODE_ARRAY,
+                count,
+                value_entry_start: HEADER_SIZE,
+                value_data_start: data_start,
+                output,
+                payload,
+            },
+        }
+    }
+
+    pub(crate) fn push_serde(
+        &mut self,
+        index: usize,
+        type_code: u8,
+        value: &[u8],
+    ) -> Result<(), NativeBinaryJsonEncodeError> {
+        self.layout.push(
+            index,
+            type_code,
+            value,
+            LiteralPolicy::Index,
+            OffsetPolicy::Checked,
+        )
+    }
+
+    pub(crate) fn push_node(
+        &mut self,
+        index: usize,
+        type_code: u8,
+        value: &[u8],
+    ) -> Result<(), NativeBinaryJsonEncodeError> {
+        self.layout.push(
+            index,
+            type_code,
+            value,
+            LiteralPolicy::Checked,
+            OffsetPolicy::Plain,
+        )
+    }
+
+    pub(crate) fn finish(self) -> Result<(u8, Vec<u8>), NativeBinaryJsonEncodeError> {
+        self.layout.finish(&[])
+    }
+}
+
+/// Staged native object layout. The caller supplies sorted keys and determines
+/// whether child conversion happens before construction or after each key
+/// write.
+pub(crate) struct NativeJsonObjectWriter {
+    layout: NativeJsonContainerLayout,
+    key_data_start: usize,
+    keys: Vec<u8>,
+}
+
+impl NativeJsonObjectWriter {
+    pub(crate) fn new<'a>(
+        mut keys: impl ExactSizeIterator<Item = &'a str>,
+    ) -> Result<Self, NativeBinaryJsonEncodeError> {
+        let count = keys.len();
+        let value_entry_start = HEADER_SIZE + count * KEY_ENTRY_SIZE;
+        let key_data_start = value_entry_start + count * VALUE_ENTRY_SIZE;
+        let key_bytes = keys.try_fold(0_usize, |total, key| {
+            if key.len() > u16::MAX as usize {
+                Err(NativeBinaryJsonEncodeError::KeyTooLong)
+            } else {
+                total
+                    .checked_add(key.len())
+                    .ok_or(NativeBinaryJsonEncodeError::InvalidBinary)
+            }
+        })?;
+        let value_data_start = key_data_start + key_bytes;
+        let output = vec![0; key_data_start];
+        let keys = Vec::with_capacity(key_bytes);
+        let payload = Vec::new();
+        Ok(Self {
+            layout: NativeJsonContainerLayout {
+                type_code: JSON_TYPE_CODE_OBJECT,
+                count,
+                value_entry_start,
+                value_data_start,
+                output,
+                payload,
+            },
+            key_data_start,
+            keys,
+        })
+    }
+
+    pub(crate) fn push_key(
+        &mut self,
+        index: usize,
+        key: &str,
+    ) -> Result<(), NativeBinaryJsonEncodeError> {
+        let entry = HEADER_SIZE + index * KEY_ENTRY_SIZE;
+        let offset = u32::try_from(self.key_data_start + self.keys.len())
+            .map_err(|_| NativeBinaryJsonEncodeError::InvalidBinary)?;
+        self.layout.output[entry..entry + 4].copy_from_slice(&offset.to_le_bytes());
+        self.layout.output[entry + 4..entry + 6].copy_from_slice(&(key.len() as u16).to_le_bytes());
+        self.keys.extend_from_slice(key.as_bytes());
+        Ok(())
+    }
+
+    pub(crate) fn push_value_serde(
+        &mut self,
+        index: usize,
+        type_code: u8,
+        value: &[u8],
+    ) -> Result<(), NativeBinaryJsonEncodeError> {
+        self.layout.push(
+            index,
+            type_code,
+            value,
+            LiteralPolicy::Index,
+            OffsetPolicy::Plain,
+        )
+    }
+
+    pub(crate) fn push_value_node(
+        &mut self,
+        index: usize,
+        type_code: u8,
+        value: &[u8],
+    ) -> Result<(), NativeBinaryJsonEncodeError> {
+        self.layout.push(
+            index,
+            type_code,
+            value,
+            LiteralPolicy::Checked,
+            OffsetPolicy::Plain,
+        )
+    }
+
+    pub(crate) fn finish(self) -> Result<(u8, Vec<u8>), NativeBinaryJsonEncodeError> {
+        self.layout.finish(&self.keys)
+    }
+}
+
 fn encode_binary_array(
     values: &[(u8, Vec<u8>)],
 ) -> Result<(u8, Vec<u8>), NativeBinaryJsonEncodeError> {
-    let data_start = HEADER_SIZE + values.len() * VALUE_ENTRY_SIZE;
-    let mut output = vec![0; data_start];
-    let mut payload = Vec::new();
+    let mut writer = NativeJsonArrayWriter::new(values.len());
     for (index, value) in values.iter().enumerate() {
-        let entry = HEADER_SIZE + index * VALUE_ENTRY_SIZE;
-        output[entry] = value.0;
-        if value.0 == JSON_TYPE_CODE_LITERAL {
-            output[entry + 1] = *value
-                .1
-                .first()
-                .ok_or(NativeBinaryJsonEncodeError::InvalidBinary)?;
-        } else {
-            let offset = u32::try_from(data_start + payload.len())
-                .map_err(|_| NativeBinaryJsonEncodeError::InvalidBinary)?;
-            output[entry + 1..entry + 5].copy_from_slice(&offset.to_le_bytes());
-            payload.extend_from_slice(&value.1);
-        }
+        writer.push_node(index, value.0, &value.1)?;
     }
-    output.extend_from_slice(&payload);
-    write_native_binary_json_header(&mut output, values.len())?;
-    Ok((JSON_TYPE_CODE_ARRAY, output))
+    writer.finish()
 }
 
 fn encode_binary_object(
@@ -96,48 +293,12 @@ fn encode_binary_object(
 ) -> Result<(u8, Vec<u8>), NativeBinaryJsonEncodeError> {
     let mut values = values.to_vec();
     values.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
-    let key_entry_start = HEADER_SIZE;
-    let value_entry_start = key_entry_start + values.len() * KEY_ENTRY_SIZE;
-    let key_data_start = value_entry_start + values.len() * VALUE_ENTRY_SIZE;
-    let key_bytes = values.iter().try_fold(0_usize, |total, (key, _)| {
-        if key.len() > u16::MAX as usize {
-            Err(NativeBinaryJsonEncodeError::KeyTooLong)
-        } else {
-            total
-                .checked_add(key.len())
-                .ok_or(NativeBinaryJsonEncodeError::InvalidBinary)
-        }
-    })?;
-    let value_data_start = key_data_start + key_bytes;
-    let mut output = vec![0; key_data_start];
-    let mut keys = Vec::with_capacity(key_bytes);
-    let mut payload = Vec::new();
+    let mut writer = NativeJsonObjectWriter::new(values.iter().map(|(key, _)| *key))?;
     for (index, (key, value)) in values.iter().enumerate() {
-        let key_entry = key_entry_start + index * KEY_ENTRY_SIZE;
-        let key_offset = u32::try_from(key_data_start + keys.len())
-            .map_err(|_| NativeBinaryJsonEncodeError::InvalidBinary)?;
-        output[key_entry..key_entry + 4].copy_from_slice(&key_offset.to_le_bytes());
-        output[key_entry + 4..key_entry + 6].copy_from_slice(&(key.len() as u16).to_le_bytes());
-        keys.extend_from_slice(key.as_bytes());
-
-        let value_entry = value_entry_start + index * VALUE_ENTRY_SIZE;
-        output[value_entry] = value.0;
-        if value.0 == JSON_TYPE_CODE_LITERAL {
-            output[value_entry + 1] = *value
-                .1
-                .first()
-                .ok_or(NativeBinaryJsonEncodeError::InvalidBinary)?;
-        } else {
-            let offset = u32::try_from(value_data_start + payload.len())
-                .map_err(|_| NativeBinaryJsonEncodeError::InvalidBinary)?;
-            output[value_entry + 1..value_entry + 5].copy_from_slice(&offset.to_le_bytes());
-            payload.extend_from_slice(&value.1);
-        }
+        writer.push_key(index, key)?;
+        writer.push_value_node(index, value.0, &value.1)?;
     }
-    output.extend_from_slice(&keys);
-    output.extend_from_slice(&payload);
-    write_native_binary_json_header(&mut output, values.len())?;
-    Ok((JSON_TYPE_CODE_OBJECT, output))
+    writer.finish()
 }
 
 /// Writes a checked native header into an existing container buffer. As in the
@@ -264,5 +425,99 @@ mod tests {
         }
         write_native_binary_json_header(&mut header, 1).unwrap();
         assert_eq!(header, [1, 0, 0, 0, 8, 0, 0, 0]);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn staged_writers_keep_fixed_layout_and_distinct_literal_offset_policies() {
+    use NativeBinaryJsonEncodeError::{InvalidBinary, KeyTooLong};
+    for serde in [false, true] {
+        let mut array = NativeJsonArrayWriter::new(2);
+        assert_eq!(&array.layout.output[..8], &[0; 8]);
+        if serde {
+            array.push_serde(0, 0x04, &[1, 99]).unwrap();
+            array.push_serde(1, 0x0c, &[1, b'a']).unwrap();
+        } else {
+            array.push_node(0, 0x04, &[1, 99]).unwrap();
+            array.push_node(1, 0x0c, &[1, b'a']).unwrap();
+        }
+        assert_eq!(
+            array.finish().unwrap(),
+            (
+                0x03,
+                vec![
+                    2, 0, 0, 0, 20, 0, 0, 0, 0x04, 1, 0, 0, 0, 0x0c, 18, 0, 0, 0, 1, b'a',
+                ]
+            )
+        );
+        let mut object = NativeJsonObjectWriter::new(["a", "b"].into_iter()).unwrap();
+        object.push_key(0, "a").unwrap();
+        assert_eq!(object.keys, b"a");
+        assert_eq!(object.layout.output[20], 0);
+        if serde {
+            object.push_value_serde(0, 0x04, &[1]).unwrap();
+        } else {
+            object.push_value_node(0, 0x04, &[1]).unwrap();
+        }
+        object.push_key(1, "b").unwrap();
+        if serde {
+            object.push_value_serde(1, 0x0c, &[1, b'x']).unwrap();
+        } else {
+            object.push_value_node(1, 0x0c, &[1, b'x']).unwrap();
+        }
+        assert_eq!(
+            object.finish().unwrap(),
+            (
+                0x01,
+                vec![
+                    2, 0, 0, 0, 34, 0, 0, 0, 30, 0, 0, 0, 1, 0, 31, 0, 0, 0, 1, 0, 0x04, 1, 0, 0,
+                    0, 0x0c, 32, 0, 0, 0, b'a', b'b', 1, b'x',
+                ]
+            )
+        );
+    }
+    let mut array = NativeJsonArrayWriter::new(1);
+    assert_eq!(array.push_node(0, 0x04, &[]), Err(InvalidBinary));
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| array.push_serde(
+            0,
+            0x04,
+            &[]
+        )))
+        .is_err()
+    );
+    let mut object = NativeJsonObjectWriter::new(["a"].into_iter()).unwrap();
+    object.push_key(0, "a").unwrap();
+    assert_eq!(object.push_value_node(0, 0x04, &[]), Err(InvalidBinary));
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| object.push_value_serde(
+            0,
+            0x04,
+            &[]
+        )))
+        .is_err()
+    );
+    let long_key = "x".repeat(usize::from(u16::MAX) + 1);
+    assert!(matches!(
+        NativeJsonObjectWriter::new([long_key.as_str()].into_iter()),
+        Err(KeyTooLong)
+    ));
+    // Exercise offsets without allocating multi-gigabyte containers. Checked
+    // serde-array addition must reject usize overflow before a payload append.
+    let mut array = NativeJsonArrayWriter::new(1);
+    array.layout.value_data_start = usize::MAX;
+    array.layout.payload.push(0);
+    assert_eq!(array.push_serde(0, 0x0c, &[0]), Err(InvalidBinary));
+    assert_eq!(array.layout.payload, [0]);
+    if let Ok(too_large) = usize::try_from(u64::from(u32::MAX) + 1) {
+        let mut array = NativeJsonArrayWriter::new(1);
+        array.layout.value_data_start = too_large;
+        assert_eq!(array.push_node(0, 0x0c, &[0]), Err(InvalidBinary));
+        let mut object = NativeJsonObjectWriter::new(["a"].into_iter()).unwrap();
+        object.key_data_start = too_large;
+        assert_eq!(object.push_key(0, "a"), Err(InvalidBinary));
+        assert!(object.keys.is_empty());
+        assert_eq!(&object.layout.output[8..14], &[0; 6]);
     }
 }

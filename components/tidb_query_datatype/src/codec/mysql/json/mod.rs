@@ -92,6 +92,7 @@ use codec::number::{F64_SIZE, I64_SIZE, NumberCodec};
 use constants::{JSON_LITERAL_FALSE, JSON_LITERAL_NIL, JSON_LITERAL_TRUE};
 use tikv_util::is_even;
 
+pub(crate) use self::native_codec::{NativeJsonArrayWriter, NativeJsonObjectWriter};
 pub use self::{
     jcodec::{JsonDatumPayloadChunkEncoder, JsonDecoder, JsonEncoder},
     json_depth::{native_json_depth, native_json_depth_from_children},
