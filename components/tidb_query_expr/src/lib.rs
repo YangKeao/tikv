@@ -102,6 +102,9 @@ pub use native_cast_integer::{
     native_cast_integer_signed_value, native_cast_integer_unsigned_value,
 };
 
+mod native_coerce_string;
+pub use native_coerce_string::native_coerce_string;
+
 mod native_cast_duration;
 pub use native_cast_duration::{
     NativeDurationCastOutcome, NativeDurationCastSource, native_cast_arg_as_duration,

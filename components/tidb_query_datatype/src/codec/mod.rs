@@ -30,6 +30,7 @@ pub mod native_json_parse;
 pub mod native_mysql_json;
 pub mod native_sql_string;
 pub mod native_string_type;
+pub mod native_temporal_convert;
 pub mod native_type_name;
 pub mod native_vector_convert;
 mod overflow;

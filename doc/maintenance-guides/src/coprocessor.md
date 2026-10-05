@@ -642,6 +642,13 @@ short-circuit admission policy described above.
   the SDK controller also preserves the internal VECTOR arm's direct NULL result. JSON ordinary/typed/value
   coercion and typed datatype construction are shared by the modules described
   above; generic typed child evaluation and other CAST domains remain.
+  `codec/native_temporal_convert.rs` owns raw kind conversion, temporal rounding,
+  duration calendar/year conversion and year adjustment/parsing. Native methods
+  retain only raw value/event projection. DATE/zero fast returns, timestamp-gap
+  metadata reset, round-time reprojection and duration-midnight behavior stay
+  distinct. `native_coerce_string.rs` owns generic expression string coercion,
+  including Rust float display and kind-specific UTF-8 errors; it is not SQL
+  float rendering. YEAR/DATE controllers and signed-datum fallback remain native.
   `native_cast_duration.rs` owns ordinary, argument and computed TIME conversion.
   Its native bridge supplies only lazy zone metadata, applies a generic truncate
   effect and wraps raw parts. `codec/native_duration_convert.rs` owns rounding,
