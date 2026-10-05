@@ -605,6 +605,14 @@ short-circuit admission policy described above.
   rounding/clip/boundary/NaN policy and is untouched. Other CAST domains, outer
   NULL and UNION's negative bypass are not covered by this slice, and no whole
   CAST family or new wire admission is credited.
+  `codec/native_sql_string.rs` owns native SQL byte/string source selection
+  across19 actual variants, strict UTF8 stages, sentinel errors and fixed/scientific
+  float primitives. Borrowed Decimal/Time/Duration/JSON/vector views reuse existing
+  shared formatters without normalization or host formatting callbacks. Raw bytes
+  validate before cloning; other byte kinds retain their distinct unchecked byte
+  result. JSON keeps the original Display-error panic; Float32 narrows in the
+  selected SDK primitive. General diagnostic/row/value-expression selectors stay
+  outside this scope; only their existing scientific float primitive is shared.
   CHAR/BINARY CAST uses `native_cast_string.rs` for source/YEAR-zero choice,
   charset demand, existing encoding DECODE, diagnostics and truncation/padding.
   Exact explicit BINARY CHAR retains its early byte route without YEAR, charset
@@ -613,9 +621,9 @@ short-circuit admission policy described above.
   the handler's repeated limit/policy reads and errors are not cached away.
   `codec/native_string_type.rs` owns native string classification, preserving
   named versus Other codes and native array code views rather than canonicalizing
-  raw bytes through wire types. Native sql_string remains an actual datatype
-  service with its internal selector still pending; no whole-CAST/M2 or new
-  profile/admission claim follows.
+  raw bytes through wire types. Native sql_string remains the datatype API but
+  its implementation now delegates to the shared module above; no whole-CAST/M2
+  or new profile/admission claim follows.
   DOUBLE/FLOAT CAST uses `native_cast_float.rs`, with a distinct value-only
   entry for strict UTF8/Decimal-prefix conversion. Ordinary text instead uses
   lossy UTF8 and `codec/native_float_parse.rs`; all ordinary JSON requests its
