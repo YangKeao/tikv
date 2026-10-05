@@ -103,6 +103,9 @@ pub use native_cast_integer::{
     native_cast_integer_signed_value, native_cast_integer_unsigned_value,
 };
 
+mod native_cast_time;
+pub use native_cast_time::{NativeTimeCastModes, native_cast_arg_as_datetime, native_cast_time};
+
 mod native_cast_year;
 pub use native_cast_year::native_cast_year;
 

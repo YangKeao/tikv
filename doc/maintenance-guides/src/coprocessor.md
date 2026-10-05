@@ -648,7 +648,12 @@ short-circuit admission policy described above.
   metadata reset, round-time reprojection and duration-midnight behavior stay
   distinct. `native_coerce_string.rs` owns generic expression string coercion,
   including Rust float display and kind-specific UTF-8 errors; it is not SQL
-  float rendering. DATE/DATETIME expression controllers remain native.
+  float rendering. `native_cast_time.rs` owns explicit/computed/argument temporal
+  control, source-aware parser selection, warning classification and DATE clock
+  finishing. Native supplies actual views/source metadata, lazy modes/clock/zone
+  getters and warning effects. YEAR/Duration early returns and argument Time/NULL
+  passthrough remain distinct; warning fallback uses datatype signed conversion
+  in UTC, and DST formatting repeats the original zone read.
   `native_cast_year.rs` owns YEAR selection, clock/zone/concat demand and exact
   error folding. Native supplies only actual value views and lazy data getters.
   Its non-duration path uses shared string/date parsing then UTC signed casting.
@@ -665,7 +670,7 @@ short-circuit admission policy described above.
   outcome lives in `mysql/binary_literal.rs`, separate from wire-context parsing.
   Native methods project values/errors/events. Existing integer-controller
   callback interfaces remain, but their signed-datum business implementation is
-  shared; this does not close DATE or all typed/write conversion controllers.
+  shared; this does not close all typed/write conversion controllers.
   `native_cast_duration.rs` owns ordinary, argument and computed TIME conversion.
   Its native bridge supplies only lazy zone metadata, applies a generic truncate
   effect and wraps raw parts. `codec/native_duration_convert.rs` owns rounding,
@@ -674,8 +679,8 @@ short-circuit admission policy described above.
   the duration target and the native BinaryJSON adapter, not duplicated.
   Integer UTC fallback, raw rounding versus SQL clamping, JSON unquote,
   numeric-NULL versus string-value event handling and double rendering remain
-  separate. YEAR/DATE calendar/coercion controllers and wire Duration are not
-  folded into this slice.
+  separate. YEAR and DATE/DATETIME controllers use the shared owners above;
+  wire Duration policy is unchanged.
   `codec/native_sql_string.rs` owns native SQL byte/string source selection
   across19 actual variants, strict UTF8 stages, sentinel errors and fixed/scientific
   float primitives. Borrowed Decimal/Time/Duration/JSON/vector views reuse existing
