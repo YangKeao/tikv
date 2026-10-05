@@ -27,21 +27,58 @@ fn trim_leading_zero_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[pos..]
 }
 
+/// The native result before statement-context warning/error policy.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum NativeBinaryLiteralIntOutcome {
+    /// Conversion was exact.
+    Exact(u64),
+    /// Significant bytes exceeded the unsigned 64-bit boundary.
+    Truncated {
+        /// Go's returned value (`math.MaxUint64`).
+        value: u64,
+    },
+}
+
+impl NativeBinaryLiteralIntOutcome {
+    /// Returns the value produced alongside the exact/truncated disposition.
+    pub const fn value(self) -> u64 {
+        match self {
+            Self::Exact(value) | Self::Truncated { value } => value,
+        }
+    }
+
+    /// Returns whether Go would pass `ErrTruncatedWrongVal` to its context.
+    pub const fn is_truncated(self) -> bool {
+        matches!(self, Self::Truncated { .. })
+    }
+}
+
+/// Native unsigned literal conversion, without wire context or signed policy.
+pub fn native_binary_literal_to_int(bytes: &[u8]) -> NativeBinaryLiteralIntOutcome {
+    literal_int_from_trimmed_bytes(trim_leading_zero_bytes(bytes))
+}
+
+fn literal_int_from_trimmed_bytes(bytes: &[u8]) -> NativeBinaryLiteralIntOutcome {
+    if bytes.len() > 8 {
+        return NativeBinaryLiteralIntOutcome::Truncated { value: u64::MAX };
+    }
+    let value = bytes
+        .iter()
+        .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte));
+    NativeBinaryLiteralIntOutcome::Exact(value)
+}
+
 /// Returns the int value for the literal.
 pub fn to_uint(ctx: &mut EvalContext, bytes: &[u8]) -> Result<u64> {
     let bytes = trim_leading_zero_bytes(bytes);
-    if bytes.is_empty() {
-        return Ok(0);
-    }
-    if bytes.len() > 8 {
+    let outcome = literal_int_from_trimmed_bytes(bytes);
+    if outcome.is_truncated() {
         ctx.handle_truncate_err(Error::truncated_wrong_val(
             "BINARY",
             BinaryLiteral(bytes.to_owned()).to_string(),
         ))?;
-        return Ok(u64::MAX);
     }
-    let val = bytes.iter().fold(0, |acc, x| acc << 8 | (u64::from(*x)));
-    Ok(val)
+    Ok(outcome.value())
 }
 
 impl BinaryLiteral {
@@ -490,4 +527,37 @@ mod tests {
             assert_eq!(result, expected);
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn native_literal_outcome_keeps_width_leading_zeroes_and_wire_policy_separate() {
+    use NativeBinaryLiteralIntOutcome as O;
+    for (bytes, expected) in [
+        (vec![], O::Exact(0)),
+        (vec![0; 20], O::Exact(0)),
+        (vec![0, 0, 0x12, 0x34], O::Exact(0x1234)),
+        (vec![0xff; 8], O::Exact(u64::MAX)),
+        (
+            vec![0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            O::Exact(u64::MAX),
+        ),
+        (vec![1; 9], O::Truncated { value: u64::MAX }),
+    ] {
+        assert_eq!(native_binary_literal_to_int(&bytes), expected);
+    }
+    let exact = native_binary_literal_to_int(&[0xff; 8]);
+    assert_eq!(exact.value(), u64::MAX);
+    assert!(!exact.is_truncated());
+    let wide = native_binary_literal_to_int(&[1; 9]);
+    assert_eq!(wide.value(), u64::MAX);
+    assert!(wide.is_truncated());
+    let mut wire = EvalContext::default();
+    let error = to_uint(&mut wire, &[1; 9]).unwrap_err().to_string();
+    let mut padded = vec![0; 10];
+    padded.extend_from_slice(&[1; 9]);
+    assert_eq!(to_uint(&mut wire, &padded).unwrap_err().to_string(), error);
+    assert_eq!(to_uint(&mut wire, &[]).unwrap(), 0);
+    assert_eq!(to_uint(&mut wire, &[0; 20]).unwrap(), 0);
+    assert_eq!(to_uint(&mut wire, &[0xff; 8]).unwrap(), u64::MAX);
 }

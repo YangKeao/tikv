@@ -6,7 +6,7 @@
 use smallvec::SmallVec;
 
 use super::{
-    decimal::{Decimal, NativeDecimalError},
+    decimal::{Decimal, NativeDecimalError, NativeDecimalOp},
     native_decimal_codec::DecimalCodecWarning,
 };
 
@@ -90,6 +90,32 @@ impl NativeDecimalParseValue {
             storage_scale: self.storage_scale,
             declared_shape: self.declared_shape,
         }
+    }
+
+    /// Reverse sign through the shared native arithmetic owner and project its
+    /// exact coefficient/scales back, retaining the original infallible
+    /// boundary.
+    pub fn negate(&self) -> Self {
+        Decimal::try_from_native_digits(
+            self.negative,
+            &self.digits,
+            self.storage_scale,
+            self.scale,
+            usize::MAX,
+        )
+        .and_then(|value| value.try_native_math(NativeDecimalOp::Negate, usize::MAX))
+        .and_then(|value| {
+            let digits = value.native_canonical_coefficient_digits(usize::MAX)?;
+            let parts = value.words();
+            Ok(Self::from_raw_parts(
+                parts.negative,
+                SmallVec::from_vec(digits),
+                parts.result_frac,
+                parts.storage_frac,
+                None,
+            ))
+        })
+        .expect("shared native decimal math failed")
     }
 
     /// Exact unsigned coefficient construction using the native inline width.
@@ -851,5 +877,42 @@ fn native_decimal_to_f64_keeps_visible_rounding_raw_sign_and_panic_domain() {
             declared_shape: None,
         };
         assert!(std::panic::catch_unwind(|| value.to_f64()).is_err());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn native_parse_value_negate_uses_math_owner_and_keeps_hidden_storage() {
+    let value = NativeDecimalParseValue::from_raw_parts(
+        false,
+        SmallVec::from_slice(b"001234500"),
+        2,
+        5,
+        Some((20, 2)),
+    );
+    let negated = value.negate();
+    let view = negated.as_ref();
+    assert!(view.negative);
+    assert_eq!(view.digits, b"1234500");
+    assert_eq!(view.scale, 2);
+    assert_eq!(view.storage_scale, 5);
+    assert_eq!(view.declared_shape, None);
+    assert_eq!(value.as_ref().digits, b"001234500");
+    assert_eq!(value.as_ref().declared_shape, Some((20, 2)));
+    for negative in [false, true] {
+        let zero = NativeDecimalParseValue::from_raw_parts(
+            negative,
+            SmallVec::from_slice(b"00000000"),
+            3,
+            6,
+            Some((8, 3)),
+        )
+        .negate();
+        let view = zero.as_ref();
+        assert!(!view.negative);
+        assert_eq!(view.digits, b"000000");
+        assert_eq!(view.scale, 3);
+        assert_eq!(view.storage_scale, 6);
+        assert_eq!(view.declared_shape, None);
     }
 }
