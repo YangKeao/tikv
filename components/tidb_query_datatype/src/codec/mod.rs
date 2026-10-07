@@ -35,6 +35,7 @@ pub mod native_mysql_json;
 pub mod native_numeric;
 pub mod native_scalar_convert;
 pub mod native_sql_string;
+pub mod native_string_convert;
 pub mod native_string_type;
 pub mod native_temporal_convert;
 pub mod native_temporal_number;

@@ -22,6 +22,22 @@ pub enum NativeStringTypeCode {
 }
 
 impl NativeStringTypeCode {
+    /// Exact native IsTypeBlob named identities, never raw Other bytes.
+    pub const fn is_blob(self) -> bool {
+        matches!(
+            self,
+            Self::TinyBlob | Self::MediumBlob | Self::LongBlob | Self::Blob
+        )
+    }
+    /// Native IsTypeChar excludes VarString.
+    pub const fn is_char(self) -> bool {
+        matches!(self, Self::String | Self::VarChar)
+    }
+    /// Native IsTypeVarchar includes VarString, unlike IsTypeChar.
+    pub const fn is_varchar(self) -> bool {
+        matches!(self, Self::VarString | Self::VarChar)
+    }
+
     /// Exact native named-variant IsString policy. Other never becomes a
     /// string type by interpreting its payload as a MySQL type number.
     pub const fn is_string(self) -> bool {

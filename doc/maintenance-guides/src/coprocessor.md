@@ -795,7 +795,12 @@ short-circuit admission policy described above.
   and cutovers. Native numeric_helper also delegates best-effort integer parsing
   to native_integer_convert and const precision/length arithmetic to
   native_decimal_convert. Its error enum is aliased; ordinary prefix parsing is
-  not substituted. Other datatype controllers remain separate.
+  not substituted. `codec/native_string_convert.rs` owns ProduceStr byte/rune
+  limits, complete UTF-8 prefixes, whitespace-tail diagnostics and binary
+  fixed-string padding, with named classification in native_string_type. It
+  reuses canonical UTF-8 decode/count helpers and retains invalid-byte width and
+  lazy logical lengths. Native projects actual metadata and typed diagnostics.
+  Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
