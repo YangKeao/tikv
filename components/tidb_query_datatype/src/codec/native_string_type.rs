@@ -29,6 +29,18 @@ pub enum NativeStringTypeCode {
 }
 
 impl NativeStringTypeCode {
+    pub const fn is_vector(self) -> bool {
+        matches!(self, Self::VectorFloat32)
+    }
+
+    pub const fn is_unspecified(self) -> bool {
+        matches!(self, Self::Unspecified)
+    }
+
+    pub const fn is_prefixable(self) -> bool {
+        self.is_blob() || self.is_char()
+    }
+
     pub const fn is_hybrid(self) -> bool {
         matches!(self, Self::Enum | Self::Bit | Self::Set)
     }
@@ -402,4 +414,20 @@ fn field_type_equality_policy_preserves_identity_asymmetry_and_partial_rules() {
     assert!(unsafe_strings.partial_equal(true, true));
     assert!(!unsafe_strings.partial_equal(false, true));
     assert!(!unsafe_strings.partial_equal(true, false));
+}
+
+#[cfg(test)]
+#[test]
+fn field_code_string_classifiers_preserve_named_unknown_identity() {
+    use NativeStringTypeCode::*;
+    assert!(VectorFloat32.is_vector());
+    assert!(!Other(0xe1).is_vector());
+    assert!(Unspecified.is_unspecified());
+    assert!(!Other(0).is_unspecified());
+    for code in [VarChar, String, TinyBlob, MediumBlob, LongBlob, Blob] {
+        assert!(code.is_prefixable(), "{code:?}");
+    }
+    for code in [VarString, Unspecified, VectorFloat32, Other(15), Other(254)] {
+        assert!(!code.is_prefixable(), "{code:?}");
+    }
 }

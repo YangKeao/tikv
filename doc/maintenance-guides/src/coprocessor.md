@@ -831,7 +831,10 @@ short-circuit admission policy described above.
   native supplies actual named/unknown identity, collation text and the
   bin-collation fact. FieldType Equal/PartialEqual composition also lives in
   native_string_type over an equality-facts carrier; native supplies actual
-  code/eval/length/scale and metadata equality facts only. Other datatype controllers remain separate.
+  code/eval/length/scale and metadata equality facts only. FieldTypeCode default length/decimal tables and
+  blob/char/vector/varchar/unspecified/prefixable/fractionable/time/float/
+  integer/stored/numeric/temporal classifiers live in native_type_name and
+  native_string_type; native projects complete named/unknown identity only. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
