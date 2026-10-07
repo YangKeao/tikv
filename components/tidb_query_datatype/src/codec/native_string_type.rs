@@ -4,6 +4,8 @@
 //! byte is not reinterpreted as a known variant, even when the numbers
 //! coincide.
 
+use super::{native_eval_type::NativeEvalType, native_type_name::NativeTypeNameCode};
+
 /// Actual source type identity needed by native string conversion. Known
 /// non-string types other than Year can be projected to Other for these
 /// predicates; this is not a replacement for their full field-type metadata.
@@ -85,6 +87,89 @@ impl NativeStringTypeCode {
     /// Charset names and flags are deliberately not inputs to this predicate.
     pub fn is_binary_string(self, collation: &str) -> bool {
         self.is_string() && collation == "binary"
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeFieldTypeEquality {
+    left_code: NativeTypeNameCode,
+    right_code: NativeTypeNameCode,
+    left_eval: NativeEvalType,
+    right_eval: NativeEvalType,
+    left_flen: i64,
+    right_flen: i64,
+    left_decimal: i64,
+    right_decimal: i64,
+    charset_equal: bool,
+    collation_equal: bool,
+    unsigned_equal: bool,
+    elems_equal: bool,
+}
+
+impl NativeFieldTypeEquality {
+    pub const fn new(
+        left_code: NativeTypeNameCode,
+        right_code: NativeTypeNameCode,
+        left_eval: NativeEvalType,
+        right_eval: NativeEvalType,
+        left_flen: i64,
+        right_flen: i64,
+        left_decimal: i64,
+        right_decimal: i64,
+        charset_equal: bool,
+        collation_equal: bool,
+        unsigned_equal: bool,
+        elems_equal: bool,
+    ) -> Self {
+        Self {
+            left_code,
+            right_code,
+            left_eval,
+            right_eval,
+            left_flen,
+            right_flen,
+            left_decimal,
+            right_decimal,
+            charset_equal,
+            collation_equal,
+            unsigned_equal,
+            elems_equal,
+        }
+    }
+
+    pub const fn equal(self) -> bool {
+        use NativeTypeNameCode::{Known, Unknown};
+        let type_equal = match (self.left_code, self.right_code) {
+            (Known(left), Known(right)) => {
+                left == right || (left == 15 && right == 253) || (left == 253 && right == 15)
+            }
+            (Unknown(left), Unknown(right)) => left == right,
+            _ => false,
+        };
+        let flen_equal = self.left_flen == self.right_flen
+            || (matches!(self.left_eval, NativeEvalType::Real) && self.left_decimal == -1)
+            || matches!(self.left_eval, NativeEvalType::Json);
+        let ignore_decimal = matches!(self.left_eval, NativeEvalType::Int | NativeEvalType::String);
+        type_equal
+            && (ignore_decimal || self.left_decimal == self.right_decimal)
+            && self.charset_equal
+            && self.collation_equal
+            && flen_equal
+            && self.unsigned_equal
+            && self.elems_equal
+    }
+
+    pub const fn partial_equal(self, not_null_equal: bool, unsafe_string_length: bool) -> bool {
+        if !not_null_equal {
+            return false;
+        }
+        if !unsafe_string_length
+            || !matches!(self.left_eval, NativeEvalType::String)
+            || !matches!(self.right_eval, NativeEvalType::String)
+        {
+            return self.equal();
+        }
+        self.charset_equal && self.collation_equal && self.unsigned_equal && self.elems_equal
     }
 }
 
@@ -257,4 +342,64 @@ fn field_string_policy_preserves_named_unknown_and_restored_data_rules() {
         false
     ));
     assert!(!native_need_restored_data(String, "binary", true, false));
+}
+
+#[cfg(test)]
+#[test]
+fn field_type_equality_policy_preserves_identity_asymmetry_and_partial_rules() {
+    use NativeEvalType::*;
+    use NativeTypeNameCode::{Known, Unknown};
+    let facts = |left_code,
+                 right_code,
+                 left_eval,
+                 right_eval,
+                 left_flen,
+                 right_flen,
+                 left_decimal,
+                 right_decimal| {
+        NativeFieldTypeEquality::new(
+            left_code,
+            right_code,
+            left_eval,
+            right_eval,
+            left_flen,
+            right_flen,
+            left_decimal,
+            right_decimal,
+            true,
+            true,
+            true,
+            true,
+        )
+    };
+    assert!(facts(Known(15), Known(253), String, String, 8, 8, 0, 0).equal());
+    assert!(facts(Unknown(15), Unknown(15), String, String, 8, 8, 0, 0).equal());
+    assert!(!facts(Known(15), Unknown(15), String, String, 8, 8, 0, 0).equal());
+    assert!(!facts(Known(255), Unknown(255), String, String, 8, 8, 0, 0).equal());
+    assert!(facts(Known(5), Known(5), Real, Real, 8, 99, -1, -1).equal());
+    assert!(facts(Known(245), Known(245), Json, Json, 8, 99, 0, 0).equal());
+    assert!(facts(Known(3), Known(3), Int, Int, 8, 8, 1, 9).equal());
+    assert!(!facts(Known(246), Known(246), Decimal, Decimal, 8, 8, 1, 9).equal());
+    assert!(
+        !NativeFieldTypeEquality::new(
+            Known(3),
+            Known(3),
+            Int,
+            Int,
+            8,
+            8,
+            0,
+            0,
+            false,
+            true,
+            true,
+            true,
+        )
+        .equal()
+    );
+    let unsafe_strings = facts(Known(254), Known(252), String, String, 8, 99, 1, 9);
+    assert!(!unsafe_strings.equal());
+    assert!(unsafe_strings.partial_equal(true, true));
+    assert!(!unsafe_strings.partial_equal(false, true));
+    assert!(!unsafe_strings.partial_equal(true, false));
 }

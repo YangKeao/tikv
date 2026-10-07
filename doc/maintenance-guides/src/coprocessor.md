@@ -829,7 +829,9 @@ short-circuit admission policy described above.
   only. FieldType hybrid and variable-length classification plus
   character-string/restored-data policy also live in native_string_type;
   native supplies actual named/unknown identity, collation text and the
-  bin-collation fact. Other datatype controllers remain separate.
+  bin-collation fact. FieldType Equal/PartialEqual composition also lives in
+  native_string_type over an equality-facts carrier; native supplies actual
+  code/eval/length/scale and metadata equality facts only. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
