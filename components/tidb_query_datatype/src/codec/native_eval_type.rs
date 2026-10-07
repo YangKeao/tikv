@@ -36,6 +36,56 @@ pub fn native_render_binary_expression(
     format!("({left} {} {right})", native_arithmetic_symbol(op))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeNumericDiagnosticDomain {
+    Integer,
+    Real,
+    Decimal,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeBinaryLiteralRender {
+    Signed,
+    Real,
+    Unsigned,
+}
+
+pub const fn native_binary_literal_render(
+    domain: NativeNumericDiagnosticDomain,
+    source_unsigned: bool,
+) -> NativeBinaryLiteralRender {
+    match domain {
+        NativeNumericDiagnosticDomain::Integer if !source_unsigned => {
+            NativeBinaryLiteralRender::Signed
+        }
+        NativeNumericDiagnosticDomain::Real => NativeBinaryLiteralRender::Real,
+        NativeNumericDiagnosticDomain::Integer
+        | NativeNumericDiagnosticDomain::Decimal
+        | NativeNumericDiagnosticDomain::Other => NativeBinaryLiteralRender::Unsigned,
+    }
+}
+
+pub const fn native_should_wrap_intdiv_decimal_argument(
+    is_intdiv: bool,
+    domain: NativeNumericDiagnosticDomain,
+    source_is_decimal: bool,
+    constant_has_literal: bool,
+) -> bool {
+    is_intdiv
+        && matches!(domain, NativeNumericDiagnosticDomain::Decimal)
+        && !source_is_decimal
+        && !constant_has_literal
+}
+
+pub fn native_render_column_reference(orig_name: &str, unique_id: i64) -> String {
+    if orig_name.is_empty() {
+        format!("Column#{unique_id}")
+    } else {
+        orig_name.to_owned()
+    }
+}
+
 pub fn native_render_cast_expression(argument: &str, target: &str) -> String {
     format!("cast({argument}, {target})")
 }
@@ -1885,4 +1935,34 @@ fn diagnostic_renderer_preserves_operator_cast_decimal_and_function_text() {
         "pow(x, 2)"
     );
     assert_eq!(native_render_function_expression("rand", &[]), "rand()")
+}
+
+#[cfg(test)]
+#[test]
+fn diagnostic_argument_policy_preserves_column_domain_and_intdiv_wrap_truth_tables() {
+    use NativeNumericDiagnosticDomain::*;
+    assert_eq!(native_render_column_reference("", 42), "Column#42");
+    assert_eq!(native_render_column_reference("source.a", 42), "source.a");
+    for (domain, unsigned, expected) in [
+        (Integer, false, NativeBinaryLiteralRender::Signed),
+        (Integer, true, NativeBinaryLiteralRender::Unsigned),
+        (Real, false, NativeBinaryLiteralRender::Real),
+        (Real, true, NativeBinaryLiteralRender::Real),
+        (Decimal, false, NativeBinaryLiteralRender::Unsigned),
+        (Other, false, NativeBinaryLiteralRender::Unsigned),
+    ] {
+        assert_eq!(native_binary_literal_render(domain, unsigned), expected);
+    }
+    for (is_intdiv, domain, source_decimal, literal, expected) in [
+        (true, Decimal, false, false, true),
+        (false, Decimal, false, false, false),
+        (true, Integer, false, false, false),
+        (true, Decimal, true, false, false),
+        (true, Decimal, false, true, false),
+    ] {
+        assert_eq!(
+            native_should_wrap_intdiv_decimal_argument(is_intdiv, domain, source_decimal, literal,),
+            expected
+        );
+    }
 }

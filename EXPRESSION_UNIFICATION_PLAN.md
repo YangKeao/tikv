@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round176收口（expr-diagnostic-argument-170）：既有native_eval_type接管column reference命名、numeric binary-literal display domain及INTDIV DECIMAL wrap predicate；native删重复column/domain/multi-clause policy，仅AST/Datum/FieldType投影和float格式。5/5 targeted GREEN SDK1/native-new1/arithmetic-overflow1/numeric-domain1/session SQL1；2新tests，旧SDK15/native33逐体不变。详expr-diagnostic-argument-checkpoint/summary；runtime一记录，配对Plan+DCO发布。不宣称whole renderer/evaluator；R100 full expr四历史失败保留；238strict0remaining7不变。
+
+round176启动（expr-diagnostic-argument-170）：E扩native_eval_type接管column/orig-name render、numeric binary-literal display domain与INTDIV DECIMAL argument wrap predicate；A scalar_function删重复column branch、domain match与多条件wrap policy，仅AST/Datum/FieldType投影及实际float formatting。保hidden virtual recursion、strict literal fold、signed carrier与decimal target fitting。父SDK/native各补test、targeted existing/session SQL诊断核心、配对Plan；不宣称whole renderer/evaluator或新族，238strict0remaining7不变。
+
 round175收口（expr-diagnostic-render-169）：既有native_eval_type接管六算术operator symbol及binary/cast/decimal-cast/function diagnostic文本组合；native删重复format/join，仅AST递归、值/名解析、target metadata、typed errors。5/5 targeted GREEN SDK1/native-new1/arithmetic-overflow1/math-overflow1/session SQL1；2新tests，旧SDK14/native32逐体不变。详expr-diagnostic-render-checkpoint/summary；runtime一记录，配对Plan+DCO发布。不宣称whole renderer/evaluator；R100 full tidb-expr四历史失败保留且未伪称重跑绿；238strict0remaining7不变。
 
 round175启动（expr-diagnostic-render-169）：E扩native_eval_type接管六算术operator symbol及binary/cast/decimal-cast/function diagnostic文本组合；A scalar_function删重复format/join实现，仅AST递归、常量/列求值、source selection与typed error mapping。保cast_json、DIV decimal target、float格式、unknown fallback。父SDK/native各补test、targeted existing/session SQL错误核心（已知full expr历史失败不重跑作绿门）、配对Plan；不宣称whole evaluator/renderer或新族，238strict0remaining7不变。

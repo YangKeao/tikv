@@ -861,7 +861,8 @@ short-circuit admission policy described above.
   rules, statement time/session zone, numeric conversion and concrete events. FieldType JSON Go-compatible tag classification lives in native_field_value;
   native JSON keeps serde decoding, Go slice storage and concrete FieldType projection. Go 1.25 64-bit slice growth, allocator size-class and decode-capacity
   policy live in native_field_value; native runtime keeps shared slice headers/backing storage and layout projection. Arithmetic diagnostic operator symbols and binary/cast/decimal-cast/function
-  text composition live in native_eval_type; native expression code keeps AST recursion, value/name resolution and typed errors. Other datatype controllers remain separate.
+  text composition live in native_eval_type; native expression code keeps AST recursion, value/name resolution and typed errors. Numeric diagnostic column naming, binary-literal display-domain and INTDIV
+  DECIMAL argument-wrap policy live in native_eval_type; native expression code keeps AST/Datum/FieldType projection and actual float formatting. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
