@@ -854,7 +854,8 @@ short-circuit admission policy described above.
   conversion keeps real values, typed diagnostics and context effects. String-target datum conversion route selection lives in native_eval_type; native
   conversion keeps real bytes, charset transforms and typed errors. Integer conversion diagnostic-action policy lives in native_eval_type; native
   conversion keeps source projection, concrete typed errors and context writes. Decimal conversion target-shape and input-diagnostic policy live in
-  native_eval_type; native conversion keeps Decimal arithmetic, concrete typed errors and context writes. Other datatype controllers remain separate.
+  native_eval_type; native conversion keeps Decimal arithmetic, concrete typed errors and context writes. BIT conversion target-shape and input-route policy live in native_eval_type;
+  native conversion keeps literal parsing, actual unsigned conversion and BinaryLiteral construction. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

@@ -181,6 +181,48 @@ pub const fn native_string_conversion_route(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeBitTargetShape {
+    Invalid,
+    Full { width_bytes: u8 },
+    Bounded { upper: u64, width_bytes: u8 },
+}
+
+pub const fn native_bit_target_shape(flen: i64) -> NativeBitTargetShape {
+    if flen < 1 || flen > 64 {
+        return NativeBitTargetShape::Invalid;
+    }
+    let width_bytes = ((flen + 7) / 8) as u8;
+    if flen == 64 {
+        NativeBitTargetShape::Full { width_bytes }
+    } else {
+        NativeBitTargetShape::Bounded {
+            upper: (1_u64 << flen) - 1,
+            width_bytes,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeBitInputRoute {
+    Bytes,
+    Signed,
+    Unsigned,
+}
+
+pub const fn native_bit_input_route(
+    is_string_or_bytes: bool,
+    is_signed_int: bool,
+) -> NativeBitInputRoute {
+    if is_string_or_bytes {
+        NativeBitInputRoute::Bytes
+    } else if is_signed_int {
+        NativeBitInputRoute::Signed
+    } else {
+        NativeBitInputRoute::Unsigned
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeDatumConversionTarget {
     Null,
     SignedInteger,
@@ -1478,4 +1520,31 @@ fn decimal_target_controller_preserves_sentinel_invalid_clamp_and_text_event_pol
             expected
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn bit_target_controller_preserves_boundaries_upper_width_and_route_precedence() {
+    use NativeBitInputRoute::*;
+    use NativeBitTargetShape::*;
+    for flen in [i64::MIN, -1, 0, 65, i64::MAX] {
+        assert_eq!(native_bit_target_shape(flen), Invalid);
+    }
+    for (flen, upper, width_bytes) in [
+        (1, 1, 1),
+        (7, 127, 1),
+        (8, 255, 1),
+        (9, 511, 2),
+        (63, i64::MAX as u64, 8),
+    ] {
+        assert_eq!(
+            native_bit_target_shape(flen),
+            Bounded { upper, width_bytes }
+        );
+    }
+    assert_eq!(native_bit_target_shape(64), Full { width_bytes: 8 });
+    assert_eq!(native_bit_input_route(true, true), Bytes);
+    assert_eq!(native_bit_input_route(true, false), Bytes);
+    assert_eq!(native_bit_input_route(false, true), Signed);
+    assert_eq!(native_bit_input_route(false, false), Unsigned);
 }
