@@ -29,6 +29,11 @@ pub enum NativeStringTypeCode {
 }
 
 impl NativeStringTypeCode {
+    pub const fn converts_between_char_and_varchar(self, to: Self) -> bool {
+        (self.is_varchar() && matches!(to, Self::String))
+            || (matches!(self, Self::String) && to.is_varchar())
+    }
+
     pub const fn is_vector(self) -> bool {
         matches!(self, Self::VectorFloat32)
     }
@@ -429,5 +434,27 @@ fn field_code_string_classifiers_preserve_named_unknown_identity() {
     }
     for code in [VarString, Unspecified, VectorFloat32, Other(15), Other(254)] {
         assert!(!code.is_prefixable(), "{code:?}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn field_decimal_meta_char_varchar_conversion_keeps_named_unknown_identity() {
+    use NativeStringTypeCode::*;
+    assert!(VarChar.converts_between_char_and_varchar(String));
+    assert!(VarString.converts_between_char_and_varchar(String));
+    assert!(String.converts_between_char_and_varchar(VarChar));
+    assert!(String.converts_between_char_and_varchar(VarString));
+    for (from, to) in [
+        (String, String),
+        (VarChar, VarString),
+        (Other(15), String),
+        (String, Other(253)),
+        (Other(254), VarChar),
+    ] {
+        assert!(
+            !from.converts_between_char_and_varchar(to),
+            "{from:?}/{to:?}"
+        );
     }
 }

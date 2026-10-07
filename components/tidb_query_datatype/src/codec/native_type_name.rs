@@ -73,6 +73,10 @@ pub const fn native_type_is_integer(code: NativeTypeNameCode) -> bool {
     matches!(code, NativeTypeNameCode::Known(1 | 2 | 9 | 3 | 8 | 13))
 }
 
+pub const fn native_mysql_is_integer_type(code: NativeTypeNameCode) -> bool {
+    matches!(code, NativeTypeNameCode::Known(1 | 2 | 9 | 3 | 8))
+}
+
 pub const fn native_type_is_stored_as_integer(code: NativeTypeNameCode) -> bool {
     native_type_is_integer(code) || matches!(code, NativeTypeNameCode::Known(12 | 10 | 7 | 11))
 }
@@ -290,4 +294,18 @@ fn field_code_policy_preserves_default_tables_classifiers_and_unknown_identity()
     assert!(native_type_is_numeric(Known(246)));
     assert!(native_type_is_temporal(Known(14)));
     assert!(!native_type_is_temporal_with_date(Known(14)));
+}
+
+#[cfg(test)]
+#[test]
+fn field_decimal_meta_mysql_integer_classifier_keeps_named_unknown_identity() {
+    use NativeTypeNameCode::{Known, Unknown};
+    for raw in [1, 2, 9, 3, 8] {
+        assert!(native_mysql_is_integer_type(Known(raw)), "{raw}");
+        assert!(!native_mysql_is_integer_type(Unknown(raw)), "{raw}");
+    }
+    for raw in [0, 4, 5, 13, 16, 246, 253, 254] {
+        assert!(!native_mysql_is_integer_type(Known(raw)), "{raw}");
+        assert!(!native_mysql_is_integer_type(Unknown(raw)), "{raw}");
+    }
 }

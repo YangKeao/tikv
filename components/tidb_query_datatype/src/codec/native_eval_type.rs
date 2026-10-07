@@ -4,6 +4,44 @@ use std::{error::Error, fmt};
 
 use super::native_type_name::NativeTypeNameCode;
 
+/// Validates decimal precision and scale only for the native decimal type.
+pub const fn native_decimal_metadata_valid(
+    code: NativeTypeNameCode,
+    decimal: i64,
+    flen: i64,
+) -> bool {
+    if !matches!(code, NativeTypeNameCode::Known(246)) {
+        return true;
+    }
+    decimal >= 0 && decimal <= 30 && flen > 0 && flen <= 65 && flen >= decimal
+}
+
+/// Computes scale separately so callers can retain its original update order.
+pub const fn native_update_decimal_scale(
+    code: NativeTypeNameCode,
+    old_decimal: i64,
+    decimal_delta: i64,
+) -> Option<i64> {
+    if !matches!(code, NativeTypeNameCode::Known(246)) {
+        return None;
+    }
+    Some(if old_decimal < 0 {
+        30
+    } else {
+        old_decimal + decimal_delta
+    })
+}
+
+/// Computes precision without moving its arithmetic before a scale update.
+pub const fn native_update_decimal_flen(old_decimal: i64, old_flen: i64, flen_delta: i64) -> i64 {
+    if old_flen < 0 {
+        65
+    } else {
+        let flen = old_flen + flen_delta + if old_decimal < 0 { 30 } else { 0 };
+        if flen > 65 { 65 } else { flen }
+    }
+}
+
 /// The value representation used to evaluate a built-in function.
 ///
 /// This is the single Rust type for both `pkg/parser/types.EvalType` and the
@@ -682,5 +720,34 @@ mod tests {
                 NativeEvalType::String
             );
         }
+    }
+
+    #[test]
+    fn field_decimal_meta_validity_and_delta_controller_preserve_limits_and_identity() {
+        use NativeTypeNameCode::{Known, Unknown};
+        for (decimal, flen, valid) in [
+            (0, 1, true),
+            (30, 65, true),
+            (-1, 10, false),
+            (31, 65, false),
+            (1, 0, false),
+            (2, 1, false),
+            (1, 66, false),
+        ] {
+            assert_eq!(
+                native_decimal_metadata_valid(Known(246), decimal, flen),
+                valid
+            );
+        }
+        for code in [Known(3), Known(13), Unknown(246)] {
+            assert!(native_decimal_metadata_valid(code, -1, 0));
+            assert_eq!(native_update_decimal_scale(code, 1, 2), None);
+        }
+        assert_eq!(native_update_decimal_scale(Known(246), 1, 2), Some(3));
+        assert_eq!(native_update_decimal_scale(Known(246), -1, 99), Some(30));
+        assert_eq!(native_update_decimal_flen(1, 10, 2), 12);
+        assert_eq!(native_update_decimal_flen(-1, 10, 2), 42);
+        assert_eq!(native_update_decimal_flen(1, -1, 99), 65);
+        assert_eq!(native_update_decimal_flen(1, 64, 99), 65);
     }
 }

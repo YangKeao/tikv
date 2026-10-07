@@ -834,7 +834,10 @@ short-circuit admission policy described above.
   code/eval/length/scale and metadata equality facts only. FieldTypeCode default length/decimal tables and
   blob/char/vector/varchar/unspecified/prefixable/fractionable/time/float/
   integer/stored/numeric/temporal classifiers live in native_type_name and
-  native_string_type; native projects complete named/unknown identity only. Other datatype controllers remain separate.
+  native_string_type; native projects complete named/unknown identity only. MySQL-integer classification, CHAR/VARCHAR conversion, DECIMAL metadata
+  validity and flen/scale delta updates live in native_type_name,
+  native_string_type and native_eval_type; native projects complete identity
+  and metadata and assigns returned values only. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
