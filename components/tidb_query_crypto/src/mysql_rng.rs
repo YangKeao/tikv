@@ -5,6 +5,12 @@
 
 const MAX_RAND_VALUE: u32 = 0x3fff_ffff;
 
+pub const fn mysql_rand_seed_state(seed: i64) -> (u32, u32) {
+    let seed1 = seed.wrapping_mul(0x1_0001).wrapping_add(55_555_555) as u32 % MAX_RAND_VALUE;
+    let seed2 = seed.wrapping_mul(0x1000_0001) as u32 % MAX_RAND_VALUE;
+    (seed1, seed2)
+}
+
 /// Advances raw MySQL seeds using the native public setters' wrapping policy.
 /// Inputs are deliberately not normalized before the step. Normalized seeds
 /// make 3*seed1+seed2 <= u32::MAX-7, so this also preserves TiKV RAND's
@@ -23,6 +29,11 @@ pub struct MySqlRand {
 }
 
 impl MySqlRand {
+    pub fn from_seed(seed: i64) -> Self {
+        let (seed1, seed2) = mysql_rand_seed_state(seed);
+        Self::from_seeds(seed1, seed2)
+    }
+
     /// Normalizes both seeds into the original MySQL recurrence domain.
     pub fn from_seeds(seed1: u32, seed2: u32) -> Self {
         Self {
@@ -58,5 +69,19 @@ mod tests {
         let (mut seed1, mut seed2) = (u32::MAX, u32::MAX);
         assert_eq!(mysql_rand_step(&mut seed1, &mut seed2), 0.0);
         assert_eq!((seed1, seed2), (0, 32));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn shared_rand_seed_state_preserves_wrapping_vectors_and_first_values() {
+        for (seed, state, first) in [
+            (0, (55_555_555, 0), 0.155_220_427_694_935_74),
+            (1, (55_621_092, 268_435_457), 0.405_403_537_121_977_24),
+            (-1, (55_490_018, 805_306_370), 0.905_037_321_993_184_5),
+            (i64::MAX, (55_490_018, 805_306_370), 0.905_037_321_993_184_5),
+        ] {
+            assert_eq!(mysql_rand_seed_state(seed), state);
+            assert_eq!(MySqlRand::from_seed(seed).next_f64(), first);
+        }
     }
 }

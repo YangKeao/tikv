@@ -579,6 +579,43 @@ fn pow_native(base: Option<BytesRef>, exponent: Option<BytesRef>) -> Result<Opti
         .map(encode_raw_f64))
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NativeRandSeedSource {
+    Null,
+    Signed,
+    Unsigned,
+    Decimal,
+    Real,
+    Text,
+    RangeSentinel,
+    Other,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NativeRandSeedRoute {
+    Zero,
+    Signed,
+    Unsigned,
+    Decimal,
+    Real,
+    Text,
+    UnsupportedRangeSentinel,
+    SignedFallback,
+}
+
+pub const fn native_rand_seed_route(source: NativeRandSeedSource) -> NativeRandSeedRoute {
+    match source {
+        NativeRandSeedSource::Null => NativeRandSeedRoute::Zero,
+        NativeRandSeedSource::Signed => NativeRandSeedRoute::Signed,
+        NativeRandSeedSource::Unsigned => NativeRandSeedRoute::Unsigned,
+        NativeRandSeedSource::Decimal => NativeRandSeedRoute::Decimal,
+        NativeRandSeedSource::Real => NativeRandSeedRoute::Real,
+        NativeRandSeedSource::Text => NativeRandSeedRoute::Text,
+        NativeRandSeedSource::RangeSentinel => NativeRandSeedRoute::UnsupportedRangeSentinel,
+        NativeRandSeedSource::Other => NativeRandSeedRoute::SignedFallback,
+    }
+}
+
 #[inline]
 #[rpn_fn]
 fn rand() -> Result<Option<Real>> {
@@ -3184,5 +3221,26 @@ mod tests {
             let res2 = rand.gen();
             assert_eq!(res2, exp2);
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn rand_seed_route_preserves_all_source_classes_and_fallbacks() {
+    use NativeRandSeedRoute::*;
+    for (source, route) in [
+        (NativeRandSeedSource::Null, Zero),
+        (NativeRandSeedSource::Signed, Signed),
+        (NativeRandSeedSource::Unsigned, Unsigned),
+        (NativeRandSeedSource::Decimal, Decimal),
+        (NativeRandSeedSource::Real, Real),
+        (NativeRandSeedSource::Text, Text),
+        (
+            NativeRandSeedSource::RangeSentinel,
+            UnsupportedRangeSentinel,
+        ),
+        (NativeRandSeedSource::Other, SignedFallback),
+    ] {
+        assert_eq!(native_rand_seed_route(source), route);
     }
 }

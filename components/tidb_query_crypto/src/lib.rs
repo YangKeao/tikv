@@ -11,7 +11,7 @@ mod vitess;
 
 use std::fmt;
 
-pub use mysql_rng::{MySqlRand, mysql_rand_step};
+pub use mysql_rng::{MySqlRand, mysql_rand_seed_state, mysql_rand_step};
 use sha1::{Digest, Sha1};
 pub use sql_crypt::{sql_decode, sql_encode};
 pub use vitess::hash_uint64;
