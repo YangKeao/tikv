@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round174收口（go-slice-growth-168）：既有native_field_value接管Go1.25 64-bit growslice/allocator size classes/scanned-noscan round/decode capacity；native删size table/round/growth算法，仅GoSharedSlice header/backing、public wrappers/layout projection。5/5 GREEN SDK1/nativeDatatype513/new1/existing slice-JSON1/enum metadata SQL1；2新tests，旧SDK2/native0逐体不变。详go-slice-growth-checkpoint/summary；runtime一记录，配对Plan+DCO发布。不宣称whole JSON/type dedup，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
+
+round174启动（go-slice-growth-168）：E扩native_field_value接管Go1.25 64-bit slice growslice/allocator size-class/decode-capacity算法与pointer layout；A go_runtime删size table/round/growth实现，仅GoSharedSlice header/backing和layout投影窄适配。保checked overflow panic、scanned header阈值、small/page rounding与公开签名。父SDK/native各补test、fullnativeDatatype+existing field-JSON/session enum SQL核心、配对Plan；不宣称whole JSON/type dedup或新族，238strict0remaining7不变。
+
 round173收口（field-json-tag-167）：既有native_field_value接管FieldType JSON九tag+unknown及Go EqualFold兼容分类（ASCII/long-s/Kelvin）；native删matcher和连续if，仅serde scalar/slice、duplicate/null/map order、GoSharedSlice与projection。5/5 GREEN SDK1/nativeDatatype512/new1/existing slice-JSON1/enum metadata SQL1；2新tests，旧SDK1/native8逐体不变。详field-json-tag-checkpoint/summary；runtime一记录，配对Plan+DCO发布。不宣称whole JSON shape/type dedup，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
 
 round173启动（field-json-tag-167）：E扩native_field_value接管FieldType JSON Go bytes.EqualFold-compatible tag classification（9 named+unknown，含long-s/Kelvin特殊fold）；A field_type/json删本地tag matcher与连续if chain，仅serde scalar/slice decode、GoSharedSlice存储和FieldType projection。保duplicate/null/map-order/unknown skip。父SDK/native各补test、fullnativeDatatype+existing/session field-JSON核心、配对Plan；不宣称whole JSON shape/type dedup或新族，238strict0remaining7不变。

@@ -4,6 +4,101 @@
 
 use super::native_type_name::NativeTypeNameCode;
 
+// Go 1.25's 64-bit allocator size classes. TiDB's supported server targets
+// are 64-bit; `growslice` rounding is defined by these byte classes and, for
+// scanned allocations only, the runtime's 8-byte malloc-header threshold.
+const GO_64_SIZE_CLASSES: &[usize] = &[
+    8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352,
+    384, 416, 448, 480, 512, 576, 640, 704, 768, 896, 1024, 1152, 1280, 1408, 1536, 1792, 2048,
+    2304, 2688, 3072, 3200, 3456, 4096, 4864, 5376, 6144, 6528, 6784, 6912, 8192, 9472, 9728,
+    10240, 10880, 12288, 13568, 14336, 16384, 18432, 19072, 20480, 21760, 24576, 27264, 28672,
+    32768,
+];
+
+/// Whether a Go slice's element type contains pointers and therefore uses a
+/// scanned allocation. Above the malloc-header threshold, scanned and noscan
+/// slices with the same element width can have different observable caps.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NativeGoSliceElementLayout {
+    /// The element type contains no pointers.
+    NoPointers,
+    /// The element type contains at least one pointer.
+    PointerBearing,
+}
+
+fn native_go_64_round_allocation(bytes: usize, layout: NativeGoSliceElementLayout) -> usize {
+    const MALLOC_HEADER: usize = 8;
+    const MIN_HEADER_SIZE: usize = 8 * 64;
+    const MAX_SMALL_SIZE: usize = 32_768;
+    const PAGE_SIZE: usize = 8_192;
+
+    if bytes <= MAX_SMALL_SIZE - MALLOC_HEADER {
+        let header = usize::from(
+            layout == NativeGoSliceElementLayout::PointerBearing && bytes > MIN_HEADER_SIZE,
+        ) * MALLOC_HEADER;
+        let requested = bytes + header;
+        return GO_64_SIZE_CLASSES
+            .iter()
+            .copied()
+            .find(|class| *class >= requested)
+            .expect("small Go allocation has a size class")
+            - header;
+    }
+    bytes
+        .checked_add(PAGE_SIZE - 1)
+        .expect("Go slice allocation overflow")
+        & !(PAGE_SIZE - 1)
+}
+
+/// Computes Go 1.25's next 64-bit slice capacity for a concrete element
+/// width/layout.
+pub fn native_go_64_next_slice_capacity(
+    new_len: usize,
+    old_capacity: usize,
+    element_size: usize,
+    layout: NativeGoSliceElementLayout,
+) -> usize {
+    let double_capacity = old_capacity
+        .checked_mul(2)
+        .expect("Go slice capacity overflow");
+    let mut candidate = if new_len > double_capacity {
+        new_len
+    } else if old_capacity < 256 {
+        double_capacity
+    } else {
+        let mut grown = old_capacity;
+        loop {
+            grown = grown
+                .checked_add((grown + 3 * 256) >> 2)
+                .expect("Go slice capacity overflow");
+            if grown >= new_len {
+                break grown;
+            }
+        }
+    };
+    if candidate < new_len {
+        candidate = new_len;
+    }
+    let bytes = candidate
+        .checked_mul(element_size)
+        .expect("Go slice allocation overflow");
+    native_go_64_round_allocation(bytes, layout) / element_size
+}
+
+/// Computes the capacity reached while Go's array decoder exposes elements
+/// one at a time.
+pub fn native_go_64_slice_decode_capacity(
+    mut capacity: usize,
+    decoded_len: usize,
+    element_size: usize,
+    layout: NativeGoSliceElementLayout,
+) -> usize {
+    while capacity < decoded_len {
+        capacity = native_go_64_next_slice_capacity(capacity + 1, capacity, element_size, layout);
+    }
+    capacity
+}
+
 const UNSPECIFIED_LENGTH: i64 = -1;
 const MAX_DECIMAL_WIDTH: i64 = 65;
 const MAX_DECIMAL_SCALE: i64 = 30;
@@ -579,4 +674,34 @@ fn field_json_tag_policy_preserves_named_case_unicode_fold_and_unknown_keys() {
     }
     assert!(ascii_tag_equal_fold("\u{212a}", b"K"));
     assert!(!ascii_tag_equal_fold("kX", b"K"));
+}
+
+#[cfg(test)]
+#[test]
+fn go_slice_growth_policy_preserves_size_classes_scanned_headers_and_decode_steps() {
+    use NativeGoSliceElementLayout::*;
+    for (decoded_len, expected) in [(1, 8), (8, 8), (9, 16)] {
+        assert_eq!(
+            native_go_64_slice_decode_capacity(0, decoded_len, 1, NoPointers),
+            expected
+        );
+    }
+    for (decoded_len, expected) in [(1, 1), (2, 2), (3, 4), (5, 8)] {
+        assert_eq!(
+            native_go_64_slice_decode_capacity(0, decoded_len, 16, PointerBearing),
+            expected
+        );
+    }
+    assert_eq!(
+        native_go_64_next_slice_capacity(257, 256, 16, NoPointers),
+        512
+    );
+    assert_eq!(
+        native_go_64_next_slice_capacity(257, 256, 16, PointerBearing),
+        591
+    );
+    assert_eq!(
+        native_go_64_next_slice_capacity(1000, 1, 1, NoPointers),
+        1024
+    );
 }
