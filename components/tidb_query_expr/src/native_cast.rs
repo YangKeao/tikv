@@ -7,6 +7,47 @@
 
 use crate::{NativeIdentityFrameError, NativeIdentityRef, decode_native_identity};
 
+/// Whether a source-specific UNION DECIMAL cast yields zero or converts its
+/// value.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NativeUnionDecimalRoute {
+    Zero,
+    Convert,
+}
+
+/// Chooses the UNION DECIMAL negative-source policy.
+pub const fn native_union_decimal_route(is_negative: bool) -> NativeUnionDecimalRoute {
+    if is_negative {
+        NativeUnionDecimalRoute::Zero
+    } else {
+        NativeUnionDecimalRoute::Convert
+    }
+}
+
+/// Chooses the UNION DECIMAL route from trimmed valid UTF-8 text.
+pub fn native_union_text_decimal_route(bytes: &[u8]) -> NativeUnionDecimalRoute {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return NativeUnionDecimalRoute::Convert;
+    };
+    let trimmed = text.trim();
+    native_union_decimal_route(trimmed.len() > 1 && trimmed.starts_with('-'))
+}
+
+/// Clamps a signed UNION value before unsigned projection.
+pub const fn native_union_signed_to_unsigned(value: i64) -> u64 {
+    if value < 0 { 0 } else { value as u64 }
+}
+
+/// Clamps a real UNION value before signed integer projection.
+pub fn native_union_real_to_signed(value: f64) -> i64 {
+    if value < 0.0 { 0 } else { value as i64 }
+}
+
+/// Clamps a real UNION value before real projection.
+pub fn native_union_real(value: f64) -> f64 {
+    if value < 0.0 { 0.0 } else { value }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeCastRealUnsignedResult {
     pub value: u64,
@@ -196,4 +237,25 @@ mod tests {
         canonical.push(0);
         assert!(decode_native_cast_real_unsigned_result(&canonical).is_none());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn union_cast_policy_preserves_seven_source_specific_clamps_and_routes() {
+    use NativeUnionDecimalRoute::*;
+    assert_eq!(native_union_decimal_route(true), Zero);
+    assert_eq!(native_union_decimal_route(false), Convert);
+    for text in [b"-1".as_slice(), b"  -1.5  ", b"-x"] {
+        assert_eq!(native_union_text_decimal_route(text), Zero);
+    }
+    for text in [&b"-"[..], &b"+1"[..], &b"1"[..], &b"  -  "[..], &[0xff]] {
+        assert_eq!(native_union_text_decimal_route(text), Convert);
+    }
+    assert_eq!(native_union_signed_to_unsigned(-1), 0);
+    assert_eq!(native_union_signed_to_unsigned(7), 7);
+    assert_eq!(native_union_real_to_signed(-0.5), 0);
+    assert_eq!(native_union_real_to_signed(2.9), 2);
+    assert_eq!(native_union_real(-0.5).to_bits(), 0.0_f64.to_bits());
+    assert_eq!(native_union_real(2.5), 2.5);
+    assert!(native_union_real(f64::NAN).is_nan());
 }

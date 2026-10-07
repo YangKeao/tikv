@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round178收口（union-cast-control-172）：native_cast接管7个source-specific UNION CAST clamp/zero-vs-convert/text route并复用既有UnsignedInUnion controller；func删七段policy，scalar删独立unsigned special case，仅留name/Datum投影、Decimal构造/warning与target fitting。最终5/5 GREEN SDK1/native-all7-1/existing2/typed1/set-SQL1；2新tests，旧TiKV1/TiDB47逐体不变。保留新test异长数组E0308及无效SQL oracle两RED，均仅test修正/删除后全rerun。whole CAST不claim，legacy SimpleSig仍阻塞；239strict0remaining6不变。详union-cast-control checkpoint/summary，配对Plan+DCO发布。
+
+round178启动（union-cast-control-172）：E扩native_cast接管7个source-specific UNION CAST的negative clamp/zero-vs-convert/text-negative route，复用既有native_cast_integer UnsignedInUnion controller；A func删七段native policy，scalar删独立unsigned clamp仅保name/source/result-type投影及DECIMAL target fitting。保NULL、warning order和具体Decimal构造。父补SDK/native/typed tests；本步不claim whole CAST，legacy SimpleSig仍阻塞；239strict0remaining6不变。
+
 round177收口（rand-kernel-171）：tidb_query_crypto接管MySQL RAND seed-state派生+既有recurrence，tidb_query_expr接管Datum seed route；native删seed derivation/source selector，仅host time entropy、session/per-occurrence identity/lifetime、Mutex及concrete conversion。6/6 GREEN crypto1/route1/native RNG1/native route1/typed-row1/session SQL sequence-order1；4新tests，旧TiKV57/TiDB7逐体不变。新增RAND functional family，239/245(97.55%) strict0 remaining6；无PB signature不造admission。详rand-kernel-checkpoint/summary；配对Plan+DCO发布。R100 full expr4/unistore1历史失败保留。
 
 round177启动（rand-kernel-171）：C扩tidb_query_crypto接管MySQL RAND seed-state派生（step已共享）；E impl_math接管Datum seed source route；A tidb-util删seed derivation仅Mutex/time/state，math_fn删source selector仅concrete conversion/session entropy/per-occurrence identity。保constant-seed sequence、dynamic per-row reseed、unseeded session RNG、UTF8/range errors。四文件并行owner，父exports/tests；若AST/shared/typed/session核心全绿则新增RAND functional family credit至239/245，strict仍0。
