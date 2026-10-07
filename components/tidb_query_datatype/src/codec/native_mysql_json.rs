@@ -5,6 +5,7 @@
 use std::str::Utf8Error;
 
 use super::{
+    mysql::time::TimeType,
     native_json_construct::{
         NativeJsonConstructError, native_json_from_duration, native_json_from_f64,
         native_json_from_i64, native_json_from_opaque, native_json_from_string,
@@ -89,6 +90,30 @@ pub fn native_convert_to_json_target(
         I::BinaryLiteral(_) => Err(NativeJsonTargetError::CannotCreateJsonFromBinary),
         other => native_datum_to_mysql_json(other).map_err(NativeJsonTargetError::Datum),
     }
+}
+
+/// Legacy SimpleSig CAST-to-JSON policy. String bytes retain the old lossy
+/// UTF-8 parse boundary. DATETIME and duration inputs are restamped to FSP 6
+/// before conversion; DATE and all other inputs retain their metadata. Every
+/// target-conversion error is deliberately folded to `None`.
+pub fn native_legacy_cast_json(input: NativeSqlStringInput<'_>) -> Option<(u8, Vec<u8>)> {
+    use NativeSqlStringInput as I;
+    let input = match input {
+        I::String(bytes) | I::Bytes(bytes) => {
+            let text = String::from_utf8_lossy(bytes);
+            return native_json_parse(&text).ok();
+        }
+        I::Time(mut value) if value.kind == TimeType::DateTime => {
+            value.fsp = 6;
+            I::Time(value)
+        }
+        I::Duration { nanoseconds, .. } => I::Duration {
+            nanoseconds,
+            fsp: 6,
+        },
+        other => other,
+    };
+    native_convert_to_json_target(input).ok()
 }
 
 /// Aggregate-style opaque conversion: Bytes is unconditional, while String
@@ -372,5 +397,61 @@ fn native_json_target_preserves_parse_kinds_and_ordinary_fallback_errors() {
     assert_eq!(
         native_convert_to_json_target(I::Null).unwrap(),
         (0x04, vec![0])
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_json_cast_preserves_lossy_text_temporal_fsp_and_seven_source_routes() {
+    use NativeSqlStringInput as I;
+
+    use super::mysql::{
+        NativeDecimalParseRef,
+        time::{NativeTemporalValue, TimeType},
+    };
+    let decimal = NativeDecimalParseRef {
+        negative: false,
+        digits: b"125",
+        scale: 1,
+        storage_scale: 1,
+        declared_shape: None,
+    };
+    for input in [
+        I::Int(-1),
+        I::Real(2.5),
+        I::Decimal(decimal),
+        I::Json {
+            type_code: 0x03,
+            value: &[0xff],
+        },
+    ] {
+        assert_eq!(
+            native_legacy_cast_json(input),
+            native_convert_to_json_target(input).ok()
+        );
+    }
+    assert_eq!(
+        native_legacy_cast_json(I::Bytes(&[b'"', 0xff, b'"'])),
+        native_json_parse("\"�\"").ok()
+    );
+    let time = NativeTemporalValue {
+        raw: 20240305143045,
+        kind: TimeType::DateTime,
+        fsp: 1,
+    };
+    assert_eq!(
+        native_legacy_cast_json(I::Time(time)),
+        native_convert_to_json_target(I::Time(NativeTemporalValue { fsp: 6, ..time })).ok()
+    );
+    assert_eq!(
+        native_legacy_cast_json(I::Duration {
+            nanoseconds: 3_600_000_000_000,
+            fsp: 1
+        }),
+        native_convert_to_json_target(I::Duration {
+            nanoseconds: 3_600_000_000_000,
+            fsp: 6
+        })
+        .ok()
     );
 }

@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round180收口（legacy-cast-json-174）：native_mysql_json接管legacy lossy string parse、JSON编码、DateTime/Duration FSP6 restamp及error fold；新窄cast_json bridge仅投影encoded parts；Unistore删Int/Real/Decimal/String/Time/Duration/Json七个SimpleSig本地算法，仅child/NULL/Datum。最终4/4 GREEN SDK1/bridge1/Unistore all7-1/existing composition1；3新tests，旧TiKV2/TiDB116逐体不变。保留新test Decimal1.3错误oracle RED，test-only改精确1.25后rerun。whole CAST不claim；239strict0remaining6。详legacy-cast-json checkpoint/summary，配对Plan+DCO发布。
+
+round180启动（legacy-cast-json-174）：D扩native_mysql_json closed legacy CAST接管Int/Real/Decimal/String/Time/Duration/Json编码、parse及DateTime/Duration FSP6 restamp并折叠错误；A新清晰cast_json bridge只投影shared BinaryJSON；U cophandler删7个SimpleSig::*AsJson本地算法，仅child/NULL/Datum投影。三文件并行owner，父module exports/tests；whole CAST不claim，其他legacy targets仍阻塞；239strict0remaining6。
+
 round179收口（legacy-cast-decimal-173）：native_cast_decimal接管legacy i128 signed/unsigned选择和既有numeric→Decimal转换并折叠legacy event/error；bridge投影Decimal；Unistore删Int/Real/Decimal/String/Time/Duration六个SimpleSig本地算法，仅child/NULL/Datum投影。最终4/4 GREEN SDK1/bridge1/Unistore all6-1/existing comparison1；2新tests，旧TiKV3/TiDB116逐体不变。保留新test跨module helper E0425/E0433 compile RED，test-only修正后rerun。whole CAST不claim，其他legacy targets仍阻塞；239strict0remaining6。详legacy-cast-decimal checkpoint/summary，配对Plan+DCO发布。
 
 round179启动（legacy-cast-decimal-173）：E扩native_cast_decimal以closed legacy接口接管i128 signed/unsigned选择及既有NativeNumericInput→Decimal转换（折叠legacy event）；A cast_decimal bridge投影Datum；U cophandler删6个SimpleSig::*AsDecimal本地from_int/uint/float/string/time/duration算法，仅child读取、NULL折叠及Datum投影。三文件并行owner，父exports/tests；whole CAST不claim，其他legacy targets仍阻塞；239strict0remaining6不变。
