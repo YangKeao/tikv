@@ -484,6 +484,63 @@ where
     native_type_to_str(code, charset).to_owned() + &suffix
 }
 
+pub fn native_field_info_schema_str(
+    compact: &str,
+    code: NativeTypeNameCode,
+    unsigned: bool,
+) -> String {
+    let mut rendered = compact.to_owned();
+    if unsigned && !matches!(code, NativeTypeNameCode::Known(16 | 13)) {
+        rendered.push_str(" unsigned");
+    }
+    rendered
+}
+
+pub fn native_field_type_desc(
+    info_schema: &str,
+    code: NativeTypeNameCode,
+    zerofill: bool,
+) -> String {
+    let mut rendered = info_schema.to_owned();
+    if zerofill && !matches!(code, NativeTypeNameCode::Known(13)) {
+        rendered.push_str(" zerofill");
+    }
+    rendered
+}
+
+pub fn native_field_source_string(
+    compact: &str,
+    code: NativeTypeNameCode,
+    unsigned: bool,
+    zerofill: bool,
+    binary_flag: bool,
+    charset: &str,
+    collation: &str,
+) -> String {
+    let mut parts = vec![compact.to_owned()];
+    if unsigned {
+        parts.push("UNSIGNED".to_owned());
+    }
+    if zerofill {
+        parts.push("ZEROFILL".to_owned());
+    }
+    if binary_flag && !matches!(code, NativeTypeNameCode::Known(254)) {
+        parts.push("BINARY".to_owned());
+    }
+    if matches!(
+        code,
+        NativeTypeNameCode::Known(15 | 253 | 254 | 249 | 250 | 251 | 252)
+    ) {
+        if !charset.is_empty() && charset != "binary" {
+            parts.push(format!("CHARACTER SET {charset}"));
+        }
+        if !collation.is_empty() && collation != "binary" {
+            parts.push(format!("COLLATE {collation}"));
+        }
+    }
+    parts.join(" ")
+}
+
 pub fn native_restore_as_cast_type(
     code: NativeTypeNameCode,
     is_array: bool,
@@ -899,5 +956,60 @@ fn field_compact_render_preserves_escaping_widths_precision_aliases_and_unknown_
             std::iter::empty::<&str>()
         ),
         ""
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn field_source_render_preserves_flag_exclusions_charset_order_and_unknown_identity() {
+    use NativeTypeNameCode::{Known, Unknown};
+    assert_eq!(
+        native_field_info_schema_str("bit(8)", Known(16), true),
+        "bit(8)"
+    );
+    assert_eq!(
+        native_field_info_schema_str("year(4)", Known(13), true),
+        "year(4)"
+    );
+    assert_eq!(
+        native_field_info_schema_str("", Unknown(13), true),
+        " unsigned"
+    );
+    assert_eq!(
+        native_field_type_desc("year(4)", Known(13), true),
+        "year(4)"
+    );
+    assert_eq!(native_field_type_desc("", Unknown(13), true), " zerofill");
+    assert_eq!(
+        native_field_source_string(
+            "varchar(3)",
+            Known(15),
+            true,
+            true,
+            true,
+            "utf8",
+            "utf8_bin"
+        ),
+        "varchar(3) UNSIGNED ZEROFILL BINARY CHARACTER SET utf8 COLLATE utf8_bin"
+    );
+    assert_eq!(
+        native_field_source_string(
+            "char(3)",
+            Known(254),
+            false,
+            false,
+            true,
+            "utf8",
+            "utf8_bin"
+        ),
+        "char(3) CHARACTER SET utf8 COLLATE utf8_bin"
+    );
+    assert_eq!(
+        native_field_source_string("", Unknown(254), false, false, true, "utf8", "utf8_bin"),
+        " BINARY"
+    );
+    assert_eq!(
+        native_field_source_string("bigint", Known(8), false, false, true, "utf8", "utf8_bin"),
+        "bigint BINARY"
     );
 }
