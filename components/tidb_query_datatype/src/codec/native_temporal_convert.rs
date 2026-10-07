@@ -176,6 +176,44 @@ pub fn native_duration_convert_to_year_with_event<TZ: TimeZone>(
     ))
 }
 
+/// The trimmed parse input plus the original-text facts used by YEAR zero
+/// adjustment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeYearTextSource<'a> {
+    pub trimmed: &'a str,
+    original_len_not_four: bool,
+    trimmed_starts_zero: bool,
+}
+
+pub fn native_year_text_source(text: &str) -> NativeYearTextSource<'_> {
+    let trimmed = text.trim();
+    NativeYearTextSource {
+        trimmed,
+        original_len_not_four: text.len() != 4,
+        trimmed_starts_zero: trimmed.starts_with('0'),
+    }
+}
+
+/// The value returned beside parsing overflow and its later AdjustYear zero
+/// policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeYearTextFinish {
+    pub value: i64,
+    pub adjust_zero: bool,
+}
+
+pub const fn native_year_text_finish(
+    source: &NativeYearTextSource<'_>,
+    parsed: i64,
+    parsed_overflow: bool,
+) -> NativeYearTextFinish {
+    let value = if parsed_overflow { 0 } else { parsed };
+    NativeYearTextFinish {
+        value,
+        adjust_zero: source.original_len_not_four && value == 0 && source.trimmed_starts_zero,
+    }
+}
+
 /// Preserve the native YEAR window, zero exception and original overflow
 /// subject.
 pub fn native_adjust_year_with_event(year: i64, adjust_zero: bool) -> NativeYearConverted {
@@ -418,5 +456,33 @@ mod tests {
             ),
             Err(NativeTimeError::InvalidDate)
         );
+    }
+
+    #[test]
+    fn year_text_source_and_finish_preserve_original_length_zero_and_overflow_policy() {
+        for (text, parsed, overflow, trimmed, value, adjust_zero) in [
+            ("0000", 0, false, "0000", 0, false),
+            ("00", 0, false, "00", 0, true),
+            (" 0000 ", 0, false, "0000", 0, true),
+            ("   ", 0, false, "", 0, false),
+            (
+                "99999999999999999999",
+                i64::MAX,
+                true,
+                "99999999999999999999",
+                0,
+                false,
+            ),
+            ("00000", i64::MAX, true, "00000", 0, true),
+            ("70", 70, false, "70", 70, false),
+        ] {
+            let source = native_year_text_source(text);
+            assert_eq!(source.trimmed, trimmed);
+            assert_eq!(
+                native_year_text_finish(&source, parsed, overflow),
+                NativeYearTextFinish { value, adjust_zero },
+                "{text:?}",
+            );
+        }
     }
 }

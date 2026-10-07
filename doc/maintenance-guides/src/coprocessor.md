@@ -814,7 +814,10 @@ short-circuit admission policy described above.
   Diagnostics call sites/effect order. Scientific-notation expansion and exact DECIMAL-text-to-UNSIGNED conversion live
   in native_integer_convert. SDK owns exponent placement, lexical bounds,
   first-fraction rounding and typed failures; native maps errors and renders the
-  actual Decimal to text. Other datatype controllers remain separate.
+  actual Decimal to text. YEAR text preparation lives in native_temporal_convert: SDK selects the
+  trimmed parse source and owns overflow-side zero plus original-length and
+  leading-zero adjustment. Native invokes the shared integer parser and retains
+  typed event projection. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
