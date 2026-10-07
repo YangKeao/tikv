@@ -5,7 +5,8 @@
 //! JSON string routing deliberately precedes trimming and ignores target
 //! bounds.
 use super::{
-    mysql::json::native_binary_json_string_bytes, native_float_parse::native_valid_float_prefix,
+    mysql::{Decimal, NativeDecimalParseRef, json::native_binary_json_string_bytes},
+    native_float_parse::native_valid_float_prefix,
     native_type_name::NativeTypeNameCode,
 };
 
@@ -205,6 +206,30 @@ fn converted_result<T>(result: Result<T, (T, NativeIntegerError)>) -> NativeInte
             event: Some(NativeIntegerEvent::Overflow(error)),
         },
     }
+}
+
+/// Preserve source-decimal overflow ahead of the bounded integer event.
+pub fn native_convert_decimal_to_int(
+    value: NativeDecimalParseRef<'_>,
+    lower: i64,
+    upper: i64,
+    target: NativeTypeNameCode,
+) -> NativeIntegerConverted<i64> {
+    let rounded = value.round_to_i64();
+    let raw = rounded.unwrap_or_else(|| value.round_to_i64_saturating());
+    let mut converted = converted_result(native_convert_int_to_int(raw, lower, upper, target));
+    if rounded.is_none() {
+        converted.event = Some(NativeIntegerEvent::Overflow(overflow(
+            Decimal::native_format_visible(
+                value.negative,
+                value.digits,
+                value.scale,
+                value.storage_scale,
+            ),
+            target,
+        )));
+    }
+    converted
 }
 
 pub const fn native_integer_unsigned_upper_bound(target: NativeTypeNameCode) -> u64 {
@@ -1108,6 +1133,43 @@ mod tests {
         assert!(
             std::panic::catch_unwind(|| { native_convert_decimal_str_to_uint("0.5", 0, Known(1)) })
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn decimal_to_signed_preserves_round_bound_and_source_overflow_precedence() {
+        use crate::codec::mysql::native_decimal_from_literal;
+        for (text, expected) in [
+            ("126.5", NativeIntegerConverted::exact(127)),
+            ("127.4", NativeIntegerConverted::exact(127)),
+        ] {
+            let value = native_decimal_from_literal(text);
+            assert_eq!(
+                native_convert_decimal_to_int(value.as_ref(), -128, 127, Known(1)),
+                expected
+            );
+        }
+        let rounded_bound = native_decimal_from_literal("127.5");
+        assert_eq!(
+            native_convert_decimal_to_int(rounded_bound.as_ref(), -128, 127, Known(1)),
+            NativeIntegerConverted {
+                value: 127,
+                event: Some(NativeIntegerEvent::Overflow(NativeIntegerError::Overflow {
+                    value: "128".into(),
+                    target: Known(1),
+                })),
+            },
+        );
+        let source_overflow = native_decimal_from_literal("9223372036854775808.00");
+        assert_eq!(
+            native_convert_decimal_to_int(source_overflow.as_ref(), -128, 127, Known(1)),
+            NativeIntegerConverted {
+                value: 127,
+                event: Some(NativeIntegerEvent::Overflow(NativeIntegerError::Overflow {
+                    value: "9223372036854775808.00".into(),
+                    target: Known(1),
+                })),
+            },
         );
     }
 }

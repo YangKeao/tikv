@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round149收口（decimal-signed-target-143）：既有native_integer_convert用共享Decimal ref接管half-up round/lazy saturate、signed target bound、visible source subject及source-overflow优先，native删组合算法仅shared carrier投影。7Cargo attempts：最终5GREEN SDK1/nativeDatatype486/转换2/sessionSQL1；保留2 RED，均父新test误以为126.5 ties-even→126而canonical half-up→127，只改两新期望/证据措辞后重跑，生产/旧tests未改。2新tests，旧SDK5/native29逐体不变，SDK1/native1无新file。两agent production-only及时freeze；详decimal-signed-checkpoint/summary。fmt/diff过，type一记录，配对Plan+DCO发布。其它datatype/renderer后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
+
+round149启动（decimal-signed-target-143）：E扩既有native_integer_convert以共享Decimal ref直接接管round/saturate、signed target bound与source-overflow subject/precedence；A datum_convert删decimal_to_signed组合体仅typed Converted投影。保saturating/format lazy、source overflow覆盖bound event、visible Decimal metadata。父各补1test、fullnativeDatatype+decimal/SQL核心、配对Plan；其它datatype/renderer后续，238strict0remaining7不增族。
+
 round148收口（year-text-142）：既有native_temporal_convert接管YEAR trim source、overflow-side zero与原文len/leading-zero adjust，native仅共享str_to_int调用和typed event move。5Cargo全GREEN SDK1/nativeDatatype485/YEAR2/sessionSQL1；2新tests，旧SDK2/native28逐体不变，SDK1/native1无新file。A按冻结签名production-only完成；C先结迟到R147后仍未写R148，父停turn转lease实现25行并补双方tests，Cargo前无生产纠正；详year-text-checkpoint/summary。fmt/diff过，type一记录，配对Plan+DCO发布。其它datatype/renderer后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
 
 round148启动（year-text-142）：C扩既有native_temporal_convert接管YEAR文本trim source、parse-overflow side zero与原文len/leading-zero adjust；A datum_convert仅调用已共享str_to_int并保typed event投影。保原文len而非trim len、overflow value0、四位0000不adjust/非四位leading0 adjust。父各补1test、fullnativeDatatype+YEAR/SQL核心、配对Plan；其它datatype/renderer后续，238strict0remaining7不增族。

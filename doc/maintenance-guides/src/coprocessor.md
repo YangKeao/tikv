@@ -817,7 +817,10 @@ short-circuit admission policy described above.
   actual Decimal to text. YEAR text preparation lives in native_temporal_convert: SDK selects the
   trimmed parse source and owns overflow-side zero plus original-length and
   leading-zero adjustment. Native invokes the shared integer parser and retains
-  typed event projection. Other datatype controllers remain separate.
+  typed event projection. Target-aware DECIMAL-to-SIGNED conversion lives in native_integer_convert
+  over the shared Decimal ref. SDK owns rounding, lazy saturation, integer
+  bounds and source-overflow precedence/subject; native maps the shared
+  converted carrier. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
