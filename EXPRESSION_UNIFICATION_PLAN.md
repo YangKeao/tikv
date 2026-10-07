@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round147收口（decimal-uint-141）：既有native_integer_convert接管scientific展开与精确DECIMAL-text→UNSIGNED算法/typed error，native删54行算法仅error映射和Decimal实际to_string。6Cargo attempts：最终5GREEN SDK3/nativeDatatype484/转换2/sessionSQL1；保留1新SDK测试oracle RED（1.25e-2误期望0.00125，源行为0.0125），只修新oracle后重跑，生产/旧tests未改。3新tests，旧SDK3/native24逐体不变，SDK1/native1 Rust无新file。两agent生产完成但迟未tests/final，父停turn adopt补tests；详decimal-uint-checkpoint/summary。fmt/diff过，type一记录，配对Plan+DCO发布。其它datatype/renderer后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
+
+round147启动（decimal-uint-141）：C扩既有native_integer_convert接管scientific notation展开与DECIMAL text→UNSIGNED精确算法/typed errors；A convert.rs只共享error→native error映射及Decimal实际to_string facade。保i128 point、expanded overflow subject、lexical bound、首fraction round、upper-round panic顺序。父fullnativeDatatype+convert/numeric/SQL核心、配对Plan；其它datatype/renderer仍后续，238strict0remaining7不增族。
+
 round146收口（numeric-event-140）：新native_conversion_event共享generic outcome ownership、prefer-second与parsed-truncation/bounded-overflow优先选择，native只typed event/error投影且Diagnostics点/顺序不动。5Cargo matched全GREEN SDK2/nativeDatatype483/precedence2/sessionSQL1，无Cargo失败重试；3新tests，旧SDK0/native27逐体不变，SDK2/native1 Rust、新SDKfile1。A完成adapter但迟未test/final，父停turn后adopt并补typed test；详numeric-event-checkpoint.md/summary.txt。最终fmt/diff过，type一记录、CAST历史/族不变，配对Plan+DCO发布。其它datatype/renderer后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
 
 round146启动（numeric-event-140）：SDK新native_conversion_event接管generic numeric outcome、prefer-second与truncation-nonfatal时bounded-overflow优先选择；A datum_convert仅typed ScalarConversionEvent/Error投影，Diagnostics调用点/顺序不动。保fatal parsed优先、unsigned second优先、move无clone。父fullnativeDatatype+numeric consumer/SQL核心、配对Plan；其它datatype/renderer仍后续，238strict0remaining7不增族。

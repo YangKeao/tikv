@@ -111,6 +111,7 @@ pub enum NativeIntegerError {
         target: NativeTypeNameCode,
     },
     InvalidUnsignedInteger(String),
+    InvalidScientificExponent(String),
 }
 /// Requests only the original generic diagnostic effects, at their original
 /// execution points. Borrowed temporary subjects cannot escape a callback.
@@ -128,6 +129,74 @@ fn overflow(value: impl ToString, target: NativeTypeNameCode) -> NativeIntegerEr
         target,
     }
 }
+/// Expands the source scientific notation without validating the mantissa.
+pub fn native_convert_scientific_notation(input: &str) -> Result<String, NativeIntegerError> {
+    let Some(exponent_index) = input.find(['e', 'E']) else {
+        return Ok(input.to_owned());
+    };
+    let exponent = input[exponent_index + 1..]
+        .parse::<i64>()
+        .map_err(|_| NativeIntegerError::InvalidScientificExponent(input.to_owned()))?;
+    let mantissa = &input[..exponent_index];
+    if exponent == 0 {
+        return Ok(mantissa.to_owned());
+    }
+
+    let point = mantissa.find('.').unwrap_or(mantissa.len());
+    let mut digits = mantissa.to_owned();
+    if point < digits.len() {
+        digits.remove(point);
+    }
+    let new_point = point as i128 + exponent as i128;
+    if new_point <= 0 {
+        return Ok(format!("0.{}{}", "0".repeat((-new_point) as usize), digits));
+    }
+    if new_point >= digits.len() as i128 {
+        digits.push_str(&"0".repeat((new_point - digits.len() as i128) as usize));
+        return Ok(digits);
+    }
+    digits.insert(new_point as usize, '.');
+    Ok(digits)
+}
+
+/// Converts the expanded decimal text through the original unsigned bounds
+/// and first-fractional-byte rounding policy.
+pub fn native_convert_decimal_str_to_uint(
+    input: &str,
+    upper_bound: u64,
+    target: NativeTypeNameCode,
+) -> Result<u64, (u64, NativeIntegerError)> {
+    let expanded = native_convert_scientific_notation(input).map_err(|error| (0, error))?;
+    let (mut integer, fraction) = expanded.split_once('.').unwrap_or((expanded.as_str(), ""));
+    integer = integer.trim_start_matches('0');
+    if integer.is_empty() {
+        integer = "0";
+    }
+    if integer.starts_with('-') {
+        return Err((0, overflow(&expanded, target)));
+    }
+    let round = u64::from(
+        fraction
+            .as_bytes()
+            .first()
+            .is_some_and(|digit| *digit >= b'5'),
+    );
+    let largest_integer = upper_bound - round;
+    let upper_text = largest_integer.to_string();
+    if integer.len() > upper_text.len()
+        || (integer.len() == upper_text.len() && integer > upper_text.as_str())
+    {
+        return Err((upper_bound, overflow(&expanded, target)));
+    }
+    let value = integer.parse::<u64>().map_err(|_| {
+        (
+            0,
+            NativeIntegerError::InvalidUnsignedInteger(integer.to_owned()),
+        )
+    })?;
+    Ok(value + round)
+}
+
 fn converted_result<T>(result: Result<T, (T, NativeIntegerError)>) -> NativeIntegerConverted<T> {
     match result {
         Ok(value) => NativeIntegerConverted::exact(value),
@@ -983,5 +1052,62 @@ mod tests {
             NativeIntegerConverted::exact(0)
         );
         assert!(std::panic::catch_unwind(|| native_json_to_int64(11, &nan, true, 0)).is_err());
+    }
+
+    #[test]
+    fn decimal_text_scientific_notation_preserves_point_and_typed_failures() {
+        for (input, expected) in [
+            ("1", "1"),
+            ("1.25e0", "1.25"),
+            ("1.25e2", "125"),
+            ("1.25e-2", "0.0125"),
+            ("-1E3", "-1000"),
+        ] {
+            assert_eq!(native_convert_scientific_notation(input).unwrap(), expected);
+        }
+        assert_eq!(
+            native_convert_scientific_notation("1e+").unwrap_err(),
+            NativeIntegerError::InvalidScientificExponent("1e+".into()),
+        );
+    }
+
+    #[test]
+    fn decimal_text_to_uint_preserves_round_bounds_errors_and_panic_order() {
+        assert_eq!(
+            native_convert_decimal_str_to_uint("1.5", 255, Known(1)),
+            Ok(2)
+        );
+        assert_eq!(
+            native_convert_decimal_str_to_uint("1e2", 255, Known(1)),
+            Ok(100)
+        );
+        assert_eq!(
+            native_convert_decimal_str_to_uint("255.5", 255, Known(1)),
+            Err((
+                255,
+                NativeIntegerError::Overflow {
+                    value: "255.5".into(),
+                    target: Known(1),
+                }
+            )),
+        );
+        assert_eq!(
+            native_convert_decimal_str_to_uint("-1e1", 255, Known(1)),
+            Err((
+                0,
+                NativeIntegerError::Overflow {
+                    value: "-10".into(),
+                    target: Known(1),
+                }
+            )),
+        );
+        assert_eq!(
+            native_convert_decimal_str_to_uint("x.1", 255, Known(1)),
+            Err((0, NativeIntegerError::InvalidUnsignedInteger("x".into()))),
+        );
+        assert!(
+            std::panic::catch_unwind(|| { native_convert_decimal_str_to_uint("0.5", 0, Known(1)) })
+                .is_err()
+        );
     }
 }

@@ -811,7 +811,10 @@ short-circuit admission policy described above.
   Generic numeric outcome ownership and parse-versus-bound event precedence live
   in native_conversion_event, including bounded overflow priority when parsing
   truncation is nonfatal. Native constructs typed events/errors and retains
-  Diagnostics call sites/effect order. Other datatype controllers remain separate.
+  Diagnostics call sites/effect order. Scientific-notation expansion and exact DECIMAL-text-to-UNSIGNED conversion live
+  in native_integer_convert. SDK owns exponent placement, lexical bounds,
+  first-fraction rounding and typed failures; native maps errors and renders the
+  actual Decimal to text. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
