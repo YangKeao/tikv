@@ -181,6 +181,34 @@ pub const fn native_string_conversion_route(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeYearInput {
+    Text,
+    Time,
+    Duration,
+    Json,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeYearConversionRoute {
+    Text,
+    Time,
+    DurationDirect,
+    Json,
+    SignedFallback,
+}
+
+pub const fn native_year_conversion_route(input: NativeYearInput) -> NativeYearConversionRoute {
+    match input {
+        NativeYearInput::Text => NativeYearConversionRoute::Text,
+        NativeYearInput::Time => NativeYearConversionRoute::Time,
+        NativeYearInput::Duration => NativeYearConversionRoute::DurationDirect,
+        NativeYearInput::Json => NativeYearConversionRoute::Json,
+        NativeYearInput::Other => NativeYearConversionRoute::SignedFallback,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeElementInput {
     Text,
     BinaryLiteral,
@@ -1755,4 +1783,19 @@ fn time_route_policy_preserves_target_identity_fsp_sources_and_unsigned_bound() 
         native_time_input_route(UnsignedInteger, false),
         NativeTimeInputRoute::Unsupported
     );
+}
+
+#[cfg(test)]
+#[test]
+fn year_route_policy_preserves_text_time_duration_json_and_signed_fallback() {
+    use NativeYearConversionRoute::*;
+    for (input, expected) in [
+        (NativeYearInput::Text, Text),
+        (NativeYearInput::Time, Time),
+        (NativeYearInput::Duration, DurationDirect),
+        (NativeYearInput::Json, Json),
+        (NativeYearInput::Other, SignedFallback),
+    ] {
+        assert_eq!(native_year_conversion_route(input), expected);
+    }
 }
