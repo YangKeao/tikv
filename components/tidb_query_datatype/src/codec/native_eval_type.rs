@@ -46,6 +46,42 @@ pub const fn native_update_decimal_flen(old_decimal: i64, old_flen: i64, flen_de
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeStringConversionSource {
+    Text,
+    BinaryLiteral,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeStringConversionRoute {
+    RawBinary,
+    DecodeBinary,
+    EncodeBinary,
+    ValidateText,
+    DecodeBinaryLiteral,
+    Stringify,
+}
+
+pub const fn native_string_conversion_route(
+    source: NativeStringConversionSource,
+    from_binary: bool,
+    to_binary: bool,
+) -> NativeStringConversionRoute {
+    match source {
+        NativeStringConversionSource::Text => match (from_binary, to_binary) {
+            (true, true) => NativeStringConversionRoute::RawBinary,
+            (true, false) => NativeStringConversionRoute::DecodeBinary,
+            (false, true) => NativeStringConversionRoute::EncodeBinary,
+            (false, false) => NativeStringConversionRoute::ValidateText,
+        },
+        NativeStringConversionSource::BinaryLiteral => {
+            NativeStringConversionRoute::DecodeBinaryLiteral
+        }
+        NativeStringConversionSource::Other => NativeStringConversionRoute::Stringify,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeDatumConversionTarget {
     Null,
     SignedInteger,
@@ -1227,6 +1263,32 @@ fn datum_target_selector_preserves_all_named_domains_signedness_and_unknown_iden
             native_datum_conversion_target(Unknown(raw), true),
             Unsupported,
             "{raw}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn datum_string_route_preserves_binary_truth_table_and_source_kind_precedence() {
+    use NativeStringConversionRoute::*;
+    use NativeStringConversionSource::*;
+    for (from_binary, to_binary, expected) in [
+        (true, true, RawBinary),
+        (true, false, DecodeBinary),
+        (false, true, EncodeBinary),
+        (false, false, ValidateText),
+    ] {
+        assert_eq!(
+            native_string_conversion_route(Text, from_binary, to_binary),
+            expected
+        );
+        assert_eq!(
+            native_string_conversion_route(BinaryLiteral, from_binary, to_binary),
+            DecodeBinaryLiteral
+        );
+        assert_eq!(
+            native_string_conversion_route(Other, from_binary, to_binary),
+            Stringify
         );
     }
 }
