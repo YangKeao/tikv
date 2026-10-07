@@ -181,6 +181,58 @@ pub const fn native_string_conversion_route(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeElementInput {
+    Text,
+    BinaryLiteral,
+    ZeroEnum,
+    NamedEnumSet,
+    Vector,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeEnumConversionRoute {
+    Text,
+    BinaryLiteral,
+    ZeroEnum,
+    Named,
+    Unsigned,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeSetConversionRoute {
+    Text,
+    BinaryLiteral,
+    Named,
+    Unsigned,
+    Unsupported,
+}
+
+pub const fn native_enum_conversion_route(input: NativeElementInput) -> NativeEnumConversionRoute {
+    match input {
+        NativeElementInput::Text => NativeEnumConversionRoute::Text,
+        NativeElementInput::BinaryLiteral => NativeEnumConversionRoute::BinaryLiteral,
+        NativeElementInput::ZeroEnum => NativeEnumConversionRoute::ZeroEnum,
+        NativeElementInput::NamedEnumSet => NativeEnumConversionRoute::Named,
+        NativeElementInput::Vector | NativeElementInput::Other => {
+            NativeEnumConversionRoute::Unsigned
+        }
+    }
+}
+
+pub const fn native_set_conversion_route(input: NativeElementInput) -> NativeSetConversionRoute {
+    match input {
+        NativeElementInput::Text => NativeSetConversionRoute::Text,
+        NativeElementInput::BinaryLiteral => NativeSetConversionRoute::BinaryLiteral,
+        NativeElementInput::ZeroEnum | NativeElementInput::NamedEnumSet => {
+            NativeSetConversionRoute::Named
+        }
+        NativeElementInput::Vector => NativeSetConversionRoute::Unsupported,
+        NativeElementInput::Other => NativeSetConversionRoute::Unsigned,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeBitTargetShape {
     Invalid,
     Full { width_bytes: u8 },
@@ -1547,4 +1599,45 @@ fn bit_target_controller_preserves_boundaries_upper_width_and_route_precedence()
     assert_eq!(native_bit_input_route(true, false), Bytes);
     assert_eq!(native_bit_input_route(false, true), Signed);
     assert_eq!(native_bit_input_route(false, false), Unsigned);
+}
+
+#[cfg(test)]
+#[test]
+fn enum_set_route_policy_preserves_zero_named_vector_and_fallback_asymmetry() {
+    use NativeElementInput::*;
+    for (input, enum_route, set_route) in [
+        (
+            Text,
+            NativeEnumConversionRoute::Text,
+            NativeSetConversionRoute::Text,
+        ),
+        (
+            BinaryLiteral,
+            NativeEnumConversionRoute::BinaryLiteral,
+            NativeSetConversionRoute::BinaryLiteral,
+        ),
+        (
+            ZeroEnum,
+            NativeEnumConversionRoute::ZeroEnum,
+            NativeSetConversionRoute::Named,
+        ),
+        (
+            NamedEnumSet,
+            NativeEnumConversionRoute::Named,
+            NativeSetConversionRoute::Named,
+        ),
+        (
+            Vector,
+            NativeEnumConversionRoute::Unsigned,
+            NativeSetConversionRoute::Unsupported,
+        ),
+        (
+            Other,
+            NativeEnumConversionRoute::Unsigned,
+            NativeSetConversionRoute::Unsigned,
+        ),
+    ] {
+        assert_eq!(native_enum_conversion_route(input), enum_route);
+        assert_eq!(native_set_conversion_route(input), set_route);
+    }
 }
