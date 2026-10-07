@@ -22,6 +22,9 @@ use super::{
     native_sql_string::{NativeSqlStringError, NativeSqlStringInput, native_sql_string},
 };
 
+/// Native TIME's whole-second boundary, shared by conversion and datum bounds.
+pub const NATIVE_MAX_DURATION_NANOS: i64 = 3_020_399_000_000_000;
+
 /// Raw native duration storage, not the range-checked wire Duration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeDurationParts {
@@ -120,7 +123,6 @@ pub fn native_number_to_duration(
     fsp: i64,
 ) -> Result<NativeDurationConverted<NativeDurationParts>, NativeTimeError> {
     const TIME_MAX_VALUE: i64 = 8_385_959;
-    const MAX_TIME_NANOS: i64 = 3_020_399_000_000_000;
     // Bound first: i64::MIN must never reach abs().
     if !(-TIME_MAX_VALUE..=TIME_MAX_VALUE).contains(&number) {
         if number >= 10_000_000_000 {
@@ -144,9 +146,9 @@ pub fn native_number_to_duration(
         return Ok(NativeDurationConverted {
             value: NativeDurationParts {
                 nanoseconds: if number < 0 {
-                    -MAX_TIME_NANOS
+                    -NATIVE_MAX_DURATION_NANOS
                 } else {
-                    MAX_TIME_NANOS
+                    NATIVE_MAX_DURATION_NANOS
                 },
                 fsp,
             },

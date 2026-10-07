@@ -183,6 +183,153 @@ pub const fn native_field_eval_type(code: NativeTypeNameCode, flags: u64) -> Nat
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeBoundTemporalKind {
+    Date,
+    DateTime,
+    Timestamp,
+}
+/// Actual bound payload, leaving only native datum/temporal/decimal constructor
+/// projection outside this policy. FLOAT payloads are already narrowed to f32.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NativeBoundValue {
+    Null,
+    Int(i64),
+    UInt(u64),
+    Real {
+        value: f64,
+        float32: bool,
+    },
+    StringByte(u8),
+    DecimalText(String),
+    DurationNanos(i64),
+    Temporal {
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        microsecond: u32,
+        kind: NativeBoundTemporalKind,
+    },
+}
+pub fn native_type_bound(
+    code: NativeTypeNameCode,
+    flen: i64,
+    decimal: i64,
+    unsigned: bool,
+    maximum: bool,
+) -> NativeBoundValue {
+    use NativeBoundValue as V;
+
+    use super::{
+        native_decimal_convert::native_bound_decimal_text,
+        native_duration_convert::NATIVE_MAX_DURATION_NANOS,
+        native_float_convert::native_get_max_float,
+        native_integer_convert::{
+            native_integer_signed_lower_bound, native_integer_signed_upper_bound,
+            native_integer_unsigned_upper_bound,
+        },
+    };
+    let NativeTypeNameCode::Known(raw) = code else {
+        return V::Null;
+    };
+    match raw {
+        1 | 2 | 9 | 3 | 8 => {
+            if unsigned {
+                V::UInt(if maximum {
+                    native_integer_unsigned_upper_bound(code)
+                } else {
+                    0
+                })
+            } else {
+                V::Int(if maximum {
+                    native_integer_signed_upper_bound(code)
+                } else {
+                    native_integer_signed_lower_bound(code)
+                })
+            }
+        }
+        4 | 5 => {
+            let value = native_get_max_float(flen as i32, decimal as i32);
+            let value = if raw == 4 {
+                f64::from(value as f32)
+            } else {
+                value
+            };
+            V::Real {
+                value: if maximum { value } else { -value },
+                float32: raw == 4,
+            }
+        }
+        15 | 253 | 252 | 249 | 250 | 251 | 254 => V::StringByte(if maximum { 250 } else { 1 }),
+        246 => V::DecimalText(native_bound_decimal_text(flen, decimal, maximum)),
+        11 => V::DurationNanos(if maximum {
+            NATIVE_MAX_DURATION_NANOS
+        } else {
+            -NATIVE_MAX_DURATION_NANOS
+        }),
+        10 | 12 => {
+            let kind = if raw == 10 {
+                NativeBoundTemporalKind::Date
+            } else {
+                NativeBoundTemporalKind::DateTime
+            };
+            if maximum {
+                V::Temporal {
+                    year: 9999,
+                    month: 12,
+                    day: 31,
+                    hour: 23,
+                    minute: 59,
+                    second: 59,
+                    microsecond: 999_999,
+                    kind,
+                }
+            } else {
+                V::Temporal {
+                    year: 1,
+                    month: 1,
+                    day: 1,
+                    hour: 0,
+                    minute: 0,
+                    second: 0,
+                    microsecond: 0,
+                    kind,
+                }
+            }
+        }
+        7 => {
+            let kind = NativeBoundTemporalKind::Timestamp;
+            if maximum {
+                V::Temporal {
+                    year: 2038,
+                    month: 1,
+                    day: 19,
+                    hour: 3,
+                    minute: 14,
+                    second: 7,
+                    microsecond: 999_999,
+                    kind,
+                }
+            } else {
+                V::Temporal {
+                    year: 1970,
+                    month: 1,
+                    day: 1,
+                    hour: 0,
+                    minute: 0,
+                    second: 1,
+                    microsecond: 0,
+                    kind,
+                }
+            }
+        }
+        _ => V::Null,
+    }
+}
+
 /// Source FieldType.SetFlenUnderLimit. The caller supplies its effective code
 /// (including ARRAY's JSON view); negative sentinels are not lower-clamped.
 pub fn native_field_flen_under_limit(code: NativeTypeNameCode, flen: i64) -> i64 {
@@ -199,6 +346,214 @@ pub fn native_field_decimal_under_limit(code: NativeTypeNameCode, decimal: i64) 
         decimal.min(crate::codec::mysql::decimal::MAX_FRACTION as i64)
     } else {
         decimal
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use NativeBoundTemporalKind as K;
+    use NativeBoundValue as V;
+    use NativeTypeNameCode::{Known, Unknown};
+
+    use super::*;
+    #[test]
+    fn native_type_bounds_keep_known_identity_unsigned_float_metadata_and_temporal_payloads() {
+        for (code, low, high, upper) in [
+            (1, -128, 127, 255),
+            (2, -32768, 32767, 65535),
+            (9, -8388608, 8388607, 16777215),
+            (3, -2147483648, 2147483647, 4294967295),
+            (8, i64::MIN, i64::MAX, u64::MAX),
+        ] {
+            assert_eq!(
+                native_type_bound(Known(code), -1, -1, false, false),
+                V::Int(low)
+            );
+            assert_eq!(
+                native_type_bound(Known(code), -1, -1, false, true),
+                V::Int(high)
+            );
+            assert_eq!(
+                native_type_bound(Known(code), -1, -1, true, false),
+                V::UInt(0)
+            );
+            assert_eq!(
+                native_type_bound(Known(code), -1, -1, true, true),
+                V::UInt(upper)
+            );
+        }
+        for maximum in [false, true] {
+            for unsigned in [false, true] {
+                assert_eq!(
+                    native_type_bound(Known(4), 3, 1, unsigned, maximum),
+                    V::Real {
+                        value: if maximum {
+                            f64::from(99.9f32)
+                        } else {
+                            -f64::from(99.9f32)
+                        },
+                        float32: true
+                    }
+                );
+                assert_eq!(
+                    native_type_bound(
+                        Known(5),
+                        (1i64 << 32) + 3,
+                        (1i64 << 32) + 1,
+                        unsigned,
+                        maximum
+                    ),
+                    V::Real {
+                        value: if maximum { 99.9 } else { -99.9 },
+                        float32: false
+                    }
+                );
+                for code in [15, 253, 252, 249, 250, 251, 254] {
+                    assert_eq!(
+                        native_type_bound(Known(code), 0, -1, unsigned, maximum),
+                        V::StringByte(if maximum { 250 } else { 1 })
+                    );
+                }
+                assert_eq!(
+                    native_type_bound(Known(246), 1, 3, unsigned, maximum),
+                    V::DecimalText((if maximum { "9.999" } else { "-9.999" }).into())
+                );
+            }
+        }
+        assert_eq!(
+            native_type_bound(Known(4), 100, 0, false, true),
+            V::Real {
+                value: f64::INFINITY,
+                float32: true
+            }
+        );
+        assert_eq!(
+            native_type_bound(Known(4), 100, 0, true, false),
+            V::Real {
+                value: f64::NEG_INFINITY,
+                float32: true
+            }
+        );
+        assert_eq!(
+            native_type_bound(Known(5), -1, -1, true, true),
+            V::Real {
+                value: -9.0,
+                float32: false
+            }
+        );
+        for code in [4, 5] {
+            let V::Real { value, .. } = native_type_bound(Known(code), 0, 0, true, false) else {
+                panic!("floating bound");
+            };
+            assert_eq!(value.to_bits(), (-0.0f64).to_bits());
+        }
+        for (code, kind) in [(10, K::Date), (12, K::DateTime)] {
+            assert_eq!(
+                native_type_bound(Known(code), -1, -1, false, true),
+                V::Temporal {
+                    year: 9999,
+                    month: 12,
+                    day: 31,
+                    hour: 23,
+                    minute: 59,
+                    second: 59,
+                    microsecond: 999_999,
+                    kind
+                }
+            );
+            assert_eq!(
+                native_type_bound(Known(code), -1, -1, true, false),
+                V::Temporal {
+                    year: 1,
+                    month: 1,
+                    day: 1,
+                    hour: 0,
+                    minute: 0,
+                    second: 0,
+                    microsecond: 0,
+                    kind
+                }
+            );
+        }
+        assert_eq!(
+            native_type_bound(Known(7), -1, -1, false, true),
+            V::Temporal {
+                year: 2038,
+                month: 1,
+                day: 19,
+                hour: 3,
+                minute: 14,
+                second: 7,
+                microsecond: 999_999,
+                kind: K::Timestamp
+            }
+        );
+        assert_eq!(
+            native_type_bound(Known(7), -1, -1, true, false),
+            V::Temporal {
+                year: 1970,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 1,
+                microsecond: 0,
+                kind: K::Timestamp
+            }
+        );
+        use super::super::native_duration_convert::{
+            NATIVE_MAX_DURATION_NANOS, native_number_to_duration,
+        };
+        assert_eq!(NATIVE_MAX_DURATION_NANOS, 3_020_399_000_000_000);
+        for maximum in [false, true] {
+            let expected = if maximum {
+                NATIVE_MAX_DURATION_NANOS
+            } else {
+                -NATIVE_MAX_DURATION_NANOS
+            };
+            assert_eq!(
+                native_type_bound(Known(11), -1, 6, true, maximum),
+                V::DurationNanos(expected)
+            );
+            assert_eq!(
+                native_number_to_duration(if maximum { 8_385_960 } else { i64::MIN }, 0)
+                    .unwrap()
+                    .value
+                    .nanoseconds,
+                expected
+            );
+        }
+        for code in 0..=255 {
+            for maximum in [false, true] {
+                assert_eq!(
+                    native_type_bound(Unknown(code), 3, 1, true, maximum),
+                    V::Null
+                );
+                if !matches!(
+                    code,
+                    1 | 2
+                        | 3
+                        | 4
+                        | 5
+                        | 7
+                        | 8
+                        | 9
+                        | 10
+                        | 11
+                        | 12
+                        | 15
+                        | 246
+                        | 249
+                        | 250
+                        | 251
+                        | 252
+                        | 253
+                        | 254
+                ) {
+                    assert_eq!(native_type_bound(Known(code), 3, 1, true, maximum), V::Null);
+                }
+            }
+        }
     }
 }
 

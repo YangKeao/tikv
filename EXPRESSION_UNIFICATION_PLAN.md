@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round144收口（datatype-bound-138）：eval_type共享GetMax/GetMin分派并复用integer/float，decimal_convert共享精确boundtext，duration唯一常量；native仅真实Datum/collation/Decimal/Duration/Time投影。5Cargo matched全GREEN SDK2/nativeDatatype481/reverse1/executorSQL1，无Cargo失败重试；3新tests，旧SDK7/native25逐体不变，SDK3/native1 Rust、无新Rustfile/SQLprobe。父在可见完整test后请求interrupt冻结，A已FINAL确认；详datatype-bound-checkpoint.md/summary.txt。最终fmt/diff过，B/A冻结，type一记录、CAST历史/族不变，配对Plan+DCO发布。其它datatype/renderer等后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
+
+round144启动（datatype-bound-138）：B既有eval_type/decimal_convert/duration_convert接管GetMax/GetMin类型分派、Decimal文本与canonical Duration常量，复用integer/float owners；A datum_convert只DTO→实际Datum/Time/Collation storage+新consumer，source_kind_bound保持显式或薄复用。保Known/Unknown identity、i64→i32 metadata cast、时态边界与unsigned。父fullnativeDatatype+reverse/SQL核心、配对Plan；其它datatype/renderer仍后续，238strict0remaining7不增族。
+
 round143收口（string-target-137）：新datatype native_string_convert+既有string_type共享ProduceStr截断/UTF8prefix/空白诊断/zero-pad，native只actualmetadata/typederror。5Cargo matched全GREEN SDK2+type1/nativeDatatype480/既有SQL2，无Cargo失败重试；3新tests，旧SDK1/native24逐体不变，SDK3/native1 Rust、新SDKfile1。A最终edit后turn失败，父adopt/fmt/test，A后续确认无已知未完；详string-target-checkpoint.md/summary.txt。最终fmt/diff过，B冻结，type一记录、CAST历史/族不变，配对Plan+DCO发布。其它datatype/renderer等后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
 
 round143启动（string-target-137）：B既有string_type+新native_string_convert接管ProduceStr截断/UTF8完整前缀/空白尾/诊断分类/zero-pad；A datum_convert只actualmetadata与typeddiagnostic投影+新consumer。复用SDK canonical UTF8 decoder/count，不复制；保invalidbyte RuneError width1、logical count仅诊断启用时、callback/message lazy与原事件顺序。父codecmod/fullnativeDatatype+expr/SQL核心、配对Plan；其它datatype/renderer仍后续，238strict0remaining7不增族。

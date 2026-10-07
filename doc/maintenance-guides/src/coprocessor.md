@@ -800,6 +800,10 @@ short-circuit admission policy described above.
   fixed-string padding, with named classification in native_string_type. It
   reuses canonical UTF-8 decode/count helpers and retains invalid-byte width and
   lazy logical lengths. Native projects actual metadata and typed diagnostics.
+  Datatype GetMaxValue/GetMinValue dispatch lives in native_eval_type, reusing
+  integer/float bounds, Decimal boundary text and one canonical duration limit.
+  Native materializes Datum/collation/temporal storage only. Known/unknown
+  identity, unsigned policy, metadata casts and temporal endpoints remain exact.
   Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the

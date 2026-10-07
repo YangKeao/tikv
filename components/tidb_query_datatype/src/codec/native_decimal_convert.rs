@@ -44,6 +44,22 @@ pub const fn native_precision_to_length_no_truncation(
     length
 }
 
+/// Native GetMaxValue/GetMinValue's literal payload before Decimal
+/// construction. Preserve the original integer.max(1) nine for scale>0,
+/// including flen<=scale; zero-width integral bounds remain empty text (and a
+/// lone '-' for minimum).
+pub fn native_bound_decimal_text(flen: i64, decimal: i64, maximum: bool) -> String {
+    let flen = flen.max(0) as usize;
+    let scale = decimal.max(0) as usize;
+    let integer = flen.saturating_sub(scale);
+    let text = if scale == 0 {
+        "9".repeat(integer)
+    } else {
+        format!("{}.{}", "9".repeat(integer.max(1)), "9".repeat(scale))
+    };
+    if maximum { text } else { format!("-{text}") }
+}
+
 #[derive(Clone, Debug)]
 pub struct NativeDecimalConverted {
     pub value: NativeDecimalParseValue,
@@ -174,6 +190,28 @@ pub fn native_datum_to_decimal(
             return Err(NativeNumericError::Unsupported);
         }
     })
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+    #[test]
+    fn native_decimal_bound_text_preserves_zero_shapes_excess_scale_and_sign_prefix() {
+        for (flen, scale, maximum, minimum) in [
+            (5, 2, "999.99", "-999.99"),
+            (3, 0, "999", "-999"),
+            (0, 0, "", "-"),
+            (-1, -1, "", "-"),
+            (i64::MIN, i64::MIN, "", "-"),
+            (2, 2, "9.99", "-9.99"),
+            (1, 3, "9.999", "-9.999"),
+            (-2, 2, "9.99", "-9.99"),
+            (2, -2, "99", "-99"),
+        ] {
+            assert_eq!(native_bound_decimal_text(flen, scale, true), maximum);
+            assert_eq!(native_bound_decimal_text(flen, scale, false), minimum);
+        }
+    }
 }
 
 #[cfg(test)]
