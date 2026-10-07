@@ -18,6 +18,8 @@ pub enum NativeStringTypeCode {
     Blob,
     VarString,
     String,
+    Enum,
+    Set,
     Other(u8),
 }
 
@@ -61,6 +63,35 @@ impl NativeStringTypeCode {
     }
 }
 
+pub fn native_enum_set_display_length(
+    code: NativeStringTypeCode,
+    lengths: impl IntoIterator<Item = usize>,
+) -> i64 {
+    let lengths = lengths.into_iter().map(|length| length as i64);
+    match code {
+        NativeStringTypeCode::Enum => lengths.max().unwrap_or(0),
+        NativeStringTypeCode::Set => {
+            let lengths: Vec<i64> = lengths.collect();
+            lengths.iter().sum::<i64>() + lengths.len().saturating_sub(1) as i64
+        }
+        _ => -1,
+    }
+}
+
+pub const fn native_field_type_has_charset(code: NativeStringTypeCode, binary_flag: bool) -> bool {
+    match code {
+        NativeStringTypeCode::VarChar
+        | NativeStringTypeCode::String
+        | NativeStringTypeCode::VarString
+        | NativeStringTypeCode::TinyBlob
+        | NativeStringTypeCode::MediumBlob
+        | NativeStringTypeCode::LongBlob
+        | NativeStringTypeCode::Blob => !binary_flag,
+        NativeStringTypeCode::Enum | NativeStringTypeCode::Set => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn native_string_type_preserves_named_identity_and_exact_collation() {
@@ -99,5 +130,31 @@ fn native_string_type_preserves_named_identity_and_exact_collation() {
         // type. Unknown variant identity must survive native projection.
         assert!(!Other(raw).is_string());
         assert!(!Other(raw).is_binary_string("binary"));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn field_string_metadata_preserves_lengths_binary_flags_and_named_identity() {
+    use NativeStringTypeCode::*;
+    assert_eq!(native_enum_set_display_length(Enum, []), 0);
+    assert_eq!(native_enum_set_display_length(Enum, [1, 4, 2]), 4);
+    assert_eq!(native_enum_set_display_length(Set, []), 0);
+    assert_eq!(native_enum_set_display_length(Set, [1, 4, 0]), 7);
+    assert_eq!(native_enum_set_display_length(Other(247), [9]), -1);
+    for code in [
+        VarChar, String, VarString, TinyBlob, MediumBlob, LongBlob, Blob,
+    ] {
+        assert!(native_field_type_has_charset(code, false), "{code:?}");
+        assert!(!native_field_type_has_charset(code, true), "{code:?}");
+    }
+    for code in [Enum, Set] {
+        assert!(!code.is_string());
+        assert!(native_field_type_has_charset(code, false));
+        assert!(native_field_type_has_charset(code, true));
+    }
+    for code in [Unspecified, Year, Other(247)] {
+        assert!(!native_field_type_has_charset(code, false), "{code:?}");
+        assert!(!native_field_type_has_charset(code, true), "{code:?}");
     }
 }

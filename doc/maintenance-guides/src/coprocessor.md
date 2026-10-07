@@ -823,7 +823,10 @@ short-circuit admission policy described above.
   converted carrier. DECIMAL-to-UNSIGNED also consumes the shared Decimal ref in
   native_integer_convert, which renders canonical visible sign, scale and
   storage metadata before reusing its exact text algorithm. Native keeps its
-  public facade and typed-error mapping only. Other datatype controllers remain separate.
+  public facade and typed-error mapping only. ENUM/SET display-length arithmetic and FieldType HasCharset/BINARY
+  classification live in native_string_type. Named identity includes Enum and
+  Set while raw unknown bytes remain Other; native projects actual code/flags
+  only. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
