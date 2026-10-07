@@ -45,6 +45,59 @@ pub const fn native_update_decimal_flen(old_decimal: i64, old_flen: i64, flen_de
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeDatumConversionTarget {
+    Null,
+    SignedInteger,
+    UnsignedInteger,
+    Float32,
+    Float64,
+    String,
+    Decimal,
+    DateTime,
+    Duration,
+    Year,
+    Enum,
+    Set,
+    Bit,
+    Json,
+    VectorFloat32,
+    Unsupported,
+}
+
+pub const fn native_datum_conversion_target(
+    code: NativeTypeNameCode,
+    unsigned: bool,
+) -> NativeDatumConversionTarget {
+    match code {
+        NativeTypeNameCode::Known(6) => NativeDatumConversionTarget::Null,
+        NativeTypeNameCode::Known(1 | 2 | 9 | 3 | 8) => {
+            if unsigned {
+                NativeDatumConversionTarget::UnsignedInteger
+            } else {
+                NativeDatumConversionTarget::SignedInteger
+            }
+        }
+        NativeTypeNameCode::Known(4) => NativeDatumConversionTarget::Float32,
+        NativeTypeNameCode::Known(5) => NativeDatumConversionTarget::Float64,
+        NativeTypeNameCode::Known(254 | 15 | 253 | 252 | 249 | 250 | 251) => {
+            NativeDatumConversionTarget::String
+        }
+        NativeTypeNameCode::Known(246) => NativeDatumConversionTarget::Decimal,
+        NativeTypeNameCode::Known(10 | 12 | 7) => NativeDatumConversionTarget::DateTime,
+        NativeTypeNameCode::Known(11) => NativeDatumConversionTarget::Duration,
+        NativeTypeNameCode::Known(13) => NativeDatumConversionTarget::Year,
+        NativeTypeNameCode::Known(247) => NativeDatumConversionTarget::Enum,
+        NativeTypeNameCode::Known(248) => NativeDatumConversionTarget::Set,
+        NativeTypeNameCode::Known(16) => NativeDatumConversionTarget::Bit,
+        NativeTypeNameCode::Known(245) => NativeDatumConversionTarget::Json,
+        NativeTypeNameCode::Known(225) => NativeDatumConversionTarget::VectorFloat32,
+        NativeTypeNameCode::Known(_) | NativeTypeNameCode::Unknown(_) => {
+            NativeDatumConversionTarget::Unsupported
+        }
+    }
+}
+
 /// The value representation used to evaluate a built-in function.
 ///
 /// This is the single Rust type for both `pkg/parser/types.EvalType` and the
@@ -1103,6 +1156,77 @@ mod tests {
         assert_eq!(
             (binary_string.eval, binary_string.binary_output),
             (String, true)
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn datum_target_selector_preserves_all_named_domains_signedness_and_unknown_identity() {
+    use NativeDatumConversionTarget::*;
+    use NativeTypeNameCode::{Known, Unknown};
+    assert_eq!(native_datum_conversion_target(Known(6), false), Null);
+    for raw in [1, 2, 9, 3, 8] {
+        assert_eq!(
+            native_datum_conversion_target(Known(raw), false),
+            SignedInteger
+        );
+        assert_eq!(
+            native_datum_conversion_target(Known(raw), true),
+            UnsignedInteger
+        );
+        assert_eq!(
+            native_datum_conversion_target(Unknown(raw), false),
+            Unsupported
+        );
+        assert_eq!(
+            native_datum_conversion_target(Unknown(raw), true),
+            Unsupported
+        );
+    }
+    for (raw, expected) in [
+        (4, Float32),
+        (5, Float64),
+        (254, String),
+        (15, String),
+        (253, String),
+        (252, String),
+        (249, String),
+        (250, String),
+        (251, String),
+        (246, Decimal),
+        (10, DateTime),
+        (12, DateTime),
+        (7, DateTime),
+        (11, Duration),
+        (13, Year),
+        (247, Enum),
+        (248, Set),
+        (16, Bit),
+        (245, Json),
+        (225, VectorFloat32),
+    ] {
+        assert_eq!(
+            native_datum_conversion_target(Known(raw), false),
+            expected,
+            "{raw}"
+        );
+        assert_eq!(
+            native_datum_conversion_target(Unknown(raw), false),
+            Unsupported,
+            "{raw}"
+        );
+    }
+    for raw in [0, 14, 17, 34, 255] {
+        assert_eq!(
+            native_datum_conversion_target(Known(raw), false),
+            Unsupported,
+            "{raw}"
+        );
+        assert_eq!(
+            native_datum_conversion_target(Unknown(raw), true),
+            Unsupported,
+            "{raw}"
         );
     }
 }
