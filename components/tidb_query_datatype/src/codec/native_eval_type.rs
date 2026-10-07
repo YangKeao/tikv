@@ -46,6 +46,47 @@ pub const fn native_update_decimal_flen(old_decimal: i64, old_flen: i64, flen_de
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeDecimalTargetShape {
+    Unspecified,
+    Invalid,
+    Bounded { precision: u32, scale: u32 },
+}
+
+pub const fn native_decimal_target_shape(
+    flen: i64,
+    decimal: i64,
+    unspecified: i64,
+) -> NativeDecimalTargetShape {
+    if flen == unspecified || decimal == unspecified {
+        NativeDecimalTargetShape::Unspecified
+    } else if flen < decimal {
+        NativeDecimalTargetShape::Invalid
+    } else {
+        NativeDecimalTargetShape::Bounded {
+            precision: if flen < 0 { 0 } else { flen as u32 },
+            scale: if decimal < 0 { 0 } else { decimal as u32 },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeDecimalInputDiagnosticAction {
+    TruncatedError,
+    Unhandled,
+}
+
+pub const fn native_decimal_input_diagnostic_action(
+    is_text: bool,
+    is_truncated: bool,
+) -> NativeDecimalInputDiagnosticAction {
+    if is_text && is_truncated {
+        NativeDecimalInputDiagnosticAction::TruncatedError
+    } else {
+        NativeDecimalInputDiagnosticAction::Unhandled
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeIntegerDiagnosticSource {
     Text,
     Integer,
@@ -1400,5 +1441,41 @@ fn integer_diagnostic_policy_preserves_signed_event_fit_and_unsigned_source_rule
         (Other, Unhandled),
     ] {
         assert_eq!(native_unsigned_integer_diagnostic_action(source), expected);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn decimal_target_controller_preserves_sentinel_invalid_clamp_and_text_event_policy() {
+    use NativeDecimalInputDiagnosticAction::*;
+    use NativeDecimalTargetShape::*;
+    for (flen, decimal) in [(-1, -1), (-1, 2), (5, -1)] {
+        assert_eq!(native_decimal_target_shape(flen, decimal, -1), Unspecified);
+    }
+    assert_eq!(native_decimal_target_shape(2, 3, -1), Invalid);
+    assert_eq!(
+        native_decimal_target_shape(5, 2, -1),
+        Bounded {
+            precision: 5,
+            scale: 2
+        }
+    );
+    assert_eq!(
+        native_decimal_target_shape(-2, -3, -1),
+        Bounded {
+            precision: 0,
+            scale: 0
+        }
+    );
+    for (is_text, is_truncated, expected) in [
+        (true, true, TruncatedError),
+        (true, false, Unhandled),
+        (false, true, Unhandled),
+        (false, false, Unhandled),
+    ] {
+        assert_eq!(
+            native_decimal_input_diagnostic_action(is_text, is_truncated),
+            expected
+        );
     }
 }
