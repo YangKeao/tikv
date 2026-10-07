@@ -856,7 +856,8 @@ short-circuit admission policy described above.
   conversion keeps source projection, concrete typed errors and context writes. Decimal conversion target-shape and input-diagnostic policy live in
   native_eval_type; native conversion keeps Decimal arithmetic, concrete typed errors and context writes. BIT conversion target-shape and input-route policy live in native_eval_type;
   native conversion keeps literal parsing, actual unsigned conversion and BinaryLiteral construction. ENUM/SET conversion input classification and route policy live in
-  native_eval_type; native conversion keeps element parsing, collators, unsigned conversion and concrete values/events. Other datatype controllers remain separate.
+  native_eval_type; native conversion keeps element parsing, collators, unsigned conversion and concrete values/events. DATE/DATETIME/TIMESTAMP conversion target kind, FSP and input-route policy
+  live in native_eval_type; native conversion keeps parsing, timezone/DST operations and concrete typed fallbacks. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

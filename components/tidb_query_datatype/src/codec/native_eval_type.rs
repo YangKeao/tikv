@@ -327,6 +327,75 @@ pub const fn native_datum_conversion_target(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeTimeTargetKind {
+    Date,
+    DateTime,
+    Timestamp,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeTimeInputSource {
+    Time,
+    Duration,
+    Text,
+    SignedInteger,
+    UnsignedInteger,
+    Decimal,
+    Json,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeTimeInputRoute {
+    Time,
+    Duration,
+    Text,
+    SignedInteger,
+    BoundedUnsignedInteger,
+    Decimal,
+    Json,
+    Unsupported,
+}
+
+pub const fn native_time_target_kind(code: NativeTypeNameCode) -> NativeTimeTargetKind {
+    match code {
+        NativeTypeNameCode::Known(10) => NativeTimeTargetKind::Date,
+        NativeTypeNameCode::Known(12) => NativeTimeTargetKind::DateTime,
+        NativeTypeNameCode::Known(7) => NativeTimeTargetKind::Timestamp,
+        NativeTypeNameCode::Known(_) | NativeTypeNameCode::Unknown(_) => {
+            NativeTimeTargetKind::Unsupported
+        }
+    }
+}
+
+pub const fn native_time_target_fsp(decimal: i64, unspecified: i64) -> i64 {
+    if decimal == unspecified { 0 } else { decimal }
+}
+
+pub const fn native_time_input_route(
+    source: NativeTimeInputSource,
+    unsigned_fits_i64: bool,
+) -> NativeTimeInputRoute {
+    match source {
+        NativeTimeInputSource::Time => NativeTimeInputRoute::Time,
+        NativeTimeInputSource::Duration => NativeTimeInputRoute::Duration,
+        NativeTimeInputSource::Text => NativeTimeInputRoute::Text,
+        NativeTimeInputSource::SignedInteger => NativeTimeInputRoute::SignedInteger,
+        NativeTimeInputSource::UnsignedInteger => {
+            if unsigned_fits_i64 {
+                NativeTimeInputRoute::BoundedUnsignedInteger
+            } else {
+                NativeTimeInputRoute::Unsupported
+            }
+        }
+        NativeTimeInputSource::Decimal => NativeTimeInputRoute::Decimal,
+        NativeTimeInputSource::Json => NativeTimeInputRoute::Json,
+        NativeTimeInputSource::Other => NativeTimeInputRoute::Unsupported,
+    }
+}
+
 /// The value representation used to evaluate a built-in function.
 ///
 /// This is the single Rust type for both `pkg/parser/types.EvalType` and the
@@ -1640,4 +1709,50 @@ fn enum_set_route_policy_preserves_zero_named_vector_and_fallback_asymmetry() {
         assert_eq!(native_enum_conversion_route(input), enum_route);
         assert_eq!(native_set_conversion_route(input), set_route);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn time_route_policy_preserves_target_identity_fsp_sources_and_unsigned_bound() {
+    use NativeTimeInputSource::*;
+    use NativeTimeTargetKind::*;
+    assert_eq!(native_time_target_kind(NativeTypeNameCode::Known(10)), Date);
+    assert_eq!(
+        native_time_target_kind(NativeTypeNameCode::Known(12)),
+        DateTime
+    );
+    assert_eq!(
+        native_time_target_kind(NativeTypeNameCode::Known(7)),
+        Timestamp
+    );
+    assert_eq!(
+        native_time_target_kind(NativeTypeNameCode::Known(11)),
+        Unsupported
+    );
+    assert_eq!(
+        native_time_target_kind(NativeTypeNameCode::Unknown(10)),
+        Unsupported
+    );
+    assert_eq!(native_time_target_fsp(-1, -1), 0);
+    assert_eq!(native_time_target_fsp(6, -1), 6);
+    for (source, expected) in [
+        (Time, NativeTimeInputRoute::Time),
+        (Duration, NativeTimeInputRoute::Duration),
+        (Text, NativeTimeInputRoute::Text),
+        (SignedInteger, NativeTimeInputRoute::SignedInteger),
+        (Decimal, NativeTimeInputRoute::Decimal),
+        (Json, NativeTimeInputRoute::Json),
+        (Other, NativeTimeInputRoute::Unsupported),
+    ] {
+        assert_eq!(native_time_input_route(source, false), expected);
+        assert_eq!(native_time_input_route(source, true), expected);
+    }
+    assert_eq!(
+        native_time_input_route(UnsignedInteger, true),
+        NativeTimeInputRoute::BoundedUnsignedInteger
+    );
+    assert_eq!(
+        native_time_input_route(UnsignedInteger, false),
+        NativeTimeInputRoute::Unsupported
+    );
 }
