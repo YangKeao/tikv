@@ -409,6 +409,96 @@ pub fn native_type_to_str(code: NativeTypeNameCode, charset: &str) -> &'static s
     }
 }
 
+pub fn native_restore_field_type_bytes<I, B>(
+    code: NativeTypeNameCode,
+    flen: i64,
+    decimal: i64,
+    unsigned: bool,
+    zerofill: bool,
+    binary_flag: bool,
+    charset: &str,
+    collation: &str,
+    elements: I,
+) -> Vec<u8>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+{
+    use NativeTypeNameCode::Known;
+
+    let mut restored = native_type_to_str(code, charset)
+        .to_uppercase()
+        .into_bytes();
+
+    match code {
+        Known(247 | 248) => {
+            restored.push(b'(');
+            for (index, element) in elements.into_iter().enumerate() {
+                if index != 0 {
+                    restored.push(b',');
+                }
+                restored.push(b'\'');
+                for &byte in element.as_ref() {
+                    restored.push(byte);
+                    if byte == b'\'' {
+                        restored.push(byte);
+                    }
+                }
+                restored.push(b'\'');
+            }
+            restored.push(b')');
+        }
+        Known(7 | 12 | 11) => {
+            if decimal != -1 {
+                restored.push(b'(');
+                restored.extend_from_slice(decimal.to_string().as_bytes());
+                restored.push(b')');
+            }
+        }
+        Known(0 | 4 | 5 | 246) => {
+            if flen != -1 {
+                restored.push(b'(');
+                restored.extend_from_slice(flen.to_string().as_bytes());
+                if decimal != -1 {
+                    restored.push(b',');
+                    restored.extend_from_slice(decimal.to_string().as_bytes());
+                }
+                restored.push(b')');
+            }
+        }
+        Known(_) | NativeTypeNameCode::Unknown(_) => {
+            if flen != -1 {
+                restored.push(b'(');
+                restored.extend_from_slice(flen.to_string().as_bytes());
+                restored.push(b')');
+            }
+        }
+    }
+
+    if unsigned {
+        restored.extend_from_slice(b" UNSIGNED");
+    }
+    if zerofill {
+        restored.extend_from_slice(b" ZEROFILL");
+    }
+    if binary_flag && charset != "binary" {
+        restored.extend_from_slice(b" BINARY");
+    }
+
+    if matches!(code, Known(15 | 253 | 254 | 249 | 250 | 251 | 252)) {
+        if !charset.is_empty() && charset != "binary" {
+            restored.extend_from_slice(b" CHARACTER SET ");
+            restored.extend_from_slice(charset.to_uppercase().as_bytes());
+        }
+        if !collation.is_empty() && collation != "binary" {
+            restored.extend_from_slice(b" COLLATE ");
+            restored.extend_from_slice(collation.as_bytes());
+        }
+    }
+
+    restored
+}
+
 /// Escapes a value using TiDB's native output formatting rules.
 pub fn native_output_format(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
@@ -1011,5 +1101,95 @@ fn field_source_render_preserves_flag_exclusions_charset_order_and_unknown_ident
     assert_eq!(
         native_field_source_string("bigint", Known(8), false, false, true, "utf8", "utf8_bin"),
         "bigint BINARY"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn field_byte_render_preserves_raw_elements_precision_flags_charset_and_unknown_identity() {
+    use NativeTypeNameCode::{Known, Unknown};
+    assert_eq!(
+        native_restore_field_type_bytes(
+            Known(247),
+            -1,
+            -1,
+            true,
+            true,
+            true,
+            "utf8",
+            "utf8_bin",
+            [b"a'\xff".as_slice(), b"\0".as_slice()]
+        ),
+        b"ENUM('a''\xff','\0') UNSIGNED ZEROFILL BINARY"
+    );
+    assert_eq!(
+        native_restore_field_type_bytes(
+            Known(246),
+            10,
+            2,
+            false,
+            false,
+            false,
+            "",
+            "",
+            std::iter::empty::<&[u8]>()
+        ),
+        b"DECIMAL(10,2)"
+    );
+    assert_eq!(
+        native_restore_field_type_bytes(
+            Known(12),
+            20,
+            3,
+            false,
+            false,
+            false,
+            "",
+            "",
+            std::iter::empty::<&[u8]>()
+        ),
+        b"DATETIME(3)"
+    );
+    assert_eq!(
+        native_restore_field_type_bytes(
+            Known(15),
+            10,
+            0,
+            false,
+            false,
+            true,
+            "utf8",
+            "utf8_bin",
+            std::iter::empty::<&[u8]>()
+        ),
+        b"VARCHAR(10) BINARY CHARACTER SET UTF8 COLLATE utf8_bin"
+    );
+    assert_eq!(
+        native_restore_field_type_bytes(
+            Unknown(15),
+            3,
+            7,
+            false,
+            false,
+            true,
+            "utf8",
+            "utf8_bin",
+            std::iter::empty::<&[u8]>()
+        ),
+        b"(3) BINARY"
+    );
+    assert_eq!(
+        native_restore_field_type_bytes(
+            Known(15),
+            4,
+            0,
+            false,
+            false,
+            true,
+            "binary",
+            "binary",
+            std::iter::empty::<&[u8]>()
+        ),
+        b"VARBINARY(4)"
     );
 }
