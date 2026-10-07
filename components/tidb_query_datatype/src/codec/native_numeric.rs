@@ -7,8 +7,8 @@ use chrono::TimeZone;
 
 use super::{
     mysql::{
-        NativeDecimalParseRef, NativeVectorFloat32, binary_literal::native_binary_literal_to_int,
-        time::NativeTemporalValue,
+        Decimal, NativeDecimalParseRef, NativeVectorFloat32,
+        binary_literal::native_binary_literal_to_int, decimal::Res, time::NativeTemporalValue,
     },
     native_duration_convert::{NativeDurationParts, native_round_duration_fsp},
     native_integer_convert::{
@@ -41,6 +41,40 @@ pub enum NativeNumericInput<'a> {
     Null,
     MinNotNull,
     MaxValue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NativeLegacyIntegerCast {
+    Value(i64),
+    Overflow(f64),
+}
+
+pub fn native_legacy_cast_integer(
+    input: NativeNumericInput<'_>,
+) -> Option<NativeLegacyIntegerCast> {
+    use NativeLegacyIntegerCast as C;
+    use NativeNumericInput as I;
+
+    match input {
+        I::Real(value) | I::Float32(value) => {
+            let rounded = value.round();
+            if rounded < -9223372036854775808.0 || rounded >= 9223372036854775808.0 {
+                Some(C::Overflow(rounded))
+            } else {
+                Some(C::Value(rounded as i64))
+            }
+        }
+        I::Decimal(value) => Some(
+            match Decimal::native_to_i64_trunc(value.negative, value.digits, value.storage_scale) {
+                Res::Ok(value) | Res::Truncated(value) => C::Value(value),
+                Res::Overflow(_) => C::Overflow(value.to_f64()),
+            },
+        ),
+        I::String(value) | I::Bytes(value) => Some(C::Value(
+            native_str_to_int(&String::from_utf8_lossy(value), false).value,
+        )),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -194,4 +228,42 @@ mod tests {
             ));
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_integer_cast_preserves_half_away_truncation_overflow_and_lossy_prefix() {
+    use NativeLegacyIntegerCast::{Overflow, Value};
+    let decimal = NativeDecimalParseRef {
+        negative: true,
+        digits: b"125",
+        scale: 1,
+        storage_scale: 1,
+        declared_shape: None,
+    };
+    assert_eq!(
+        native_legacy_cast_integer(NativeNumericInput::Real(2.5)),
+        Some(Value(3))
+    );
+    assert_eq!(
+        native_legacy_cast_integer(NativeNumericInput::Real(-2.5)),
+        Some(Value(-3))
+    );
+    assert!(matches!(
+        native_legacy_cast_integer(NativeNumericInput::Real(9.3e18)),
+        Some(Overflow(_))
+    ));
+    assert_eq!(
+        native_legacy_cast_integer(NativeNumericInput::Decimal(decimal)),
+        Some(Value(-12))
+    );
+    assert_eq!(
+        native_legacy_cast_integer(NativeNumericInput::Bytes(b" 42tail")),
+        Some(Value(42))
+    );
+    assert_eq!(
+        native_legacy_cast_integer(NativeNumericInput::Bytes(&[0xff])),
+        Some(Value(0))
+    );
+    assert_eq!(native_legacy_cast_integer(NativeNumericInput::Null), None);
 }
