@@ -200,6 +200,73 @@ pub const ET_JSON: NativeEvalType = NativeEvalType::Json;
 /// The `pkg/types.ETVectorFloat32` alias.
 pub const ET_VECTOR_FLOAT32: NativeEvalType = NativeEvalType::VectorFloat32;
 
+/// Merges the aggregate-relevant field flags.
+pub const fn native_merge_type_flags(left: u32, right: u32, not_null: u32, unsigned: u32) -> u32 {
+    left & (right & not_null | !not_null) & (right & unsigned | !unsigned)
+}
+
+/// Sets or clears one field flag.
+pub const fn native_set_type_flag(flags: u32, item: u32, on: bool) -> u32 {
+    if on { flags | item } else { flags & !item }
+}
+
+/// Returns the next wider integer type for mixed-sign aggregation.
+pub const fn native_mixed_sign_bumped_type(code: NativeTypeNameCode) -> NativeTypeNameCode {
+    match code {
+        NativeTypeNameCode::Known(1) => NativeTypeNameCode::Known(2),
+        NativeTypeNameCode::Known(2) => NativeTypeNameCode::Known(9),
+        NativeTypeNameCode::Known(9) => NativeTypeNameCode::Known(3),
+        NativeTypeNameCode::Known(3) => NativeTypeNameCode::Known(8),
+        NativeTypeNameCode::Known(8) => NativeTypeNameCode::Known(246),
+        code => code,
+    }
+}
+
+/// Merges two aggregate evaluation types using TiDB's aggregate policy.
+pub const fn native_merge_aggregate_eval_type(
+    mut left_eval: NativeEvalType,
+    mut right_eval: NativeEvalType,
+    left_code: NativeTypeNameCode,
+    right_code: NativeTypeNameCode,
+    left_unsigned: bool,
+    right_unsigned: bool,
+) -> NativeEvalType {
+    let left_unspecified = matches!(left_code, NativeTypeNameCode::Known(0));
+    let right_unspecified = matches!(right_code, NativeTypeNameCode::Known(0));
+
+    if left_unspecified && right_unspecified {
+        return NativeEvalType::String;
+    }
+    if left_unspecified {
+        left_eval = right_eval;
+    } else if right_unspecified {
+        right_eval = left_eval;
+    }
+
+    if left_eval.is_string_kind() || right_eval.is_string_kind() {
+        NativeEvalType::String
+    } else if matches!(left_eval, NativeEvalType::Real)
+        || matches!(right_eval, NativeEvalType::Real)
+    {
+        NativeEvalType::Real
+    } else if matches!(left_eval, NativeEvalType::Decimal)
+        || matches!(right_eval, NativeEvalType::Decimal)
+        || left_unsigned != right_unsigned
+    {
+        NativeEvalType::Decimal
+    } else {
+        NativeEvalType::Int
+    }
+}
+
+/// Reports whether an aggregate result should use binary output.
+pub const fn native_aggregate_binary_output(
+    aggregate: NativeEvalType,
+    binary_string: bool,
+) -> bool {
+    !aggregate.is_string_kind() || binary_string
+}
+
 /// Mirrors the native parser FieldType.EvalType table. The caller supplies its
 /// effective code (including ARRAY-to-JSON projection) without losing Unknown
 /// identity, and the complete source flag word.
@@ -749,5 +816,65 @@ mod tests {
         assert_eq!(native_update_decimal_flen(-1, 10, 2), 42);
         assert_eq!(native_update_decimal_flen(1, -1, 99), 65);
         assert_eq!(native_update_decimal_flen(1, 64, 99), 65);
+    }
+
+    #[test]
+    fn field_aggregate_policy_preserves_flags_bumps_eval_identity_and_binary_output() {
+        use NativeEvalType::{Decimal, Int, Real, String};
+        use NativeTypeNameCode::{Known, Unknown};
+        let not_null = 1;
+        let unsigned = 1 << 5;
+        assert_eq!(
+            native_merge_type_flags(u32::MAX, not_null | unsigned, not_null, unsigned),
+            u32::MAX
+        );
+        assert_eq!(
+            native_merge_type_flags(u32::MAX, 0, not_null, unsigned),
+            u32::MAX & !not_null & !unsigned
+        );
+        assert_eq!(native_set_type_flag(0, unsigned, true), unsigned);
+        assert_eq!(
+            native_set_type_flag(u32::MAX, unsigned, false),
+            u32::MAX & !unsigned
+        );
+
+        for (code, expected) in [
+            (Known(1), Known(2)),
+            (Known(2), Known(9)),
+            (Known(9), Known(3)),
+            (Known(3), Known(8)),
+            (Known(8), Known(246)),
+            (Known(13), Known(13)),
+            (Unknown(1), Unknown(1)),
+        ] {
+            assert_eq!(native_mixed_sign_bumped_type(code), expected);
+        }
+        assert_eq!(
+            native_merge_aggregate_eval_type(String, Int, Known(0), Known(3), false, false),
+            Int
+        );
+        assert_eq!(
+            native_merge_aggregate_eval_type(Int, String, Known(3), Known(0), false, false),
+            Int
+        );
+        assert_eq!(
+            native_merge_aggregate_eval_type(Int, Real, Known(0), Known(0), false, false),
+            String
+        );
+        assert_eq!(
+            native_merge_aggregate_eval_type(String, Int, Unknown(0), Known(3), false, false),
+            String
+        );
+        assert_eq!(
+            native_merge_aggregate_eval_type(Int, Int, Known(3), Known(3), true, false),
+            Decimal
+        );
+        assert_eq!(
+            native_merge_aggregate_eval_type(Decimal, Real, Known(246), Known(5), false, false),
+            Real
+        );
+        assert!(native_aggregate_binary_output(Int, false));
+        assert!(!native_aggregate_binary_output(String, false));
+        assert!(native_aggregate_binary_output(String, true));
     }
 }

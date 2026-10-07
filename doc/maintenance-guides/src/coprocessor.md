@@ -839,7 +839,9 @@ short-circuit admission policy described above.
   native_string_type and native_eval_type; native projects complete identity
   and metadata and assigns returned values only. The exact 29x29 FieldType merge table and Go map-zero index policy live
   in native_type_name; native aggregate code projects complete type identity
-  and maps the shared result byte only. Other datatype controllers remain separate.
+  and maps the shared result byte only. Aggregate flag merge/set, mixed-sign integer bump, Unspecified-aware eval
+  merge and binary-output policy live in native_eval_type; native aggregate
+  code scans concrete FieldType metadata and assigns shared decisions. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
