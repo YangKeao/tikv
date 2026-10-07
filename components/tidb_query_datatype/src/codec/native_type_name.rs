@@ -260,6 +260,68 @@ pub const fn native_type_is_temporal_with_date(code: NativeTypeNameCode) -> bool
     native_type_is_time(code)
 }
 
+/// Converts a source type label to its native code, including blob/binary
+/// aliases.
+pub fn native_str_to_type(label: &str) -> NativeTypeNameCode {
+    use NativeTypeNameCode::Known;
+    let label = label
+        .replacen("blob", "text", 1)
+        .replacen("binary", "char", 1);
+    match label.as_str() {
+        "bit" => Known(16),
+        "text" => Known(252),
+        "date" => Known(10),
+        "datetime" => Known(12),
+        "unspecified" => Known(0),
+        "decimal" => Known(246),
+        "double" => Known(5),
+        "enum" => Known(247),
+        "float" => Known(4),
+        "geometry" => Known(255),
+        "vector" => Known(225),
+        "mediumint" => Known(9),
+        "json" => Known(245),
+        "int" => Known(3),
+        "bigint" => Known(8),
+        "longtext" => Known(251),
+        "mediumtext" => Known(250),
+        "null" => Known(6),
+        "set" => Known(248),
+        "smallint" => Known(2),
+        "char" => Known(254),
+        "time" => Known(11),
+        "timestamp" => Known(7),
+        "tinyint" => Known(1),
+        "tinytext" => Known(249),
+        "varchar" => Known(15),
+        "var_string" => Known(253),
+        "year" => Known(13),
+        _ => Known(0),
+    }
+}
+
+/// Returns the source storage-width estimate for field metadata.
+pub const fn native_field_storage_length(
+    code: NativeTypeNameCode,
+    flen: i64,
+    decimal: i64,
+    var_storage_len: i64,
+) -> i64 {
+    use NativeTypeNameCode::Known;
+    match code {
+        Known(1 | 2 | 9 | 3 | 8 | 5 | 4 | 13 | 11 | 10 | 12 | 7 | 247 | 248 | 16) => 8,
+        Known(246) => {
+            const DIGITS_TO_BYTES: [i64; 10] = [0, 1, 1, 2, 2, 3, 3, 4, 4, 4];
+            let integer = flen - decimal;
+            integer / 9 * 4
+                + DIGITS_TO_BYTES[(integer % 9) as usize]
+                + decimal / 9 * 4
+                + DIGITS_TO_BYTES[(decimal % 9) as usize]
+        }
+        _ => var_storage_len,
+    }
+}
+
 /// Native TypeStr uses no charset alias, even for binary source metadata.
 pub fn native_type_str(code: NativeTypeNameCode) -> &'static str {
     native_type_to_str(code, "")
@@ -505,4 +567,34 @@ fn field_merge_table_preserves_matrix_and_zero_index_identity_policy() {
             assert!(matches!(native_merge_field_type(left, right), Known(_)));
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn field_name_storage_policy_preserves_aliases_identity_widths_and_decimal_packing() {
+    use NativeTypeNameCode::{Known, Unknown};
+    for (label, expected) in [
+        ("blob", Known(252)),
+        ("longblob", Known(251)),
+        ("binary", Known(254)),
+        ("varbinary", Known(15)),
+        ("blobbinary", Known(0)),
+        ("unknown", Known(0)),
+    ] {
+        assert_eq!(native_str_to_type(label), expected, "{label}");
+    }
+    for code in [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 16, 247, 248] {
+        assert_eq!(
+            native_field_storage_length(Known(code), 99, 77, -1),
+            8,
+            "{code}"
+        );
+    }
+    assert_eq!(native_field_storage_length(Known(246), 10, 2, -1), 5);
+    assert_eq!(native_field_storage_length(Known(246), 20, 10, -1), 10);
+    assert_eq!(native_field_storage_length(Known(15), 10, 2, -1), -1);
+    assert_eq!(native_field_storage_length(Unknown(246), 10, 2, -1), -1);
+    assert!(
+        std::panic::catch_unwind(|| native_field_storage_length(Known(246), 0, 1, -1)).is_err()
+    );
 }

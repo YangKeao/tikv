@@ -845,7 +845,8 @@ short-circuit admission policy described above.
   live in native_eval_type; native aggregate code projects concrete metadata
   descriptors, preserves the empty native shape and applies shared results. Runtime and parser DefaultTypeForValue metadata policy, digit/Go-float
   widths and charset/flag decisions live in native_field_value; native code
-  projects value shapes and applies returned metadata specs. Other datatype controllers remain separate.
+  projects value shapes and applies returned metadata specs. Type-name parsing aliases and fixed/DECIMAL storage-width policy live in
+  native_type_name; native code projects complete identity and metadata only. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
