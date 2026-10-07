@@ -7,6 +7,47 @@
 
 use crate::{NativeIdentityFrameError, NativeIdentityRef, decode_native_identity};
 
+/// Source category in the closed native-cast AST admission policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeCastAdmissionSource {
+    RangeSentinel,
+    Vector,
+    Other,
+}
+
+/// Target category in the closed native-cast AST admission policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeCastAdmissionTarget {
+    String,
+    Vector,
+    Other,
+}
+
+/// Decision produced by the closed native-cast AST admission policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeCastAdmission {
+    Allow,
+    RejectRangeSentinel,
+    RejectVectorTarget,
+}
+
+/// Applies the closed native-cast AST admission policy.
+pub const fn native_cast_admission(
+    source: NativeCastAdmissionSource,
+    target: NativeCastAdmissionTarget,
+) -> NativeCastAdmission {
+    match source {
+        NativeCastAdmissionSource::RangeSentinel => NativeCastAdmission::RejectRangeSentinel,
+        NativeCastAdmissionSource::Vector => match target {
+            NativeCastAdmissionTarget::String | NativeCastAdmissionTarget::Vector => {
+                NativeCastAdmission::Allow
+            }
+            NativeCastAdmissionTarget::Other => NativeCastAdmission::RejectVectorTarget,
+        },
+        NativeCastAdmissionSource::Other => NativeCastAdmission::Allow,
+    }
+}
+
 /// Whether a source-specific UNION DECIMAL cast yields zero or converts its
 /// value.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -258,4 +299,25 @@ fn union_cast_policy_preserves_seven_source_specific_clamps_and_routes() {
     assert_eq!(native_union_real(-0.5).to_bits(), 0.0_f64.to_bits());
     assert_eq!(native_union_real(2.5), 2.5);
     assert!(native_union_real(f64::NAN).is_nan());
+}
+
+#[cfg(test)]
+#[test]
+fn cast_admission_matrix_rejects_sentinels_and_non_string_vector_targets() {
+    use NativeCastAdmission::{Allow, RejectRangeSentinel, RejectVectorTarget};
+    use NativeCastAdmissionSource::{Other, RangeSentinel, Vector};
+    use NativeCastAdmissionTarget::{Other as OtherTarget, String, Vector as VectorTarget};
+    for target in [String, VectorTarget, OtherTarget] {
+        assert_eq!(
+            native_cast_admission(RangeSentinel, target),
+            RejectRangeSentinel
+        );
+    }
+    assert_eq!(native_cast_admission(Vector, String), Allow);
+    assert_eq!(native_cast_admission(Vector, VectorTarget), Allow);
+    assert_eq!(
+        native_cast_admission(Vector, OtherTarget),
+        RejectVectorTarget
+    );
+    assert_eq!(native_cast_admission(Other, OtherTarget), Allow);
 }

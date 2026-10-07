@@ -53,9 +53,11 @@ pub use native_bounded_staleness::{
 
 mod native_cast;
 pub use native_cast::{
+    NativeCastAdmission, NativeCastAdmissionSource, NativeCastAdmissionTarget,
     NativeCastRealUnsignedResult, NativeUnionDecimalRoute, cast_real_unsigned_native_args_valid,
-    decode_native_cast_real_unsigned_result, native_union_decimal_route, native_union_real,
-    native_union_real_to_signed, native_union_signed_to_unsigned, native_union_text_decimal_route,
+    decode_native_cast_real_unsigned_result, native_cast_admission, native_union_decimal_route,
+    native_union_real, native_union_real_to_signed, native_union_signed_to_unsigned,
+    native_union_text_decimal_route,
 };
 
 mod native_clock;

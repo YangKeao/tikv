@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round184收口（cast-admission-178）：tidb_query_expr native_cast接管range sentinel/vector target closed admission；cast.rs仅Datum/CastType投影及既有error。最终SDK1/native1 GREEN；一次错误workdir rustfmt路径在Cargo前exit1，纠正路径后全绿。partial CAST无family credit；239strict0remaining6。
+
+round184启动（cast-admission-178）：E在tidb_query_expr native_cast新增closed source/target admission matrix（range sentinel拒绝；Vector仅Char/Binary/Vector）；A cast.rs只投影Datum/CastType并构造既有error。双owner，父exports/tests；partial CAST no family credit，239strict0remaining6。
+
 round183收口（legacy-cast-integer-177）：native_numeric接管REAL half-away/range subject、Decimal trunc/overflow subject及lossy String prefix/saturation；cast_integer投影Value/Overflow；U删3个AsInt本地体，仅child/NULL/具体error。最终4/4 GREEN；bridge新test因enum缺Debug/PartialEq compile RED，derive-only修正后rerun绿。whole CAST不claim；239strict0remaining6。
 
 round183启动（legacy-cast-integer-177）：D扩native_numeric closed outcome接管REAL half-away rounding/range subject、Decimal trunc/overflow subject、lossy String prefix/saturation；A cast_integer bridge投影Value/Overflow；U删3个AsInt本地算法，仅child/NULL及具体legacy error构造。三owner并行，父exports/tests；whole CAST不claim，239strict0remaining6。
