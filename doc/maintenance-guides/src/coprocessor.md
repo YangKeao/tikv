@@ -820,7 +820,10 @@ short-circuit admission policy described above.
   typed event projection. Target-aware DECIMAL-to-SIGNED conversion lives in native_integer_convert
   over the shared Decimal ref. SDK owns rounding, lazy saturation, integer
   bounds and source-overflow precedence/subject; native maps the shared
-  converted carrier. Other datatype controllers remain separate.
+  converted carrier. DECIMAL-to-UNSIGNED also consumes the shared Decimal ref in
+  native_integer_convert, which renders canonical visible sign, scale and
+  storage metadata before reusing its exact text algorithm. Native keeps its
+  public facade and typed-error mapping only. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

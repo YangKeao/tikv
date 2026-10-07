@@ -160,6 +160,21 @@ pub fn native_convert_scientific_notation(input: &str) -> Result<String, NativeI
     Ok(digits)
 }
 
+/// Format the native decimal once before applying unsigned text conversion.
+pub fn native_convert_decimal_to_uint(
+    value: NativeDecimalParseRef<'_>,
+    upper_bound: u64,
+    target: NativeTypeNameCode,
+) -> Result<u64, (u64, NativeIntegerError)> {
+    let text = Decimal::native_format_visible(
+        value.negative,
+        value.digits,
+        value.scale,
+        value.storage_scale,
+    );
+    native_convert_decimal_str_to_uint(&text, upper_bound, target)
+}
+
 /// Converts the expanded decimal text through the original unsigned bounds
 /// and first-fractional-byte rounding policy.
 pub fn native_convert_decimal_str_to_uint(
@@ -1133,6 +1148,40 @@ mod tests {
         assert!(
             std::panic::catch_unwind(|| { native_convert_decimal_str_to_uint("0.5", 0, Known(1)) })
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn decimal_ref_to_uint_preserves_visible_scale_rounding_and_target_subject() {
+        use crate::codec::mysql::native_decimal_from_literal;
+        for (text, expected) in [("072.500", 73), ("255.4", 255)] {
+            let value = native_decimal_from_literal(text);
+            assert_eq!(
+                native_convert_decimal_to_uint(value.as_ref(), 255, Known(1)),
+                Ok(expected)
+            );
+        }
+        let overflow = native_decimal_from_literal("255.50");
+        assert_eq!(
+            native_convert_decimal_to_uint(overflow.as_ref(), 255, Known(1)),
+            Err((
+                255,
+                NativeIntegerError::Overflow {
+                    value: "255.50".into(),
+                    target: Known(1),
+                }
+            )),
+        );
+        let negative = native_decimal_from_literal("-1.00");
+        assert_eq!(
+            native_convert_decimal_to_uint(negative.as_ref(), 255, Known(1)),
+            Err((
+                0,
+                NativeIntegerError::Overflow {
+                    value: "-1.00".into(),
+                    target: Known(1),
+                }
+            )),
         );
     }
 
