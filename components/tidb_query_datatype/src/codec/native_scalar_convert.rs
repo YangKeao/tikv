@@ -123,6 +123,27 @@ pub fn native_datum_to_f64(
     })
 }
 
+/// Legacy integer-to-real casts use Rust's direct, potentially lossy
+/// i128-to-f64 conversion.
+pub fn native_legacy_cast_real_integer(value: i128) -> f64 {
+    value as f64
+}
+
+/// Legacy real casts decode string-like inputs lossily and discard parse
+/// events. Other inputs reuse the native Datum conversion, returning its value
+/// even when it reports an event and folding conversion errors to `None`.
+pub fn native_legacy_cast_real(input: NativeNumericInput<'_>) -> Option<f64> {
+    use NativeNumericInput as I;
+    match input {
+        I::String(bytes) | I::Bytes(bytes) => {
+            Some(parse_float(&String::from_utf8_lossy(bytes)).value)
+        }
+        input => native_datum_to_f64(input)
+            .ok()
+            .map(|conversion| conversion.value),
+    }
+}
+
 /// Native ToBool keeps decimal raw-coefficient zero semantics and vector's
 /// empty-storage zero definition. No JSON numeric-cast policy participates.
 pub fn native_datum_to_bool(
@@ -436,4 +457,16 @@ mod tests {
             );
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_real_cast_preserves_i128_identity_lossy_prefix_and_saturation() {
+    use super::native_numeric::NativeNumericInput as I;
+    assert_eq!(native_legacy_cast_real_integer(i128::MIN), i128::MIN as f64);
+    assert_eq!(native_legacy_cast_real(I::Real(2.5)), Some(2.5));
+    assert_eq!(native_legacy_cast_real(I::Bytes(b" 12.5tail")), Some(12.5));
+    assert_eq!(native_legacy_cast_real(I::Bytes(b"1e9999")), Some(f64::MAX));
+    assert_eq!(native_legacy_cast_real(I::Bytes(&[0xff])), Some(0.0));
+    assert_eq!(native_legacy_cast_real(I::MinNotNull), None);
 }

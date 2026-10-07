@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round181收口（legacy-cast-real-175）：先以不可变regression复现CastRealAsReal实际None/预期Some(2.5) RED；native_scalar_convert接管i128/real/decimal/lossy text→REAL及event/error fold，cast_float窄bridge；Unistore删四source算法且identity修复。最终5/5 GREEN SDK/bridge/regression/existing composition/string prefix；3新tests，旧TiKV2/TiDB118逐体不变，0新Rust文件。whole CAST不claim；239strict0remaining6。详checkpoint/summary，配对Plan+DCO发布。
+
+round181启动（legacy-cast-real-175）：先新增direct SimpleSig CastRealAsReal identity regression并在实现前RED（当前fallback误返None）；D扩native_scalar_convert closed legacy接口接管i128/Real/Decimal/lossy String→REAL及range saturation/event fold；A cast_float bridge；U cophandler删4个AsReal本地算法并修复identity。父exports/tests，whole CAST不claim；239strict0remaining6。
+
 round180收口（legacy-cast-json-174）：native_mysql_json接管legacy lossy string parse、JSON编码、DateTime/Duration FSP6 restamp及error fold；新窄cast_json bridge仅投影encoded parts；Unistore删Int/Real/Decimal/String/Time/Duration/Json七个SimpleSig本地算法，仅child/NULL/Datum。最终4/4 GREEN SDK1/bridge1/Unistore all7-1/existing composition1；3新tests，旧TiKV2/TiDB116逐体不变。保留新test Decimal1.3错误oracle RED，test-only改精确1.25后rerun。whole CAST不claim；239strict0remaining6。详legacy-cast-json checkpoint/summary，配对Plan+DCO发布。
 
 round180启动（legacy-cast-json-174）：D扩native_mysql_json closed legacy CAST接管Int/Real/Decimal/String/Time/Duration/Json编码、parse及DateTime/Duration FSP6 restamp并折叠错误；A新清晰cast_json bridge只投影shared BinaryJSON；U cophandler删7个SimpleSig::*AsJson本地算法，仅child/NULL/Datum投影。三文件并行owner，父module exports/tests；whole CAST不claim，其他legacy targets仍阻塞；239strict0remaining6。
