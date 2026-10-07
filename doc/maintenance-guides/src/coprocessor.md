@@ -852,7 +852,8 @@ short-circuit admission policy described above.
   native_type_name; native code projects compact text, complete identity and metadata only. Lossless raw-byte FieldType restore grammar lives in native_type_name; native
   code projects effective identity, metadata and raw element slices only. Datum conversion target-domain selection lives in native_eval_type; native
   conversion keeps real values, typed diagnostics and context effects. String-target datum conversion route selection lives in native_eval_type; native
-  conversion keeps real bytes, charset transforms and typed errors. Other datatype controllers remain separate.
+  conversion keeps real bytes, charset transforms and typed errors. Integer conversion diagnostic-action policy lives in native_eval_type; native
+  conversion keeps source projection, concrete typed errors and context writes. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

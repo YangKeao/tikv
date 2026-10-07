@@ -46,6 +46,64 @@ pub const fn native_update_decimal_flen(old_decimal: i64, old_flen: i64, flen_de
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeIntegerDiagnosticSource {
+    Text,
+    Integer,
+    FloatEnumSet,
+    Decimal,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeIntegerDiagnosticAction {
+    Skip,
+    NumericOverflow,
+    ConstantOverflow,
+    DecimalOverflow,
+    Unhandled,
+}
+
+pub const fn native_signed_integer_diagnostic_action(
+    source: NativeIntegerDiagnosticSource,
+    has_event: bool,
+    decimal_round_fits: bool,
+) -> NativeIntegerDiagnosticAction {
+    match source {
+        NativeIntegerDiagnosticSource::Text => NativeIntegerDiagnosticAction::Skip,
+        NativeIntegerDiagnosticSource::Integer => NativeIntegerDiagnosticAction::NumericOverflow,
+        NativeIntegerDiagnosticSource::FloatEnumSet => {
+            if has_event {
+                NativeIntegerDiagnosticAction::ConstantOverflow
+            } else {
+                NativeIntegerDiagnosticAction::Unhandled
+            }
+        }
+        NativeIntegerDiagnosticSource::Decimal => {
+            if !has_event {
+                NativeIntegerDiagnosticAction::Unhandled
+            } else if decimal_round_fits {
+                NativeIntegerDiagnosticAction::NumericOverflow
+            } else {
+                NativeIntegerDiagnosticAction::DecimalOverflow
+            }
+        }
+        NativeIntegerDiagnosticSource::Other => NativeIntegerDiagnosticAction::Unhandled,
+    }
+}
+
+pub const fn native_unsigned_integer_diagnostic_action(
+    source: NativeIntegerDiagnosticSource,
+) -> NativeIntegerDiagnosticAction {
+    match source {
+        NativeIntegerDiagnosticSource::Text => NativeIntegerDiagnosticAction::Skip,
+        NativeIntegerDiagnosticSource::Integer
+        | NativeIntegerDiagnosticSource::FloatEnumSet
+        | NativeIntegerDiagnosticSource::Decimal => NativeIntegerDiagnosticAction::NumericOverflow,
+        NativeIntegerDiagnosticSource::Other => NativeIntegerDiagnosticAction::Unhandled,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeStringConversionSource {
     Text,
     BinaryLiteral,
@@ -1290,5 +1348,57 @@ fn datum_string_route_preserves_binary_truth_table_and_source_kind_precedence() 
             native_string_conversion_route(Other, from_binary, to_binary),
             Stringify
         );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn integer_diagnostic_policy_preserves_signed_event_fit_and_unsigned_source_rules() {
+    use NativeIntegerDiagnosticAction::*;
+    use NativeIntegerDiagnosticSource::*;
+    for has_event in [false, true] {
+        for round_fits in [false, true] {
+            assert_eq!(
+                native_signed_integer_diagnostic_action(Text, has_event, round_fits),
+                Skip
+            );
+            assert_eq!(
+                native_signed_integer_diagnostic_action(Integer, has_event, round_fits),
+                NumericOverflow
+            );
+            assert_eq!(
+                native_signed_integer_diagnostic_action(Other, has_event, round_fits),
+                Unhandled
+            );
+        }
+    }
+    assert_eq!(
+        native_signed_integer_diagnostic_action(FloatEnumSet, false, true),
+        Unhandled
+    );
+    assert_eq!(
+        native_signed_integer_diagnostic_action(FloatEnumSet, true, true),
+        ConstantOverflow
+    );
+    assert_eq!(
+        native_signed_integer_diagnostic_action(Decimal, false, false),
+        Unhandled
+    );
+    assert_eq!(
+        native_signed_integer_diagnostic_action(Decimal, true, true),
+        NumericOverflow
+    );
+    assert_eq!(
+        native_signed_integer_diagnostic_action(Decimal, true, false),
+        DecimalOverflow
+    );
+    for (source, expected) in [
+        (Text, Skip),
+        (Integer, NumericOverflow),
+        (FloatEnumSet, NumericOverflow),
+        (Decimal, NumericOverflow),
+        (Other, Unhandled),
+    ] {
+        assert_eq!(native_unsigned_integer_diagnostic_action(source), expected);
     }
 }
