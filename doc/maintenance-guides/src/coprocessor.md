@@ -843,7 +843,9 @@ short-circuit admission policy described above.
   merge and binary-output policy live in native_eval_type; native aggregate
   code scans concrete FieldType metadata and assigns shared decisions. Complete allocation-free FieldType and eval aggregate iterator controllers
   live in native_eval_type; native aggregate code projects concrete metadata
-  descriptors, preserves the empty native shape and applies shared results. Other datatype controllers remain separate.
+  descriptors, preserves the empty native shape and applies shared results. Runtime and parser DefaultTypeForValue metadata policy, digit/Go-float
+  widths and charset/flag decisions live in native_field_value; native code
+  projects value shapes and applies returned metadata specs. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

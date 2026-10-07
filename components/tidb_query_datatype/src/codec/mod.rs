@@ -27,6 +27,7 @@ pub mod native_decimal_context;
 pub mod native_decimal_convert;
 pub mod native_duration_convert;
 pub mod native_eval_type;
+pub mod native_field_value;
 pub mod native_float_convert;
 pub mod native_float_parse;
 pub mod native_integer_convert;
