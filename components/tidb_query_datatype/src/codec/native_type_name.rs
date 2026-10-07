@@ -409,6 +409,85 @@ pub fn native_type_to_str(code: NativeTypeNameCode, charset: &str) -> &'static s
     }
 }
 
+pub fn native_restore_as_cast_type(
+    code: NativeTypeNameCode,
+    is_array: bool,
+    flen: i64,
+    decimal: i64,
+    unsigned: bool,
+    has_binary_flag: bool,
+    charset: &str,
+    collation: &str,
+    explicit_charset: bool,
+) -> String {
+    use NativeTypeNameCode::Known;
+
+    let mut restored = match code {
+        Known(253 | 254) => {
+            let binary = charset == "binary" && collation == "binary";
+            let mut restored = if binary {
+                "BINARY".to_owned()
+            } else {
+                "CHAR".to_owned()
+            };
+            if flen != -1 {
+                restored.push_str(&format!("({flen})"));
+            }
+            if explicit_charset && !binary {
+                if has_binary_flag {
+                    restored.push_str(" BINARY");
+                }
+                if charset != "binary" && charset != "utf8mb4" {
+                    restored.push_str(" CHARSET ");
+                    restored.push_str(&charset.to_uppercase());
+                }
+            }
+            restored
+        }
+        Known(10) => "DATE".to_owned(),
+        Known(12) => {
+            if decimal > 0 {
+                format!("DATETIME({decimal})")
+            } else {
+                "DATETIME".to_owned()
+            }
+        }
+        Known(246) => {
+            if flen > 0 && decimal > 0 {
+                format!("DECIMAL({flen}, {decimal})")
+            } else if flen > 0 {
+                format!("DECIMAL({flen})")
+            } else {
+                "DECIMAL".to_owned()
+            }
+        }
+        Known(11) => {
+            if decimal > 0 {
+                format!("TIME({decimal})")
+            } else {
+                "TIME".to_owned()
+            }
+        }
+        Known(8) => {
+            if unsigned {
+                "UNSIGNED".to_owned()
+            } else {
+                "SIGNED".to_owned()
+            }
+        }
+        Known(245) => "JSON".to_owned(),
+        Known(5) => "DOUBLE".to_owned(),
+        Known(4) => "FLOAT".to_owned(),
+        Known(13) => "YEAR".to_owned(),
+        Known(225) => "VECTOR".to_owned(),
+        Known(_) | NativeTypeNameCode::Unknown(_) => String::new(),
+    };
+    if is_array {
+        restored.push_str(" ARRAY");
+    }
+    restored
+}
+
 #[cfg(test)]
 #[test]
 fn native_type_names_keep_known_unknown_identity_and_exact_charset_aliases() {
@@ -596,5 +675,95 @@ fn field_name_storage_policy_preserves_aliases_identity_widths_and_decimal_packi
     assert_eq!(native_field_storage_length(Unknown(246), 10, 2, -1), -1);
     assert!(
         std::panic::catch_unwind(|| native_field_storage_length(Known(246), 0, 1, -1)).is_err()
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn field_cast_render_preserves_charset_precision_signedness_unknown_and_array_grammar() {
+    use NativeTypeNameCode::{Known, Unknown};
+    assert_eq!(
+        native_restore_as_cast_type(
+            Known(253),
+            false,
+            4,
+            -1,
+            false,
+            false,
+            "binary",
+            "binary",
+            true
+        ),
+        "BINARY(4)"
+    );
+    assert_eq!(
+        native_restore_as_cast_type(
+            Known(254),
+            false,
+            3,
+            -1,
+            false,
+            true,
+            "latin1",
+            "latin1_bin",
+            true
+        ),
+        "CHAR(3) BINARY CHARSET LATIN1"
+    );
+    assert_eq!(
+        native_restore_as_cast_type(
+            Known(254),
+            false,
+            -1,
+            -1,
+            false,
+            true,
+            "utf8mb4",
+            "utf8mb4_bin",
+            true
+        ),
+        "CHAR BINARY"
+    );
+    for (code, flen, decimal, unsigned, expected) in [
+        (12, -1, 3, false, "DATETIME(3)"),
+        (246, 10, 2, false, "DECIMAL(10, 2)"),
+        (246, 10, 0, false, "DECIMAL(10)"),
+        (11, -1, 6, false, "TIME(6)"),
+        (8, -1, -1, true, "UNSIGNED"),
+        (8, -1, -1, false, "SIGNED"),
+        (245, -1, -1, false, "JSON"),
+    ] {
+        assert_eq!(
+            native_restore_as_cast_type(
+                Known(code),
+                false,
+                flen,
+                decimal,
+                unsigned,
+                false,
+                "",
+                "",
+                false
+            ),
+            expected
+        );
+    }
+    assert_eq!(
+        native_restore_as_cast_type(
+            Unknown(253),
+            true,
+            4,
+            -1,
+            false,
+            false,
+            "binary",
+            "binary",
+            true
+        ),
+        " ARRAY"
+    );
+    assert_eq!(
+        native_restore_as_cast_type(Known(225), true, -1, -1, false, false, "", "", false),
+        "VECTOR ARRAY"
     );
 }
