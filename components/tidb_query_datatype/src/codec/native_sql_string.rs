@@ -111,6 +111,27 @@ pub fn native_sql_string(input: NativeSqlStringInput<'_>) -> Result<String, Nati
     decode_bytes(&bytes)
 }
 
+/// Renders an integer with the legacy unistore cast semantics: values fitting
+/// in `i64` use signed decimal, while all other values are reinterpreted as
+/// `u64` and rendered as unsigned decimal.
+pub fn native_legacy_cast_string_integer(value: i128) -> Vec<u8> {
+    match i64::try_from(value) {
+        Ok(value) => value.to_string().into_bytes(),
+        Err(_) => (value as u64).to_string().into_bytes(),
+    }
+}
+
+/// Applies the legacy unistore string cast, preserving string and byte inputs
+/// verbatim and converting all formatting or UTF-8 errors to `None`.
+pub fn native_legacy_cast_string(input: NativeSqlStringInput<'_>) -> Option<Vec<u8>> {
+    match input {
+        NativeSqlStringInput::String(bytes) | NativeSqlStringInput::Bytes(bytes) => {
+            Some(bytes.to_vec())
+        }
+        _ => native_sql_string(input).ok().map(String::into_bytes),
+    }
+}
+
 trait GoScientificFloat: fmt::Display + fmt::LowerExp + Copy {
     fn special(self) -> Option<&'static str>;
 }
@@ -343,4 +364,50 @@ mod tests {
         assert_eq!(native_sql_string(I::Float32(f64::MAX)).unwrap(), "+Inf");
         assert_eq!(native_sql_float32_scientific(f64::MAX), "+Inf");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_string_cast_preserves_integer_selection_raw_bytes_and_renderers() {
+    use NativeSqlStringInput as I;
+
+    use super::mysql::{
+        NativeDecimalParseRef,
+        time::{NativeTemporalValue, TimeType},
+    };
+    assert_eq!(native_legacy_cast_string_integer(-7), b"-7");
+    assert_eq!(
+        native_legacy_cast_string_integer(i128::from(u64::MAX)),
+        b"18446744073709551615"
+    );
+    assert_eq!(
+        native_legacy_cast_string(I::Bytes(&[0xff])),
+        Some(vec![0xff])
+    );
+    let decimal = NativeDecimalParseRef {
+        negative: false,
+        digits: b"125",
+        scale: 1,
+        storage_scale: 1,
+        declared_shape: None,
+    };
+    for input in [
+        I::Real(2.5),
+        I::Decimal(decimal),
+        I::Time(NativeTemporalValue {
+            raw: 20240305143045,
+            kind: TimeType::DateTime,
+            fsp: 0,
+        }),
+        I::Duration {
+            nanoseconds: 3_600_000_000_000,
+            fsp: 0,
+        },
+    ] {
+        assert_eq!(
+            native_legacy_cast_string(input),
+            native_sql_string(input).ok().map(String::into_bytes)
+        );
+    }
+    assert_eq!(native_legacy_cast_string(I::MinNotNull), None);
 }
