@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round152收口（field-string-policy-146）：既有native_string_type增加named Bit/JSON/Vector并接管hybrid、var-length、character-string与restored-data policy；native field_type删policy体仅named/unknown type、collation text、bin-collation fact投影。5Cargo全GREEN SDK1/nativeDatatype489/FieldType2/sessionSQL1；2新tests，旧SDK2/native24逐体不变，SDK1/native1无新file。两agent production-only及时freeze，父补tests；详field-string-policy-checkpoint/summary。fmt/diff过，type一记录，配对Plan+DCO发布。其它datatype/renderer后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
+
+round152启动（field-string-policy-146）：E扩既有native_string_type named Bit/Json/Vector并接管hybrid、var-length、character-string与restored-data policy；A field_type仅type/collation/bin-collation facts投影。保Unknown numeric identity、exact binary/0900 guard、gbk sort-key事实、新collation关停与VARCHAR例外。父SDK补1test，native既有restored-data immutable+新classification，fullnativeDatatype+sessionSQL核心、配对Plan；其它datatype/renderer后续，238strict0remaining7不增族。
+
 round151收口（field-string-meta-145）：既有native_string_type增加named Enum/Set并接管display length及HasCharset/BINARY分类；native field_type删selector体仅code/flags投影，unknown numeric alias仍Other。6Cargo attempts：最终5GREEN SDK1/nativeDatatype488/FieldType2/sessionSQL1；保留1 compile RED（父新test漏导入两个parent fn，11个E0425、未执行test），只补test imports后重跑，生产/旧tests未改。2新tests，旧SDK1/native23逐体不变，SDK1/native1无新file。两agent production-only及时freeze；详field-string-meta-checkpoint/summary。fmt/diff过，type一记录，配对Plan+DCO发布。其它datatype/renderer后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
 
 round151启动（field-string-meta-145）：E扩既有native_string_type named Enum/Set并接管ENUM/SET display length与HasCharset/BINARY分类；A field_type仅named/unknown投影。保empty、Set逗号计数、usize→i64/求和域、Unspecified/Year/Unknown false、Enum/Set无视binary true。父各补1test、fullnativeDatatype+field/sessionSQL核心、配对Plan；其它datatype/renderer后续，238strict0remaining7不增族。

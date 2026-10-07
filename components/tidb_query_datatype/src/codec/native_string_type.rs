@@ -20,10 +20,35 @@ pub enum NativeStringTypeCode {
     String,
     Enum,
     Set,
+    Bit,
+    Json,
+    VectorFloat32,
     Other(u8),
 }
 
 impl NativeStringTypeCode {
+    pub const fn is_hybrid(self) -> bool {
+        matches!(self, Self::Enum | Self::Bit | Self::Set)
+    }
+
+    pub const fn is_var_length_type(self) -> bool {
+        matches!(
+            self,
+            Self::VarChar
+                | Self::VarString
+                | Self::Json
+                | Self::TinyBlob
+                | Self::MediumBlob
+                | Self::LongBlob
+                | Self::Blob
+                | Self::VectorFloat32
+        )
+    }
+
+    pub fn is_character_string(self, collation: &str) -> bool {
+        self.is_string() && !self.is_binary_string(collation)
+    }
+
     /// Exact native IsTypeBlob named identities, never raw Other bytes.
     pub const fn is_blob(self) -> bool {
         matches!(
@@ -61,6 +86,21 @@ impl NativeStringTypeCode {
     pub fn is_binary_string(self, collation: &str) -> bool {
         self.is_string() && collation == "binary"
     }
+}
+
+pub fn native_need_restored_data(
+    code: NativeStringTypeCode,
+    collation: &str,
+    use_new_collation: bool,
+    is_bin_collation: bool,
+) -> bool {
+    if !use_new_collation || !code.is_character_string(collation) {
+        return false;
+    }
+    if collation == "utf8mb4_0900_bin" {
+        return false;
+    }
+    !is_bin_collation || code.is_varchar()
 }
 
 pub fn native_enum_set_display_length(
@@ -157,4 +197,64 @@ fn field_string_metadata_preserves_lengths_binary_flags_and_named_identity() {
         assert!(!native_field_type_has_charset(code, false), "{code:?}");
         assert!(!native_field_type_has_charset(code, true), "{code:?}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn field_string_policy_preserves_named_unknown_and_restored_data_rules() {
+    use NativeStringTypeCode::*;
+    for code in [Enum, Bit, Set] {
+        assert!(code.is_hybrid(), "{code:?}");
+    }
+    for raw in u8::MIN..=u8::MAX {
+        assert!(!Other(raw).is_hybrid());
+        assert!(!Other(raw).is_var_length_type());
+    }
+    for code in [
+        VarChar,
+        VarString,
+        Json,
+        TinyBlob,
+        MediumBlob,
+        LongBlob,
+        Blob,
+        VectorFloat32,
+    ] {
+        assert!(code.is_var_length_type(), "{code:?}");
+    }
+    assert!(String.is_character_string("utf8mb4_bin"));
+    assert!(!String.is_character_string("binary"));
+    assert!(!Enum.is_character_string("utf8mb4_bin"));
+    assert!(native_need_restored_data(
+        String,
+        "utf8mb4_general_ci",
+        true,
+        false
+    ));
+    assert!(!native_need_restored_data(
+        String,
+        "utf8mb4_bin",
+        true,
+        true
+    ));
+    assert!(native_need_restored_data(
+        VarChar,
+        "utf8mb4_bin",
+        true,
+        true
+    ));
+    assert!(native_need_restored_data(String, "gbk_bin", true, false));
+    assert!(!native_need_restored_data(
+        String,
+        "utf8mb4_0900_bin",
+        true,
+        false
+    ));
+    assert!(!native_need_restored_data(
+        String,
+        "utf8mb4_general_ci",
+        false,
+        false
+    ));
+    assert!(!native_need_restored_data(String, "binary", true, false));
 }

@@ -826,7 +826,10 @@ short-circuit admission policy described above.
   public facade and typed-error mapping only. ENUM/SET display-length arithmetic and FieldType HasCharset/BINARY
   classification live in native_string_type. Named identity includes Enum and
   Set while raw unknown bytes remain Other; native projects actual code/flags
-  only. Other datatype controllers remain separate.
+  only. FieldType hybrid and variable-length classification plus
+  character-string/restored-data policy also live in native_string_type;
+  native supplies actual named/unknown identity, collation text and the
+  bin-collation fact. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
