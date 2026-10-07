@@ -807,8 +807,11 @@ short-circuit admission policy described above.
   ChangeReverseResultByUpperLowerBound delegates overflow early-return demand,
   source-kind bounds, equal replacement and ceiling increment selection to
   native_reverse_bound. Native performs actual conversion/comparison and Decimal
-  addition, preserving comparison collation and effect order. Other datatype
-  controllers remain separate.
+  addition, preserving comparison collation and effect order.
+  Generic numeric outcome ownership and parse-versus-bound event precedence live
+  in native_conversion_event, including bounded overflow priority when parsing
+  truncation is nonfatal. Native constructs typed events/errors and retains
+  Diagnostics call sites/effect order. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
