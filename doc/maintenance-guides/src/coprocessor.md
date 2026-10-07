@@ -804,7 +804,11 @@ short-circuit admission policy described above.
   integer/float bounds, Decimal boundary text and one canonical duration limit.
   Native materializes Datum/collation/temporal storage only. Known/unknown
   identity, unsigned policy, metadata casts and temporal endpoints remain exact.
-  Other datatype controllers remain separate.
+  ChangeReverseResultByUpperLowerBound delegates overflow early-return demand,
+  source-kind bounds, equal replacement and ceiling increment selection to
+  native_reverse_bound. Native performs actual conversion/comparison and Decimal
+  addition, preserving comparison collation and effect order. Other datatype
+  controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

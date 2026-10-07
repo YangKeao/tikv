@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round145收口（reverse-bound-139）：新native_reverse_bound共享ChangeReverse overflow早返/source-kind边界/equal替换/ceil-floor动作与bounded increment，native只actual convert/compare/collation/Datum投影/Decimal add。5Cargo matched全GREEN SDK2/nativeDatatype482/reverse2/executorSQL1，无Cargo失败重试；3新tests，旧SDK0/native26逐体不变，SDK2/native1 Rust、新SDKfile1。首B久析未写被停并转lease；父pre-Cargo发现新owner prepare分支反向，agent修正+补tests后父adopt/fmt/test，无Cargo前失败。详reverse-bound-checkpoint.md/summary.txt。最终fmt/diff过，type一记录、CAST历史/族不变，配对Plan+DCO发布。其它datatype/eventmerge/renderer后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
+
+round145启动（reverse-bound-139）：B新native_reverse_bound接管ChangeReverse overflow早返/source-kind边界/equal替换/ceil递增与数值上限策略，复用bound/decimal/integer owners；A datum_convert仅实际convert/compare/Decimal add与Datum投影。保source collation比较、equal优先、floor不增、NaN/max/invalid-target panic及effect order。父fullnativeDatatype+reverse/executorSQL核心、配对Plan；其它datatype/renderer仍后续，238strict0remaining7不增族。
+
 round144收口（datatype-bound-138）：eval_type共享GetMax/GetMin分派并复用integer/float，decimal_convert共享精确boundtext，duration唯一常量；native仅真实Datum/collation/Decimal/Duration/Time投影。5Cargo matched全GREEN SDK2/nativeDatatype481/reverse1/executorSQL1，无Cargo失败重试；3新tests，旧SDK7/native25逐体不变，SDK3/native1 Rust、无新Rustfile/SQLprobe。父在可见完整test后请求interrupt冻结，A已FINAL确认；详datatype-bound-checkpoint.md/summary.txt。最终fmt/diff过，B/A冻结，type一记录、CAST历史/族不变，配对Plan+DCO发布。其它datatype/renderer等后续，238strict0remaining7不变，full expr/unistore/lint/perf未跑。
 
 round144启动（datatype-bound-138）：B既有eval_type/decimal_convert/duration_convert接管GetMax/GetMin类型分派、Decimal文本与canonical Duration常量，复用integer/float owners；A datum_convert只DTO→实际Datum/Time/Collation storage+新consumer，source_kind_bound保持显式或薄复用。保Known/Unknown identity、i64→i32 metadata cast、时态边界与unsigned。父fullnativeDatatype+reverse/SQL核心、配对Plan；其它datatype/renderer仍后续，238strict0remaining7不增族。
