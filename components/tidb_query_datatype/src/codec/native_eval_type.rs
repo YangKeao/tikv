@@ -2,7 +2,10 @@
 
 use std::{error::Error, fmt};
 
-use super::native_type_name::NativeTypeNameCode;
+use super::{
+    native_string_type::NativeStringTypeCode,
+    native_type_name::{NativeTypeNameCode, native_merge_field_type, native_type_is_integer},
+};
 
 /// Validates decimal precision and scale only for the native decimal type.
 pub const fn native_decimal_metadata_valid(
@@ -199,6 +202,138 @@ pub const ET_DURATION: NativeEvalType = NativeEvalType::Duration;
 pub const ET_JSON: NativeEvalType = NativeEvalType::Json;
 /// The `pkg/types.ETVectorFloat32` alias.
 pub const ET_VECTOR_FLOAT32: NativeEvalType = NativeEvalType::VectorFloat32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeAggregateField {
+    pub code: NativeTypeNameCode,
+    pub string_code: NativeStringTypeCode,
+    pub eval: NativeEvalType,
+    pub flags: u32,
+}
+
+impl NativeAggregateField {
+    pub const fn new(
+        code: NativeTypeNameCode,
+        string_code: NativeStringTypeCode,
+        eval: NativeEvalType,
+        flags: u32,
+    ) -> Self {
+        Self {
+            code,
+            string_code,
+            eval,
+            flags,
+        }
+    }
+}
+
+pub struct NativeAggregateEvalResult {
+    pub eval: NativeEvalType,
+    pub unsigned: bool,
+    pub binary_output: bool,
+}
+
+pub fn native_agg_field_type<I>(
+    fields: I,
+    not_null_flag: u32,
+    unsigned_flag: u32,
+) -> Option<(NativeTypeNameCode, u32)>
+where
+    I: IntoIterator<Item = NativeAggregateField>,
+{
+    let mut fields = fields.into_iter();
+    let first = fields.next()?;
+    let mut code = first.code;
+    let mut flags = first.flags;
+    let mut mixed_sign = false;
+    let mut unsigned_codes = [0_u64; 4];
+
+    if first.flags & unsigned_flag != 0 {
+        if let NativeTypeNameCode::Known(raw) = first.code {
+            unsigned_codes[usize::from(raw) / 64] |= 1_u64 << (raw % 64);
+        }
+    }
+
+    for field in fields {
+        if field.flags & unsigned_flag != 0 {
+            if let NativeTypeNameCode::Known(raw) = field.code {
+                unsigned_codes[usize::from(raw) / 64] |= 1_u64 << (raw % 64);
+            }
+        }
+        mixed_sign |= (flags & unsigned_flag != 0) != (field.flags & unsigned_flag != 0);
+        code = native_merge_field_type(code, field.code);
+        flags = native_merge_type_flags(flags, field.flags, not_null_flag, unsigned_flag);
+    }
+
+    if mixed_sign && native_type_is_integer(code) {
+        if let NativeTypeNameCode::Known(raw) = code {
+            let final_type_was_unsigned =
+                unsigned_codes[usize::from(raw) / 64] & (1_u64 << (raw % 64)) != 0;
+            let bit_was_unsigned = unsigned_codes[0] & (1_u64 << 16) != 0;
+            if final_type_was_unsigned || bit_was_unsigned {
+                code = native_mixed_sign_bumped_type(code);
+            }
+        }
+    }
+
+    if flags & unsigned_flag != 0 && !mixed_sign {
+        flags |= unsigned_flag;
+    }
+    Some((code, flags))
+}
+
+pub fn native_aggregate_eval_type<I>(
+    fields: I,
+    unsigned_flag: u32,
+    binary_flag: u32,
+) -> NativeAggregateEvalResult
+where
+    I: IntoIterator<Item = NativeAggregateField>,
+{
+    let mut fields = fields.into_iter();
+    let first = fields
+        .next()
+        .unwrap_or_else(|| panic!("AggregateEvalType requires an argument"));
+    let mut aggregate = NativeEvalType::String;
+    let mut unsigned = false;
+    let mut seen_non_null = false;
+    let mut binary_string = false;
+    let mut last_code = first.code;
+
+    for field in std::iter::once(first).chain(fields) {
+        if matches!(field.code, NativeTypeNameCode::Known(6)) {
+            continue;
+        }
+
+        binary_string |= (field.string_code.is_blob()
+            || field.string_code.is_varchar()
+            || field.string_code.is_char())
+            && field.flags & binary_flag != 0;
+        let current_unsigned = field.flags & unsigned_flag != 0;
+        if seen_non_null {
+            aggregate = native_merge_aggregate_eval_type(
+                aggregate,
+                field.eval,
+                last_code,
+                field.code,
+                unsigned,
+                current_unsigned,
+            );
+            unsigned &= current_unsigned;
+        } else {
+            aggregate = field.eval;
+            unsigned = current_unsigned;
+            seen_non_null = true;
+        }
+        last_code = field.code;
+    }
+
+    NativeAggregateEvalResult {
+        eval: aggregate,
+        unsigned,
+        binary_output: native_aggregate_binary_output(aggregate, binary_string),
+    }
+}
 
 /// Merges the aggregate-relevant field flags.
 pub const fn native_merge_type_flags(left: u32, right: u32, not_null: u32, unsigned: u32) -> u32 {
@@ -876,5 +1011,98 @@ mod tests {
         assert!(native_aggregate_binary_output(Int, false));
         assert!(!native_aggregate_binary_output(String, false));
         assert!(native_aggregate_binary_output(String, true));
+    }
+
+    #[test]
+    fn field_aggregate_controller_preserves_empty_null_identity_metadata_and_no_allocation_shape() {
+        use NativeEvalType::{Int, String};
+        use NativeStringTypeCode::{Other, Unspecified, VarChar};
+        use NativeTypeNameCode::{Known, Unknown};
+        let not_null = 1;
+        let unsigned = 1 << 5;
+        let binary = 1 << 7;
+        assert_eq!(
+            native_agg_field_type(Vec::<NativeAggregateField>::new(), not_null, unsigned),
+            None
+        );
+        assert_eq!(
+            native_agg_field_type(
+                [
+                    NativeAggregateField::new(Known(1), Other(1), Int, unsigned),
+                    NativeAggregateField::new(Known(1), Other(1), Int, 0),
+                ],
+                not_null,
+                unsigned,
+            ),
+            Some((Known(2), 0))
+        );
+        assert_eq!(
+            native_agg_field_type(
+                [
+                    NativeAggregateField::new(Unknown(1), Other(1), String, unsigned),
+                    NativeAggregateField::new(Known(1), Other(1), Int, 0),
+                ],
+                not_null,
+                unsigned,
+            ),
+            Some((Known(246), 0))
+        );
+
+        assert!(
+            std::panic::catch_unwind(|| native_aggregate_eval_type(
+                Vec::<NativeAggregateField>::new(),
+                unsigned,
+                binary,
+            ))
+            .is_err()
+        );
+        let all_null = native_aggregate_eval_type(
+            [NativeAggregateField::new(
+                Known(6),
+                Other(6),
+                String,
+                u32::MAX,
+            )],
+            unsigned,
+            binary,
+        );
+        assert_eq!(
+            (all_null.eval, all_null.unsigned, all_null.binary_output),
+            (String, false, false)
+        );
+        let known_zero = native_aggregate_eval_type(
+            [
+                NativeAggregateField::new(Known(0), Unspecified, String, 0),
+                NativeAggregateField::new(Known(3), Other(3), Int, 0),
+            ],
+            unsigned,
+            binary,
+        );
+        assert_eq!(known_zero.eval, Int);
+        assert!(known_zero.binary_output);
+        let unknown_zero = native_aggregate_eval_type(
+            [
+                NativeAggregateField::new(Unknown(0), Other(0), String, 0),
+                NativeAggregateField::new(Known(3), Other(3), Int, 0),
+            ],
+            unsigned,
+            binary,
+        );
+        assert_eq!(unknown_zero.eval, String);
+        assert!(!unknown_zero.binary_output);
+        let binary_string = native_aggregate_eval_type(
+            [NativeAggregateField::new(
+                Known(15),
+                VarChar,
+                String,
+                binary,
+            )],
+            unsigned,
+            binary,
+        );
+        assert_eq!(
+            (binary_string.eval, binary_string.binary_output),
+            (String, true)
+        );
     }
 }
