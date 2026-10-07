@@ -858,7 +858,8 @@ short-circuit admission policy described above.
   native conversion keeps literal parsing, actual unsigned conversion and BinaryLiteral construction. ENUM/SET conversion input classification and route policy live in
   native_eval_type; native conversion keeps element parsing, collators, unsigned conversion and concrete values/events. DATE/DATETIME/TIMESTAMP conversion target kind, FSP and input-route policy
   live in native_eval_type; native conversion keeps parsing, timezone/DST operations and concrete typed fallbacks. YEAR source routing lives in native_eval_type; native conversion keeps text
-  rules, statement time/session zone, numeric conversion and concrete events. Other datatype controllers remain separate.
+  rules, statement time/session zone, numeric conversion and concrete events. FieldType JSON Go-compatible tag classification lives in native_field_value;
+  native JSON keeps serde decoding, Go slice storage and concrete FieldType projection. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals

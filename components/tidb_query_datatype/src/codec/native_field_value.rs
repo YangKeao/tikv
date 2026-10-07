@@ -8,6 +8,94 @@ const UNSPECIFIED_LENGTH: i64 = -1;
 const MAX_DECIMAL_WIDTH: i64 = 65;
 const MAX_DECIMAL_SCALE: i64 = 30;
 
+/// JSON field names recognized by TiDB's field metadata decoder.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NativeFieldJsonTag {
+    Tp,
+    Flag,
+    Flen,
+    Decimal,
+    Charset,
+    Collate,
+    Elems,
+    ElemsIsBinaryLit,
+    Array,
+    Unknown,
+}
+
+/// Classifies a JSON field name using Go's `bytes.EqualFold` semantics.
+pub const fn native_field_json_tag(incoming: &str) -> NativeFieldJsonTag {
+    if ascii_tag_equal_fold(incoming, b"Tp") {
+        NativeFieldJsonTag::Tp
+    } else if ascii_tag_equal_fold(incoming, b"Flag") {
+        NativeFieldJsonTag::Flag
+    } else if ascii_tag_equal_fold(incoming, b"Flen") {
+        NativeFieldJsonTag::Flen
+    } else if ascii_tag_equal_fold(incoming, b"Decimal") {
+        NativeFieldJsonTag::Decimal
+    } else if ascii_tag_equal_fold(incoming, b"Charset") {
+        NativeFieldJsonTag::Charset
+    } else if ascii_tag_equal_fold(incoming, b"Collate") {
+        NativeFieldJsonTag::Collate
+    } else if ascii_tag_equal_fold(incoming, b"Elems") {
+        NativeFieldJsonTag::Elems
+    } else if ascii_tag_equal_fold(incoming, b"ElemsIsBinaryLit") {
+        NativeFieldJsonTag::ElemsIsBinaryLit
+    } else if ascii_tag_equal_fold(incoming, b"Array") {
+        NativeFieldJsonTag::Array
+    } else {
+        NativeFieldJsonTag::Unknown
+    }
+}
+
+const fn ascii_tag_equal_fold(incoming: &str, expected: &[u8]) -> bool {
+    let incoming = incoming.as_bytes();
+    let mut incoming_index = 0;
+    let mut expected_index = 0;
+
+    while expected_index < expected.len() {
+        if incoming_index >= incoming.len() {
+            return false;
+        }
+
+        let folded = match incoming[incoming_index] {
+            byte @ b'A'..=b'Z' => {
+                incoming_index += 1;
+                byte + (b'a' - b'A')
+            }
+            byte @ b'a'..=b'z' => {
+                incoming_index += 1;
+                byte
+            }
+            0xC5 if incoming_index + 1 < incoming.len() && incoming[incoming_index + 1] == 0xBF => {
+                incoming_index += 2;
+                b's'
+            }
+            0xE2 if incoming_index + 2 < incoming.len()
+                && incoming[incoming_index + 1] == 0x84
+                && incoming[incoming_index + 2] == 0xAA =>
+            {
+                incoming_index += 3;
+                b'k'
+            }
+            _ => return false,
+        };
+
+        let expected = expected[expected_index];
+        let expected = if expected >= b'A' && expected <= b'Z' {
+            expected + (b'a' - b'A')
+        } else {
+            expected
+        };
+        if folded != expected {
+            return false;
+        }
+        expected_index += 1;
+    }
+
+    incoming_index == incoming.len()
+}
+
 /// Value shapes accepted by TiDB's default-field-type policies.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum NativeFieldValue {
@@ -465,4 +553,30 @@ mod tests {
             spec(0, -1, -1, 0, Preserve)
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn field_json_tag_policy_preserves_named_case_unicode_fold_and_unknown_keys() {
+    use NativeFieldJsonTag::*;
+    for (incoming, expected) in [
+        ("Tp", Tp),
+        ("tP", Tp),
+        ("FLAG", Flag),
+        ("flen", Flen),
+        ("DECIMAL", Decimal),
+        ("Char\u{17f}et", Charset),
+        ("COLLATE", Collate),
+        ("elems", Elems),
+        ("ELEMSISBINARYLIT", ElemsIsBinaryLit),
+        ("array", Array),
+        ("TpX", Unknown),
+        ("T", Unknown),
+        ("\u{212a}", Unknown),
+        ("Ｆlag", Unknown),
+    ] {
+        assert_eq!(native_field_json_tag(incoming), expected);
+    }
+    assert!(ascii_tag_equal_fold("\u{212a}", b"K"));
+    assert!(!ascii_tag_equal_fold("kX", b"K"));
 }
