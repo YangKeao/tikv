@@ -94,7 +94,8 @@ mod native_cast_decimal;
 pub use native_cast_decimal::{
     NativeCastDecimalInput, decimal_prefix as native_cast_decimal_prefix, native_cast_decimal,
     native_cast_decimal_input_warning, native_cast_decimal_numeric,
-    native_cast_decimal_numeric_input_warning,
+    native_cast_decimal_numeric_input_warning, native_legacy_cast_decimal_integer,
+    native_legacy_cast_decimal_numeric,
 };
 
 mod native_cast_integer;

@@ -45,6 +45,29 @@ fn numeric_input(number: NativeNumericInput<'_>) -> NativeCastDecimalInput<'_> {
         _ => I::Other,
     }
 }
+
+/// Converts a legacy integer to decimal when it fits an existing signed or
+/// unsigned integer constructor.
+pub fn native_legacy_cast_decimal_integer(value: i128) -> Option<NativeDecimalParseValue> {
+    if let Ok(value) = i64::try_from(value) {
+        Some(NativeDecimalParseValue::from_int(value))
+    } else if let Ok(value) = u64::try_from(value) {
+        Some(NativeDecimalParseValue::from_uint(value))
+    } else {
+        None
+    }
+}
+
+/// Converts legacy numeric input while deliberately folding both conversion
+/// events and conversion errors into the legacy optional result.
+pub fn native_legacy_cast_decimal_numeric(
+    input: NativeNumericInput<'_>,
+) -> Option<NativeDecimalParseValue> {
+    native_datum_to_decimal(input)
+        .ok()
+        .map(|converted| converted.value)
+}
+
 /// Closed ordinary DECIMAL composition: actual datatype conversion and its
 /// event/error folding stay in the SDK; the original warning sink is the
 /// effect.
@@ -572,5 +595,31 @@ mod tests {
         assert_eq!(visible(&minimum), i64::MIN.to_string());
         let (maximum, _) = cast(I::UInt(u64::MAX), 0, u32::MAX);
         assert_eq!(visible(&maximum), u64::MAX.to_string());
+    }
+
+    #[test]
+    fn legacy_decimal_cast_preserves_i128_selection_and_folded_numeric_events() {
+        for (value, expected) in [
+            (i128::from(i64::MIN), i64::MIN.to_string()),
+            (-1, "-1".to_owned()),
+            (i128::from(u64::MAX), u64::MAX.to_string()),
+        ] {
+            assert_eq!(
+                visible(&native_legacy_cast_decimal_integer(value).unwrap()),
+                expected
+            );
+        }
+        assert!(native_legacy_cast_decimal_integer(i128::MIN).is_none());
+        assert_eq!(
+            visible(&native_legacy_cast_decimal_numeric(NativeNumericInput::Real(2.5)).unwrap(),),
+            "2.5"
+        );
+        assert_eq!(
+            visible(
+                &native_legacy_cast_decimal_numeric(NativeNumericInput::Bytes(b" 12.5rest"))
+                    .unwrap(),
+            ),
+            "12.5"
+        );
     }
 }
