@@ -409,6 +409,81 @@ pub fn native_type_to_str(code: NativeTypeNameCode, charset: &str) -> &'static s
     }
 }
 
+/// Escapes a value using TiDB's native output formatting rules.
+pub fn native_output_format(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\0' => output.push_str("\\0"),
+            '\'' => output.push_str("''"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            _ => output.push(ch),
+        }
+    }
+    output
+}
+
+/// Renders the native equivalent of TiDB's compact field-type description.
+pub fn native_compact_field_type<I, S>(
+    code: NativeTypeNameCode,
+    charset: &str,
+    flen: i64,
+    decimal: i64,
+    zerofill: bool,
+    strict_integer_display_width: bool,
+    elements: I,
+) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    use NativeTypeNameCode::Known;
+
+    let (default_flen, default_decimal) = native_default_field_length_and_decimal(code);
+    let decimal_not_default = decimal != default_decimal && decimal != 0 && decimal != -1;
+    let display_flen = if flen == -1 { default_flen } else { flen };
+    let display_decimal = if decimal == -1 {
+        default_decimal
+    } else {
+        decimal
+    };
+
+    let suffix = match code {
+        Known(247 | 248) => {
+            let mut suffix = String::from("('");
+            let mut first = true;
+            for element in elements {
+                if !first {
+                    suffix.push_str("','");
+                }
+                first = false;
+                suffix.push_str(&native_output_format(element.as_ref()));
+            }
+            suffix.push_str("')");
+            suffix
+        }
+        Known(7 | 12 | 11) if decimal_not_default => format!("({display_decimal})"),
+        Known(5 | 4) if decimal_not_default => {
+            format!("({display_flen},{display_decimal})")
+        }
+        Known(246) => format!("({display_flen},{display_decimal})"),
+        Known(16 | 15 | 254 | 253) => format!("({display_flen})"),
+        Known(1) if !strict_integer_display_width || zerofill || display_flen == 1 => {
+            format!("({display_flen})")
+        }
+        Known(2 | 9 | 3 | 8) if !strict_integer_display_width || zerofill => {
+            format!("({display_flen})")
+        }
+        Known(13) => format!("({flen})"),
+        Known(225) if flen != -1 => format!("({flen})"),
+        Known(6) => "(0)".to_owned(),
+        Known(_) | NativeTypeNameCode::Unknown(_) => String::new(),
+    };
+
+    native_type_to_str(code, charset).to_owned() + &suffix
+}
+
 pub fn native_restore_as_cast_type(
     code: NativeTypeNameCode,
     is_array: bool,
@@ -765,5 +840,64 @@ fn field_cast_render_preserves_charset_precision_signedness_unknown_and_array_gr
     assert_eq!(
         native_restore_as_cast_type(Known(225), true, -1, -1, false, false, "", "", false),
         "VECTOR ARRAY"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn field_compact_render_preserves_escaping_widths_precision_aliases_and_unknown_identity() {
+    use NativeTypeNameCode::{Known, Unknown};
+    assert_eq!(native_output_format("\0'\n\r\\😀"), "\\0''\\n\\r\\😀");
+    assert_eq!(
+        native_compact_field_type(Known(247), "", -1, -1, false, true, ["a'b", "x\n"]),
+        "enum('a''b','x\\n')"
+    );
+    assert_eq!(
+        native_compact_field_type(Known(1), "", 2, 0, false, true, std::iter::empty::<&str>()),
+        "tinyint"
+    );
+    assert_eq!(
+        native_compact_field_type(Known(1), "", 2, 0, true, true, std::iter::empty::<&str>()),
+        "tinyint(2)"
+    );
+    assert_eq!(
+        native_compact_field_type(Known(5), "", 7, 3, false, true, std::iter::empty::<&str>()),
+        "double(7,3)"
+    );
+    assert_eq!(
+        native_compact_field_type(
+            Known(246),
+            "",
+            10,
+            2,
+            false,
+            true,
+            std::iter::empty::<&str>()
+        ),
+        "decimal(10,2)"
+    );
+    assert_eq!(
+        native_compact_field_type(
+            Known(15),
+            "binary",
+            4,
+            0,
+            false,
+            true,
+            std::iter::empty::<&str>()
+        ),
+        "varbinary(4)"
+    );
+    assert_eq!(
+        native_compact_field_type(
+            Unknown(1),
+            "",
+            2,
+            0,
+            true,
+            false,
+            std::iter::empty::<&str>()
+        ),
+        ""
     );
 }
