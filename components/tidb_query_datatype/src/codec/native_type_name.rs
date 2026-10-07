@@ -10,6 +10,170 @@ pub enum NativeTypeNameCode {
     Unknown(u8),
 }
 
+/// Exact `fieldTypeMergeRules` from `pkg/types/field_type.go`.
+const MERGE_RULES: [[u8; 29]; 29] = [
+    [
+        246, 246, 246, 246, 5, 5, 246, 15, 0, 0, 15, 15, 15, 15, 15, 15, 15, 15, 246, 15, 15, 249,
+        250, 251, 252, 15, 254, 15, 15,
+    ],
+    [
+        246, 1, 2, 3, 4, 5, 1, 15, 8, 9, 15, 15, 15, 1, 15, 15, 8, 15, 246, 15, 15, 249, 250, 251,
+        252, 15, 254, 15, 15,
+    ],
+    [
+        246, 2, 2, 3, 4, 5, 2, 15, 8, 9, 15, 15, 15, 2, 15, 15, 8, 15, 246, 15, 15, 249, 250, 251,
+        252, 15, 254, 15, 15,
+    ],
+    [
+        246, 3, 3, 3, 5, 5, 3, 15, 8, 3, 15, 15, 15, 3, 15, 15, 8, 15, 246, 15, 15, 249, 250, 251,
+        252, 15, 254, 15, 15,
+    ],
+    [
+        5, 4, 4, 5, 4, 5, 4, 15, 4, 4, 15, 15, 15, 4, 15, 15, 5, 15, 5, 15, 15, 249, 250, 251, 252,
+        15, 254, 15, 15,
+    ],
+    [
+        5, 5, 5, 5, 5, 5, 5, 15, 5, 5, 15, 15, 15, 5, 15, 15, 5, 15, 5, 15, 15, 249, 250, 251, 252,
+        15, 254, 15, 15,
+    ],
+    [
+        246, 1, 2, 3, 4, 5, 6, 7, 8, 8, 10, 11, 12, 13, 14, 15, 16, 245, 246, 247, 248, 249, 250,
+        251, 252, 15, 254, 255, 225,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 7, 7, 15, 15, 12, 12, 12, 15, 14, 15, 15, 15, 15, 15, 15, 249, 250,
+        251, 252, 15, 254, 15, 15,
+    ],
+    [
+        246, 8, 8, 8, 5, 5, 8, 15, 8, 3, 15, 15, 15, 8, 14, 15, 8, 15, 246, 15, 15, 249, 250, 251,
+        252, 15, 254, 15, 15,
+    ],
+    [
+        246, 9, 9, 3, 4, 5, 9, 15, 8, 9, 15, 15, 15, 9, 14, 15, 8, 15, 246, 15, 15, 249, 250, 251,
+        252, 15, 254, 15, 15,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 10, 12, 15, 15, 10, 12, 12, 15, 14, 15, 15, 15, 15, 15, 15, 249,
+        250, 251, 252, 15, 254, 15, 15,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 11, 12, 15, 15, 12, 11, 12, 15, 14, 15, 15, 15, 15, 15, 15, 249,
+        250, 251, 252, 15, 254, 15, 15,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 12, 12, 15, 15, 12, 12, 12, 15, 14, 15, 15, 15, 15, 15, 15, 249,
+        250, 251, 252, 15, 254, 15, 15,
+    ],
+    [
+        0, 1, 2, 3, 4, 5, 13, 15, 8, 9, 15, 15, 15, 13, 15, 15, 8, 15, 246, 15, 15, 249, 250, 251,
+        252, 15, 254, 15, 15,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 14, 12, 15, 15, 14, 12, 12, 15, 14, 15, 15, 15, 15, 15, 15, 249,
+        250, 251, 252, 15, 254, 15, 15,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 249,
+        250, 251, 252, 15, 15, 15, 15,
+    ],
+    [
+        15, 8, 8, 8, 5, 5, 16, 15, 8, 8, 15, 15, 15, 8, 15, 15, 16, 15, 246, 15, 15, 249, 250, 251,
+        252, 15, 254, 15, 15,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 245, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 245, 15, 15, 15, 251,
+        251, 251, 251, 15, 254, 15, 15,
+    ],
+    [
+        246, 246, 246, 246, 5, 5, 246, 15, 246, 246, 15, 15, 15, 246, 15, 15, 246, 15, 246, 15, 15,
+        249, 250, 251, 252, 15, 254, 15, 15,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 247, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 249,
+        250, 251, 252, 15, 254, 15, 15,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 248, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 249,
+        250, 251, 252, 15, 254, 15, 15,
+    ],
+    [
+        249, 249, 249, 249, 249, 249, 249, 249, 249, 249, 249, 249, 249, 249, 249, 249, 249, 251,
+        249, 249, 249, 249, 250, 251, 252, 249, 249, 249, 251,
+    ],
+    [
+        250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 251,
+        250, 250, 250, 250, 250, 251, 250, 250, 250, 250, 251,
+    ],
+    [
+        251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251,
+        251, 251, 251, 251, 251, 251, 251, 251, 251, 251, 251,
+    ],
+    [
+        252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 252, 251,
+        252, 252, 252, 252, 250, 251, 252, 252, 252, 252, 251,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 249,
+        250, 251, 252, 15, 15, 15, 15,
+    ],
+    [
+        254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 15, 254, 254,
+        254, 254, 254, 249, 250, 251, 252, 15, 254, 254, 254,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 255, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 249,
+        250, 251, 252, 15, 254, 255, 15,
+    ],
+    [
+        15, 15, 15, 15, 15, 15, 225, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 251,
+        251, 251, 251, 15, 254, 15, 225,
+    ],
+];
+
+const fn native_type_index(code: NativeTypeNameCode) -> usize {
+    match code {
+        NativeTypeNameCode::Known(0) => 0,
+        NativeTypeNameCode::Known(1) => 1,
+        NativeTypeNameCode::Known(2) => 2,
+        NativeTypeNameCode::Known(3) => 3,
+        NativeTypeNameCode::Known(4) => 4,
+        NativeTypeNameCode::Known(5) => 5,
+        NativeTypeNameCode::Known(6) => 6,
+        NativeTypeNameCode::Known(7) => 7,
+        NativeTypeNameCode::Known(8) => 8,
+        NativeTypeNameCode::Known(9) => 9,
+        NativeTypeNameCode::Known(10) => 10,
+        NativeTypeNameCode::Known(11) => 11,
+        NativeTypeNameCode::Known(12) => 12,
+        NativeTypeNameCode::Known(13) => 13,
+        NativeTypeNameCode::Known(14) => 14,
+        NativeTypeNameCode::Known(15) => 15,
+        NativeTypeNameCode::Known(16) => 16,
+        NativeTypeNameCode::Known(245) => 17,
+        NativeTypeNameCode::Known(246) => 18,
+        NativeTypeNameCode::Known(247) => 19,
+        NativeTypeNameCode::Known(248) => 20,
+        NativeTypeNameCode::Known(249) => 21,
+        NativeTypeNameCode::Known(250) => 22,
+        NativeTypeNameCode::Known(251) => 23,
+        NativeTypeNameCode::Known(252) => 24,
+        NativeTypeNameCode::Known(253) => 25,
+        NativeTypeNameCode::Known(254) => 26,
+        NativeTypeNameCode::Known(255) => 27,
+        NativeTypeNameCode::Known(225) => 28,
+        // Go's `fieldTypeIndexes[tp]` is a map lookup without an `ok` check,
+        // so every unknown or unregistered byte uses the zero-value index.
+        NativeTypeNameCode::Known(_) | NativeTypeNameCode::Unknown(_) => 0,
+    }
+}
+
+pub const fn native_merge_field_type(
+    left: NativeTypeNameCode,
+    right: NativeTypeNameCode,
+) -> NativeTypeNameCode {
+    NativeTypeNameCode::Known(MERGE_RULES[native_type_index(left)][native_type_index(right)])
+}
+
 pub const fn native_default_field_length_and_decimal(code: NativeTypeNameCode) -> (i64, i64) {
     use NativeTypeNameCode::Known;
     match code {
@@ -307,5 +471,38 @@ fn field_decimal_meta_mysql_integer_classifier_keeps_named_unknown_identity() {
     for raw in [0, 4, 5, 13, 16, 246, 253, 254] {
         assert!(!native_mysql_is_integer_type(Known(raw)), "{raw}");
         assert!(!native_mysql_is_integer_type(Unknown(raw)), "{raw}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn field_merge_table_preserves_matrix_and_zero_index_identity_policy() {
+    use NativeTypeNameCode::{Known, Unknown};
+    for (left, right, expected) in [
+        (Known(1), Known(2), Known(2)),
+        (Known(4), Known(3), Known(5)),
+        (Known(245), Known(252), Known(251)),
+        (Known(14), Known(10), Known(14)),
+        (Unknown(17), Unknown(34), Known(246)),
+        (Known(17), Known(34), Known(246)),
+        (Unknown(1), Known(2), Known(246)),
+    ] {
+        assert_eq!(
+            native_merge_field_type(left, right),
+            expected,
+            "{left:?}/{right:?}"
+        );
+    }
+    for left in [
+        Known(0),
+        Known(1),
+        Known(245),
+        Known(255),
+        Unknown(0),
+        Unknown(255),
+    ] {
+        for right in [Known(0), Known(8), Known(254), Unknown(8)] {
+            assert!(matches!(native_merge_field_type(left, right), Known(_)));
+        }
     }
 }

@@ -837,7 +837,9 @@ short-circuit admission policy described above.
   native_string_type; native projects complete named/unknown identity only. MySQL-integer classification, CHAR/VARCHAR conversion, DECIMAL metadata
   validity and flen/scale delta updates live in native_type_name,
   native_string_type and native_eval_type; native projects complete identity
-  and metadata and assigns returned values only. Other datatype controllers remain separate.
+  and metadata and assigns returned values only. The exact 29x29 FieldType merge table and Go map-zero index policy live
+  in native_type_name; native aggregate code projects complete type identity
+  and maps the shared result byte only. Other datatype controllers remain separate.
   `native_coerce_numeric.rs` owns general integer classification, mixed-signed
   comparison, bits/Decimal/f64 projection and nullable truth. Native aliases the
   Integer carrier and maps values/errors; literal outcomes and hybrid ordinals
