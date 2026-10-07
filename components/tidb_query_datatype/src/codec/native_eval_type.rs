@@ -7,6 +7,56 @@ use super::{
     native_type_name::{NativeTypeNameCode, native_merge_field_type, native_type_is_integer},
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeArithmeticOperator {
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    IntegerDivide,
+    Modulo,
+}
+
+pub const fn native_arithmetic_symbol(op: NativeArithmeticOperator) -> &'static str {
+    match op {
+        NativeArithmeticOperator::Plus => "+",
+        NativeArithmeticOperator::Minus => "-",
+        NativeArithmeticOperator::Multiply => "*",
+        NativeArithmeticOperator::Divide => "/",
+        NativeArithmeticOperator::IntegerDivide => "DIV",
+        NativeArithmeticOperator::Modulo => "%",
+    }
+}
+
+pub fn native_render_binary_expression(
+    left: &str,
+    op: NativeArithmeticOperator,
+    right: &str,
+) -> String {
+    format!("({left} {} {right})", native_arithmetic_symbol(op))
+}
+
+pub fn native_render_cast_expression(argument: &str, target: &str) -> String {
+    format!("cast({argument}, {target})")
+}
+
+pub fn native_render_decimal_cast_expression(
+    text: &str,
+    flen: i64,
+    decimal: i64,
+    unsigned: bool,
+) -> String {
+    let unsigned_suffix = if unsigned { " UNSIGNED" } else { "" };
+    format!(
+        "cast({text}, decimal({flen},{}){unsigned_suffix} BINARY)",
+        decimal.max(0)
+    )
+}
+
+pub fn native_render_function_expression(name: &str, args: &[String]) -> String {
+    format!("{name}({})", args.join(", "))
+}
+
 /// Validates decimal precision and scale only for the native decimal type.
 pub const fn native_decimal_metadata_valid(
     code: NativeTypeNameCode,
@@ -1798,4 +1848,41 @@ fn year_route_policy_preserves_text_time_duration_json_and_signed_fallback() {
     ] {
         assert_eq!(native_year_conversion_route(input), expected);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn diagnostic_renderer_preserves_operator_cast_decimal_and_function_text() {
+    use NativeArithmeticOperator::*;
+    for (operator, symbol) in [
+        (Plus, "+"),
+        (Minus, "-"),
+        (Multiply, "*"),
+        (Divide, "/"),
+        (IntegerDivide, "DIV"),
+        (Modulo, "%"),
+    ] {
+        assert_eq!(native_arithmetic_symbol(operator), symbol);
+        assert_eq!(
+            native_render_binary_expression("left", operator, "right"),
+            format!("(left {symbol} right)")
+        );
+    }
+    assert_eq!(
+        native_render_cast_expression("a + b", "json"),
+        "cast(a + b, json)"
+    );
+    assert_eq!(
+        native_render_decimal_cast_expression("col", 20, -1, false),
+        "cast(col, decimal(20,0) BINARY)"
+    );
+    assert_eq!(
+        native_render_decimal_cast_expression("col", 20, 4, true),
+        "cast(col, decimal(20,4) UNSIGNED BINARY)"
+    );
+    assert_eq!(
+        native_render_function_expression("pow", &["x".to_owned(), "2".to_owned()]),
+        "pow(x, 2)"
+    );
+    assert_eq!(native_render_function_expression("rand", &[]), "rand()")
 }
