@@ -407,7 +407,10 @@ short-circuit admission policy described above.
   through the existing RPN Evaluation error, not a fabricated SQL NULL/overflow
   or Pool/ResourceLimit classification. Repeated parsing/UTC lookup and frame
   allocation are not claims of performance neutrality or full heap accounting.
-  Native Decimal presentation uses datatype-owned `native_format_visible`,
+  `NativeDecimalParseValue` is the canonical owned sign/coefficient/visible-scale/
+  storage-scale/declared-shape value; TiDB's public Decimal is a thin wrapper
+  and retains its TiDB-only JSON/error adapters. Native Decimal presentation uses
+  datatype-owned `native_format_visible`,
   `native_format_go_shortest_float` and `native_from_f64` methods. Visible
   HalfUp formatting is distinct from retained storage and the wire formatter.
   Float conversion uses the original Ryu Go-g spelling and MySQL nine-word

@@ -53,7 +53,7 @@ impl NativeDecimalParseValue {
     /// or UTF-8 checks, normalization, or scale/shape validation. This
     /// transport constructor does not admit the value to arithmetic or
     /// formatting.
-    pub fn from_raw_parts(
+    pub const fn from_raw_parts(
         negative: bool,
         digits: SmallVec<[u8; 24]>,
         scale: u32,
@@ -90,6 +90,31 @@ impl NativeDecimalParseValue {
             storage_scale: self.storage_scale,
             declared_shape: self.declared_shape,
         }
+    }
+
+    pub const fn negative(&self) -> bool {
+        self.negative
+    }
+
+    pub const fn scale(&self) -> u32 {
+        self.scale
+    }
+
+    pub const fn storage_scale(&self) -> u32 {
+        self.storage_scale
+    }
+
+    pub const fn declared_shape(&self) -> Option<(i64, i64)> {
+        self.declared_shape
+    }
+
+    pub fn coefficient_is_inline(&self) -> bool {
+        !self.digits.spilled()
+    }
+
+    /// Replaces TiDB's declared storage shape without changing numeric value.
+    pub fn set_declared_shape(&mut self, declared_shape: Option<(i64, i64)>) {
+        self.declared_shape = declared_shape;
     }
 
     /// Reverse sign through the shared native arithmetic owner and project its

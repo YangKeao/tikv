@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round207收口（decimal-shared-storage-201）：M2 Decimal主体类型去重：TiKV NativeDecimalParseValue现唯一拥有negative/inline coefficient/visible scale/storage scale/declared shape五字段，并提供const metadata accessors、shape mutation与inline状态；TiDB Decimal删除五字段，成为shared value薄wrapper，保TiDB-only JSON/error/public math API。SDK negate/storage1+shift1；TiDB transport1+raw1+JSON1+math1 GREEN。集成中先遇const as_ref对SmallVec deref E0015，改为四个const metadata getters；再遇codec旧字段引用E0615，改accessor后全绿，均为compile refusal非测试失败。功能240/245不变，broader M2 active。
+
+round207启动（decimal-shared-storage-201）：落实R206确定的五字段精确匹配；保DecimalDigits为本地构造helper但不再作Decimal存储。
+
 round206收口（core-time-fields-200）：M2 raw CoreTime算法收口：TiKV Time新增const hour/minute/second/microsecond_from_core_bits，与既有year/month/day一起唯一拥有7字段unchecked bit projection；native_core_fields也改用同一accessors。TiDB删除4 offsets/masks，仅保CoreTime public facade。SDK fields1+layout1、TiDB const/raw1 GREEN。FieldType聚合无现成lossless SDK value故PASS；Decimal五字段→NativeDecimalParseValue确定为后续较大切口。功能240/245不变，broader M2 active。
 
 round206启动（core-time-fields-200）：Decimal/FieldType storage窄审计并先删CoreTime剩余4个本地bit投影，避免新增无价值newtype。
