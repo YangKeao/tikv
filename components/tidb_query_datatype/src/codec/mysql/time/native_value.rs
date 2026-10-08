@@ -69,6 +69,11 @@ pub struct NativeTemporalValue {
 }
 
 impl NativeTemporalValue {
+    /// Constructs raw transport storage without FSP or calendar validation.
+    pub const fn from_raw_parts(raw: u64, kind: TimeType, fsp: u8) -> Self {
+        Self { raw, kind, fsp }
+    }
+
     /// Normalize only FSP. DATE ignores even invalid FSP and retains all clock
     /// fields and reserved raw bits; calendar validation is a separate
     /// operation.
@@ -195,6 +200,14 @@ mod tests {
             [0, 1, 2]
         );
         let raw = Time::native_core_from_fields(2020, 2, 29, 23, 59, 58, 123456) | 0b1011;
+        assert_eq!(
+            NativeTemporalValue::from_raw_parts(u64::MAX, TimeType::Date, u8::MAX),
+            NativeTemporalValue {
+                raw: u64::MAX,
+                kind: TimeType::Date,
+                fsp: u8::MAX,
+            }
+        );
         assert_eq!(
             NativeTemporalValue::new(raw, TimeType::DateTime, -2),
             Err(NativeTimeError::InvalidFsp(NativeFspError::InvalidFsp(-2)))
