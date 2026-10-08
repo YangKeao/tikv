@@ -58,8 +58,11 @@ impl<Src: BatchExecutor> BatchSelectionExecutor<Src> {
         let mut condition_column_ref_counts = Vec::with_capacity(conditions_def.len());
         let mut ctx = EvalContext::new(config);
         for def in conditions_def {
-            let expr =
-                RpnExpressionBuilder::build_from_expr_tree(def, &mut ctx, src.schema().len())?;
+            let expr = RpnExpressionBuilder::build_from_expr_tree_strict_controls(
+                def,
+                &mut ctx,
+                src.schema().len(),
+            )?;
             condition_column_ref_counts.push(count_column_refs(&expr));
             conditions.push(expr);
         }

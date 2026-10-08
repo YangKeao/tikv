@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round215收口（strict-wire-depth-209）：关闭M3最后的production wire depth缺口。新增`build_from_expr_tree_strict_controls`，production DAG aggregate/parser、selection、projection、TopN/partition、limit九处构造入口全部使用strict context；eligible AND/OR不再因depth>32转普通eager FnCall。旧public builder保留32 cap作为兼容API与immutable oracle，不再是production request construction。新test对33/256深、AND/OR、cast/no-cast在2MiB stack上与eager结果差分并证明全层ShortCircuit；旧cap stress仍GREEN；aggr+executor production `cargo check` GREEN；TiDB 1024 CASE bridge GREEN。尝试executor test target RED（exit101）：test-only rpn_fn expansion跨crate访问crate-private CallShape args/return_type共18 E0603/E0624，production check未受影响，保留日志且不算gate。M3 planned Demo scope complete；strict family count仍0，功能240/245不变。M6 broad/test-only visibility与全toolchain门槛仍开。
+
+round215启动（strict-wire-depth-209）：核对immutable depth oracle后以separate strict production builder替换全部request构造入口，不篡改旧兼容测试语义，并在小栈执行深层差分。
+
 round214收口（strict-local-in-208）：M3 strict-local signed IN接管。TiDB普通SQL `in` 在signed LongLong seed下映射TiKV private `InIntSourceOrder`；TiKV local registry保留全部参数identity/source order，直接用ready compare kernel，不调用wire `init_compare_in_data`，故不会沿用legacy [0,4,2] constant extraction，也不把runtime parameter写入永久hash metadata。compare ready reducer删除本地手写3VL loop并委托shared `native_in_ready_values`。同一compiled program用两批不同bindings验证true/null变化；PB InInt仍由原immutable rejection test拒绝，wire retained-order原test保持GREEN。SDK local/reducer/rejection/control/wire5、TiDB SQL seed/native2、session SQL1共8 GREEN；session auxiliary binaries 0-match排除。M3现仅余wire nested AND/OR >32 eager fallback；strict count仍0，功能240/245不变。
 
 round214启动（strict-local-in-208）：实现不复用wire参数重排的strict-local signed IN，要求source-order、NULL 3VL、parameter rebind与wire isolation同时可证。

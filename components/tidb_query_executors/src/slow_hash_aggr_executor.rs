@@ -150,7 +150,7 @@ impl<Src: BatchExecutor> BatchSlowHashAggregationExecutor<Src> {
         let mut ctx = EvalContext::new(config.clone());
         let mut group_by_exps = Vec::with_capacity(group_by_exp_defs.len());
         for def in group_by_exp_defs {
-            group_by_exps.push(RpnExpressionBuilder::build_from_expr_tree(
+            group_by_exps.push(RpnExpressionBuilder::build_from_expr_tree_strict_controls(
                 def, &mut ctx, schema_len,
             )?);
         }

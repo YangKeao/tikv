@@ -172,7 +172,7 @@ impl<Src: BatchExecutor> BatchFastHashAggregationExecutor<Src> {
     ) -> Result<Self> {
         assert_eq!(group_by_exp_defs.len(), 1);
         let mut ctx = EvalContext::new(config.clone());
-        let group_by_exp = RpnExpressionBuilder::build_from_expr_tree(
+        let group_by_exp = RpnExpressionBuilder::build_from_expr_tree_strict_controls(
             group_by_exp_defs.into_iter().next().unwrap(),
             &mut ctx,
             src.schema().len(),

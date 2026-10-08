@@ -144,7 +144,7 @@ impl<Src: BatchExecutor> BatchPartitionTopNExecutor<Src> {
 
         let mut order_exprs: Vec<RpnExpression> = Vec::with_capacity(order_exprs_def.len());
         for def in order_exprs_def {
-            order_exprs.push(RpnExpressionBuilder::build_from_expr_tree(
+            order_exprs.push(RpnExpressionBuilder::build_from_expr_tree_strict_controls(
                 def,
                 &mut ctx,
                 src.schema().len(),
@@ -157,7 +157,7 @@ impl<Src: BatchExecutor> BatchPartitionTopNExecutor<Src> {
 
         let mut partition_exprs: Vec<RpnExpression> = Vec::with_capacity(partition_exprs_def.len());
         for def in partition_exprs_def {
-            partition_exprs.push(RpnExpressionBuilder::build_from_expr_tree(
+            partition_exprs.push(RpnExpressionBuilder::build_from_expr_tree_strict_controls(
                 def,
                 &mut ctx,
                 src.schema().len(),

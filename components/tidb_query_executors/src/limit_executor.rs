@@ -108,7 +108,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
         let mut truncate_key_exp = Vec::with_capacity(truncate_key_exp_defs.len());
         let mut ctx = EvalContext::new(config.clone());
         for def in truncate_key_exp_defs {
-            truncate_key_exp.push(RpnExpressionBuilder::build_from_expr_tree(
+            truncate_key_exp.push(RpnExpressionBuilder::build_from_expr_tree_strict_controls(
                 def, &mut ctx, schema_len,
             )?);
         }

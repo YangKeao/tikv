@@ -120,22 +120,26 @@ collection and finalization are in `src/coprocessor/batch.rs`.
 - The DAG `flags` bitmask is a network-facing contract. Bit 12,
   `Flag::ENABLE_SHORT_CIRCUIT_EXPRESSION`, enables lazy `LogicalAnd`/`LogicalOr`
   evaluation through `EvalConfig::from_request` and `RpnExpressionBuilder`.
-- Lazy evaluation is left-to-right, row-selective, and must preserve SQL
-  three-valued logic; short-circuit nesting is capped at 32. If the bit is
-  absent or unknown to the server, the expression is not eligible/profitable,
-  or the cap is exceeded, the existing eager `FnCall` path is used.
+- Lazy evaluation is left-to-right, row-selective, and preserves SQL
+  three-valued logic. Production DAG, aggregate, projection, selection,
+  TopN/partition, and limit constructors use
+  `build_from_expr_tree_strict_controls`, so nesting beyond 32 never changes an
+  eligible logical call to eager execution. The older public builder retains
+  its depth-32 behavior as a compatibility API and test oracle, but is not a
+  production request-construction path. If the request bit is absent or the
+  expression is otherwise ineligible/unprofitable, the eager `FnCall` path is
+  still used.
 - In short-circuit mode, skipped argument functions are not invoked, so their
   warnings/errors are suppressed, although referenced columns may still be
-  eagerly decoded; when unavailable, the existing eager path and SQL-mode
-  warning/error behavior are preserved.
+  eagerly decoded; SQL-mode warning/error behavior otherwise remains unchanged.
 
 ### In-process expression-library consumers
 
 `components/tidb_query_datatype` owns the scalar representations and collation
 kernels; `components/tidb_query_expr` owns RPN construction and execution. These
 libraries can also be called in-process without constructing a coprocessor
-request or starting a storage/server runtime. This does not change the wire
-short-circuit admission policy described above.
+request or starting a storage/server runtime. This does not change the request
+flag or eligibility policy described above.
 
 - The wire tree builder and `local::compile_local` share shallow typed
   `CallShape` / `CallBuild` descriptors, one function selector, and opaque

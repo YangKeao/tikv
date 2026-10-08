@@ -96,8 +96,11 @@ impl<Src: BatchExecutor> BatchProjectionExecutor<Src> {
         let mut column_offset_set = HashSet::with_capacity(exprs_len);
         let mut column_offset_vec = Vec::with_capacity(exprs_len);
         for def in exprs_def {
-            let rpn_expression =
-                RpnExpressionBuilder::build_from_expr_tree(def, &mut ctx, src.schema().len())?;
+            let rpn_expression = RpnExpressionBuilder::build_from_expr_tree_strict_controls(
+                def,
+                &mut ctx,
+                src.schema().len(),
+            )?;
             if no_dup_column_ref_only && rpn_expression.len() == 1 {
                 check_column_ref(
                     &rpn_expression,

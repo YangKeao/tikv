@@ -85,6 +85,26 @@ impl RpnExpressionBuilder {
         Ok(RpnExpression::from(expr_nodes))
     }
 
+    /// Builds a production wire expression without the legacy depth-32 eager
+    /// fallback. The evaluator is iterative and accounts retained frame state;
+    /// malformed resource-heavy trees still fail through its normal budgets.
+    pub fn build_from_expr_tree_strict_controls(
+        tree_node: Expr,
+        ctx: &mut EvalContext,
+        max_columns: usize,
+    ) -> Result<RpnExpression> {
+        let mut expr_nodes = Vec::new();
+        let mut build_ctx =
+            RpnBuildContext::new_strict(ctx, super::super::select_expr_node, max_columns);
+        build_ctx.append_rpn_nodes_recursively(
+            tree_node,
+            ScalarFuncSig::Unspecified,
+            0,
+            &mut expr_nodes,
+        )?;
+        Ok(RpnExpression::from(expr_nodes))
+    }
+
     /// Only used in tests, with a customized function mapper.
     #[cfg(test)]
     pub(crate) fn build_from_expr_tree_with_fn_mapper<F, M>(
@@ -271,6 +291,7 @@ struct RpnBuildContext<'a, F> {
     ctx: &'a mut EvalContext,
     fn_mapper: F,
     max_columns: usize,
+    max_short_circuit_depth: usize,
     // TODO: Passing `max_columns` is only a workaround solution that works when we only check
     // column offset. To totally check whether or not the expression is valid, we need to pass in
     // the full schema instead.
@@ -285,6 +306,16 @@ where
             ctx,
             fn_mapper,
             max_columns,
+            max_short_circuit_depth: MAX_SHORT_CIRCUIT_NESTING_DEPTH,
+        }
+    }
+
+    fn new_strict(ctx: &'a mut EvalContext, fn_mapper: F, max_columns: usize) -> Self {
+        Self {
+            ctx,
+            fn_mapper,
+            max_columns,
+            max_short_circuit_depth: usize::MAX,
         }
     }
 
@@ -351,7 +382,7 @@ where
                 .cfg
                 .flag
                 .contains(Flag::ENABLE_SHORT_CIRCUIT_EXPRESSION)
-            && short_circuit_depth <= MAX_SHORT_CIRCUIT_NESTING_DEPTH;
+            && short_circuit_depth <= self.max_short_circuit_depth;
 
         if can_short_circuit {
             let short_circuit_func_meta = short_circuit_func_meta.unwrap();
@@ -1373,6 +1404,81 @@ mod tests {
                     exp.node_count() + depth - 1,
                     "depth={depth}, sig={sig:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn test_production_strict_builder_keeps_deep_wire_controls_lazy() {
+        for depth in [
+            MAX_SHORT_CIRCUIT_NESTING_DEPTH + 1,
+            8 * MAX_SHORT_CIRCUIT_NESTING_DEPTH,
+        ] {
+            for root_sig in [ScalarFuncSig::LogicalOr, ScalarFuncSig::LogicalAnd] {
+                for wrap_in_cast in [false, true] {
+                    let (strict, eager) = thread::Builder::new()
+                        .stack_size(16 * 1024 * 1024)
+                        .spawn_wrapper(move || {
+                            (
+                                RpnExpressionBuilder::build_from_expr_tree_strict_controls(
+                                    nested_logical_expr(depth, root_sig, wrap_in_cast),
+                                    &mut short_circuit_context(),
+                                    depth + 1,
+                                )
+                                .unwrap(),
+                                RpnExpressionBuilder::build_from_expr_tree(
+                                    nested_logical_expr(depth, root_sig, wrap_in_cast),
+                                    &mut EvalContext::default(),
+                                    depth + 1,
+                                )
+                                .unwrap(),
+                            )
+                        })
+                        .unwrap()
+                        .join()
+                        .unwrap();
+                    assert_eq!(short_circuit_depth(&strict), depth);
+                    assert!(!contains_regular_logical_call(&strict));
+                    thread::Builder::new()
+                        .stack_size(2 * 1024 * 1024)
+                        .spawn_wrapper(move || {
+                            let batch_size = crate::BATCH_MAX_SIZE;
+                            let schema = vec![FieldTypeTp::LongLong.into(); depth + 1];
+                            let logical_rows: Vec<_> =
+                                (0..batch_size).rev().map(|row| 2 * row + 1).collect();
+                            let mut columns = nested_logical_columns(depth, root_sig, true);
+                            let expected = eager
+                                .eval(
+                                    &mut EvalContext::default(),
+                                    &schema,
+                                    &mut columns,
+                                    &logical_rows,
+                                    batch_size,
+                                )
+                                .unwrap()
+                                .vector_value()
+                                .unwrap()
+                                .as_ref()
+                                .to_int_vec();
+                            let actual = strict
+                                .eval(
+                                    &mut short_circuit_context(),
+                                    &schema,
+                                    &mut columns,
+                                    &logical_rows,
+                                    batch_size,
+                                )
+                                .unwrap()
+                                .vector_value()
+                                .unwrap()
+                                .as_ref()
+                                .to_int_vec();
+                            assert_eq!(actual, expected);
+                        })
+                        .unwrap()
+                        .join()
+                        .unwrap();
+                }
             }
         }
     }
