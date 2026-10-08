@@ -565,9 +565,11 @@ short-circuit admission policy described above.
   ASCII/UTF8 group scanning and seven-encoding byte operations/prefix counts.
   GB operations reuse existing native GB helpers; UTF8 scanning reuses the
   strict decoder. Primitive valid-input fastpaths deliberately differ from
-  registry transforms. Native error/result carriers remain frontend projections;
-  charset metadata/name/case policy and evaluator selection are not implied
-  migrated by this foundation. No C4 profile or wire policy is added here.
+  registry transforms. Native error/result carriers remain frontend projections.
+  FieldType `Charset` owns the seven canonical names, ASCII-case-insensitive
+  lookup and the `utf8mb3` alias; the wire `from_name` wrapper still requires
+  exact canonical spelling. Evaluator selection is not implied migrated by this
+  foundation. No C4 profile or wire policy is added here.
   Native TIMESTAMPDIFF has separate Text/Core Values/Bytes3/nullable-Int
   profiles. The datatype `time/native_timestamp_diff.rs` owns strict wide-year
   text/civil/signed-month arithmetic and the distinct raw i32-daynr/u32-month

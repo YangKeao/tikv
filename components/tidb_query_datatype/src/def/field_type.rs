@@ -171,19 +171,45 @@ pub enum Charset {
 }
 
 impl Charset {
-    pub fn from_name(name: &str) -> Result<Self, DataTypeError> {
-        match name {
-            "utf8mb4" => Ok(Charset::Utf8Mb4),
-            "utf8" => Ok(Charset::Utf8),
-            "latin1" => Ok(Charset::Latin1),
-            "gbk" => Ok(Charset::Gbk),
-            "binary" => Ok(Charset::Binary),
-            "ascii" => Ok(Charset::Ascii),
-            "gb18030" => Ok(Charset::Gb18030),
-            _ => Err(DataTypeError::UnsupportedCharset {
-                name: String::from(name),
-            }),
+    const SUPPORTED: [Self; 7] = [
+        Self::Utf8Mb4,
+        Self::Utf8,
+        Self::Latin1,
+        Self::Gbk,
+        Self::Binary,
+        Self::Ascii,
+        Self::Gb18030,
+    ];
+
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Utf8Mb4 => "utf8mb4",
+            Self::Utf8 => "utf8",
+            Self::Latin1 => "latin1",
+            Self::Gbk => "gbk",
+            Self::Binary => "binary",
+            Self::Ascii => "ascii",
+            Self::Gb18030 => "gb18030",
         }
+    }
+
+    /// Shared TiDB charset-name classifier, including the legacy utf8mb3 alias.
+    pub fn native_from_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case("utf8mb3") {
+            return Some(Self::Utf8);
+        }
+        Self::SUPPORTED
+            .iter()
+            .copied()
+            .find(|charset| name.eq_ignore_ascii_case(charset.canonical_name()))
+    }
+
+    pub fn from_name(name: &str) -> Result<Self, DataTypeError> {
+        Self::native_from_name(name)
+            .filter(|charset| name == charset.canonical_name())
+            .ok_or_else(|| DataTypeError::UnsupportedCharset {
+                name: String::from(name),
+            })
     }
 }
 
@@ -572,6 +598,15 @@ mod tests {
                 coll.unwrap_err();
             }
         }
+    }
+
+    #[test]
+    fn native_charset_name_classifier_preserves_alias_and_case_policy() {
+        assert_eq!(Charset::native_from_name("UTF8MB3"), Some(Charset::Utf8));
+        assert_eq!(Charset::native_from_name("Gb18030"), Some(Charset::Gb18030));
+        assert_eq!(Charset::native_from_name("unknown"), None);
+        assert!(Charset::from_name("UTF8").is_err());
+        assert!(Charset::from_name("utf8mb3").is_err());
     }
 
     #[test]
