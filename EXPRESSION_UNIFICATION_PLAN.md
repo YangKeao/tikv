@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round189收口（legacy-cast-time-183）：native_cast_time新增无warning/now的closed legacy入口，保留numeric DATE/DATETIME分类、lossy text kind/FSP6与JSON opaque-first；U删五source+JSON本地parser/accessor，仅child/NULL/Datum。SDK1/Unistore Time1/JSON1 GREEN；Duration→Time仍拒绝，Time→Duration/i128 identity待后续。partial CAST no credit；239strict0remaining6。
+
+round189启动（legacy-cast-time-183）：按remaining matrix安全子集迁移五Time source+JSON，不启用now-anchored Duration→Time。
+
 round188收口（cast-remaining-matrix-182）：冻结R187后remaining direct CAST：Time五source+JSON opaque/string、Time→Duration、full-width i128 identity；condition arms仅value-channel presence/truth投影。明确target/source FieldType丢失、FSP/date-mode/warning/opaque-order及now-anchored Duration→Time blocker；不为凑credit错误套generic controller。详cast-remaining-matrix；239strict0remaining6，goal active。配对Plan+DCO docs checkpoint。
 
 round188启动（cast-remaining-matrix-182）：只读审计全部remaining direct legacy CAST，区分可迁移time controller与metadata/now兼容例外，冻结下一safe API；不改family credit。

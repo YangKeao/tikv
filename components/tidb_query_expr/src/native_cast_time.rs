@@ -9,10 +9,11 @@ use tidb_query_datatype::codec::{
     convert::native_warning_subject_byte_cap,
     mysql::{
         Decimal, Time,
+        json::native_binary_json_string_bytes,
         time::{
-            NativeTemporalValue, TimeType, native_get_time_fsp, native_parse_time,
-            native_parse_time_from_decimal_text, native_parse_time_from_float64,
-            native_parse_time_from_num,
+            NativeTemporalValue, TimeType, native_get_time_fsp, native_is_date_format,
+            native_parse_time, native_parse_time_from_decimal_text, native_parse_time_from_float64,
+            native_parse_time_from_int64, native_parse_time_from_num,
         },
     },
     native_duration_convert::NativeDurationParts,
@@ -25,6 +26,72 @@ use tidb_query_datatype::codec::{
 };
 
 use crate::native_coerce_string::native_coerce_string;
+
+/// Legacy temporal conversion folds every parse failure into SQL NULL.
+pub fn native_legacy_cast_time<TZ: TimeZone>(
+    text: NativeSqlStringInput<'_>,
+    number: NativeNumericInput<'_>,
+    zone: &TZ,
+) -> Option<NativeTemporalValue> {
+    use NativeNumericInput as N;
+    use NativeSqlStringInput as S;
+
+    fn parse_text<TZ: TimeZone>(bytes: &[u8], zone: &TZ) -> Option<NativeTemporalValue> {
+        let text = String::from_utf8_lossy(bytes);
+        let kind = if native_is_date_format(&text) {
+            TimeType::Date
+        } else {
+            TimeType::DateTime
+        };
+        native_parse_time(&text, kind, 6, false, false, false, true, zone)
+            .ok()
+            .map(|parsed| parsed.time)
+    }
+
+    match number {
+        N::Time(time) => Some(time),
+        N::Int(value) => native_parse_time_from_int64(value, false, false, zone).ok(),
+        N::UInt(value) => native_parse_time_from_int64(value as i64, false, false, zone).ok(),
+        N::Real(value) | N::Float32(value) => {
+            native_parse_time_from_float64(value, false, false, zone)
+                .into_result()
+                .ok()
+        }
+        N::Decimal(value) => {
+            let text = Decimal::native_format_visible(
+                value.negative,
+                value.digits,
+                value.scale,
+                value.storage_scale,
+            );
+            native_parse_time_from_decimal_text(&text, false, false, zone)
+                .into_result()
+                .ok()
+        }
+        N::String(_) | N::Bytes(_) => match text {
+            S::String(bytes) | S::Bytes(bytes) => parse_text(bytes, zone),
+            _ => None,
+        },
+        N::Json { .. } => match text {
+            S::Json { type_code, value } => {
+                let kind = match type_code {
+                    0x0e => Some(TimeType::Date),
+                    0x0f => Some(TimeType::DateTime),
+                    0x10 => Some(TimeType::Timestamp),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    let raw = u64::from_le_bytes(value.try_into().ok()?);
+                    NativeTemporalValue::new(raw, kind, 6).ok()
+                } else {
+                    parse_text(native_binary_json_string_bytes(type_code, value)?, zone)
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeTimeCastModes {
@@ -768,4 +835,36 @@ mod tests {
         );
         assert_eq!(*calls.borrow(), vec!["modes", "zone", "warning"]);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_time_cast_preserves_numeric_text_identity_and_opaque_first_routes() {
+    use tidb_query_datatype::codec::{
+        native_numeric::NativeNumericInput as N, native_sql_string::NativeSqlStringInput as I,
+    };
+    let zone = chrono::Utc;
+    let numeric = native_legacy_cast_time(I::Int(20240305), N::Int(20240305), &zone).unwrap();
+    assert_eq!(numeric.kind, TimeType::Date);
+    let text = native_legacy_cast_time(
+        I::Bytes(b"2024-03-05 14:30:45"),
+        N::Bytes(b"2024-03-05 14:30:45"),
+        &zone,
+    )
+    .unwrap();
+    assert_eq!(text.kind, TimeType::DateTime);
+    let opaque = native_legacy_cast_time(
+        I::Json {
+            type_code: 0x0e,
+            value: &numeric.raw.to_le_bytes(),
+        },
+        N::Json {
+            type_code: 0x0e,
+            value: &numeric.raw.to_le_bytes(),
+        },
+        &zone,
+    )
+    .unwrap();
+    assert_eq!(opaque.kind, TimeType::Date);
+    assert!(native_legacy_cast_time(I::Bytes(b"bad"), N::Bytes(b"bad"), &zone).is_none());
 }

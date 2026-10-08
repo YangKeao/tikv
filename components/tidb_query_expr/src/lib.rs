@@ -112,7 +112,9 @@ pub use native_cast_integer::{
 };
 
 mod native_cast_time;
-pub use native_cast_time::{NativeTimeCastModes, native_cast_arg_as_datetime, native_cast_time};
+pub use native_cast_time::{
+    NativeTimeCastModes, native_cast_arg_as_datetime, native_cast_time, native_legacy_cast_time,
+};
 
 mod native_cast_year;
 pub use native_cast_year::native_cast_year;
