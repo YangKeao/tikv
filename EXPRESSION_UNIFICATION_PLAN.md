@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round217收口（m6-final-gates-211）：按加速Demo合同完成M6验收/报告。当前TiDB `make lint` exit0；TiKV changed production crates query_expr/aggr/executors locked check exit0；Plan三份SHA、240/245(97.96%)、strict0、5 approved no-credit deferrals、relative links、remote heads与tracked-clean全部PASS。首次invariant命令断言全PASS但tee错`../logs`导致exit1，原样改正确路径重跑exit0，两者披露。M2/M3 planned Demo complete，M4/M5功能接管超过90%且五例外有解除条件；本轮闭合accelerated Demo的lint/compile/report证据。full TiKV clippy仍是R193 grpcio-sys vendored Abseil/current C++环境RED；R192历史full expr/unistore失败、release/exhaustive/TiFlash/FIPS环境、allocator peak/OOM、性能阈值和PR readiness均明确defer/not passed，依用户指令不阻功能Demo交付。无性能改善claim，strict complete family仍0。独立只读审计判ACTIVE：line148只放宽per-cut sequencing，不自动豁免canonical final completion；final performance/workspace gates与stale status reconciliation仍开。因此不标overall goal/M6 complete，功能Demo完成也不等于PR-ready或完整Go package transcreation。
+
+round217启动（m6-final-gates-211）：复跑最新TiDB强制lint、TiKV生产编译与final invariant；汇总性能/深验后补而不以未测值冒充通过，独立只读审计后决定goal状态。
+
 round216收口（m6-macro-abi-210）：M6清掉R215披露的executor test compile RED。根因是`rpn_fn`在downstream crate展开却需构造RpnFnMeta/调用validator，R193后CallShape/CallBuild边界收窄为crate-private；现仅将macro必需的CallShape/CallArg/CallBuild、args/return_type/field_type、argument/type validators与RpnFnMeta两construction fields设为`doc(hidden)` public，语义上标记macro ABI而非consumer API，不开放metadata内容或selector。修复过程逐层暴露CallBuild→shape/arg validator→RpnFnMeta字段，最终executor full lib120/0/0、aggr full lib40/0/0、selection/projection/error3、deep wire1与production compile全部GREEN。原R215 RED raw log仍保留；中间同路径重跑覆盖但错误链在Plan披露。M6 test-only visibility门槛关闭；full TiKV clippy grpcio/Abseil、TiDB lint最终复跑等仍开。
 
 round216启动（m6-macro-abi-210）：恢复downstream rpn_fn测试编译，以最窄doc-hidden macro ABI修复，不回退shared CallShape设计或复制legacy descriptors。
