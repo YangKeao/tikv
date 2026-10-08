@@ -117,6 +117,7 @@ pub enum FunctionRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalFunctionId {
     NullIfIntSignedSigned,
+    InIntSourceOrder,
     AsinRaw,
     AcosRaw,
     SqrtRaw,

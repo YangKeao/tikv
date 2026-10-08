@@ -152,6 +152,55 @@ fn local_registered_id_without_tipb() {
 }
 
 #[test]
+fn strict_local_in_keeps_source_arguments_and_rebinds_without_metadata_hashing() {
+    let mut program = compile(
+        &call(
+            FunctionRef::Local(LocalFunctionId::InIntSourceOrder),
+            vec![
+                input(0),
+                constant(Some(7)),
+                input(1),
+                constant(None),
+                input(2),
+            ],
+        ),
+        &[ft(), ft(), ft()],
+    );
+    let data = |columns: &[&[Option<i64>]]| {
+        LazyBatchColumnVec::from(
+            columns
+                .iter()
+                .map(|column| {
+                    let mut value = VectorValue::with_capacity(column.len(), EvalType::Int);
+                    for item in *column {
+                        value.push_int(*item);
+                    }
+                    value
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let first = data(&[
+        &[Some(5), Some(5), None, Some(5)],
+        &[Some(5), Some(4), Some(5), None],
+        &[Some(99), Some(5), Some(5), Some(6)],
+    ]);
+    assert_eq!(
+        evaluate(&mut program, &first, 4, &[0, 1, 2, 3]),
+        vec![Some(1), Some(1), None, None]
+    );
+    let rebound = data(&[
+        &[Some(5), Some(5)],
+        &[Some(4), Some(4)],
+        &[Some(6), Some(5)],
+    ]);
+    assert_eq!(
+        evaluate(&mut program, &rebound, 2, &[0, 1]),
+        vec![None, Some(1)]
+    );
+}
+
+#[test]
 fn local_rejects_bad_spec_and_unadmitted_domains() {
     assert!(matches!(
         compile_local(&input(1), &[ft()], LocalCompileContext::default()),

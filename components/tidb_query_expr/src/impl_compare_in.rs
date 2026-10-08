@@ -371,26 +371,23 @@ fn init_compare_in_data<T: InByHash>(
 #[inline]
 pub fn compare_in_by_compare<T: InByCompare>(args: &[Option<&T>]) -> Result<Option<Int>> {
     assert!(!args.is_empty());
-    let base_val = args[0];
-    match base_val {
-        None => Ok(None),
-        Some(base_val) => {
-            let mut default_ret = Some(0);
-            for arg in &args[1..] {
-                match arg {
-                    None => {
-                        default_ret = None;
-                    }
-                    Some(v) => {
-                        if *v == base_val {
-                            return Ok(Some(1));
-                        }
-                    }
-                }
-            }
-            Ok(default_ret)
-        }
-    }
+    let base = args[0];
+    let left = if base.is_some() {
+        crate::NativeInControlValue::Other
+    } else {
+        crate::NativeInControlValue::Null
+    };
+    let result = crate::native_in_ready_values(left, args.len() - 1, |index| {
+        Ok::<_, std::convert::Infallible>(match (base, args[index + 1]) {
+            (Some(left), Some(right)) => crate::NativeInControlValue::Int(i64::from(left == right)),
+            _ => crate::NativeInControlValue::Null,
+        })
+    })
+    .unwrap();
+    Ok(match result {
+        crate::NativeInControlResult::Null => None,
+        crate::NativeInControlResult::Bool(value) => Some(i64::from(value)),
+    })
 }
 
 #[rpn_fn(nullable, varg, min_args = 1)]

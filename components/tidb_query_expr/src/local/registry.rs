@@ -42,7 +42,9 @@ pub(crate) fn check_local_admission(call: &CallShape, metadata: &CallMetadata) -
             | ScalarFuncSig::CaseWhenInt
             | ScalarFuncSig::CoalesceInt,
         )
-        | FunctionRef::Local(LocalFunctionId::NullIfIntSignedSigned) => Ok(()),
+        | FunctionRef::Local(
+            LocalFunctionId::NullIfIntSignedSigned | LocalFunctionId::InIntSourceOrder,
+        ) => Ok(()),
         function => Err(other_err!(
             "Function {:?} is outside the admitted local seed domain",
             function
@@ -55,6 +57,15 @@ pub(crate) fn map_local_call_to_rpn_func(
     call: &CallShape,
 ) -> Result<RpnFnMeta> {
     match id {
+        LocalFunctionId::InIntSourceOrder => {
+            if call.args().len() < 2 {
+                return Err(other_err!("Local IN requires at least two arguments"));
+            }
+            check_signed_int_type(call.return_type())?;
+            Ok(crate::impl_compare_in::compare_in_by_compare_fn_meta::<
+                tidb_query_datatype::codec::data_type::Int,
+            >())
+        }
         LocalFunctionId::NullIfIntSignedSigned => {
             validate_argument_count_eq(call.args().len(), 2)?;
             check_signed_int_type(call.return_type())?;
