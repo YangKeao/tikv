@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round195收口（request-owner-matrix-189）：三审计锁request-root边界：Session SQL根已由SessionAsciiRuntime begin/close→StmtContext→Columns真实传播；planner literal保live token；Legacy Shared可继承selected parent且active child优先。5个focused filters全绿（Session zero/one各1、planner1、Unistore1、StmtContext4）。R193共享manifest变更后TiDB rust/Cargo.lock遗漏导致四命令prebuild --locked RED，非测试失败；同步锁后原命令绿并提交。remote Unistore DAG从DirectUnaryRequest跨进程无process-local owner/policy；不得伪造Session token或加dead Option字段，需未来request-local server policy/lifecycle multi-crate设计。功能240/245不变；M4 local lifecycle证据闭合，remote边界明确仍active。
+
+round195启动（request-owner-matrix-189）：并行审计RequestEvalContext/LegacyEvaluator/测试，选安全已有owner传播；不为remote DAG伪造进程内owner。
+
 round194收口（m0-m6-audit-188）：三独立只读审计M0–M6/全入口/证据。结论：accelerated Demo功能完成240/245+5逐项例外、未发现新增隐式fallback；但canonical goal不能完成，因broader M2 type/value、real request-owner/default-NoColumns/wrapper propagation及M6全门仍open，strict0。修复证据陈旧矛盾：remaining core清空、latest functional=CAST R190、240/245、RAND非例外、5 exceptions approved defer。ledger/links/JSON/diff验证，配对Plan+DCO docs；goal active。
 
 round194启动（m0-m6-audit-188）：3-agent final audit，区分Demo允许后补与真实M2/M4/M6 blocker；先清证据矛盾再决定goal状态。
