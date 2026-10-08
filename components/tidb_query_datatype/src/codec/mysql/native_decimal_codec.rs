@@ -3,6 +3,9 @@
 //! Native MyDecimal's fixed binary codec leaves. These preserve the original
 //! signed word/count domain, warning precedence and caller-sized-buffer
 //! contract; they do not import or normalize a Decimal.
+
+use smallvec::SmallVec;
+
 const DIGITS_PER_WORD: usize = 9;
 const WORD_BUF_LEN: usize = 9;
 const WORD_SIZE: usize = 4;
@@ -50,6 +53,14 @@ pub struct NativeDecimalDecoded {
 pub struct NativeDecimalDecodeFailure {
     pub consumed: usize,
     pub error: DecimalCodecError,
+}
+
+/// Decimal sign, coefficient digits, and scale reconstructed from native words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeDecimalParts {
+    pub negative: bool,
+    pub coefficient: SmallVec<[u8; 24]>,
+    pub scale: u32,
 }
 
 /// Original unchecked-shape DecimalBinSize arithmetic, including signed widths.
@@ -110,6 +121,68 @@ pub fn remove_leading_zeros(source_digits_int: i32, words: &[i32; 9]) -> (usize,
     }
     (word_idx, digits_int)
 }
+
+/// Reconstruct coefficient digits from the native base-1e9 word view.
+pub fn decimal_words_to_parts(
+    negative: bool,
+    digits_int: i32,
+    digits_frac: i32,
+    words: &[i32; 9],
+) -> NativeDecimalParts {
+    let (word_start_idx, digits_int) = remove_leading_zeros(digits_int, words);
+    let int_len = digits_int.max(0) as usize;
+    let fraction_len = digits_frac.max(0) as usize;
+    let mut coefficient = SmallVec::<[u8; 24]>::new();
+    coefficient.resize(int_len + fraction_len, b'0');
+
+    if digits_int > 0 {
+        let mut pos = int_len;
+        let mut word_idx = word_start_idx + (digits_int as usize).div_ceil(DIGITS_PER_WORD);
+        let mut remaining = digits_int;
+        while remaining > 0 {
+            word_idx -= 1;
+            let mut word = words[word_idx];
+            let take = remaining.min(DIGITS_PER_WORD as i32);
+            for _ in 0..take {
+                let next = word / 10;
+                pos -= 1;
+                coefficient[pos] = b'0' + (word - next * 10) as u8;
+                word = next;
+            }
+            remaining -= DIGITS_PER_WORD as i32;
+        }
+    }
+
+    if digits_frac > 0 {
+        let digit_mask = POWERS10[DIGITS_PER_WORD - 1];
+        let mut word_idx = word_start_idx + (digits_int.max(0) as usize).div_ceil(DIGITS_PER_WORD);
+        let mut remaining = digits_frac;
+        let mut offset = int_len;
+        while remaining > 0 {
+            let mut word = words[word_idx];
+            word_idx += 1;
+            let take = remaining.min(DIGITS_PER_WORD as i32);
+            for _ in 0..take {
+                let next = word / digit_mask;
+                coefficient[offset] = b'0' + next as u8;
+                offset += 1;
+                word -= next * digit_mask;
+                word *= 10;
+            }
+            remaining -= DIGITS_PER_WORD as i32;
+        }
+    }
+
+    if coefficient.is_empty() {
+        coefficient.push(b'0');
+    }
+    NativeDecimalParts {
+        negative,
+        coefficient,
+        scale: digits_frac.max(0) as u32,
+    }
+}
+
 fn fix_word_cnt_error(
     words_int: usize,
     words_frac: usize,
@@ -437,6 +510,41 @@ pub fn decode_bin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decimal_words_to_parts_preserves_coefficient_shape() {
+        let mut fraction = [0; 9];
+        fraction[0] = 456_000_000;
+        assert_eq!(
+            decimal_words_to_parts(false, 0, 3, &fraction),
+            NativeDecimalParts {
+                negative: false,
+                coefficient: SmallVec::from_slice(b"456"),
+                scale: 3,
+            }
+        );
+
+        assert_eq!(
+            decimal_words_to_parts(true, 0, 0, &[0; 9]),
+            NativeDecimalParts {
+                negative: true,
+                coefficient: SmallVec::from_slice(b"0"),
+                scale: 0,
+            }
+        );
+
+        let mut leading_zero_word = [0; 9];
+        leading_zero_word[1] = 123;
+        assert_eq!(
+            decimal_words_to_parts(false, 12, 0, &leading_zero_word),
+            NativeDecimalParts {
+                negative: false,
+                coefficient: SmallVec::from_slice(b"123"),
+                scale: 0,
+            }
+        );
+    }
+
     #[test]
     fn native_binary_write_keeps_shape_status_bytes_and_caller_contract() {
         let mut words = [0; 9];
