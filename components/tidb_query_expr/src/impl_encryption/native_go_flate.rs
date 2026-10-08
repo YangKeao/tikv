@@ -957,6 +957,7 @@ impl Compressor {
                 // hashPrev[i & windowMask] has already been overwritten.
                 break;
             }
+            tries -= 1;
             i = self.hash_prev[iu & WINDOW_MASK] as i32 - self.hash_offset as i32;
             if i < min_index || i < 0 {
                 break;
@@ -1149,4 +1150,21 @@ fn adler32(data: &[u8]) -> u32 {
         }
     }
     (s2 << 16) | s1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_match_honors_chain_budget_even_on_cycle() {
+        let mut compressor = Compressor::new_level6();
+        compressor.chain = 1;
+        compressor.window[..8].copy_from_slice(b"abcdefgh");
+        // With hash_offset=1 this points candidate 1 back to itself. The Go
+        // chain budget must terminate the search even if the table is cyclic.
+        compressor.hash_prev[1] = 2;
+
+        assert_eq!(compressor.find_match(4, 1, 2, 4), (2, 0, false));
+    }
 }

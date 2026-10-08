@@ -30,6 +30,7 @@
 /// (single-rounding multiplies via `f64::mul_add`, which is the correctly
 /// rounded fused form the assembly's `VFMADD` produces). `k` rounds to
 /// nearest-even via `CVTSD2SL`, not truncation.
+#[allow(clippy::approx_constant)] // Preserve the exact Go source literal.
 pub(crate) fn go_exp(x: f64) -> f64 {
     const OVERFLOW: f64 = 7.097_827_128_933_84e2;
     const LOG2E: f64 = 1.442_695_040_888_963_407_359_924_681_001_892_0;
@@ -157,6 +158,7 @@ fn go_log(x: f64) -> f64 {
 
 /// Go `math.Log10` (src/math/log10.go), bit-exact: `Log(x) * (1/Ln10)`.
 /// TiDB's `LOG10` evaluates through go's standard library.
+#[allow(clippy::approx_constant)] // Preserve Go's arbitrary-precision reciprocal.
 pub(crate) fn go_log10(x: f64) -> f64 {
     // go log10.go: `return Log(x) * (1 / Ln10)` — `1 / Ln10` is an UNTYPED
     // constant division, evaluated in arbitrary precision and rounded once

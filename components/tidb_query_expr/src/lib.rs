@@ -8,7 +8,11 @@
 //! query engine is provided via TiKV Coprocessor interface. However standalone
 //! UDF functions are also exported and can be used standalone.
 
-#![allow(elided_lifetimes_in_paths)] // Necessary until rpn_fn accepts functions annotated with lifetimes.
+#![allow(elided_lifetimes_in_paths)]
+// Necessary until rpn_fn accepts functions annotated with lifetimes.
+// Existing compatibility fixtures intentionally assert only success/error class;
+// preserve their bodies while keeping this lint denied for production targets.
+#![cfg_attr(test, allow(clippy::assertions_on_result_states))]
 #![allow(incomplete_features)]
 #![feature(proc_macro_hygiene)]
 #![feature(specialization)]

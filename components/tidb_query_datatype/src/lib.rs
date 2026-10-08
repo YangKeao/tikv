@@ -3,6 +3,8 @@
 //! This crate stores data types which used by other tidb query related crates.
 
 #![feature(proc_macro_hygiene)]
+// Compatibility fixtures intentionally assert only success/error class.
+#![cfg_attr(test, allow(clippy::assertions_on_result_states))]
 #![feature(min_specialization)]
 #![feature(test)]
 #![allow(internal_features)]
