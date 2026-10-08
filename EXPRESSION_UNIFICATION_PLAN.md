@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round222收口（five-host-adapters-216）：用户确认五个例外先保留，但要求TiDB残留尽量简单且不保留完整native expression evaluator。新增唯一`host_compat.rs` closed name/arity adapter；JSON_SCHEMA_VALID因cache/no-I/O-on-NULL保留一个显式lazy expression adapter，其余四项只收already-evaluated Datum。generic `builtin_ext::{info,crypto,json}`生产match删除五项入口，unknown host name直接None、无fallback；保留parser/plan codec/resource/global-var算法与warning/cache policy，不改功能、不增TiKV代码、不计新family credit。generic refusal1、host semantics6、password SQL1、decode SQL1、digest session1、static ownership2 PASS，TiDB `make lint` exit0；240/245、strict0、overall complete/pr_ready false不变。命令过程中先后有错误receipt路径、错误cargo cwd/path、修复前E0432 import、两次不完整exact filter0-match、错误独立test target与首次static脚本误把test源码计入production；全部修正后仅最终有命中的receipt计gate。
+
+round222启动（five-host-adapters-216）：把五个approved exception从generic family native dispatcher剥离为明确宿主effect adapters；要求单入口、无unknown fallback、JSON lazy demand保真，底层兼容算法暂不迁移。
+
 round221收口（m0-m6-accelerated-complete-215）：M0–M6 accelerated Demo目标完成。cost-aware final invariant在pushed paired HEAD验证三份Plan、240/245(97.96%)、strict0、cost4 flags、M6/full clippy、245 baseline subset、全部relative links、remote heads与tracked-clean PASS。此前严格review唯一line385 blocker在m6-cost-record-214闭合后重审判COMPLETE；另一独立review亦判COMPLETE。M0冻结分母/入口合同、M1 collation、M2 type/Decimal、M3 evaluator control/plumbing、M4/M5 240功能族TiKV-only接管与native删除、M6 lint/clippy/core tests/cost/report均达到加速合同。五个approved no-credit例外保持明确future owner条件；strict family audit计数按冻结合同保持0，不虚报更严结论。`overall_goal_complete=true`仅表示本实验加速范围；`pr_ready=false`，release/TiFlash/FIPS环境、穷尽差分、allocator peak/OOM与完整Go package transcreation仍未claim且不被此次完成掩盖。
 
 round221启动（m0-m6-accelerated-complete-215）：在cost记录推送后复跑全不变量并让先前提出唯一缺口的独立审计者复核；只在COMPLETE verdict后更新overall状态并发布最终配对checkpoint。
