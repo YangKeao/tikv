@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round199收口（window-param-marker-193）：修复window整数参数prepared binding：get_uint64_from_constant沿现有Columns::param_value解析ParamMarker order，负order/missing/error仍None，保留Null/negative/deferred/literal分类。新增unit先RED(None vs Some(7))后GREEN；原Go表1 GREEN；真实PREPARE NTILE(?)→EXECUTE USING @buckets SQL 1 GREEN，覆盖physical builder。未增fallback/owner。功能240/245不变；R198两gap剩null-rejection live-context一项。
+
+round199启动（window-param-marker-193）：让NTH_VALUE/LEAD/LAG/NTILE整数常量提取沿live Columns解析prepared ParamMarker；先RED再修，验证unit+真实SQL。
+
 round198收口（wrapper-classification-192）：window生产链Session→physical_builder::build_window→WindowExec<StmtContext>，partition/order/range/aggregate/value/lead-lag均用同一ctx；追加zero-slot SUM(ASCII(v)) OVER回归1 GREEN，确认无NoColumns owner loss。DDL default真实路径均live StmtContext；aggregation wrap_cast NoColumns仅literal metadata probe。发现两项未来修复：null-rejection helper丢planner live Columns可能误折session函数；window uint constant extractor拒绝ParamMarker。storage_class parse UTC/eval default-zone差异虽可疑，但首个UNIX_TIMESTAMP探针旧行为即绿，未证明语义bug，未改代码。功能240/245不变；两gap明确排入后续。
 
 round198启动（wrapper-classification-192）：分类window runtime与Rust standalone DDL/fold NoColumns；只修有可复现语义gap，不为ownerless构造伪造execution。
