@@ -1308,9 +1308,12 @@ short-circuit admission policy described above.
   actual wrapper. Only these value profiles require nonnull operands at both
   admission layers. The shared `tidb_query_crypto::aes` module owns the original
   mode loops, padding, key folding and public CTR compatibility closure, backed
-  by the already-used RustCrypto AES 0.9.1 primitive. Its opaque block interface
+  by the workspace-approved OpenSSL AES primitive. Its opaque block interface
   keeps the native random-access I/O layer separate without exposing cipher
   variants; the unrelated native GCM primitive dependency remains unchanged.
+  SHA-1 compatibility also uses OpenSSL. Vitess retains one scoped Rust DES
+  wrapper only for its fixed-key non-security shard hash because OpenSSL 3's
+  default provider does not expose DES-ECB; `deny.toml` names only that wrapper.
   The actual wrapper checks/slices IVs before deriving keys. Exact operation and
   mode/key profile plus this-call dispatch witness authenticate short-IV causes
   only for the 18 IV profiles; ECB/NULL cannot manufacture that SQL diagnostic.
@@ -1418,7 +1421,7 @@ short-circuit admission policy described above.
   ENCODE/DECODE, TIDB_SHARD/VITESS_HASH and FORMAT_BYTES/FORMAT_NANO_TIME
   use seven private recipes with existing roles and owned results. The pure
   `tidb_query_crypto` leaf owns the normalized MySQL RNG state, historical
-  SQLCrypt permutation and original RustCrypto DES Vitess hash. Native utility
+  SQLCrypt permutation and fixed-key Rust DES Vitess compatibility hash. Native utility
   facades and the existing TiKV MySqlRng facade delegate to those leaves;
   clock/seed policy and public utility callers remain intact. Native mathutil's
   mutex and raw seed setters/getters use the same wrapping step without silently

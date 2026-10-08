@@ -12,13 +12,17 @@ mod vitess;
 use std::fmt;
 
 pub use mysql_rng::{MySqlRand, mysql_rand_seed_state, mysql_rand_step};
-use sha1::{Digest, Sha1};
+use openssl::hash::{MessageDigest, hash};
 pub use sql_crypt::{sql_decode, sql_encode};
 pub use vitess::hash_uint64;
 
 /// Calculates SHA-1 using the same byte contract as Go's helper.
 pub fn sha1_hash(input: &[u8]) -> [u8; 20] {
-    Sha1::digest(input).into()
+    hash(MessageDigest::sha1(), input)
+        .expect("OpenSSL failed to calculate SHA-1 digest")
+        .as_ref()
+        .try_into()
+        .expect("OpenSSL SHA-1 digest must be exactly 20 bytes")
 }
 
 /// Encodes plaintext bytes as MySQL's uppercase `*SHA1(SHA1(password))` form.

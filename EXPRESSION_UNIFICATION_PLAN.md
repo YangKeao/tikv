@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round193收口（m6-crypto-fips-187）：修M6 cargo-deny blocker而非绕过：tidb_query_crypto AES block与SHA1改workspace-approved OpenSSL，移RustCrypto aes/sha1及锁依赖；OpenSSL3 default provider DES-ECB unsupported导致6/1真实RED，保receipt后恢复仅Vitess fixed-key non-security shard-hash的Rust DES，并在deny只准cipher←des wrapper，其他AES/SHA仍禁。crypto check+7tests+focused clippy GREEN；full make clippy security/style/dashboard/docker/license/cargo-deny已过，后续全仓编译因grpcio-sys旧abseil与当前C++工具链错误exit2，非本变更Rust lint。功能240/245不变，M6 dependency blocker已解除、全仓toolchain blocker明记；goal active。
+
+round193启动（m6-crypto-fips-187）：三owner将AES/DES/SHA1 primitive换OpenSSL以解除deny，不改TiKV策略；真实provider/fixture/clippy验证后决定legacy DES边界。
+
 round192收口（m6-gates-186）：最终gate实跑：TiDB make lint exit0（含tipb sync/projection与Go lint）；full tidb-expr exit101=1654 pass/4 historical fail/94 ignore，full Unistore exit101=226 pass/1 historical fail/13 ignore，失败集合与R100相同。TiKV make clippy首次无rustup在pre-clippy exit2；注入pinned rustup重跑，security/style/dashboard/docker/license通过，cargo-deny因本实验tidb_query_crypto直依赖RustCrypto aes0.9/cipher0.5/sha10.10违反现FIPS bans而exit2。未绕过deny或虚报绿；此为明确M6/FIPS blocker/risk，功能240/245与5 exceptions不变。ledger/relative-links/diff clean验证绿；strict0/goal active。
 
 round192启动（m6-gates-186）：并行真实运行TiDB必需make lint、TiKV make clippy及两full Rust libs；保留失败原始receipt，不让深验证阻塞已实现Demo但也不claim PRready。

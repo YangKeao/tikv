@@ -16,10 +16,7 @@
 
 use std::fmt;
 
-use aes::{
-    Aes128, Aes192, Aes256,
-    cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit},
-};
+use openssl::symm::{Cipher as OpenSslCipher, Crypter, Mode};
 
 /// AES block size in bytes, independent of key length.
 pub const AES_BLOCK_SIZE: usize = 16;
@@ -53,49 +50,57 @@ impl fmt::Display for EncryptError {
 impl std::error::Error for EncryptError {}
 
 /// Opaque AES block primitive for the native random-access encryption layer.
-/// Key variants and the underlying cipher implementation remain private.
+/// The owned key and underlying cipher implementation remain private.
 pub struct AesCipher {
-    cipher: Cipher,
-}
-
-enum Cipher {
-    Aes128(Aes128),
-    Aes192(Aes192),
-    Aes256(Aes256),
+    key: Vec<u8>,
 }
 
 impl AesCipher {
     /// Constructs an AES cipher with a 16-, 24-, or 32-byte key.
     pub fn new(key: &[u8]) -> Result<Self, EncryptError> {
-        let cipher = match key.len() {
-            16 => Cipher::Aes128(Aes128::new_from_slice(key).expect("validated AES-128 key")),
-            24 => Cipher::Aes192(Aes192::new_from_slice(key).expect("validated AES-192 key")),
-            32 => Cipher::Aes256(Aes256::new_from_slice(key).expect("validated AES-256 key")),
-            length => return Err(EncryptError::InvalidKeyLength(length)),
-        };
-        Ok(Self { cipher })
+        match key.len() {
+            16 | 24 | 32 => Ok(Self { key: key.to_vec() }),
+            length => Err(EncryptError::InvalidKeyLength(length)),
+        }
+    }
+
+    fn cipher(&self) -> OpenSslCipher {
+        match self.key.len() {
+            16 => OpenSslCipher::aes_128_ecb(),
+            24 => OpenSslCipher::aes_192_ecb(),
+            32 => OpenSslCipher::aes_256_ecb(),
+            _ => unreachable!("validated AES key length"),
+        }
+    }
+
+    fn process_block(&self, block: &mut [u8; AES_BLOCK_SIZE], mode: Mode) {
+        let mut crypter = Crypter::new(self.cipher(), mode, &self.key, None)
+            .expect("OpenSSL AES-ECB crypter initialization failed");
+        crypter.pad(false);
+
+        let mut output = [0_u8; AES_BLOCK_SIZE * 2];
+        let update_len = crypter
+            .update(block, &mut output)
+            .expect("OpenSSL AES block update failed");
+        let final_len = crypter
+            .finalize(&mut output[update_len..])
+            .expect("OpenSSL AES block finalization failed");
+        assert_eq!(
+            update_len + final_len,
+            AES_BLOCK_SIZE,
+            "OpenSSL AES block operation produced an invalid length"
+        );
+        block.copy_from_slice(&output[..AES_BLOCK_SIZE]);
     }
 
     /// Encrypts exactly one AES block in place, without mode or padding policy.
     pub fn encrypt_block(&self, block: &mut [u8; AES_BLOCK_SIZE]) {
-        let mut value = aes::Block::from(*block);
-        match &self.cipher {
-            Cipher::Aes128(cipher) => cipher.encrypt_block(&mut value),
-            Cipher::Aes192(cipher) => cipher.encrypt_block(&mut value),
-            Cipher::Aes256(cipher) => cipher.encrypt_block(&mut value),
-        }
-        block.copy_from_slice(&value);
+        self.process_block(block, Mode::Encrypt);
     }
 
     /// Decrypts exactly one AES block in place, without mode or padding policy.
     pub fn decrypt_block(&self, block: &mut [u8; AES_BLOCK_SIZE]) {
-        let mut value = aes::Block::from(*block);
-        match &self.cipher {
-            Cipher::Aes128(cipher) => cipher.decrypt_block(&mut value),
-            Cipher::Aes192(cipher) => cipher.decrypt_block(&mut value),
-            Cipher::Aes256(cipher) => cipher.decrypt_block(&mut value),
-        }
-        block.copy_from_slice(&value);
+        self.process_block(block, Mode::Decrypt);
     }
 }
 

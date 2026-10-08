@@ -2,7 +2,8 @@
 // Copyright 2026 PingCAP, Inc. (relocated native Vitess hash).
 
 //! Legacy Vitess shard-key compatibility using fixed-key DES.
-//! This is not encryption for protecting data; FIPS behavior is not verified.
+//! This is a non-security compatibility hash, not data protection or a FIPS
+//! primitive.
 
 use std::sync::LazyLock;
 

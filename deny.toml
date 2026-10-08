@@ -34,9 +34,11 @@ deny = [
     # gcp_v2 enables rustls only to install and require the aws-lc-rs FIPS provider at runtime.
     { name = "rustls", wrappers = ["gcp_v2", "google-cloud-auth", "reqwest", "tokio-rustls", "hyper-rustls"] },
     { name = "ring", wrappers = ["rustls", "rustls-webpki"] },
-    # Ban trait crates from RustCrypto.
+    # Ban trait crates from RustCrypto. The DES wrapper is retained only for
+    # Vitess' fixed-key shard compatibility hash; OpenSSL 3's default provider
+    # does not expose DES-ECB, and this path does not protect data.
     { name = "aead" },
-    { name = "cipher" },
+    { name = "cipher", wrappers = ["des"] },
     # aws-smithy-checksums reaches digest through crc-fast in newer releases.
     { name = "digest", wrappers = ["sha2", "md-5", "sha1", "hmac", "crc-fast"] },
     { name = "password-hash" },
