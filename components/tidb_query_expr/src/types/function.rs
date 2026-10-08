@@ -78,12 +78,16 @@ pub struct RpnFnMeta {
     /// The display name of the RPN function. Mainly used in tests.
     pub name: &'static str,
 
-    /// Validator shared by wire and typed local construction.
-    pub(crate) validator_ptr: fn(call: &CallShape) -> Result<()>,
+    /// Validator shared by wire and typed local construction. Public only for
+    /// generated `rpn_fn` metadata outside this crate.
+    #[doc(hidden)]
+    pub validator_ptr: fn(call: &CallShape) -> Result<()>,
 
     /// The sole metadata constructor, operating on original argument
-    /// identities.
-    pub(crate) metadata_ptr: fn(call: &mut CallBuild) -> Result<Box<dyn Any + Send>>,
+    /// identities. Public only for generated `rpn_fn` metadata outside this
+    /// crate.
+    #[doc(hidden)]
+    pub metadata_ptr: fn(call: &mut CallBuild) -> Result<Box<dyn Any + Send>>,
 
     #[allow(clippy::type_complexity)]
     /// The RPN function.
@@ -588,9 +592,11 @@ enum CallArgValue {
     Dynamic,
 }
 
-/// A shallow argument descriptor. It never contains an evaluable child program.
+/// A shallow argument descriptor used by generated validators. It never
+/// contains an evaluable child program.
+#[doc(hidden)]
 #[derive(Clone, Debug)]
-pub(crate) struct CallArg {
+pub struct CallArg {
     field_type: FieldType,
     value: CallArgValue,
 }
@@ -617,7 +623,8 @@ impl CallArg {
         }
     }
 
-    pub(crate) fn field_type(&self) -> &FieldType {
+    #[doc(hidden)]
+    pub fn field_type(&self) -> &FieldType {
         &self.field_type
     }
 
@@ -698,8 +705,9 @@ pub(crate) fn wire_expr_type_is_scalar(tp: ExprType) -> Result<bool> {
     }
 }
 
+#[doc(hidden)]
 #[derive(Clone, Debug)]
-pub(crate) struct CallShape {
+pub struct CallShape {
     function: FunctionRef,
     return_type: FieldType,
     args: Vec<CallArg>,
@@ -724,10 +732,12 @@ impl CallShape {
     pub(crate) fn function(&self) -> FunctionRef {
         self.function
     }
-    pub(crate) fn return_type(&self) -> &FieldType {
+    #[doc(hidden)]
+    pub fn return_type(&self) -> &FieldType {
         &self.return_type
     }
-    pub(crate) fn args(&self) -> &[CallArg] {
+    #[doc(hidden)]
+    pub fn args(&self) -> &[CallArg] {
         &self.args
     }
 }
@@ -738,7 +748,8 @@ enum MetadataSource {
 }
 
 /// Retention is independent of immutable source-order argument facts.
-pub(crate) struct CallBuild {
+#[doc(hidden)]
+pub struct CallBuild {
     shape: CallShape,
     metadata: MetadataSource,
     retained_args: Vec<usize>,
@@ -1164,7 +1175,8 @@ pub fn validate_expr_return_type(expr: &Expr, et: EvalType) -> Result<()> {
     validate_field_type(expr.get_field_type(), et)
 }
 
-pub(crate) fn validate_field_type(field_type: &FieldType, et: EvalType) -> Result<()> {
+#[doc(hidden)]
+pub fn validate_field_type(field_type: &FieldType, et: EvalType) -> Result<()> {
     let received_et = box_try!(EvalType::try_from(field_type.as_accessor().tp()));
     if et == received_et {
         Ok(())
@@ -1182,7 +1194,8 @@ pub fn validate_expr_arguments_eq(expr: &Expr, args: usize) -> Result<()> {
     validate_argument_count_eq(expr.get_children().len(), args)
 }
 
-pub(crate) fn validate_argument_count_eq(received_args: usize, args: usize) -> Result<()> {
+#[doc(hidden)]
+pub fn validate_argument_count_eq(received_args: usize, args: usize) -> Result<()> {
     if received_args == args {
         Ok(())
     } else {
@@ -1200,7 +1213,8 @@ pub fn validate_expr_arguments_gte(expr: &Expr, args: usize) -> Result<()> {
     validate_argument_count_gte(expr.get_children().len(), args)
 }
 
-pub(crate) fn validate_argument_count_gte(received_args: usize, args: usize) -> Result<()> {
+#[doc(hidden)]
+pub fn validate_argument_count_gte(received_args: usize, args: usize) -> Result<()> {
     if received_args >= args {
         Ok(())
     } else {
@@ -1218,7 +1232,8 @@ pub fn validate_expr_arguments_lte(expr: &Expr, args: usize) -> Result<()> {
     validate_argument_count_lte(expr.get_children().len(), args)
 }
 
-pub(crate) fn validate_argument_count_lte(received_args: usize, args: usize) -> Result<()> {
+#[doc(hidden)]
+pub fn validate_argument_count_lte(received_args: usize, args: usize) -> Result<()> {
     if received_args <= args {
         Ok(())
     } else {

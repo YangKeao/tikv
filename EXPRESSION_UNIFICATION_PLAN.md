@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round216收口（m6-macro-abi-210）：M6清掉R215披露的executor test compile RED。根因是`rpn_fn`在downstream crate展开却需构造RpnFnMeta/调用validator，R193后CallShape/CallBuild边界收窄为crate-private；现仅将macro必需的CallShape/CallArg/CallBuild、args/return_type/field_type、argument/type validators与RpnFnMeta两construction fields设为`doc(hidden)` public，语义上标记macro ABI而非consumer API，不开放metadata内容或selector。修复过程逐层暴露CallBuild→shape/arg validator→RpnFnMeta字段，最终executor full lib120/0/0、aggr full lib40/0/0、selection/projection/error3、deep wire1与production compile全部GREEN。原R215 RED raw log仍保留；中间同路径重跑覆盖但错误链在Plan披露。M6 test-only visibility门槛关闭；full TiKV clippy grpcio/Abseil、TiDB lint最终复跑等仍开。
+
+round216启动（m6-macro-abi-210）：恢复downstream rpn_fn测试编译，以最窄doc-hidden macro ABI修复，不回退shared CallShape设计或复制legacy descriptors。
+
 round215收口（strict-wire-depth-209）：关闭M3最后的production wire depth缺口。新增`build_from_expr_tree_strict_controls`，production DAG aggregate/parser、selection、projection、TopN/partition、limit九处构造入口全部使用strict context；eligible AND/OR不再因depth>32转普通eager FnCall。旧public builder保留32 cap作为兼容API与immutable oracle，不再是production request construction。新test对33/256深、AND/OR、cast/no-cast在2MiB stack上与eager结果差分并证明全层ShortCircuit；旧cap stress仍GREEN；aggr+executor production `cargo check` GREEN；TiDB 1024 CASE bridge GREEN。尝试executor test target RED（exit101）：test-only rpn_fn expansion跨crate访问crate-private CallShape args/return_type共18 E0603/E0624，production check未受影响，保留日志且不算gate。M3 planned Demo scope complete；strict family count仍0，功能240/245不变。M6 broad/test-only visibility与全toolchain门槛仍开。
 
 round215启动（strict-wire-depth-209）：核对immutable depth oracle后以separate strict production builder替换全部request构造入口，不篡改旧兼容测试语义，并在小栈执行深层差分。

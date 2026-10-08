@@ -143,7 +143,10 @@ flag or eligibility policy described above.
 
 - The wire tree builder and `local::compile_local` share shallow typed
   `CallShape` / `CallBuild` descriptors, one function selector, and opaque
-  `PreparedCall` metadata. Local construction must not fabricate protobuf
+  `PreparedCall` metadata. `CallShape`, `CallArg`, `CallBuild`, the validator
+  helpers, and the two `RpnFnMeta` construction fields are `doc(hidden)` public
+  solely because `rpn_fn` expands in downstream crates; they are macro ABI, not
+  a second consumer-facing construction API. Local construction must not fabricate protobuf
   expressions or maintain a second signature dispatch table. Prepared calls
   retain the original argument-index mapping: IN's legacy constant extraction
   can leave dynamic children in swap-remove order, not source order.
