@@ -161,7 +161,8 @@ short-circuit admission policy described above.
   must be exactly one Int value. `InputRow` separates physical row from selection
   occurrence. Width-one scheduling preserves order/repeats and actual typed
   `LocalError` variants. Do not pre-convert dead branches or unselected rows.
-- Strict local controls never switch to eager at depth 32. Metadata traversal
+- Strict local controls never switch to eager at depth 32; the TiDB CASE bridge
+  also iterates at least 1,024 demanded pairs under one selected scope. Metadata traversal
   and program/spec destruction are iterative, including rejected construction;
   derived deep Clone/Debug are not guaranteed. Arc-share immutable specs instead.
   Caller-owned decoded root vectors retain their borrow/selection contract;
