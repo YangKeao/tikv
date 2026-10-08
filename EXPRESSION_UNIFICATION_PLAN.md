@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round191收口（final-five-exceptions-185）：五并行只读审计逐项冻结最后5族例外：JSON_SCHEMA_VALID保draft2019/cache/lazy外部I/O边界；两DECODE PLAN保完整text/protobuf codec/render及不同error/panic；SQL_DIGEST保完整lexer/normalizer/raw-byte；PASSWORD_STRENGTH保identity+7 ordered live globals/Go byte+rune政策。均zero TiKV/PB/Unistore admission、direct named native dispatch，无hidden fallback/ready answer；未来解除条件逐项落evidence。功能仍240/245=97.96%，满足>=90%；5 exceptions获Demo defer但无credit。strict0，M6 gates/lifecycle/type acceptance继续active。配对Plan+DCO docs。
+
+round191启动（final-five-exceptions-185）：5-agent并行只读审计剩余冻结family，逐项记录入口、host effects、保留边界、无fallback证据与解除条件；不改生产/credit。
+
 round190收口（cast-complete-184）：native_legacy_cast_duration补Time→Duration并删最后可迁移本地转换体。全入口复审：Unistore implemented value CAST均经eval_legacy_*；AST Json经existing builtin_ext窄bridge调用native_cast_as_json；native仅child/NULL/Datum/error/context/full-width i128 identity投影；condition仅truth/presence。now-anchored Duration→Time及baseline-unimplemented signatures明确例外，无implicit fallback。CAST获functional credit：240/245=97.96%，remaining5，strict0。SDK1/Unistore1 GREEN，详cast-complete checkpoint；配对Plan+DCO发布。
 
 round190启动（cast-complete-184）：D native_legacy_cast_duration补Time→Duration exact route；U删最后可迁移Time::to_duration本地体；随后全CAST入口审计，若仅i128 identity adapter及now-anchored Duration→Time明确例外则按冻结规则给whole CAST functional credit 240/245，strict仍0。
