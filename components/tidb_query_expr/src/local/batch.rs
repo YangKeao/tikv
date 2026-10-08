@@ -30,8 +30,8 @@ use super::{
     ReportedLocalFailure, ResultMetaId,
     compile::{
         LocalNumericBatchProgram, ProgramEntry, compile_evaluated_bytes,
-        evaluated_ascii_bytes_type, evaluated_ascii_decimal_type, evaluated_ascii_int_type,
-        evaluated_native_vector_type,
+        evaluated_native_vector_type, ready_value_bytes_type, ready_value_decimal_type,
+        ready_value_int_type,
     },
     runtime::{EvalBudget, bytes_min_storage_bytes, int_min_storage_bytes, vector_storage_bytes},
 };
@@ -46,7 +46,7 @@ use crate::{
         ConcatKind, FieldKind, PreparedCharArgs, PreparedConcatArgs, PreparedExportSetArgs,
         PreparedFieldArgs, PreparedFindInSetKeys, PreparedMakeSetArgs,
     },
-    types::expr_eval::{EvalInput, EvaluatedAsciiWitness, FrameResult, evaluated_bytes_shape},
+    types::expr_eval::{EvalInput, FrameResult, ReadyValueDispatchWitness, evaluated_bytes_shape},
 };
 
 #[derive(Debug)]
@@ -165,7 +165,7 @@ impl NativeRegexpCallMetadata {
         self.known_cache_bytes.set(total);
         match total {
             Some(total) if total <= self.known_cache_limit.get() => Ok(()),
-            _ => Err(evaluated_ascii_storage_overflow()),
+            _ => Err(ready_value_storage_overflow()),
         }
     }
 
@@ -254,7 +254,7 @@ impl NativeLikeCallMetadata {
         self.known_cache_bytes.set(total);
         match total {
             Some(total) if total <= self.known_cache_limit.get() => Ok(()),
-            _ => Err(evaluated_ascii_storage_overflow()),
+            _ => Err(ready_value_storage_overflow()),
         }
     }
 
@@ -418,31 +418,6 @@ pub struct LocalBatch<'a> {
     pub columns: &'a LazyBatchColumnVec,
     pub physical_rows: usize,
     pub selection: &'a [usize],
-}
-
-/// Reusable index-only scratch and Demo limits. No input/program borrow or
-/// mutable service survives evaluation. The external ctx retains its warnings.
-pub struct LocalEvalState {
-    row: [usize; 1],
-    limits: ExecutionLimits,
-}
-
-impl LocalEvalState {
-    pub fn new(max_steps: u64) -> Self {
-        Self::with_limits(ExecutionLimits {
-            max_steps,
-            ..ExecutionLimits::default()
-        })
-    }
-    pub fn with_limits(limits: ExecutionLimits) -> Self {
-        Self { row: [0], limits }
-    }
-}
-
-impl Default for LocalEvalState {
-    fn default() -> Self {
-        Self::new(u64::MAX)
-    }
 }
 
 fn validate_selection(physical_rows: usize, selection: &[usize]) -> LocalResult<()> {
@@ -694,7 +669,7 @@ impl LineageOutput {
 impl LocalProgram {
     pub fn eval(
         &mut self,
-        state: &mut LocalEvalState,
+        limits: ExecutionLimits,
         ctx: &mut EvalContext,
         batch: LocalBatch<'_>,
     ) -> LocalResult<VectorValue> {
@@ -727,7 +702,7 @@ impl LocalProgram {
             ));
         }
         self.eval_rows(
-            state,
+            limits,
             ctx,
             batch.selection,
             EvalInput::Decoded(batch.columns),
@@ -742,14 +717,14 @@ impl LocalProgram {
     /// driver.
     pub fn eval_with_bindings(
         &mut self,
-        state: &mut LocalEvalState,
+        limits: ExecutionLimits,
         ctx: &mut EvalContext,
         physical_rows: usize,
         selection: &[usize],
         services: &mut dyn LocalRuntimeServices,
     ) -> LocalResult<VectorValue> {
         self.eval_bindings(
-            state,
+            limits,
             ctx,
             physical_rows,
             selection,
@@ -772,7 +747,7 @@ impl LocalProgram {
     /// reported error.
     pub fn eval_with_bindings_reported(
         &mut self,
-        state: &mut LocalEvalState,
+        limits: ExecutionLimits,
         ctx: &mut EvalContext,
         physical_rows: usize,
         selection: &[usize],
@@ -782,7 +757,7 @@ impl LocalProgram {
         // Exactly one invocation; no recovery/retry after a captured failure.
         let result = self
             .eval_bindings(
-                state,
+                limits,
                 ctx,
                 physical_rows,
                 selection,
@@ -812,7 +787,7 @@ impl LocalProgram {
 
     fn eval_bindings(
         &mut self,
-        state: &mut LocalEvalState,
+        limits: ExecutionLimits,
         ctx: &mut EvalContext,
         physical_rows: usize,
         selection: &[usize],
@@ -848,7 +823,7 @@ impl LocalProgram {
             }
         }
         self.eval_rows(
-            state,
+            limits,
             ctx,
             selection,
             EvalInput::Bindings(services),
@@ -859,7 +834,7 @@ impl LocalProgram {
 
     fn eval_rows(
         &mut self,
-        state: &mut LocalEvalState,
+        limits: ExecutionLimits,
         ctx: &mut EvalContext,
         selection: &[usize],
         mut input: EvalInput<'_, '_>,
@@ -870,7 +845,7 @@ impl LocalProgram {
         // adds collection/storage policy, never another expression evaluator.
         let (mut budget, mut output) = match mode {
             OutputMode::ConservativeInt => (
-                EvalBudget::local(state.limits, selection.len())?,
+                EvalBudget::local(limits, selection.len())?,
                 RowCollector::ConservativeInt(VectorValue::with_capacity(
                     selection.len(),
                     EvalType::Int,
@@ -882,22 +857,23 @@ impl LocalProgram {
                         "lineaged program has no checked root result flow".into(),
                     )
                 })?;
-                let mut budget = EvalBudget::lineaged(state.limits)?;
+                let mut budget = EvalBudget::lineaged(limits)?;
                 let output = LineageOutput::new(flow.carrier(), selection.len(), &mut budget)?;
                 (budget, RowCollector::Lineaged(output))
             }
         };
         // Empty selection imports no values or frames, but exact Bytes output
         // still reserves and checks its offset sentinel before publication.
+        let mut selected_row = [0];
         for (occurrence, &row) in selection.iter().enumerate() {
-            state.row[0] = row;
+            selected_row[0] = row;
             let result = match mode {
                 OutputMode::ConservativeInt => FrameResult {
                     node: self.expression.eval_with_input_recording(
                         ctx,
                         &self.schema,
                         &mut input,
-                        &state.row,
+                        &selected_row,
                         1,
                         occurrence,
                         self.host_catalog,
@@ -910,7 +886,7 @@ impl LocalProgram {
                     ctx,
                     &self.schema,
                     &mut input,
-                    &state.row,
+                    &selected_row,
                     1,
                     occurrence,
                     self.host_catalog,
@@ -931,7 +907,7 @@ impl LocalControlProgram {
     /// facade or untagged RPN escape is provided.
     pub fn eval_with_bindings(
         &mut self,
-        state: &mut LocalEvalState,
+        limits: ExecutionLimits,
         ctx: &mut EvalContext,
         physical_rows: usize,
         selection: &[usize],
@@ -939,7 +915,7 @@ impl LocalControlProgram {
     ) -> LocalResult<LineagedBatch> {
         self.inner
             .eval_bindings(
-                state,
+                limits,
                 ctx,
                 physical_rows,
                 selection,
@@ -955,7 +931,7 @@ impl LocalControlProgram {
     /// stay in the caller's existing context, including on a refused final row.
     pub fn eval_with_bindings_reported(
         &mut self,
-        state: &mut LocalEvalState,
+        limits: ExecutionLimits,
         ctx: &mut EvalContext,
         physical_rows: usize,
         selection: &[usize],
@@ -965,7 +941,7 @@ impl LocalControlProgram {
         let result = self
             .inner
             .eval_bindings(
-                state,
+                limits,
                 ctx,
                 physical_rows,
                 selection,
@@ -1001,13 +977,13 @@ impl LocalNumericBatchProgram {
     /// borrowed selection. The original owned error is returned unchanged.
     pub fn eval_with_bindings(
         &mut self,
-        state: &mut LocalEvalState,
+        limits: ExecutionLimits,
         ctx: &mut EvalContext,
         physical_rows: usize,
         selection: &[usize],
         services: &mut dyn LocalRuntimeServices,
     ) -> LocalResult<VectorValue> {
-        self.eval_with_bindings_reported(state, ctx, physical_rows, selection, services)
+        self.eval_with_bindings_reported(limits, ctx, physical_rows, selection, services)
             .map_err(ReportedLocalFailure::into_error)
     }
 
@@ -1016,7 +992,7 @@ impl LocalNumericBatchProgram {
     /// caller's warning count and stored warnings are never reset or replayed.
     pub fn eval_with_bindings_reported(
         &mut self,
-        state: &mut LocalEvalState,
+        limits: ExecutionLimits,
         ctx: &mut EvalContext,
         physical_rows: usize,
         selection: &[usize],
@@ -1024,7 +1000,7 @@ impl LocalNumericBatchProgram {
     ) -> std::result::Result<VectorValue, ReportedLocalFailure> {
         let mut recorder = FailureRecorder::default();
         let result = self.eval_numeric_bindings(
-            state,
+            limits,
             ctx,
             physical_rows,
             selection,
@@ -1036,7 +1012,7 @@ impl LocalNumericBatchProgram {
 
     fn eval_numeric_bindings(
         &mut self,
-        state: &mut LocalEvalState,
+        limits: ExecutionLimits,
         ctx: &mut EvalContext,
         physical_rows: usize,
         selection: &[usize],
@@ -1061,7 +1037,7 @@ impl LocalNumericBatchProgram {
                 "numeric batch selection exceeds 1024 occurrences".into(),
             ));
         }
-        let mut budget = EvalBudget::exact(state.limits)?;
+        let mut budget = EvalBudget::exact(limits)?;
         if rows == 0 {
             return finish_numeric_output(
                 VectorValue::with_capacity(0, EvalType::Int),
@@ -5728,9 +5704,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn return_type(self) -> tipb::FieldType {
         match self.eval_type() {
-            EvalType::Int => evaluated_ascii_int_type(),
-            EvalType::Bytes => evaluated_ascii_bytes_type(),
-            EvalType::Decimal => evaluated_ascii_decimal_type(),
+            EvalType::Int => ready_value_int_type(),
+            EvalType::Bytes => ready_value_bytes_type(),
+            EvalType::Decimal => ready_value_decimal_type(),
             _ => unreachable!("the operation has a closed Int/Bytes/Decimal result"),
         }
     }
@@ -6310,9 +6286,9 @@ impl EvaluatedBytesOp {
 
     pub(crate) fn input_field_type(self, slot: usize) -> Option<tipb::FieldType> {
         self.input_types().get(slot).map(|kind| match kind {
-            EvalType::Int => evaluated_ascii_int_type(),
-            EvalType::Bytes => evaluated_ascii_bytes_type(),
-            EvalType::Decimal => evaluated_ascii_decimal_type(),
+            EvalType::Int => ready_value_int_type(),
+            EvalType::Bytes => ready_value_bytes_type(),
+            EvalType::Decimal => ready_value_decimal_type(),
             EvalType::VectorFloat32 => evaluated_native_vector_type(),
             _ => unreachable!("the operation has only Int/Bytes/Decimal/VectorFloat32 inputs"),
         })
@@ -6440,17 +6416,16 @@ pub fn prepare_grouping_args(
     metadata: &crate::GroupingMetadata,
 ) -> LocalResult<EvaluatedArgs> {
     let groups = metadata.grouping_marks();
-    let group_count =
-        u64::try_from(groups.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+    let group_count = u64::try_from(groups.len()).map_err(|_| ready_value_storage_overflow())?;
     let words = groups.iter().try_fold(1usize, |words, marks| {
         words
             .checked_add(1)
             .and_then(|words| words.checked_add(marks.len()))
-            .ok_or_else(evaluated_ascii_storage_overflow)
+            .ok_or_else(ready_value_storage_overflow)
     })?;
     let bytes = words
         .checked_mul(8)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     let mut gid_bytes = Vec::new();
     gid_bytes
         .try_reserve_exact(8)
@@ -6462,7 +6437,7 @@ pub fn prepare_grouping_args(
         .map_err(|_| LocalError::ResourceLimit("GROUPING marks input allocation failed".into()))?;
     marks_bytes.extend_from_slice(&group_count.to_le_bytes());
     for marks in groups {
-        let count = u64::try_from(marks.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+        let count = u64::try_from(marks.len()).map_err(|_| ready_value_storage_overflow())?;
         marks_bytes.extend_from_slice(&count.to_le_bytes());
         for mark in marks {
             marks_bytes.extend_from_slice(&mark.to_le_bytes());
@@ -6518,14 +6493,14 @@ pub fn prepare_json_binary_pair_args(
     let first_len = first_raw
         .len()
         .checked_add(1)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     let second_len = second_raw
         .len()
         .checked_add(1)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     first_len
         .checked_add(second_len)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     let packet = |type_code: u8, raw: &[u8], extent: usize| -> LocalResult<Vec<u8>> {
         let mut bytes = Vec::new();
         bytes
@@ -6542,7 +6517,7 @@ pub fn prepare_json_binary_pair_args(
 }
 
 fn json_operand_list_buffer(count: usize) -> LocalResult<Vec<u8>> {
-    let count = u64::try_from(count).map_err(|_| evaluated_ascii_storage_overflow())?;
+    let count = u64::try_from(count).map_err(|_| ready_value_storage_overflow())?;
     let mut encoded = Vec::new();
     encoded.try_reserve_exact(8).map_err(|_| {
         LocalError::ResourceLimit("JSON operand list header allocation failed".into())
@@ -6552,15 +6527,15 @@ fn json_operand_list_buffer(count: usize) -> LocalResult<Vec<u8>> {
 }
 
 fn push_json_operand_bytes(encoded: &mut Vec<u8>, value: &[u8]) -> LocalResult<()> {
-    let length = u64::try_from(value.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+    let length = u64::try_from(value.len()).map_err(|_| ready_value_storage_overflow())?;
     let additional = value
         .len()
         .checked_add(8)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     encoded
         .len()
         .checked_add(additional)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     // Amortized growth avoids re-allocating the complete prefix for every value.
     encoded
         .try_reserve(additional)
@@ -6603,20 +6578,20 @@ pub fn prepare_json_object_args(
 
 fn encode_json_paths(paths: &[crate::NativeJsonPath]) -> LocalResult<Vec<u8>> {
     use crate::{NativeJsonArraySelection as Array, NativeJsonPathLeg as Leg};
-    let count = u64::try_from(paths.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+    let count = u64::try_from(paths.len()).map_err(|_| ready_value_storage_overflow())?;
     let mut extent = 8usize;
     for path in paths {
-        u64::try_from(path.legs.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+        u64::try_from(path.legs.len()).map_err(|_| ready_value_storage_overflow())?;
         extent = extent
             .checked_add(9)
-            .ok_or_else(evaluated_ascii_storage_overflow)?;
+            .ok_or_else(ready_value_storage_overflow)?;
         for leg in &path.legs {
             let additional = match leg {
                 Leg::Key(key) => {
-                    u64::try_from(key.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+                    u64::try_from(key.len()).map_err(|_| ready_value_storage_overflow())?;
                     key.len()
                         .checked_add(9)
-                        .ok_or_else(evaluated_ascii_storage_overflow)?
+                        .ok_or_else(ready_value_storage_overflow)?
                 }
                 Leg::Array(Array::Index(_)) => 9,
                 Leg::Array(Array::Range(..)) => 17,
@@ -6624,7 +6599,7 @@ fn encode_json_paths(paths: &[crate::NativeJsonPath]) -> LocalResult<Vec<u8>> {
             };
             extent = extent
                 .checked_add(additional)
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
         }
     }
     let mut encoded = Vec::new();
@@ -6636,15 +6611,14 @@ fn encode_json_paths(paths: &[crate::NativeJsonPath]) -> LocalResult<Vec<u8>> {
         // Preserve the actual cached flag, including its distinction from the
         // selector legs. Never reconstruct text or infer it from wildcard tags.
         encoded.push(u8::from(path.could_match_multiple));
-        let count =
-            u64::try_from(path.legs.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+        let count = u64::try_from(path.legs.len()).map_err(|_| ready_value_storage_overflow())?;
         encoded.extend_from_slice(&count.to_le_bytes());
         for leg in &path.legs {
             match leg {
                 Leg::Key(key) => {
                     encoded.push(0);
                     let length =
-                        u64::try_from(key.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+                        u64::try_from(key.len()).map_err(|_| ready_value_storage_overflow())?;
                     encoded.extend_from_slice(&length.to_le_bytes());
                     encoded.extend_from_slice(key.as_bytes());
                 }
@@ -6745,7 +6719,7 @@ fn reserve_json_raw_operand(encoded: &mut Vec<u8>, additional: usize) -> LocalRe
     encoded
         .len()
         .checked_add(additional)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     encoded
         .try_reserve(additional)
         .map_err(|_| LocalError::ResourceLimit("raw JSON operand packet allocation failed".into()))
@@ -6755,7 +6729,7 @@ fn encode_json_raw_scalar((kind, raw): (u8, &[u8])) -> LocalResult<Vec<u8>> {
     let extent = raw
         .len()
         .checked_add(1)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     let mut encoded = Vec::new();
     encoded
         .try_reserve_exact(extent)
@@ -6805,16 +6779,15 @@ pub fn prepare_json_raw_paths_values_args<'p, 'v>(
             ));
         }
         observed += 1;
-        let leg_count =
-            u64::try_from(legs.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+        let leg_count = u64::try_from(legs.len()).map_err(|_| ready_value_storage_overflow())?;
         let mut extent = 9usize;
         for leg in legs {
             let additional = match leg {
                 Leg::Key(key) => {
-                    u64::try_from(key.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+                    u64::try_from(key.len()).map_err(|_| ready_value_storage_overflow())?;
                     key.len()
                         .checked_add(9)
-                        .ok_or_else(evaluated_ascii_storage_overflow)?
+                        .ok_or_else(ready_value_storage_overflow)?
                 }
                 Leg::Array(Array::Index(_)) => 9,
                 Leg::Array(Array::Range { .. }) => 17,
@@ -6822,7 +6795,7 @@ pub fn prepare_json_raw_paths_values_args<'p, 'v>(
             };
             extent = extent
                 .checked_add(additional)
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
         }
         reserve_json_raw_operand(&mut encoded_paths, extent)?;
         encoded_paths.push(u8::from(multiple));
@@ -6832,7 +6805,7 @@ pub fn prepare_json_raw_paths_values_args<'p, 'v>(
                 Leg::Key(key) => {
                     encoded_paths.push(0);
                     let length =
-                        u64::try_from(key.len()).map_err(|_| evaluated_ascii_storage_overflow())?;
+                        u64::try_from(key.len()).map_err(|_| ready_value_storage_overflow())?;
                     encoded_paths.extend_from_slice(&length.to_le_bytes());
                     encoded_paths.extend_from_slice(key.as_bytes());
                 }
@@ -6867,11 +6840,11 @@ pub fn prepare_json_raw_paths_values_args<'p, 'v>(
         let length = raw
             .len()
             .checked_add(1)
-            .ok_or_else(evaluated_ascii_storage_overflow)?;
-        let word = u64::try_from(length).map_err(|_| evaluated_ascii_storage_overflow())?;
+            .ok_or_else(ready_value_storage_overflow)?;
+        let word = u64::try_from(length).map_err(|_| ready_value_storage_overflow())?;
         let additional = length
             .checked_add(8)
-            .ok_or_else(evaluated_ascii_storage_overflow)?;
+            .ok_or_else(ready_value_storage_overflow)?;
         reserve_json_raw_operand(&mut encoded_values, additional)?;
         encoded_values.extend_from_slice(&word.to_le_bytes());
         encoded_values.push(kind);
@@ -8304,7 +8277,7 @@ impl EvaluatedArgs {
             .ok_or_else(|| {
                 LocalError::ResourceLimit("Decimal math requires finite remaining storage".into())
             })?;
-        let bits = u64::try_from(remaining).map_err(|_| evaluated_ascii_storage_overflow())?;
+        let bits = u64::try_from(remaining).map_err(|_| ready_value_storage_overflow())?;
         Ok(bits as i64)
     }
 
@@ -8323,7 +8296,7 @@ impl EvaluatedArgs {
                         .checked_mul(mem::size_of::<f32>())?,
                 )
             })
-            .ok_or_else(evaluated_ascii_storage_overflow)?;
+            .ok_or_else(ready_value_storage_overflow)?;
         let check = |bytes: usize| {
             if bytes > available {
                 Err(LocalError::ResourceLimit(
@@ -8347,25 +8320,25 @@ impl EvaluatedArgs {
                     let source_bytes = source
                         .elements_capacity()
                         .checked_mul(mem::size_of::<f32>())
-                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        .ok_or_else(ready_value_storage_overflow)?;
                     let requested = source
                         .len()
                         .checked_mul(mem::size_of::<f32>())
-                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        .ok_or_else(ready_value_storage_overflow)?;
                     check(
                         live.checked_add(requested)
-                            .ok_or_else(evaluated_ascii_storage_overflow)?,
+                            .ok_or_else(ready_value_storage_overflow)?,
                     )?;
                     // No wire constructor/decoder: preserve the native-endian bits,
                     // including mutable NaN/Inf and dimensions above the text cap.
                     let wire = source.into_wire_raw();
                     let overlap = live
                         .checked_add(wire.value.capacity())
-                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        .ok_or_else(ready_value_storage_overflow)?;
                     check(overlap)?;
                     live = overlap
                         .checked_sub(source_bytes)
-                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        .ok_or_else(ready_value_storage_overflow)?;
                     Some(wire)
                 }
             };
@@ -8402,7 +8375,7 @@ impl EvaluatedArgs {
         let remaining = available
             .checked_sub(left.capacity())
             .and_then(|remaining| remaining.checked_sub(right.capacity()))
-            .ok_or_else(evaluated_ascii_storage_overflow)?;
+            .ok_or_else(ready_value_storage_overflow)?;
         let limit = Self::decimal_materialization_budget(None, remaining)?;
         let (mut ready, arity, invocation) = self.into_values(available)?;
         debug_assert_eq!(arity + 1, operation.input_types().len());
@@ -8525,7 +8498,7 @@ impl EvaluatedArgs {
                 // execution. Subtract each spill before exposing one budget.
                 let available = available
                     .checked_sub(right.as_ref().map_or(0, Decimal::spill_capacity_bytes))
-                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    .ok_or_else(ready_value_storage_overflow)?;
                 let limit = Self::decimal_materialization_budget(left.as_ref(), available)?;
                 (
                     [
@@ -9405,10 +9378,10 @@ fn materialize_native_vector(
     }
     let requested = encoded
         .checked_sub(mem::size_of::<u32>())
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     let overlap = physical_bytes
         .checked_add(requested)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     budget.check_output(overlap, input_bytes)?;
     // This is the actual computed vector's standard LE image. Decode layout
     // only; do not re-run the text parser, finite checks or dimension policy.
@@ -9421,10 +9394,10 @@ fn materialize_native_vector(
     let retained = owned
         .elements_capacity()
         .checked_mul(mem::size_of::<f32>())
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     let overlap = physical_bytes
         .checked_add(retained)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
     budget.check_output(overlap, input_bytes)?;
     Ok(owned)
 }
@@ -9686,7 +9659,7 @@ impl WorkerStorage {
     fn new(inline_bytes: usize, owned_heap_bytes: usize) -> LocalResult<Self> {
         let total_bytes = inline_bytes
             .checked_add(owned_heap_bytes)
-            .ok_or_else(evaluated_ascii_storage_overflow)?;
+            .ok_or_else(ready_value_storage_overflow)?;
         Ok(Self {
             inline_bytes,
             owned_heap_bytes,
@@ -9715,17 +9688,17 @@ impl WorkerStorage {
 // Atomic<usize> maps to AtomicUsize. No observed numeric byte count is
 // hardcoded.
 #[repr(C, align(2))]
-struct EvaluatedAsciiConfigAllocation {
+struct ReadyValueConfigAllocation {
     _strong: AtomicUsize,
     _weak: AtomicUsize,
     _data: EvalConfig,
 }
 
-fn evaluated_ascii_storage_overflow() -> LocalError {
-    LocalError::ResourceLimit("evaluated ASCII worker storage overflow".into())
+fn ready_value_storage_overflow() -> LocalError {
+    LocalError::ResourceLimit("ready-value worker storage overflow".into())
 }
 
-fn evaluated_ascii_owned_heap_bytes(
+fn ready_value_owned_heap_bytes(
     node_capacity: usize,
     schema_capacity: usize,
     metadata_bytes: usize,
@@ -9739,16 +9712,16 @@ fn evaluated_ascii_owned_heap_bytes(
                 .and_then(|schema| bytes.checked_add(schema))
         })
         .and_then(|bytes| bytes.checked_add(metadata_bytes))
-        .and_then(|bytes| bytes.checked_add(mem::size_of::<EvaluatedAsciiConfigAllocation>()))
+        .and_then(|bytes| bytes.checked_add(mem::size_of::<ReadyValueConfigAllocation>()))
         .and_then(|bytes| {
             warning_capacity
                 .checked_mul(mem::size_of::<tipb::Error>())
                 .and_then(|warnings| bytes.checked_add(warnings))
         })
-        .ok_or_else(evaluated_ascii_storage_overflow)
+        .ok_or_else(ready_value_storage_overflow)
 }
 
-fn evaluated_ascii_context_is_sealed(ctx: &EvalContext) -> bool {
+fn ready_value_context_is_sealed(ctx: &EvalContext) -> bool {
     let cfg = &ctx.cfg;
     // The only config Arc is moved into this private context at construction.
     // Its UTC enum and the remaining scalar config fields own no nested heap.
@@ -9782,9 +9755,9 @@ fn evaluated_ascii_context_is_sealed(ctx: &EvalContext) -> bool {
 pub struct EvaluatedBytesWorker {
     operation: EvaluatedBytesOp,
     program: LocalProgram,
-    state: LocalEvalState,
+    limits: ExecutionLimits,
     ctx: EvalContext,
-    witness: EvaluatedAsciiWitness,
+    witness: ReadyValueDispatchWitness,
     max_worker_retained_bytes: usize,
     accepted_storage: WorkerStorage,
     poisoned: bool,
@@ -9831,7 +9804,7 @@ pub fn prepare_evaluated_bytes(
             .eq(0..arity)
     {
         return Err(LocalError::InvalidSpec(
-            "evaluated ASCII compiled metadata differs from its fixed recipe".into(),
+            "ready-value compiled metadata differs from its fixed recipe".into(),
         ));
     }
     let mut cfg = EvalConfig::new();
@@ -9839,9 +9812,9 @@ pub fn prepare_evaluated_bytes(
     let mut runtime = EvaluatedBytesWorker {
         operation,
         program,
-        state: LocalEvalState::with_limits(execution),
+        limits: execution,
         ctx: EvalContext::new(Arc::new(cfg)),
-        witness: EvaluatedAsciiWitness::default(),
+        witness: ReadyValueDispatchWitness::default(),
         max_worker_retained_bytes,
         accepted_storage: WorkerStorage::new(0, 0)?,
         poisoned: false,
@@ -9849,7 +9822,7 @@ pub fn prepare_evaluated_bytes(
     let storage = runtime.retained_storage()?;
     if storage.total_bytes() > max_worker_retained_bytes {
         return Err(LocalError::ResourceLimit(
-            "evaluated ASCII worker retained storage exceeded".into(),
+            "ready-value worker retained storage exceeded".into(),
         ));
     }
     runtime.accepted_storage = storage;
@@ -10082,7 +10055,7 @@ impl EvaluatedBytesWorker {
     pub fn retained_storage(&self) -> LocalResult<WorkerStorage> {
         if self.poisoned {
             return Err(LocalError::InvalidSpec(
-                "evaluated ASCII worker is poisoned".into(),
+                "ready-value worker is poisoned".into(),
             ));
         }
         self.observe_storage()
@@ -10090,16 +10063,16 @@ impl EvaluatedBytesWorker {
 
     fn observe_storage(&self) -> LocalResult<WorkerStorage> {
         self.program.check_entry(self.operation.entry())?;
-        if !evaluated_ascii_context_is_sealed(&self.ctx) {
+        if !ready_value_context_is_sealed(&self.ctx) {
             return Err(LocalError::InvalidSpec(
-                "evaluated ASCII private context is not clean and sealed".into(),
+                "ready-value private context is not clean and sealed".into(),
             ));
         }
         let result_type = self.operation.return_type();
         let nodes: &[RpnExpressionNode] = self.program.expression.as_ref();
         if !matches!(nodes.last(), Some(RpnExpressionNode::FnCall { .. })) {
             return Err(LocalError::InvalidSpec(
-                "evaluated ASCII worker no longer owns its fixed recipe".into(),
+                "ready-value worker no longer owns its fixed recipe".into(),
             ));
         }
         if self.program.host_catalog.is_some()
@@ -10108,17 +10081,17 @@ impl EvaluatedBytesWorker {
             || !evaluated_bytes_shape(self.operation, nodes, &self.program.schema)
         {
             return Err(LocalError::InvalidSpec(
-                "evaluated ASCII worker ownership invariants changed".into(),
+                "ready-value worker ownership invariants changed".into(),
             ));
         }
         let metadata_bytes = self
             .program
             .expression
             .retained_metadata_heap_bytes()
-            .ok_or_else(evaluated_ascii_storage_overflow)?;
+            .ok_or_else(ready_value_storage_overflow)?;
         if metadata_bytes == 0 {
             return Err(LocalError::InvalidSpec(
-                "evaluated ASCII worker metadata was not prewarmed".into(),
+                "ready-value worker metadata was not prewarmed".into(),
             ));
         }
         let payload_bytes = if self.operation.uses_native_temporal_zone() {
@@ -10159,26 +10132,26 @@ impl EvaluatedBytesWorker {
             0
         };
         // Canonical descriptors and unit Any remain heap-free by construction.
-        let owned_heap_bytes = evaluated_ascii_owned_heap_bytes(
+        let owned_heap_bytes = ready_value_owned_heap_bytes(
             self.program.expression.capacity(),
             self.program.schema.capacity(),
             metadata_bytes,
             self.ctx.warnings.warnings.capacity(),
         )?
         .checked_add(payload_bytes)
-        .ok_or_else(evaluated_ascii_storage_overflow)?;
+        .ok_or_else(ready_value_storage_overflow)?;
         WorkerStorage::new(mem::size_of::<Self>(), owned_heap_bytes)
     }
 
     fn check_owner_footprint(&self, storage: WorkerStorage) -> LocalResult<()> {
         if storage.total_bytes() > self.max_worker_retained_bytes {
             return Err(LocalError::ResourceLimit(
-                "evaluated ASCII worker retained storage exceeded".into(),
+                "ready-value worker retained storage exceeded".into(),
             ));
         }
         if storage != self.accepted_storage {
             return Err(LocalError::InvalidSpec(
-                "evaluated ASCII retained ownership changed after publication".into(),
+                "ready-value retained ownership changed after publication".into(),
             ));
         }
         Ok(())
@@ -10189,7 +10162,7 @@ impl EvaluatedBytesWorker {
         // exit below disarms it; a caller catching a panic cannot reuse us.
         if self.poisoned {
             return Err(LocalError::InvalidSpec(
-                "evaluated ASCII worker is poisoned".into(),
+                "ready-value worker is poisoned".into(),
             ));
         }
         self.poisoned = true;
@@ -10253,11 +10226,10 @@ impl EvaluatedBytesWorker {
                 // A real retained owner is already present even for inline or
                 // NULL Decimal/vector input. Subtract it, not a guessed packet/scale
                 // cap; a caller's usize::MAX limit still leaves finite room.
-                self.state
-                    .limits
+                self.limits
                     .max_retained_bytes
                     .checked_sub(self.observe_storage()?.total_bytes())
-                    .ok_or_else(evaluated_ascii_storage_overflow)?
+                    .ok_or_else(ready_value_storage_overflow)?
             } else {
                 0
             };
@@ -10276,8 +10248,8 @@ impl EvaluatedBytesWorker {
                     let input_bytes = value
                         .capacity()
                         .checked_add(temporal_zone_heap_bytes(&zone))
-                        .ok_or_else(evaluated_ascii_storage_overflow)?;
-                    EvalBudget::exact(self.state.limits)?.check_output(64, input_bytes)?;
+                        .ok_or_else(ready_value_storage_overflow)?;
+                    EvalBudget::exact(self.limits)?.check_output(64, input_bytes)?;
                     (
                         [
                             ScalarValue::Bytes(Some(value)),
@@ -10300,13 +10272,13 @@ impl EvaluatedBytesWorker {
                     let input_bytes = value
                         .capacity()
                         .checked_add(temporal_zone_heap_bytes(&zone))
-                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        .ok_or_else(ready_value_storage_overflow)?;
                     let bound = value
                         .len()
                         .checked_add(64)
                         .map(|bytes| bytes.max(11))
-                        .ok_or_else(evaluated_ascii_storage_overflow)?;
-                    EvalBudget::exact(self.state.limits)?.check_output(bound, input_bytes)?;
+                        .ok_or_else(ready_value_storage_overflow)?;
+                    EvalBudget::exact(self.limits)?.check_output(bound, input_bytes)?;
                     (
                         [
                             ScalarValue::Bytes(Some(value)),
@@ -10325,23 +10297,23 @@ impl EvaluatedBytesWorker {
                     let input_bytes = value
                         .capacity()
                         .checked_add(temporal_zone_heap_bytes(&zone))
-                        .ok_or_else(evaluated_ascii_storage_overflow)?;
+                        .ok_or_else(ready_value_storage_overflow)?;
                     let bound = if self.operation == EvaluatedBytesOp::ExtremumTimeContextNative {
                         crate::native_extremum::native_extremum_output_bound(Some(&value), None)
-                            .ok_or_else(evaluated_ascii_storage_overflow)?
+                            .ok_or_else(ready_value_storage_overflow)?
                     } else if self.operation == EvaluatedBytesOp::LegacyDateArithmeticParseNative {
                         crate::native_legacy_date_arithmetic::native_legacy_date_arithmetic_output_bound(Some(&value), None)
-                            .ok_or_else(evaluated_ascii_storage_overflow)?
+                            .ok_or_else(ready_value_storage_overflow)?
                     } else {
                         value
                             .len()
                             .checked_add(64)
                             .map(|bytes| bytes.max(11))
-                            .ok_or_else(evaluated_ascii_storage_overflow)?
+                            .ok_or_else(ready_value_storage_overflow)?
                     };
                     // The name is an owned invocation input, not a SQL slot. Check
                     // it with the reply bound before installing or invoking anything.
-                    EvalBudget::exact(self.state.limits)?.check_output(bound, input_bytes)?;
+                    EvalBudget::exact(self.limits)?.check_output(bound, input_bytes)?;
                     (
                         [
                             ScalarValue::Bytes(Some(value)),
@@ -10391,13 +10363,12 @@ impl EvaluatedBytesWorker {
                             _ => 0,
                         })
                     })
-                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    .ok_or_else(ready_value_storage_overflow)?;
                 let limit = self
-                    .state
                     .limits
                     .max_retained_bytes
                     .checked_sub(input_bytes)
-                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    .ok_or_else(ready_value_storage_overflow)?;
                 // Arm the guard before binding, including any failing bind.
                 let guard = RegexpBindingGuard { worker: self };
                 guard.worker.regexp_metadata()?.bind(invocation, limit)?;
@@ -10412,17 +10383,14 @@ impl EvaluatedBytesWorker {
                             _ => 0,
                         })
                     })
-                    .ok_or_else(evaluated_ascii_storage_overflow)?;
-                let limit = self
-                    .state
-                    .limits
-                    .max_retained_bytes
+                    .ok_or_else(ready_value_storage_overflow)?;
+                let limit = self.limits.max_retained_bytes
                     .checked_sub(input_bytes)
                     // Every LIKE wrapper owns one Int result. Reserve its
                     // guaranteed minimum so even empty inputs/usize::MAX leave
                     // finite room; the driver checks actual result capacities.
                     .and_then(|limit| limit.checked_sub(int_min_storage_bytes(1)?))
-                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    .ok_or_else(ready_value_storage_overflow)?;
                 let guard = LikeBindingGuard { worker: self };
                 guard.worker.like_metadata()?.bind(invocation, limit)?;
                 guard.worker.eval_ready(ready, arity, &mut sql_failure)
@@ -10484,18 +10452,18 @@ impl EvaluatedBytesWorker {
             };
             total
                 .checked_add(bytes)
-                .ok_or_else(evaluated_ascii_storage_overflow)
+                .ok_or_else(ready_value_storage_overflow)
         })?;
         let input_bytes = if self.operation.uses_native_temporal_zone() {
             let zone = self.temporal_metadata()?.zone()?;
             input_bytes
                 .checked_add(temporal_zone_heap_bytes(&zone))
-                .ok_or_else(evaluated_ascii_storage_overflow)?
+                .ok_or_else(ready_value_storage_overflow)?
         } else {
             input_bytes
         };
-        self.state.row = [0];
-        let mut budget = EvalBudget::exact(self.state.limits)?;
+        let row = [0];
+        let mut budget = EvalBudget::exact(self.limits)?;
         if self.operation.uses_native_temporal_zone() {
             budget.check_output(0, input_bytes)?;
         }
@@ -10530,7 +10498,7 @@ impl EvaluatedBytesWorker {
                         .len()
                         .checked_add(64)
                         .map(|bytes| bytes.max(14))
-                        .ok_or_else(evaluated_ascii_storage_overflow)?
+                        .ok_or_else(ready_value_storage_overflow)?
                 }
                 EvaluatedBytesOp::FromUnixTimeNullNative
                     if crate::from_unixtime_null_native_args_valid(value.as_deref()) =>
@@ -10556,7 +10524,7 @@ impl EvaluatedBytesWorker {
                     value
                         .as_ref()
                         .map_or(Some(1), |bytes| bytes.len().checked_add(1))
-                        .ok_or_else(evaluated_ascii_storage_overflow)?
+                        .ok_or_else(ready_value_storage_overflow)?
                 }
                 (
                     EvaluatedBytesOp::IfNullFinishNative,
@@ -10629,7 +10597,7 @@ impl EvaluatedBytesWorker {
                     crate::NativeIdentityFrameError::Invalid => {
                         LocalError::InvalidSpec("NULLIF selector rejected its operands".into())
                     }
-                    crate::NativeIdentityFrameError::Capacity => evaluated_ascii_storage_overflow(),
+                    crate::NativeIdentityFrameError::Capacity => ready_value_storage_overflow(),
                 })?
                 .map_or(0, <[u8]>::len);
             // Actual LHS capacity stays charged even when the reply is SQL NULL.
@@ -10654,7 +10622,7 @@ impl EvaluatedBytesWorker {
                                 "real-to-unsigned cast rejected its identity".into(),
                             ),
                             crate::NativeIdentityFrameError::Capacity => {
-                                evaluated_ascii_storage_overflow()
+                                ready_value_storage_overflow()
                             }
                         })?;
                 if report.overflow_bits.is_some() {
@@ -10676,7 +10644,7 @@ impl EvaluatedBytesWorker {
                 crate::NativeIdentityFrameError::Invalid => LocalError::InvalidSpec(
                     "bounded-staleness producer rejected its operands".into(),
                 ),
-                crate::NativeIdentityFrameError::Capacity => evaluated_ascii_storage_overflow(),
+                crate::NativeIdentityFrameError::Capacity => ready_value_storage_overflow(),
             };
             let bound = match (self.operation, &ready[..arity]) {
                 (
@@ -10770,7 +10738,7 @@ impl EvaluatedBytesWorker {
                 }
             };
             let bound = crate::native_convert_charset::native_convert_charset_output_bound(value)
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             // Bound the reply before conversion, while retaining every actual
             // input owner (including all three separate charset operands).
             // Codec-internal temporary allocation peaks are not claimed here.
@@ -10830,7 +10798,7 @@ impl EvaluatedBytesWorker {
                 }
             };
             let bound = crate::native_str_to_date::native_str_to_date_output_bound(first)
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             // The full original stage report and every actual mode operand stay
             // live. No allocating producer runs before this retained-reply bound.
             budget.check_output(bound, input_bytes)?;
@@ -10848,7 +10816,7 @@ impl EvaluatedBytesWorker {
             }
             let bound =
                 crate::native_json_sum_crc32::native_json_sum_crc32_output_bound(value.as_deref())
-                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    .ok_or_else(ready_value_storage_overflow)?;
             // Structural admission and reply planning only: CRC and semantic
             // classification remain in the real producer invoked below.
             budget.check_output(bound, input_bytes)?;
@@ -10927,7 +10895,7 @@ impl EvaluatedBytesWorker {
                 }
             };
             let bound = crate::native_extract::native_extract_output_bound(first, second)
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             // Keep original units, text and whole SDK stage reports live. Only
             // size planning precedes the real producer, never host extraction.
             budget.check_output(bound, input_bytes)?;
@@ -11028,7 +10996,7 @@ impl EvaluatedBytesWorker {
                 }
             };
             let bound = crate::native_extremum::native_extremum_output_bound(first, second)
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             // The SDK planner accounts for state-dependent Decimal expansion.
             // All actual operands and the bound zone owner remain charged here.
             budget.check_output(bound, input_bytes)?;
@@ -11063,7 +11031,7 @@ impl EvaluatedBytesWorker {
                 }
             };
             let bound = crate::native_interval::native_interval_output_bound(first, second)
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             // Plan from the original packet/state, retaining all actual owners.
             // Cast order, NULL selection and search stay in the real SDK producer.
             budget.check_output(bound, input_bytes)?;
@@ -11148,7 +11116,7 @@ impl EvaluatedBytesWorker {
             };
             let bound =
                 crate::native_date_arithmetic::native_date_arithmetic_output_bound(a, b, c, d)
-                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    .ok_or_else(ready_value_storage_overflow)?;
             // SDK planning includes precision-dependent expansion. All four head
             // owners or the whole continuation report remain live and charged.
             budget.check_output(bound, input_bytes)?;
@@ -11220,7 +11188,7 @@ impl EvaluatedBytesWorker {
                 crate::native_legacy_date_arithmetic::native_legacy_date_arithmetic_output_bound(
                     first, second,
                 )
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             // SDK planning owns visible-Decimal expansion; retain whole reports,
             // actual operands and any bound legacy zone through real dispatch.
             budget.check_output(bound, input_bytes)?;
@@ -11265,7 +11233,7 @@ impl EvaluatedBytesWorker {
                 }
             };
             let bound = crate::native_in::native_in_output_bound(first, second)
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             // Preserve complete SDK state and the actual reply owners; comparison
             // and lazy request selection run only in the real producer below.
             budget.check_output(bound, input_bytes)?;
@@ -11277,7 +11245,7 @@ impl EvaluatedBytesWorker {
             &self.program.schema,
             &ready[..arity],
             self.operation.input_role(),
-            &self.state.row,
+            &row,
             &mut self.witness,
             &mut budget,
         );
@@ -11302,13 +11270,13 @@ impl EvaluatedBytesWorker {
             let known = payload
                 .known_cache_bytes
                 .get()
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             if known > payload.known_cache_limit.get() {
-                return Err(evaluated_ascii_storage_overflow());
+                return Err(ready_value_storage_overflow());
             }
             let observed = input_bytes
                 .checked_add(known)
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             // Check the exact use-site record even on a kernel error, before
             // authenticating any SQL cause. This also unwraps a recorded scope
             // refusal from the kernel's non-SQL Caused(LocalError) transport.
@@ -11319,13 +11287,13 @@ impl EvaluatedBytesWorker {
             let known = payload
                 .known_cache_bytes
                 .get()
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             if known > payload.known_cache_limit.get() {
-                return Err(evaluated_ascii_storage_overflow());
+                return Err(ready_value_storage_overflow());
             }
             let observed = input_bytes
                 .checked_add(known)
-                .ok_or_else(evaluated_ascii_storage_overflow)?;
+                .ok_or_else(ready_value_storage_overflow)?;
             // The actual wrapper records only known owned storage. No cache
             // peek, speculative compilation, or SQL error authentication here.
             budget.check_output(0, observed)?;
@@ -11510,21 +11478,20 @@ impl EvaluatedBytesWorker {
                     Some(source) => {
                         let overlap = output_bytes
                             .checked_add(source.spill_capacity_bytes())
-                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                            .ok_or_else(ready_value_storage_overflow)?;
                         budget.check_output(overlap, input_bytes)?;
                         let limit = self
-                            .state
                             .limits
                             .max_retained_bytes
                             .checked_sub(input_bytes)
                             .and_then(|remaining| remaining.checked_sub(output_bytes))
-                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                            .ok_or_else(ready_value_storage_overflow)?;
                         let owned = source
                             .try_clone_native_math(limit)
                             .map_err(native_decimal_bridge_error)?;
                         let overlap = output_bytes
                             .checked_add(owned.spill_capacity_bytes())
-                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                            .ok_or_else(ready_value_storage_overflow)?;
                         budget.check_output(overlap, input_bytes)?;
                         Some(owned)
                     }
@@ -11590,7 +11557,7 @@ impl EvaluatedBytesWorker {
                     .as_ref()
                     .map_or(0, NativeVectorFloat32::elements_capacity)
                     .checked_mul(mem::size_of::<f32>())
-                    .ok_or_else(evaluated_ascii_storage_overflow)?;
+                    .ok_or_else(ready_value_storage_overflow)?;
                 (
                     ComputedValue::NativeVector(ComputedNativeVector { value }),
                     retained,
@@ -11625,7 +11592,7 @@ impl EvaluatedBytesWorker {
                         // charged while only the decoded payload gets an owner.
                         let overlap = output_bytes
                             .checked_add(source.len())
-                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                            .ok_or_else(ready_value_storage_overflow)?;
                         budget.check_output(overlap, input_bytes)?;
                         let mut owned = Vec::new();
                         owned.try_reserve_exact(source.len()).map_err(|_| {
@@ -11633,7 +11600,7 @@ impl EvaluatedBytesWorker {
                         })?;
                         let overlap = output_bytes
                             .checked_add(owned.capacity())
-                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                            .ok_or_else(ready_value_storage_overflow)?;
                         budget.check_output(overlap, input_bytes)?;
                         owned.extend_from_slice(source);
                         UncompressOutcome::Value(owned)
@@ -11659,7 +11626,7 @@ impl EvaluatedBytesWorker {
                         // (including its tag) and ready owner remain charged.
                         let overlap = output_bytes
                             .checked_add(source.len())
-                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                            .ok_or_else(ready_value_storage_overflow)?;
                         budget.check_output(overlap, input_bytes)?;
                         let mut owned = Vec::new();
                         owned.try_reserve_exact(source.len()).map_err(|_| {
@@ -11669,7 +11636,7 @@ impl EvaluatedBytesWorker {
                         })?;
                         let overlap = output_bytes
                             .checked_add(owned.capacity())
-                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                            .ok_or_else(ready_value_storage_overflow)?;
                         budget.check_output(overlap, input_bytes)?;
                         owned.extend_from_slice(source);
                         JsonReportOutcome::Bytes(owned)
@@ -12367,7 +12334,7 @@ impl EvaluatedBytesWorker {
                     Some(source) => {
                         let overlap = output_bytes
                             .checked_add(source.len())
-                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                            .ok_or_else(ready_value_storage_overflow)?;
                         budget.check_output(overlap, input_bytes)?;
                         let mut owned = Vec::new();
                         owned.try_reserve_exact(source.len()).map_err(|_| {
@@ -12377,7 +12344,7 @@ impl EvaluatedBytesWorker {
                         })?;
                         let overlap = output_bytes
                             .checked_add(owned.capacity())
-                            .ok_or_else(evaluated_ascii_storage_overflow)?;
+                            .ok_or_else(ready_value_storage_overflow)?;
                         budget.check_output(overlap, input_bytes)?;
                         owned.extend_from_slice(source);
                         Some(owned)
@@ -12396,7 +12363,7 @@ impl EvaluatedBytesWorker {
 }
 
 #[cfg(test)]
-mod evaluated_ascii_tests {
+mod ready_value_tests {
     use std::{
         panic::{AssertUnwindSafe, catch_unwind},
         sync::Mutex,
@@ -13390,7 +13357,7 @@ mod evaluated_ascii_tests {
             }
             let left = frame(b"13", 0);
             let right = frame(b"5", 0);
-            worker.state.limits.max_retained_bytes =
+            worker.limits.max_retained_bytes =
                 storage.total_bytes() + left.capacity() + right.capacity() - 1;
             assert!(matches!(
                 worker.eval_args(EvaluatedArgs::BytesIntIntBytes(
@@ -13403,7 +13370,7 @@ mod evaluated_ascii_tests {
             ));
             assert_eq!(worker.kernel_invocations(), 0);
             assert!(worker.is_healthy());
-            worker.state.limits = ExecutionLimits::default();
+            worker.limits = ExecutionLimits::default();
             let cases = vec![
                 (
                     frame(&[255], 0),
@@ -18123,7 +18090,7 @@ mod evaluated_ascii_tests {
                 ]
             };
             let mut ctx = EvalContext::default();
-            let mut witness = EvaluatedAsciiWitness::default();
+            let mut witness = ReadyValueDispatchWitness::default();
             let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
             assert!(
                 program
@@ -18268,8 +18235,8 @@ mod evaluated_ascii_tests {
             assert_eq!(value.disposition(), Overflow);
             assert!(value.value().is_some());
             let calls = worker.kernel_invocations();
-            let limits = worker.state.limits;
-            worker.state.limits.max_steps = 0;
+            let limits = worker.limits;
+            worker.limits.max_steps = 0;
             let failure = worker
                 .eval_args_reported(input(lhs(), Decimal::from(3i64), 4))
                 .unwrap_err();
@@ -18278,9 +18245,9 @@ mod evaluated_ascii_tests {
             assert_eq!(worker.kernel_invocations(), calls);
             assert!(worker.decimal_division_metadata().unwrap().is_unbound());
             assert!(worker.is_healthy());
-            worker.state.limits = limits;
+            worker.limits = limits;
             // The real third slot receives zero after accounting for the worker.
-            worker.state.limits.max_retained_bytes = storage.total_bytes();
+            worker.limits.max_retained_bytes = storage.total_bytes();
             let failure = worker
                 .eval_args_reported(input(lhs(), Decimal::from(3i64), 4))
                 .unwrap_err();
@@ -18291,7 +18258,7 @@ mod evaluated_ascii_tests {
             assert_eq!(worker.kernel_invocations(), calls + 1);
             assert!(worker.decimal_division_metadata().unwrap().is_unbound());
             assert!(worker.is_healthy());
-            worker.state.limits = limits;
+            worker.limits = limits;
             assert!(
                 worker
                     .eval_args(input(lhs(), Decimal::from(3i64), 4))
@@ -19392,7 +19359,7 @@ mod evaluated_ascii_tests {
         assert!(payload.is_unbound());
         let mut worker = prepare(ExecutionLimits::default());
         let storage = worker.retained_storage().unwrap();
-        let known_owner = evaluated_ascii_owned_heap_bytes(
+        let known_owner = ready_value_owned_heap_bytes(
             worker.program.expression.capacity(),
             worker.program.schema.capacity(),
             worker
@@ -19837,7 +19804,7 @@ mod evaluated_ascii_tests {
             .expression
             .retained_metadata_heap_bytes()
             .unwrap();
-        let old_known = evaluated_ascii_owned_heap_bytes(
+        let old_known = ready_value_owned_heap_bytes(
             worker.program.expression.capacity(),
             worker.program.schema.capacity(),
             metadata_bytes,
@@ -20536,7 +20503,7 @@ mod evaluated_ascii_tests {
         assert_eq!(worker.retained_storage().unwrap(), storage);
         assert_eq!(worker.inner.accepted_storage, storage);
         assert_eq!(worker.kernel_invocations(), 0);
-        assert!(evaluated_ascii_context_is_sealed(&worker.inner.ctx));
+        assert!(ready_value_context_is_sealed(&worker.inner.ctx));
         assert_eq!(worker.inner.ctx.cfg.max_warning_cnt, 0);
         assert_eq!(worker.inner.ctx.warnings.warning_cnt, 0);
         assert!(worker.inner.ctx.warnings.warnings.is_empty());
@@ -20605,7 +20572,7 @@ mod evaluated_ascii_tests {
                 .expression
                 .retained_metadata_heap_bytes()
                 .unwrap()
-            + mem::size_of::<EvaluatedAsciiConfigAllocation>()
+            + mem::size_of::<ReadyValueConfigAllocation>()
             + worker.inner.ctx.warnings.warnings.capacity() * mem::size_of::<tipb::Error>();
         assert_eq!(storage.owned_heap_bytes(), expected);
         assert!(storage.owned_heap_bytes() > before.owned_heap_bytes());
@@ -20670,7 +20637,7 @@ mod evaluated_ascii_tests {
             (0, 0, 0, usize::MAX),
         ] {
             assert!(matches!(
-                evaluated_ascii_owned_heap_bytes(nodes, schema, metadata, warnings),
+                ready_value_owned_heap_bytes(nodes, schema, metadata, warnings),
                 Err(LocalError::ResourceLimit(_))
             ));
         }
@@ -20697,13 +20664,11 @@ mod evaluated_ascii_tests {
             (Some(b"2".to_vec()), Some(50)),
         ];
         for (index, (input, expected)) in cases.into_iter().enumerate() {
-            worker.inner.state.row = [99];
             let value = worker.eval_one(input).unwrap();
             assert_eq!(value.value(), expected);
             assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
             assert_eq!(value.into_option(), expected);
             assert_eq!(worker.kernel_invocations(), index as u64 + 1);
-            assert_eq!(worker.inner.state.row, [0]);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             assert_eq!(Arc::as_ptr(&worker.inner.ctx.cfg), cfg);
@@ -20822,7 +20787,7 @@ mod evaluated_ascii_tests {
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         // No large input buffer stayed in the worker after refusal.
-        worker.inner.state.limits = ExecutionLimits::default();
+        worker.inner.limits = ExecutionLimits::default();
         assert_eq!(worker.eval_one(Some(vec![])).unwrap().value(), Some(0));
         assert_eq!(worker.kernel_invocations(), 1);
         assert_eq!(worker.retained_storage().unwrap(), storage);
@@ -20839,7 +20804,7 @@ mod evaluated_ascii_tests {
         }));
         assert!(panic.is_err());
         assert!(worker.inner.poisoned);
-        assert!(evaluated_ascii_context_is_sealed(&worker.inner.ctx));
+        assert!(ready_value_context_is_sealed(&worker.inner.ctx));
         assert!(!worker.is_healthy());
         assert!(worker.retained_storage().is_err());
         assert!(matches!(
@@ -20917,7 +20882,7 @@ mod evaluated_ascii_tests {
         worker.inner.program = compile_local(
             &LocalExpr::Constant {
                 value: ScalarValue::Int(Some(7)),
-                field_type: evaluated_ascii_int_type(),
+                field_type: ready_value_int_type(),
                 literal_kind: LiteralKind::Typed,
             },
             &[],

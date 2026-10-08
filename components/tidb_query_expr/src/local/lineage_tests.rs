@@ -777,7 +777,7 @@ fn run(
 ) -> LineagedBatch {
     program
         .eval_with_bindings(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut EvalContext::default(),
             physical_rows,
             selection,
@@ -792,12 +792,12 @@ fn resource_run(
     bytes: usize,
     ctx: &mut EvalContext,
 ) -> ReportedLocalFailure {
-    let mut state = LocalEvalState::with_limits(ExecutionLimits {
+    let state = ExecutionLimits {
         max_retained_bytes: bytes,
         ..ExecutionLimits::default()
-    });
+    };
     let report = program
-        .eval_with_bindings_reported(&mut state, ctx, 1, selection, services)
+        .eval_with_bindings_reported(state, ctx, 1, selection, services)
         .unwrap_err();
     assert!(matches!(report.error(), LocalError::ResourceLimit(_)));
     assert_eq!(report.stage(), LocalFailureStage::Resource);
@@ -1153,7 +1153,7 @@ fn lineage_demanded_contract_errors_keep_input_site_and_warning_prefix() {
     let mut ctx = EvalContext::default();
     let report = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut ctx,
             2,
             &[0, 1, 0],
@@ -1199,7 +1199,7 @@ fn lineage_successful_malformed_replies_and_preflight_failures_are_unsited() {
         services.reply_at = Some((1, Reply::Value(reply)));
         let report = program
             .eval_with_bindings_reported(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut EvalContext::default(),
                 1,
                 &[0, 0],
@@ -1215,7 +1215,7 @@ fn lineage_successful_malformed_replies_and_preflight_failures_are_unsited() {
     for selection in [vec![1], vec![0, 1]] {
         let report = program
             .eval_with_bindings_reported(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut EvalContext::default(),
                 1,
                 &selection,
@@ -1229,7 +1229,7 @@ fn lineage_successful_malformed_replies_and_preflight_failures_are_unsited() {
     services.schema[0].set_collate(-45);
     let report = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut EvalContext::default(),
             1,
             &[],
@@ -1366,10 +1366,10 @@ fn lineage_empty_and_null_bytes_still_charge_offsets_bitmap_and_id_capacity() {
         }
         let output = program
             .eval_with_bindings(
-                &mut LocalEvalState::with_limits(ExecutionLimits {
+                ExecutionLimits {
                     max_retained_bytes: 1024 * 1024,
                     ..ExecutionLimits::default()
-                }),
+                },
                 &mut EvalContext::default(),
                 1,
                 &vec![0; rows],
@@ -1398,18 +1398,12 @@ fn lineage_unselected_large_constant_is_not_materialized_or_reinterpreted() {
     );
     let mut program = compile(&spec, &schema);
     let mut services = Bindings::new(&schema, vec![vec![ScalarValue::Int(Some(0))]]);
-    let mut state = LocalEvalState::with_limits(ExecutionLimits {
+    let state = ExecutionLimits {
         max_retained_bytes: 64 * 1024,
         ..ExecutionLimits::default()
-    });
+    };
     let output = program
-        .eval_with_bindings(
-            &mut state,
-            &mut EvalContext::default(),
-            1,
-            &[0],
-            &mut services,
-        )
+        .eval_with_bindings(state, &mut EvalContext::default(), 1, &[0], &mut services)
         .unwrap();
     assert_batch(
         &output,

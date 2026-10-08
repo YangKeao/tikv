@@ -548,7 +548,7 @@ fn run(
     selection: &[usize],
 ) -> LocalResult<VectorValue> {
     program.eval_with_bindings(
-        &mut LocalEvalState::default(),
+        ExecutionLimits::default(),
         &mut EvalContext::default(),
         physical_rows,
         selection,
@@ -664,18 +664,18 @@ fn profiled_selection_and_owned_plan_survive_rebinding_without_cache() {
         compile_local_profiled(&expr, &[ft()], LocalCompileContext::default(), &profile).unwrap()
     }; // Source tree and facts are gone; the compiled call owns its metadata.
     let mut services = Bindings::new(vec![(0..1025).map(|n| Some(i64::from(n))).collect()]);
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     assert!(
         program
-            .eval_with_bindings(&mut state, &mut ctx, 1025, &[], &mut services)
+            .eval_with_bindings(state, &mut ctx, 1025, &[], &mut services)
             .unwrap()
             .is_empty()
     );
     assert!(services.reads.is_empty());
     let selection: Vec<usize> = (0..1025).rev().collect();
     let output = program
-        .eval_with_bindings(&mut state, &mut ctx, 1025, &selection, &mut services)
+        .eval_with_bindings(state, &mut ctx, 1025, &selection, &mut services)
         .unwrap();
     assert_eq!(
         output.to_int_vec(),
@@ -696,7 +696,7 @@ fn profiled_selection_and_owned_plan_survive_rebinding_without_cache() {
     services.values[0][2] = None;
     assert_eq!(
         program
-            .eval_with_bindings(&mut state, &mut ctx, 1025, &[2, 0, 2], &mut services)
+            .eval_with_bindings(state, &mut ctx, 1025, &[2, 0, 2], &mut services)
             .unwrap()
             .to_int_vec(),
         vec![None, Some(1), None]
@@ -726,7 +726,7 @@ fn profiled_child_errors_keep_primary_variant_and_warning_prefix() {
             warn(&mut ctx, "prior".into());
             let error = program
                 .eval_with_bindings(
-                    &mut LocalEvalState::default(),
+                    ExecutionLimits::default(),
                     &mut ctx,
                     2,
                     &[0, 1],
@@ -767,9 +767,9 @@ fn profiled_kernel_error_stops_later_rows_without_replaying_operands() {
     services.warnings = true;
     let mut ctx = EvalContext::default();
     warn(&mut ctx, "prior".into());
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let error = program
-        .eval_with_bindings(&mut state, &mut ctx, 2, &[0, 1], &mut services)
+        .eval_with_bindings(state, &mut ctx, 2, &[0, 1], &mut services)
         .unwrap_err();
     assert!(matches!(error, LocalError::Evaluation(_)));
     assert!(error.to_string().contains("BIGINT"));
@@ -781,7 +781,7 @@ fn profiled_kernel_error_stops_later_rows_without_replaying_operands() {
     services.reads.clear();
     assert_eq!(
         program
-            .eval_with_bindings(&mut state, &mut ctx, 2, &[0], &mut services)
+            .eval_with_bindings(state, &mut ctx, 2, &[0], &mut services)
             .unwrap()
             .to_int_vec(),
         vec![Some(1)]
@@ -798,10 +798,10 @@ fn profiled_input_unwind_does_not_poison_the_next_invocation() {
     );
     let mut services = Bindings::new(vec![vec![Some(5)], vec![Some(7)]]);
     services.fault = Some((0, Fault::Panic));
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     let panic = catch_unwind(AssertUnwindSafe(|| {
-        program.eval_with_bindings(&mut state, &mut ctx, 1, &[0], &mut services)
+        program.eval_with_bindings(state, &mut ctx, 1, &[0], &mut services)
     }))
     .unwrap_err();
     let message = panic
@@ -814,7 +814,7 @@ fn profiled_input_unwind_does_not_poison_the_next_invocation() {
     services.fault = None;
     assert_eq!(
         program
-            .eval_with_bindings(&mut state, &mut ctx, 1, &[0], &mut services)
+            .eval_with_bindings(state, &mut ctx, 1, &[0], &mut services)
             .unwrap()
             .to_int_vec(),
         vec![Some(12)]
@@ -851,7 +851,7 @@ fn profiled_batch_preflight_remains_effect_free_even_for_empty_selection() {
     assert_eq!(
         program
             .eval(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut EvalContext::default(),
                 LocalBatch {
                     columns: &columns,
@@ -887,13 +887,8 @@ fn profiled_limits_precede_reads_and_do_not_reserve_host_tasks() {
         },
     ] {
         let mut services = Bindings::new(vec![vec![Some(1)], vec![Some(2)]]);
-        let result = program.eval_with_bindings(
-            &mut LocalEvalState::with_limits(limits),
-            &mut EvalContext::default(),
-            1,
-            &[0],
-            &mut services,
-        );
+        let result =
+            program.eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut services);
         assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
         assert!(services.reads.is_empty());
     }
@@ -901,10 +896,10 @@ fn profiled_limits_precede_reads_and_do_not_reserve_host_tasks() {
     assert_eq!(
         program
             .eval_with_bindings(
-                &mut LocalEvalState::with_limits(ExecutionLimits {
+                ExecutionLimits {
                     max_active_tasks: 0,
                     ..ExecutionLimits::default()
-                }),
+                },
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -927,10 +922,10 @@ fn profiled_work_budget_meters_requests_accepts_null_finish_and_kernel() {
     for max_steps in [7, 8] {
         let mut services = Bindings::new(vec![]);
         let result = program.eval_with_bindings(
-            &mut LocalEvalState::with_limits(ExecutionLimits {
+            ExecutionLimits {
                 max_steps,
                 ..ExecutionLimits::default()
-            }),
+            },
             &mut EvalContext::default(),
             1,
             &[0],
@@ -952,10 +947,10 @@ fn profiled_work_budget_meters_requests_accepts_null_finish_and_kernel() {
         let mut services = Bindings::new(vec![vec![Some(1)]]);
         services.fault = Some((0, Fault::Panic));
         let result = program.eval_with_bindings(
-            &mut LocalEvalState::with_limits(ExecutionLimits {
+            ExecutionLimits {
                 max_steps,
                 ..ExecutionLimits::default()
-            }),
+            },
             &mut EvalContext::default(),
             1,
             &[0],
@@ -978,10 +973,10 @@ fn profiled_work_budget_meters_requests_accepts_null_finish_and_kernel() {
     for max_steps in [7, 8, 9, 10] {
         let mut services = Bindings::new(vec![vec![Some(1)], vec![Some(2)]]);
         let result = program.eval_with_bindings(
-            &mut LocalEvalState::with_limits(ExecutionLimits {
+            ExecutionLimits {
                 max_steps,
                 ..ExecutionLimits::default()
-            }),
+            },
             &mut EvalContext::default(),
             1,
             &[0],
@@ -1108,7 +1103,7 @@ fn run_batch(
     selection: &[usize],
 ) -> LocalResult<VectorValue> {
     program.eval_with_bindings(
-        &mut LocalEvalState::default(),
+        ExecutionLimits::default(),
         &mut EvalContext::default(),
         physical_rows,
         selection,
@@ -1567,7 +1562,7 @@ fn numeric_batch_leaf_and_call_roots_cover_empty_one_1024_and_reject_1025() {
         }
         let mut program = compile_batch(&expr, &schema);
         assert_eq!(program.return_type(), &ft());
-        let mut state = LocalEvalState::default();
+        let state = ExecutionLimits::default();
         for count in [0, 1, 1024, 1025] {
             let mut services = Bindings::new(if shape < 2 {
                 vec![]
@@ -1581,7 +1576,7 @@ fn numeric_batch_leaf_and_call_roots_cover_empty_one_1024_and_reject_1025() {
             warn(&mut ctx, "prior".into());
             let selection: Vec<usize> = (0..count).collect();
             let result = program.eval_with_bindings_reported(
-                &mut state,
+                state,
                 &mut ctx,
                 1025,
                 &selection,
@@ -1623,7 +1618,7 @@ fn numeric_batch_owned_program_rebinds_without_retaining_source_or_values() {
         compile_numeric_batch(&expr, &[ft()], LocalCompileContext::default(), &facts).unwrap()
     };
     let mut services = Bindings::new(vec![vec![Some(5), None, Some(-3)]]);
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     for (values, expected) in [
         (
@@ -1635,7 +1630,7 @@ fn numeric_batch_owned_program_rebinds_without_retaining_source_or_values() {
         services.values[0] = values;
         services.reads.clear();
         let output = program
-            .eval_with_bindings(&mut state, &mut ctx, 3, &[2, 0, 2], &mut services)
+            .eval_with_bindings(state, &mut ctx, 3, &[2, 0, 2], &mut services)
             .unwrap();
         assert_eq!(output.to_int_vec(), expected);
         assert_eq!(services.reads, [(0, 2, 0), (1, 0, 0), (2, 2, 0)]);
@@ -1654,7 +1649,7 @@ fn numeric_batch_finishes_both_operand_phases_in_occurrence_order() {
     warn(&mut ctx, "prior".into());
     let output = program
         .eval_with_bindings(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut ctx,
             3,
             &[2, 0, 2],
@@ -1690,7 +1685,7 @@ fn numeric_batch_null_left_demands_right_even_for_one_occurrence() {
     services.fault = Some((1, Fault::Binding));
     let error = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut EvalContext::default(),
             1,
             &[0],
@@ -1747,7 +1742,7 @@ fn numeric_batch_null_left_does_not_hide_a_nested_right_kernel_error() {
     let mut services = Bindings::new(vec![vec![Some(i64::MAX)]]);
     let error = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut EvalContext::default(),
             1,
             &[0],
@@ -1772,7 +1767,7 @@ fn numeric_batch_late_right_child_error_beats_early_parent_overflow() {
     let mut ctx = EvalContext::default();
     let error = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut ctx,
             2,
             &[0, 1],
@@ -1803,7 +1798,7 @@ fn numeric_batch_later_left_child_error_precedes_every_right_child_effect() {
     let mut ctx = EvalContext::default();
     let error = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut ctx,
             2,
             &[0, 1],
@@ -1825,7 +1820,7 @@ fn numeric_batch_parent_kernel_error_follows_all_reads_without_replay() {
     warn(&mut ctx, "prior".into());
     let error = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut ctx,
             2,
             &[0, 1],
@@ -1845,7 +1840,7 @@ fn numeric_batch_repeated_selection_kernel_site_keeps_occurrence_and_physical_ro
     let mut services = Bindings::new(vec![vec![Some(i64::MAX), None, Some(2)]]);
     let report = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut EvalContext::default(),
             3,
             &[2, 0, 2],
@@ -1866,10 +1861,10 @@ fn numeric_batch_repeated_input_error_has_exact_coordinates_and_no_stale_site() 
     let mut services = BatchBindings::new(vec![vec![Some(1); 3], vec![Some(2); 3]]);
     services.fault_on = Some((1, 2, Fault::Resource));
     services.inner.warnings = true;
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     let report = program
-        .eval_with_bindings_reported(&mut state, &mut ctx, 3, &[2, 0, 2], &mut services)
+        .eval_with_bindings_reported(state, &mut ctx, 3, &[2, 0, 2], &mut services)
         .unwrap_err();
     assert!(matches!(report.error(), LocalError::ResourceLimit(_)));
     assert_eq!(report.stage(), LocalFailureStage::Input);
@@ -1899,7 +1894,7 @@ fn numeric_batch_repeated_input_error_has_exact_coordinates_and_no_stale_site() 
     services.inner.reads.clear();
     assert_eq!(
         program
-            .eval_with_bindings_reported(&mut state, &mut ctx, 3, &[2, 0, 2], &mut services)
+            .eval_with_bindings_reported(state, &mut ctx, 3, &[2, 0, 2], &mut services)
             .unwrap()
             .to_int_vec(),
         [Some(3); 3]
@@ -1907,7 +1902,7 @@ fn numeric_batch_repeated_input_error_has_exact_coordinates_and_no_stale_site() 
     let before = ctx.warnings.warning_cnt;
     services.inner.reads.clear();
     let error = program
-        .eval_with_bindings_reported(&mut state, &mut ctx, 3, &[3], &mut services)
+        .eval_with_bindings_reported(state, &mut ctx, 3, &[3], &mut services)
         .unwrap_err();
     assert_eq!(error.stage(), LocalFailureStage::Validation);
     assert!(error.site().is_none());
@@ -1933,7 +1928,7 @@ fn numeric_batch_input_errors_and_malformed_successes_preserve_warning_prefixes(
         warn(&mut ctx, "prior".into());
         let error = program
             .eval_with_bindings_reported(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut ctx,
                 3,
                 &[2, 0, 2],
@@ -1984,7 +1979,7 @@ fn numeric_batch_schema_and_selection_preflight_stays_effect_free_when_empty() {
     let mut services = Bindings::new(vec![vec![None], vec![Some(4)]]);
     services.fault = Some((0, Fault::Panic));
     services.warnings = true;
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     warn(&mut ctx, "prior".into());
     for change in 0..4 {
@@ -1999,7 +1994,7 @@ fn numeric_batch_schema_and_selection_preflight_stays_effect_free_when_empty() {
         }
         for selection in [&[][..], &[0][..]] {
             let error = program
-                .eval_with_bindings_reported(&mut state, &mut ctx, 1, selection, &mut services)
+                .eval_with_bindings_reported(state, &mut ctx, 1, selection, &mut services)
                 .unwrap_err();
             assert!(matches!(error.error(), LocalError::InvalidBatch(_)));
             assert_eq!(error.stage(), LocalFailureStage::Validation);
@@ -2008,7 +2003,7 @@ fn numeric_batch_schema_and_selection_preflight_stays_effect_free_when_empty() {
     }
     services.schema = vec![ft(), ft()];
     let error = program
-        .eval_with_bindings_reported(&mut state, &mut ctx, 1, &[1], &mut services)
+        .eval_with_bindings_reported(state, &mut ctx, 1, &[1], &mut services)
         .unwrap_err();
     assert_eq!(error.stage(), LocalFailureStage::Validation);
     assert!(error.site().is_none());
@@ -2016,7 +2011,7 @@ fn numeric_batch_schema_and_selection_preflight_stays_effect_free_when_empty() {
     assert_eq!(ctx.warnings.warning_cnt, 1);
     assert!(
         program
-            .eval_with_bindings_reported(&mut state, &mut ctx, 1, &[], &mut services)
+            .eval_with_bindings_reported(state, &mut ctx, 1, &[], &mut services)
             .unwrap()
             .is_empty()
     );
@@ -2044,7 +2039,7 @@ fn numeric_batch_zero_limits_precede_reads_and_no_host_task_reservation_is_neede
         services.fault = Some((0, Fault::Panic));
         let error = program
             .eval_with_bindings_reported(
-                &mut LocalEvalState::with_limits(limits),
+                limits,
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -2060,10 +2055,10 @@ fn numeric_batch_zero_limits_precede_reads_and_no_host_task_reservation_is_neede
     assert_eq!(
         program
             .eval_with_bindings(
-                &mut LocalEvalState::with_limits(ExecutionLimits {
+                ExecutionLimits {
                     max_active_tasks: 0,
                     ..ExecutionLimits::default()
-                }),
+                },
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -2079,11 +2074,14 @@ fn numeric_batch_zero_limits_precede_reads_and_no_host_task_reservation_is_neede
 fn numeric_batch_work_budget_is_shared_across_occurrences_and_fresh_per_invocation() {
     let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
     let mut services = Bindings::new(vec![vec![Some(1); 1024], vec![Some(2); 1024]]);
-    let mut state = LocalEvalState::new(256);
+    let state = ExecutionLimits {
+        max_steps: 256,
+        ..ExecutionLimits::default()
+    };
     let mut ctx = EvalContext::default();
     assert_eq!(
         program
-            .eval_with_bindings(&mut state, &mut ctx, 1024, &[0], &mut services)
+            .eval_with_bindings(state, &mut ctx, 1024, &[0], &mut services)
             .unwrap()
             .to_int_vec(),
         [Some(3)]
@@ -2091,7 +2089,7 @@ fn numeric_batch_work_budget_is_shared_across_occurrences_and_fresh_per_invocati
     services.reads.clear();
     let selection: Vec<usize> = (0..1024).collect();
     let error = program
-        .eval_with_bindings_reported(&mut state, &mut ctx, 1024, &selection, &mut services)
+        .eval_with_bindings_reported(state, &mut ctx, 1024, &selection, &mut services)
         .unwrap_err();
     assert_eq!(error.stage(), LocalFailureStage::Resource);
     assert!(error.site().is_none());
@@ -2099,7 +2097,7 @@ fn numeric_batch_work_budget_is_shared_across_occurrences_and_fresh_per_invocati
     services.reads.clear();
     assert_eq!(
         program
-            .eval_with_bindings_reported(&mut state, &mut ctx, 1024, &[7], &mut services)
+            .eval_with_bindings_reported(state, &mut ctx, 1024, &[7], &mut services)
             .unwrap()
             .to_int_vec(),
         [Some(3)]
@@ -2150,10 +2148,10 @@ fn numeric_batch_provider_spare_capacity_is_charged_after_read_before_next_effec
     let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
     let error = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::with_limits(ExecutionLimits {
+            ExecutionLimits {
                 max_retained_bytes: 64 * 1024,
                 ..ExecutionLimits::default()
-            }),
+            },
             &mut EvalContext::default(),
             1,
             &[0],
@@ -2179,10 +2177,10 @@ fn numeric_batch_input_unwind_does_not_poison_reused_program_state_or_reports() 
     let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
     let mut services = BatchBindings::new(vec![vec![Some(5); 2], vec![Some(7); 2]]);
     services.fault_on = Some((1, 1, Fault::Panic));
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     let panic = catch_unwind(AssertUnwindSafe(|| {
-        program.eval_with_bindings_reported(&mut state, &mut ctx, 2, &[0, 1], &mut services)
+        program.eval_with_bindings_reported(state, &mut ctx, 2, &[0, 1], &mut services)
     }))
     .unwrap_err();
     let message = panic
@@ -2198,7 +2196,7 @@ fn numeric_batch_input_unwind_does_not_poison_reused_program_state_or_reports() 
     services.inner.reads.clear();
     assert_eq!(
         program
-            .eval_with_bindings_reported(&mut state, &mut ctx, 2, &[1, 0], &mut services)
+            .eval_with_bindings_reported(state, &mut ctx, 2, &[1, 0], &mut services)
             .unwrap()
             .to_int_vec(),
         [Some(12); 2]
@@ -2300,25 +2298,21 @@ fn numeric_batch_leaf_dispatch_rejects_old_row_entries_even_when_empty() {
             });
             services.fault = Some((0, Fault::Panic));
             services.warnings = true;
-            let mut state = LocalEvalState::default();
+            let state = ExecutionLimits::default();
             let mut ctx = EvalContext::default();
 
             // Exercise real dispatch after valid schema/selection preflight,
             // not just ProgramEntry comparison. Leaf roots have no call site
             // from which the old route could infer their batch-only admission.
             assert!(matches!(
-                program.inner.eval_with_bindings(
-                    &mut state,
-                    &mut ctx,
-                    count,
-                    &selection,
-                    &mut services,
-                ),
+                program
+                    .inner
+                    .eval_with_bindings(state, &mut ctx, count, &selection, &mut services,),
                 Err(LocalError::InvalidSpec(_))
             ));
             let report = program
                 .inner
-                .eval_with_bindings_reported(&mut state, &mut ctx, count, &selection, &mut services)
+                .eval_with_bindings_reported(state, &mut ctx, count, &selection, &mut services)
                 .unwrap_err();
             assert!(matches!(report.error(), LocalError::InvalidSpec(_)));
             assert_eq!(report.stage(), LocalFailureStage::Validation);
@@ -2331,7 +2325,7 @@ fn numeric_batch_leaf_dispatch_rejects_old_row_entries_even_when_empty() {
             });
             assert!(matches!(
                 program.inner.eval(
-                    &mut state,
+                    state,
                     &mut ctx,
                     LocalBatch {
                         columns: &columns,
@@ -2355,7 +2349,7 @@ fn numeric_batch_leaf_dispatch_rejects_old_row_entries_even_when_empty() {
                 let output = if reported {
                     program
                         .eval_with_bindings_reported(
-                            &mut state,
+                            state,
                             &mut ctx,
                             count,
                             &selection,
@@ -2364,7 +2358,7 @@ fn numeric_batch_leaf_dispatch_rejects_old_row_entries_even_when_empty() {
                         .unwrap()
                 } else {
                     program
-                        .eval_with_bindings(&mut state, &mut ctx, count, &selection, &mut services)
+                        .eval_with_bindings(state, &mut ctx, count, &selection, &mut services)
                         .unwrap()
                 };
                 assert_eq!(output.to_int_vec(), expected);

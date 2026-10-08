@@ -64,7 +64,7 @@ fn evaluate(
 ) -> Vec<Option<i64>> {
     program
         .eval(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut EvalContext::default(),
             LocalBatch {
                 columns,
@@ -140,14 +140,14 @@ fn m6_width_one_owned_transport_cost_record() {
     const ITERATIONS: u32 = 10_000;
     let mut program = compile(&plus(input(0), constant(Some(1))), &[ft()]);
     let data = columns(&[Some(41)]);
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     let started = Instant::now();
     let mut last = None;
     for _ in 0..ITERATIONS {
         let output = program
             .eval(
-                &mut state,
+                state,
                 &mut ctx,
                 LocalBatch {
                     columns: &data,
@@ -297,7 +297,7 @@ fn local_rejects_bad_spec_and_unadmitted_domains() {
 fn local_batch_validation_precedes_execution() {
     let mut program = compile(&plus(input(0), constant(Some(i64::MAX))), &[ft()]);
     let mut ctx = EvalContext::default();
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let data = columns(&[Some(1)]);
     for batch in [
         LocalBatch {
@@ -312,7 +312,7 @@ fn local_batch_validation_precedes_execution() {
         },
     ] {
         assert!(matches!(
-            program.eval(&mut state, &mut ctx, batch),
+            program.eval(state, &mut ctx, batch),
             Err(LocalError::InvalidBatch(_))
         ));
     }
@@ -321,7 +321,7 @@ fn local_batch_validation_precedes_execution() {
     let raw = LazyBatchColumnVec::from(vec![LazyBatchColumn::raw_with_capacity(0)]);
     assert!(matches!(
         program.eval(
-            &mut state,
+            state,
             &mut ctx,
             LocalBatch {
                 columns: &raw,
@@ -334,7 +334,7 @@ fn local_batch_validation_precedes_execution() {
     let wrong = LazyBatchColumnVec::from(vec![VectorValue::with_capacity(0, EvalType::Bytes)]);
     assert!(matches!(
         program.eval(
-            &mut state,
+            state,
             &mut ctx,
             LocalBatch {
                 columns: &wrong,
@@ -346,7 +346,7 @@ fn local_batch_validation_precedes_execution() {
     ));
     assert!(matches!(
         program.eval(
-            &mut state,
+            state,
             &mut ctx,
             LocalBatch {
                 columns: &data,
@@ -379,7 +379,10 @@ fn local_limits_are_errors_not_alternate_execution() {
     let mut program = compile(&expr, &[]);
     assert!(matches!(
         program.eval(
-            &mut LocalEvalState::new(2),
+            ExecutionLimits {
+                max_steps: 2,
+                ..ExecutionLimits::default()
+            },
             &mut EvalContext::default(),
             LocalBatch {
                 columns: &LazyBatchColumnVec::empty(),
@@ -8559,7 +8562,7 @@ fn like_dispatch_exact_getters_metadata_roles_and_private_compile() {
     use crate::{
         NativeLikeKind, RpnExpressionNode,
         types::{
-            expr_eval::EvaluatedAsciiWitness,
+            expr_eval::ReadyValueDispatchWitness,
             function::{CallArg, CallShape},
         },
     };
@@ -8693,7 +8696,7 @@ fn like_dispatch_exact_getters_metadata_roles_and_private_compile() {
     let operation = EvaluatedBytesOp::LikeNative;
     let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
     let mut ctx = EvalContext::default();
-    let mut witness = EvaluatedAsciiWitness::default();
+    let mut witness = ReadyValueDispatchWitness::default();
     for (text, escape, role) in [
         (Some(b"a".to_vec()), Some(92), EvaluatedArgsRole::Values),
         (None, Some(92), EvaluatedArgsRole::Like),
@@ -8732,7 +8735,7 @@ fn regexp_dispatch_exact_getters_metadata_and_closed_shapes() {
     use crate::{
         RpnExpressionNode,
         types::{
-            expr_eval::EvaluatedAsciiWitness,
+            expr_eval::ReadyValueDispatchWitness,
             function::{CallArg, CallShape},
         },
     };
@@ -8897,7 +8900,7 @@ fn regexp_dispatch_exact_getters_metadata_and_closed_shapes() {
     let operation = EvaluatedBytesOp::RegexpLikeNative;
     let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
     let mut ctx = EvalContext::default();
-    let mut witness = EvaluatedAsciiWitness::default();
+    let mut witness = ReadyValueDispatchWitness::default();
     for (values, role) in [
         (
             [
@@ -8948,7 +8951,7 @@ fn vector_dispatch_getters_shapes_roles_and_private_compile() {
     use crate::{
         RpnExpressionNode,
         types::{
-            expr_eval::EvaluatedAsciiWitness,
+            expr_eval::ReadyValueDispatchWitness,
             function::{CallArg, CallShape},
         },
     };
@@ -9102,7 +9105,7 @@ fn vector_dispatch_getters_shapes_roles_and_private_compile() {
     let operation = EvaluatedBytesOp::VecDimsNative;
     let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
     let mut ctx = EvalContext::default();
-    let mut witness = EvaluatedAsciiWitness::default();
+    let mut witness = ReadyValueDispatchWitness::default();
     for (value, role) in [
         (ScalarValue::Bytes(None), EvaluatedArgsRole::NativeVector),
         (ScalarValue::VectorFloat32(None), EvaluatedArgsRole::Values),

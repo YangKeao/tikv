@@ -405,7 +405,7 @@ fn run(
     selection: &[usize],
 ) -> LocalResult<VectorValue> {
     program.eval_with_bindings(
-        &mut LocalEvalState::default(),
+        ExecutionLimits::default(),
         &mut EvalContext::default(),
         physical_rows,
         selection,
@@ -417,13 +417,7 @@ fn run_limited(
     services: &mut Services,
     limits: ExecutionLimits,
 ) -> LocalResult<VectorValue> {
-    program.eval_with_bindings(
-        &mut LocalEvalState::with_limits(limits),
-        &mut EvalContext::default(),
-        1,
-        &[0],
-        services,
-    )
+    program.eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], services)
 }
 
 #[test]
@@ -513,13 +507,7 @@ fn benchmark_count_controls_fresh_body_demand() {
     services.warnings = true;
     let mut ctx = EvalContext::default();
     program
-        .eval_with_bindings(
-            &mut LocalEvalState::default(),
-            &mut ctx,
-            1,
-            &[0],
-            &mut services,
-        )
+        .eval_with_bindings(ExecutionLimits::default(), &mut ctx, 1, &[0], &mut services)
         .unwrap();
     assert_eq!(services.reads().len(), 3);
     assert_eq!(
@@ -558,7 +546,7 @@ fn fresh_and_reuse_cache_only_this_invocation() {
         )],
     );
     let mut program = services.compile(&expr);
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     for (expected, replies) in [
         (2, vec![Some(1), Some(1), Some(2), Some(2)]),
@@ -570,7 +558,7 @@ fn fresh_and_reuse_cache_only_this_invocation() {
             generation: 1,
         };
         let output = program
-            .eval_with_bindings(&mut state, &mut ctx, 1, &[0], &mut services)
+            .eval_with_bindings(state, &mut ctx, 1, &[0], &mut services)
             .unwrap();
         assert_eq!(output.to_int_vec(), vec![Some(expected)]);
         let outer_replies: Vec<_> = services
@@ -831,7 +819,7 @@ fn d1_compatibility_and_host_free_optional_hook_is_unused() {
     assert_eq!(
         program
             .eval_with_bindings(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -850,7 +838,7 @@ fn d1_compatibility_and_host_free_optional_hook_is_unused() {
     assert_eq!(
         program
             .eval_with_bindings(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -1036,13 +1024,7 @@ fn child_errors_keep_primary_variant_warning_prefix_and_inner_first_cleanup() {
         let mut ctx = EvalContext::default();
         warn(&mut ctx, "prior".into());
         let error = program
-            .eval_with_bindings(
-                &mut LocalEvalState::default(),
-                &mut ctx,
-                1,
-                &[0],
-                &mut services,
-            )
+            .eval_with_bindings(ExecutionLimits::default(), &mut ctx, 1, &[0], &mut services)
             .unwrap_err();
         match fault {
             ReadFault::Binding => assert!(matches!(error, LocalError::BindingContract(_))),
@@ -1091,7 +1073,7 @@ fn kernel_error_precedes_later_rows_and_resume_error_keeps_its_primary() {
     warn(&mut ctx, "prior".into());
     let error = program
         .eval_with_bindings(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut ctx,
             2,
             &[0, 1],

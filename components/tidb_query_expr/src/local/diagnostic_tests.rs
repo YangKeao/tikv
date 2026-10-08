@@ -360,7 +360,7 @@ fn run(
     selection: &[usize],
 ) -> Result<VectorValue, ReportedLocalFailure> {
     program.eval_with_bindings_reported(
-        &mut LocalEvalState::default(),
+        ExecutionLimits::default(),
         &mut EvalContext::default(),
         physical_rows,
         selection,
@@ -510,10 +510,10 @@ fn reported_preflight_and_budget_errors_never_invent_operation_sites() {
         services.reset();
         let report = program
             .eval_with_bindings_reported(
-                &mut LocalEvalState::with_limits(ExecutionLimits {
+                ExecutionLimits {
                     max_steps,
                     ..ExecutionLimits::default()
-                }),
+                },
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -538,7 +538,7 @@ fn reported_preflight_and_budget_errors_never_invent_operation_sites() {
         services.reset();
         let report = program
             .eval_with_bindings_reported(
-                &mut LocalEvalState::with_limits(limits),
+                limits,
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -556,10 +556,10 @@ fn reported_kernel_site_requires_an_actual_err_not_entry_or_prior_success() {
     for max_steps in [7, 8] {
         let report = program
             .eval_with_bindings_reported(
-                &mut LocalEvalState::with_limits(ExecutionLimits {
+                ExecutionLimits {
                     max_steps,
                     ..ExecutionLimits::default()
-                }),
+                },
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -582,10 +582,10 @@ fn reported_kernel_site_requires_an_actual_err_not_entry_or_prior_success() {
         let mut services = Bindings::new(vec![vec![Some(3)]]);
         let report = program
             .eval_with_bindings_reported(
-                &mut LocalEvalState::with_limits(ExecutionLimits {
+                ExecutionLimits {
                     max_steps: 10,
                     ..ExecutionLimits::default()
-                }),
+                },
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -606,17 +606,17 @@ fn reported_kernel_site_requires_an_actual_err_not_entry_or_prior_success() {
 fn reported_retry_empty_and_panic_do_not_leave_stale_sites() {
     let mut program = compile(&plus(input(0), constant(Some(1))), 1);
     let mut services = Bindings::new(vec![vec![Some(i64::MAX)]]);
-    let mut state = LocalEvalState::default();
+    let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     let first = program
-        .eval_with_bindings_reported(&mut state, &mut ctx, 1, &[0], &mut services)
+        .eval_with_bindings_reported(state, &mut ctx, 1, &[0], &mut services)
         .unwrap_err();
     assert_kernel(&first, 0, row(0, 0));
     services.values[0][0] = Some(0);
     services.reset();
     assert_eq!(
         program
-            .eval_with_bindings_reported(&mut state, &mut ctx, 1, &[0], &mut services)
+            .eval_with_bindings_reported(state, &mut ctx, 1, &[0], &mut services)
             .unwrap()
             .to_int_vec(),
         vec![Some(1)]
@@ -624,26 +624,26 @@ fn reported_retry_empty_and_panic_do_not_leave_stale_sites() {
     services.reset();
     assert!(
         program
-            .eval_with_bindings_reported(&mut state, &mut ctx, 1, &[], &mut services)
+            .eval_with_bindings_reported(state, &mut ctx, 1, &[], &mut services)
             .unwrap()
             .is_empty()
     );
     assert!(services.reads.is_empty());
     services.schema[0].set_flen(17);
     let report = program
-        .eval_with_bindings_reported(&mut state, &mut ctx, 1, &[0], &mut services)
+        .eval_with_bindings_reported(state, &mut ctx, 1, &[0], &mut services)
         .unwrap_err();
     assert_unsited(&report, LocalFailureStage::Validation);
     services.schema[0] = ft();
     services.reply_at = Some((1, Reply::Error(evaluation(1690, "new input failure"))));
     let report = program
-        .eval_with_bindings_reported(&mut state, &mut ctx, 1, &[0], &mut services)
+        .eval_with_bindings_reported(state, &mut ctx, 1, &[0], &mut services)
         .unwrap_err();
     assert_input(&report, 0, row(0, 0));
     services.reset();
     services.reply_at = Some((1, Reply::Panic));
     let panic = catch_unwind(AssertUnwindSafe(|| {
-        program.eval_with_bindings_reported(&mut state, &mut ctx, 1, &[0], &mut services)
+        program.eval_with_bindings_reported(state, &mut ctx, 1, &[0], &mut services)
     }))
     .unwrap_err();
     let message = panic
@@ -655,13 +655,13 @@ fn reported_retry_empty_and_panic_do_not_leave_stale_sites() {
     services.reset();
     assert_eq!(
         program
-            .eval_with_bindings_reported(&mut state, &mut ctx, 1, &[0], &mut services)
+            .eval_with_bindings_reported(state, &mut ctx, 1, &[0], &mut services)
             .unwrap()
             .to_int_vec(),
         vec![Some(1)]
     );
     let report = program
-        .eval_with_bindings_reported(&mut state, &mut ctx, 1, &[1], &mut services)
+        .eval_with_bindings_reported(state, &mut ctx, 1, &[1], &mut services)
         .unwrap_err();
     assert_unsited(&report, LocalFailureStage::Validation);
     assert_kernel(&first, 0, row(0, 0)); // The earlier owned receipt is unchanged.
@@ -678,7 +678,7 @@ fn reported_null_rhs_and_unselected_rows_have_no_effects_or_reports() {
     assert_eq!(
         program
             .eval_with_bindings_reported(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut ctx,
                 3,
                 &[2, 0, 2],
@@ -695,13 +695,7 @@ fn reported_null_rhs_and_unselected_rows_have_no_effects_or_reports() {
     assert_eq!(ctx.warnings.warning_cnt, 4);
     services.reset();
     let report = program
-        .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
-            &mut ctx,
-            3,
-            &[1],
-            &mut services,
-        )
+        .eval_with_bindings_reported(ExecutionLimits::default(), &mut ctx, 3, &[1], &mut services)
         .unwrap_err();
     assert_kernel(&report, 2, row(0, 1));
     assert_eq!(services.reads, vec![(0, row(0, 1)), (1, row(0, 1))]);
@@ -771,7 +765,7 @@ fn reported_warning_endpoints_preserve_live_count_and_actual_receiver_cap() {
                     Some((2, Reply::Error(evaluation(1690, "input warning prefix"))));
             }
             let result = program.eval_with_bindings_reported(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut ctx,
                 1,
                 &[0],
@@ -807,7 +801,7 @@ fn reported_legacy_eager_error_stays_unattributed_and_controls_still_work() {
     let mut services = Bindings::new(vec![]);
     let original = program
         .eval_with_bindings(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut EvalContext::default(),
             1,
             &[0],
@@ -825,7 +819,7 @@ fn reported_legacy_eager_error_stays_unattributed_and_controls_still_work() {
     assert_eq!(
         program
             .eval_with_bindings(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -924,7 +918,7 @@ fn reported_host_refusal_follows_schema_selection_and_precedes_the_hook() {
     services.schema.push(ft());
     let report = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut EvalContext::default(),
             1,
             &[0],
@@ -936,7 +930,7 @@ fn reported_host_refusal_follows_schema_selection_and_precedes_the_hook() {
     services.schema.clear();
     let report = program
         .eval_with_bindings_reported(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut EvalContext::default(),
             0,
             &[0],
@@ -948,7 +942,7 @@ fn reported_host_refusal_follows_schema_selection_and_precedes_the_hook() {
     for selection in [&[][..], &[0][..]] {
         let report = program
             .eval_with_bindings_reported(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut EvalContext::default(),
                 1,
                 selection,
@@ -971,7 +965,7 @@ fn reported_host_refusal_follows_schema_selection_and_precedes_the_hook() {
     assert_eq!(
         program
             .eval_with_bindings(
-                &mut LocalEvalState::default(),
+                ExecutionLimits::default(),
                 &mut EvalContext::default(),
                 1,
                 &[0],

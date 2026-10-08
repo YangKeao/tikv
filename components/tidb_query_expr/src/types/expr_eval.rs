@@ -278,12 +278,12 @@ pub(crate) enum EvalInput<'data, 'services> {
     // remains in the invocation facade until both it and the result are dropped.
     ReadyBytes {
         value: &'data ScalarValue,
-        witness: &'services mut EvaluatedAsciiWitness,
+        witness: &'services mut ReadyValueDispatchWitness,
     },
     ReadyArgs {
         values: &'data [ScalarValue],
         role: EvaluatedArgsRole,
-        witness: &'services mut EvaluatedAsciiWitness,
+        witness: &'services mut ReadyValueDispatchWitness,
     },
 }
 
@@ -1644,18 +1644,18 @@ fn evaluated_ready_args_match(
 /// NULL. This is not an ASCII-body counter, an input identity, or a native SQL
 /// site.
 #[derive(Default)]
-pub(crate) struct EvaluatedAsciiWitness {
+pub(crate) struct ReadyValueDispatchWitness {
     invocations: u64,
 }
 
-impl EvaluatedAsciiWitness {
+impl ReadyValueDispatchWitness {
     pub(crate) fn invocations(&self) -> u64 {
         self.invocations
     }
 
     fn record_dispatch(&mut self) -> LocalResult<()> {
         self.invocations = self.invocations.checked_add(1).ok_or_else(|| {
-            LocalError::ResourceLimit("evaluated ASCII invocation counter overflow".into())
+            LocalError::ResourceLimit("ready-value dispatch counter overflow".into())
         })?;
         Ok(())
     }
@@ -1716,7 +1716,7 @@ impl EvalExecution {
         };
         if !valid {
             return Err(LocalError::InvalidSpec(
-                "ready Bytes and evaluated ASCII must share their closed execution domain".into(),
+                "ready values must share their closed execution domain".into(),
             ));
         }
         if input.retained_input_bytes().is_none() {
@@ -3152,7 +3152,7 @@ fn eval_prepared_kernel<'a>(
     func_meta: RpnFnMeta,
     ret_field_type: &'a FieldType,
     metadata: &(dyn std::any::Any + Send),
-    witness: Option<&mut EvaluatedAsciiWitness>,
+    witness: Option<&mut ReadyValueDispatchWitness>,
 ) -> LocalResult<RpnStackNode<'a>> {
     let mut extra = RpnFnCallExtra { ret_field_type };
     if let Some(witness) = witness {
@@ -4006,7 +4006,7 @@ impl RpnExpression {
         schema: &'a [FieldType],
         ready: &'data ScalarValue,
         input_logical_rows: &'a [usize],
-        witness: &mut EvaluatedAsciiWitness,
+        witness: &mut ReadyValueDispatchWitness,
         budget: &mut EvalBudget,
     ) -> LocalResult<RpnStackNode<'a>> {
         self.eval_with_ready_bytes(
@@ -4031,7 +4031,7 @@ impl RpnExpression {
         schema: &'a [FieldType],
         ready: &'data ScalarValue,
         input_logical_rows: &'a [usize],
-        witness: &mut EvaluatedAsciiWitness,
+        witness: &mut ReadyValueDispatchWitness,
         budget: &mut EvalBudget,
     ) -> LocalResult<RpnStackNode<'a>> {
         if operation.input_role() != EvaluatedArgsRole::Values
@@ -4066,7 +4066,7 @@ impl RpnExpression {
         ready: &'data [ScalarValue],
         role: EvaluatedArgsRole,
         input_logical_rows: &'a [usize],
-        witness: &mut EvaluatedAsciiWitness,
+        witness: &mut ReadyValueDispatchWitness,
         budget: &mut EvalBudget,
     ) -> LocalResult<RpnStackNode<'a>> {
         if self.checked_result_flow().is_some()
@@ -4335,7 +4335,7 @@ mod tests {
     fn test_evaluated_ascii_input_domain_rejects_old_entries_and_leaf_shortcuts() {
         use crate::local::ExecutionLimits;
         let ready = ScalarValue::Bytes(None);
-        let mut witness = EvaluatedAsciiWitness::default();
+        let mut witness = ReadyValueDispatchWitness::default();
         let mut input = EvalInput::ReadyBytes {
             value: &ready,
             witness: &mut witness,
@@ -4388,7 +4388,7 @@ mod tests {
             ScalarValue::Bytes(Some(bytes)) => bytes.capacity(),
             _ => unreachable!(),
         };
-        let mut witness = EvaluatedAsciiWitness::default();
+        let mut witness = ReadyValueDispatchWitness::default();
         let field_type = FieldTypeTp::Blob.into();
         assert_eq!(
             node_storage(
@@ -4445,7 +4445,7 @@ mod tests {
     fn test_evaluated_ascii_wrapper_dispatches_null_empty_and_raw_ready_values() {
         use crate::local::ExecutionLimits;
         let (program, schema) = evaluated_ascii_test_recipe();
-        let mut witness = EvaluatedAsciiWitness::default();
+        let mut witness = ReadyValueDispatchWitness::default();
         let mut ctx = EvalContext::default();
         for (bytes, expected) in [
             (None, None),
@@ -4510,7 +4510,7 @@ mod tests {
         } else {
             unreachable!();
         }
-        let mut witness = EvaluatedAsciiWitness::default();
+        let mut witness = ReadyValueDispatchWitness::default();
         let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
         assert!(matches!(
             program.eval_with_ready_ascii(
@@ -4531,7 +4531,7 @@ mod tests {
         use crate::local::ExecutionLimits;
         let ready = ScalarValue::Bytes(None);
         let schema = [FieldType::from(FieldTypeTp::Blob)];
-        let mut witness = EvaluatedAsciiWitness::default();
+        let mut witness = ReadyValueDispatchWitness::default();
         for (operation, other) in [
             (EvaluatedBytesOp::Length, EvaluatedBytesOp::BitLength),
             (EvaluatedBytesOp::LTrim, EvaluatedBytesOp::RTrim),
@@ -4648,7 +4648,7 @@ mod tests {
             FieldType::from(FieldTypeTp::LongLong),
             FieldType::from(FieldTypeTp::LongLong),
         ];
-        let mut witness = EvaluatedAsciiWitness::default();
+        let mut witness = ReadyValueDispatchWitness::default();
         for (operation, other) in [
             (EvaluatedBytesOp::BitAnd, EvaluatedBytesOp::BitOr),
             (EvaluatedBytesOp::LogicalAnd, EvaluatedBytesOp::LogicalOr),
@@ -4694,7 +4694,7 @@ mod tests {
     #[test]
     fn test_evaluated_raw_rejects_role_length_and_kernel_drift() {
         use crate::local::ExecutionLimits;
-        let mut witness = EvaluatedAsciiWitness::default();
+        let mut witness = ReadyValueDispatchWitness::default();
         assert!(evaluated_ready_args_match(
             EvaluatedBytesOp::AsinRaw,
             &[ScalarValue::Bytes(None)],
@@ -5077,7 +5077,7 @@ mod tests {
         use crate::local::ExecutionLimits;
         let (program, schema) = evaluated_ascii_test_recipe();
         let ready = ScalarValue::Bytes(None);
-        let mut witness = EvaluatedAsciiWitness {
+        let mut witness = ReadyValueDispatchWitness {
             invocations: u64::MAX,
         };
         let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
@@ -5103,7 +5103,7 @@ mod tests {
             ))
         };
         let field_type = FieldTypeTp::LongLong.into();
-        let mut witness = EvaluatedAsciiWitness::default();
+        let mut witness = ReadyValueDispatchWitness::default();
         let error = eval_prepared_kernel(
             &mut EvalContext::default(),
             1,
@@ -5474,10 +5474,10 @@ mod tests {
                 reads: 0,
             };
             let result = program.eval_with_bindings(
-                &mut LocalEvalState::with_limits(ExecutionLimits {
+                ExecutionLimits {
                     max_retained_bytes: base + copies * int,
                     ..ExecutionLimits::default()
-                }),
+                },
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -5608,10 +5608,10 @@ mod tests {
                 active: false,
             };
             let result = program.eval_with_bindings(
-                &mut LocalEvalState::with_limits(ExecutionLimits {
+                ExecutionLimits {
                     max_retained_bytes: bytes,
                     ..ExecutionLimits::default()
-                }),
+                },
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -5648,10 +5648,10 @@ mod tests {
         let columns = LazyBatchColumnVec::empty();
         let evaluate = |program: &mut LocalProgram, bytes| {
             program.eval(
-                &mut LocalEvalState::with_limits(ExecutionLimits {
+                ExecutionLimits {
                     max_retained_bytes: bytes,
                     ..ExecutionLimits::default()
-                }),
+                },
                 &mut EvalContext::default(),
                 LocalBatch {
                     columns: &columns,
@@ -5722,10 +5722,10 @@ mod tests {
             + std::mem::size_of::<EvalFrame<'_>>() * 2
             + std::mem::size_of::<RpnStackNode<'_>>() * 3;
         let result = program.eval_with_bindings(
-            &mut LocalEvalState::with_limits(ExecutionLimits {
+            ExecutionLimits {
                 max_retained_bytes: before_input,
                 ..ExecutionLimits::default()
-            }),
+            },
             &mut EvalContext::default(),
             1,
             &[0],

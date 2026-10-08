@@ -130,7 +130,7 @@ fn run(
     selection: &[usize],
 ) -> LocalResult<VectorValue> {
     program.eval_with_bindings(
-        &mut LocalEvalState::default(),
+        ExecutionLimits::default(),
         &mut EvalContext::default(),
         physical_rows,
         selection,
@@ -346,7 +346,7 @@ fn local_parent_error_precedes_later_rows_and_preserves_warning_prefix() {
         .append_warning(Error::Eval("prior".into(), 1234));
     assert!(matches!(
         program.eval_with_bindings(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut ctx,
             3,
             &[0, 1, 2],
@@ -369,13 +369,7 @@ fn local_malformed_binding_keeps_already_emitted_diagnostics() {
     bindings.reply = Reply::WrongLength;
     let mut ctx = EvalContext::default();
     assert!(matches!(
-        program.eval_with_bindings(
-            &mut LocalEvalState::default(),
-            &mut ctx,
-            1,
-            &[0],
-            &mut bindings
-        ),
+        program.eval_with_bindings(ExecutionLimits::default(), &mut ctx, 1, &[0], &mut bindings),
         Err(LocalError::BindingContract(_))
     ));
     assert_eq!(ctx.warnings.warning_cnt, 1);
@@ -423,27 +417,14 @@ fn local_execution_defaults_and_small_refusals_are_explicit() {
         },
     ] {
         let mut bindings = Bindings::new(vec![vec![Some(8)], vec![]]);
-        let mut state = LocalEvalState::with_limits(limits);
         assert!(matches!(
-            program.eval_with_bindings(
-                &mut state,
-                &mut EvalContext::default(),
-                1,
-                &[0],
-                &mut bindings
-            ),
+            program.eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut bindings),
             Err(LocalError::ResourceLimit(_))
         ));
         assert!(bindings.trace.is_empty());
         assert!(
             program
-                .eval_with_bindings(
-                    &mut state,
-                    &mut EvalContext::default(),
-                    1,
-                    &[],
-                    &mut bindings
-                )
+                .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[], &mut bindings)
                 .unwrap()
                 .is_empty()
         );
@@ -454,10 +435,10 @@ fn local_execution_defaults_and_small_refusals_are_explicit() {
     assert_eq!(
         program
             .eval_with_bindings(
-                &mut LocalEvalState::with_limits(ExecutionLimits {
+                ExecutionLimits {
                     max_active_tasks: 0,
                     ..defaults
-                }),
+                },
                 &mut EvalContext::default(),
                 1,
                 &[0],
@@ -470,13 +451,16 @@ fn local_execution_defaults_and_small_refusals_are_explicit() {
 }
 
 #[test]
-fn local_work_limit_is_shared_across_occurrences_and_state_reusable() {
+fn local_work_limit_is_shared_across_occurrences_and_fresh_per_invocation() {
     let mut program = compile(&input(0), 1);
     let mut bindings = Bindings::new(vec![vec![Some(8)]]);
-    let mut state = LocalEvalState::new(2); // one node plus one demanded read
+    let limits = ExecutionLimits {
+        max_steps: 2,
+        ..ExecutionLimits::default()
+    }; // one node plus one demanded read
     assert!(matches!(
         program.eval_with_bindings(
-            &mut state,
+            limits,
             &mut EvalContext::default(),
             1,
             &[0, 0],
@@ -487,13 +471,7 @@ fn local_work_limit_is_shared_across_occurrences_and_state_reusable() {
     assert_eq!(bindings.trace, vec![(0, 0, 0)]);
     assert_eq!(
         program
-            .eval_with_bindings(
-                &mut state,
-                &mut EvalContext::default(),
-                1,
-                &[0],
-                &mut bindings
-            )
+            .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut bindings)
             .unwrap()
             .to_int_vec(),
         vec![Some(8)]
@@ -550,7 +528,7 @@ fn local_decoded_controls_use_the_same_official_driver() {
     );
     let output = program
         .eval(
-            &mut LocalEvalState::default(),
+            ExecutionLimits::default(),
             &mut EvalContext::default(),
             LocalBatch {
                 columns: &LazyBatchColumnVec::empty(),

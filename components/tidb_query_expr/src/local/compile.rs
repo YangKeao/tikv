@@ -79,15 +79,15 @@ impl LocalNumericBatchProgram {
 /// Fresh scalar-only transport ABI, not a native SQL or wire descriptor. Do not
 /// populate charset, element or unknown-field containers: the closed worker's
 /// owner accounting relies on construction, not equality, for zero type heap.
-pub(super) fn evaluated_ascii_bytes_type() -> FieldType {
+pub(super) fn ready_value_bytes_type() -> FieldType {
     FieldType::from(tidb_query_datatype::FieldTypeTp::Blob)
 }
 
-pub(super) fn evaluated_ascii_int_type() -> FieldType {
+pub(super) fn ready_value_int_type() -> FieldType {
     FieldType::from(tidb_query_datatype::FieldTypeTp::LongLong)
 }
 
-pub(crate) fn evaluated_ascii_decimal_type() -> FieldType {
+pub(crate) fn ready_value_decimal_type() -> FieldType {
     FieldType::from(tidb_query_datatype::FieldTypeTp::NewDecimal)
 }
 
@@ -1486,7 +1486,7 @@ mod numeric_batch_compile_tests {
 }
 
 #[cfg(test)]
-mod evaluated_ascii_compile_tests {
+mod ready_value_compile_tests {
     use super::*;
     use crate::local::{CompileLimits, LiteralKind, OrdinaryProfile};
 
@@ -1494,7 +1494,7 @@ mod evaluated_ascii_compile_tests {
         LocalExpr::Call {
             function: FunctionRef::TiPb(ScalarFuncSig::Ascii),
             args: vec![arg].into_boxed_slice(),
-            return_type: evaluated_ascii_int_type(),
+            return_type: ready_value_int_type(),
             metadata: crate::CallMetadata::None,
         }
     }
@@ -1502,7 +1502,7 @@ mod evaluated_ascii_compile_tests {
     fn source() -> LocalExpr {
         source_with_arg(LocalExpr::InputSlot {
             slot: 0,
-            field_type: evaluated_ascii_bytes_type(),
+            field_type: ready_value_bytes_type(),
         })
     }
 
@@ -1524,7 +1524,7 @@ mod evaluated_ascii_compile_tests {
 
         use crate::{
             local::{ExecutionLimits, runtime::EvalBudget},
-            types::expr_eval::EvaluatedAsciiWitness,
+            types::expr_eval::ReadyValueDispatchWitness,
         };
 
         let cases: [(
@@ -1672,7 +1672,7 @@ mod evaluated_ascii_compile_tests {
             let program =
                 compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
             let mut ctx = EvalContext::default();
-            let mut witness = EvaluatedAsciiWitness::default();
+            let mut witness = ReadyValueDispatchWitness::default();
             for width in [7, 9] {
                 let ready = [ScalarValue::Bytes(Some(vec![0; width]))];
                 let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
@@ -1734,7 +1734,7 @@ mod evaluated_ascii_compile_tests {
 
         use crate::{
             local::{ExecutionLimits, runtime::EvalBudget},
-            types::expr_eval::EvaluatedAsciiWitness,
+            types::expr_eval::ReadyValueDispatchWitness,
         };
 
         let cases: [(
@@ -1891,7 +1891,7 @@ mod evaluated_ascii_compile_tests {
         let operation = EvaluatedBytesOp::UuidToBinSwapNative;
         let program = compile_evaluated_bytes(operation, LocalCompileContext::default()).unwrap();
         let mut ctx = EvalContext::default();
-        let mut witness = EvaluatedAsciiWitness::default();
+        let mut witness = ReadyValueDispatchWitness::default();
         for ready in [
             vec![ScalarValue::Bytes(None), ScalarValue::Int(Some(0))],
             vec![
@@ -1984,7 +1984,7 @@ mod evaluated_ascii_compile_tests {
         };
         assert_eq!(func_meta.name, "ascii");
         assert_eq!(*args_len, 1);
-        assert_eq!(field_type, &evaluated_ascii_int_type());
+        assert_eq!(field_type, &ready_value_int_type());
         assert!(metadata.is::<()>());
         assert_eq!(program.expression.node_count(), 2);
         assert_eq!(program.expression.work_count(), 2);
@@ -1994,7 +1994,7 @@ mod evaluated_ascii_compile_tests {
 
     #[test]
     fn evaluated_ascii_private_mode_rejects_other_sources_and_complete_types() {
-        let bytes_type = evaluated_ascii_bytes_type();
+        let bytes_type = ready_value_bytes_type();
         let schema = [bytes_type.clone()];
         let leaf = || LocalExpr::InputSlot {
             slot: 0,
@@ -2016,7 +2016,7 @@ mod evaluated_ascii_compile_tests {
             }),
             source_with_arg(LocalExpr::InputSlot {
                 slot: 0,
-                field_type: evaluated_ascii_int_type(),
+                field_type: ready_value_int_type(),
             }),
         ] {
             assert_closed_source_rejected(&spec, &schema);
@@ -2060,7 +2060,7 @@ mod evaluated_ascii_compile_tests {
         let spec = source();
         assert_closed_source_rejected(&spec, &[]);
         assert_closed_source_rejected(&spec, &[bytes_type.clone(), bytes_type.clone()]);
-        assert_closed_source_rejected(&spec, &[evaluated_ascii_int_type()]);
+        assert_closed_source_rejected(&spec, &[ready_value_int_type()]);
         let mut changed_schema = bytes_type;
         changed_schema.set_flen(3);
         assert_closed_source_rejected(&spec, &[changed_schema]);
@@ -2464,7 +2464,7 @@ mod evaluated_ascii_compile_tests {
     #[test]
     fn evaluated_ascii_does_not_open_existing_local_domains() {
         let spec = source();
-        let schema = [evaluated_ascii_bytes_type()];
+        let schema = [ready_value_bytes_type()];
         let cx = LocalCompileContext::default();
         assert!(matches!(
             compile_local(&spec, &schema, cx),
@@ -2490,7 +2490,7 @@ mod evaluated_ascii_compile_tests {
         let row = compile_local(
             &LocalExpr::Constant {
                 value: ScalarValue::Int(Some(7)),
-                field_type: evaluated_ascii_int_type(),
+                field_type: ready_value_int_type(),
                 literal_kind: LiteralKind::Typed,
             },
             &[],
