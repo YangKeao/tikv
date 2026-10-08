@@ -422,7 +422,9 @@ short-circuit admission policy described above.
   Time-to-duration conversion. Its source status/error carriers are distinct
   from wire Duration parsing and query_expr's NativeGoDuration policy. The
   native endpoint ends at838:59:59.0, matching the shared MAX_NANOS constant
-  rather than adding a fractional component to that endpoint.
+  rather than adding a fractional component to that endpoint. SDK
+  `NativeDurationParts` is the canonical raw `{nanoseconds, fsp}` storage,
+  including unvalidated chunk metadata; TiDB's public duration is a thin wrapper.
   `time/native_extract.rs` owns the original unit sets and raw numeric extraction
   formulas without SQL range/FSP normalization. Query_expr `native_extract.rs`
   now uses these services in six EXTRACT profiles: metadata selection, raw

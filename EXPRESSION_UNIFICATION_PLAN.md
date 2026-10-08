@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round204收口（duration-raw-parts-198）：M2 raw Duration类型去重：SDK NativeDurationParts现唯一存储nanoseconds/fsp并提供raw constructor/accessors及Hash/Default；TiDB MySqlDuration删除本地双字段，保公共API但透明包shared parts，所有转换直接传shared value；TIME max常量改指SDK duration constants。SDK raw1+round1、TiDB raw1+methods1 GREEN；一次错误display filter为0/0/513不计gate且另跑真实methods filter。功能240/245不变，broader M2 active。
+
+round204启动（duration-raw-parts-198）：落实R203已证实raw duration双字段；不做不安全type alias，改薄wrapper以保TiDB inherent API。
+
 round203收口（charset-name-classifier-197）：M2 FieldType窄表去重：TiKV FieldType Charset现唯一拥有7 canonical names、无分配ASCII-case-insensitive classifier与utf8mb3 alias；旧TiKV from_name以canonical_name exact filter保持wire/API拒绝uppercase/alias，TiDB from_name仅shared enum→本地enum投影。删除TiDB七分支字符串表。SDK新alias/case1、旧exact1、TiDB case/alias1 GREEN。Duration raw双字段因TiDB大量inherent API不能安全直接alias未做；Time packed候选方向不符TiDB→TiKV目标未做。功能240/245不变，broader M2 active。
 
 round203启动（charset-name-classifier-197）：三窄审计Duration/Time/FieldType，只迁可删除完整重复body；选择charset 7-name表并保两侧原边界。

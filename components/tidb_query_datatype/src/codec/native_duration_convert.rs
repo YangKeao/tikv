@@ -26,10 +26,25 @@ use super::{
 pub const NATIVE_MAX_DURATION_NANOS: i64 = 3_020_399_000_000_000;
 
 /// Raw native duration storage, not the range-checked wire Duration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct NativeDurationParts {
     pub nanoseconds: i64,
     pub fsp: i64,
+}
+
+impl NativeDurationParts {
+    /// Constructs raw native duration storage without FSP or range validation.
+    pub const fn from_raw_parts(nanoseconds: i64, fsp: i64) -> Self {
+        Self { nanoseconds, fsp }
+    }
+
+    pub const fn nanoseconds(self) -> i64 {
+        self.nanoseconds
+    }
+
+    pub const fn fsp(self) -> i64 {
+        self.fsp
+    }
 }
 
 /// Original nonfatal conversion event. Overflow retains its original subject.
@@ -317,6 +332,13 @@ pub fn native_convert_to_duration_target<TZ: TimeZone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_duration_parts_keep_unvalidated_metadata() {
+        let parts = NativeDurationParts::from_raw_parts(-1, 7);
+        assert_eq!(parts.nanoseconds(), -1);
+        assert_eq!(parts.fsp(), 7);
+    }
 
     #[test]
     fn numeric_and_round_duration_keep_fixed_values_event_subjects_and_raw_domain() {
