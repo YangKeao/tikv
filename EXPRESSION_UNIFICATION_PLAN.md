@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round192收口（m6-gates-186）：最终gate实跑：TiDB make lint exit0（含tipb sync/projection与Go lint）；full tidb-expr exit101=1654 pass/4 historical fail/94 ignore，full Unistore exit101=226 pass/1 historical fail/13 ignore，失败集合与R100相同。TiKV make clippy首次无rustup在pre-clippy exit2；注入pinned rustup重跑，security/style/dashboard/docker/license通过，cargo-deny因本实验tidb_query_crypto直依赖RustCrypto aes0.9/cipher0.5/sha10.10违反现FIPS bans而exit2。未绕过deny或虚报绿；此为明确M6/FIPS blocker/risk，功能240/245与5 exceptions不变。ledger/relative-links/diff clean验证绿；strict0/goal active。
+
+round192启动（m6-gates-186）：并行真实运行TiDB必需make lint、TiKV make clippy及两full Rust libs；保留失败原始receipt，不让深验证阻塞已实现Demo但也不claim PRready。
+
 round191收口（final-five-exceptions-185）：五并行只读审计逐项冻结最后5族例外：JSON_SCHEMA_VALID保draft2019/cache/lazy外部I/O边界；两DECODE PLAN保完整text/protobuf codec/render及不同error/panic；SQL_DIGEST保完整lexer/normalizer/raw-byte；PASSWORD_STRENGTH保identity+7 ordered live globals/Go byte+rune政策。均zero TiKV/PB/Unistore admission、direct named native dispatch，无hidden fallback/ready answer；未来解除条件逐项落evidence。功能仍240/245=97.96%，满足>=90%；5 exceptions获Demo defer但无credit。strict0，M6 gates/lifecycle/type acceptance继续active。配对Plan+DCO docs。
 
 round191启动（final-five-exceptions-185）：5-agent并行只读审计剩余冻结family，逐项记录入口、host effects、保留边界、无fallback证据与解除条件；不改生产/credit。
