@@ -206,9 +206,14 @@ executor 的 projection、selection、join residual、sort/group key、aggregate
 - Observation (M0 静态审计): `ScalarValue::from(f64)` 会把 NaN 转成 NULL；FieldType convenience accessors 会截 flags/width 或遗漏 vector variant，TiDB FieldType Clone 可共享 mutable elems。Evidence: TiKV `data_type/scalar.rs:142–175`、`def/field_type.rs:54–74,354–397`；TiDB `field_type/mod.rs:516–532`。必须 checked 映射、完整 detached SQL metadata、显式 literal provenance；PB 参数位解释由 signature 决定，不按 Datum tag 拒绝。
 - Observation (M0 静态审计): TiDB Decimal 公共 API 支持超过 9 words，TiKV core 固定 9 words，且负零乘积可能丢 visible scale；SUM/AVG 还有 i128 fast 算术。Evidence: TiDB `decimal_tests.rs:661–740,1175–1225` 和 `hash_agg.rs`；TiKV `mysql/decimal.rs:891–899`。初步 bounded bridge 不是 Decimal 去重完成，wide 域保持未迁移，禁止 string/f64 或 unsafe chunk struct copy 适配。
 - Observation (M0 静态审计): raw_varg generated validator 不保证全部异构 child 类型安全；metadata 初始化还覆盖 temporal unit 和 IN union CAST。owned 预转换可能在 dead branch/未选行触发表示错误。Evidence: TiKV codegen `rpn_function.rs:1267–1272`、`impl_regexp.rs`、`impl_time.rs`；这些是 local facade 的独立安全/demand 门槛，不能仅复用旧 validator 就宣称安全。
+- Observation (report performance): `SessionAsciiRuntime` 的实验policy默认`None`且production caller未安装；无capability的AST/value调用每次建one-shot owner/execution。CPU2 release ABBA显示默认路径六个成功workload为frozen native的1.35x–66.33x，显式pooled候选仍为1.22x–37.50x；不能把pooled称production warm path。
+- Observation (report compatibility): 同名同MD5 row table的frozen release test通过而current release在Prepare返回`InvalidSpecification`，current debug通过；helper/binary非字节相同。只证明MD5 release path存在profile-sensitive未定位问题，不判其他crypto family。
 
 ## Decision Log
 
+- Decision: before/after报告以当前默认one-shot AST/value路径为主性能结果，显式pooled execution只作为非默认best-case设计候选；三进程内sample相关、boost启用、无CI/显著性，revision-wide差异不归因单一组件。MD5只按同名同row-table receipt判该release path不兼容，不外推全crypto。
+  Rationale: `SessionAsciiRuntime` policy默认`None`且production未安装；首轮独立报告审阅发现把pooled称production warm、把targeted suites称全矩阵和把MD5扩大到全crypto均会过述。
+  Date/Author: 2026-09-28，主 agent测量与独立review修订。
 - Decision: 唯一实现优先于少改 TiKV；允许必要的 API、kernel、编译和 runtime 重构。
   Rationale: 用户明确反对为少改 TiKV 而保留两份算法。TiDB 适配层只能做职责不同的映射和绑定。
   Date/Author: 2026-09-28，用户要求与主 agent 设计。
@@ -417,6 +422,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 每次子任务交付必须包含实际改动文件、唯一实现归属、API/metadata 变化、删除清单、精确 cwd/测试命令、通过/失败/未执行结果、过滤命中数、性能或兼容风险、依赖方须采取的动作和下一步。没有跑测试就明确说未跑，不能用已编译或子 agent 的自述替代行为证据。
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
+
+round223收口（architecture-performance-report-217）：按用户要求新增独立中文报告，按抽象层级覆盖总体ownership设计、local/fixed-ready/host接口与TiDB staged glue、模块关系、交错M0–M6及逐family替换、问题、targeted兼容性和before/after性能。父agent在frozen TiDB `364aef2b`与current `a3cf8821`上用同nightly release、独立target、CPU2、3进程ABBA×每进程9个相关sample测`eval_in`：当前默认Session policy=None的one-shot路径六个成功workload分别为旧native的66.33x/45.69x/17.32x/7.30x/9.16x/1.35x；显式注入AsciiExecution的实验pooled best-case仍为37.50x/35.53x/10.13x/5.17x/5.92x/1.22x，不冒充production/default。current release MD5在Prepare返回InvalidSpecification；同名同row-table frozen release test exit0/current exit101，而current debug通过，helper/binary非字节相同，故只判MD5 release path RED，不外推全crypto。cold libtest Cargo compile 2m30→5m30、maxRSS约+21.4%，revision含其他source/lock/dependency-graph变化，不单归因direct deps。独立review首轮指出pool默认、glue职责、M0–M6非串行、targeted非矩阵、MD5范围、统计/boost/归因与wire/local selector七类过述，全部修正并补default-path重测；临时probe和detached baseline worktree已删。首次invariant脚本因相对logs路径错误未产生有效receipt，改cwd-resolved路径后PASS；初始baseline漏RUSTC、两次MD5中止、decimal bench cfg(test)零输出、错误second-manifest命令均披露且不计结果。无产品源码变化；240/245、strict0、accelerated complete不变，`pr_ready=false`。
+
+round223启动（architecture-performance-report-217）：整理独立markdown报告；新增可复现frozen/current AST/value性能对照，严格区分默认one-shot、显式pooled候选、build成本与MD5 release正确性，完成独立事实审阅后配对发布。
 
 round222收口（five-host-adapters-216）：用户确认五个例外先保留，但要求TiDB残留尽量简单且不保留完整native expression evaluator。新增唯一`host_compat.rs` closed name/arity adapter；JSON_SCHEMA_VALID因cache/no-I/O-on-NULL保留一个显式lazy expression adapter，其余四项只收already-evaluated Datum。generic `builtin_ext::{info,crypto,json}`生产match删除五项入口，unknown host name直接None、无fallback；保留parser/plan codec/resource/global-var算法与warning/cache policy，不改功能、不增TiKV代码、不计新family credit。generic refusal1、host semantics6、password SQL1、decode SQL1、digest session1、static ownership2 PASS，TiDB `make lint` exit0；240/245、strict0、overall complete/pr_ready false不变。命令过程中先后有错误receipt路径、错误cargo cwd/path、修复前E0432 import、两次不完整exact filter0-match、错误独立test target与首次static脚本误把test源码计入production；全部修正后仅最终有命中的receipt计gate。
 
@@ -2415,6 +2424,7 @@ GB只读实测已完成：GBK CI两表65536槽逐槽差0，仅native LE/TiKV BE�
 
 ## Outcomes & Retrospective
 
+- architecture-performance-report-217补足了独立可读的架构/接口/glue/迁移/模块/问题/兼容/性能报告，并纠正原先M6只有current-only成本、没有frozen before/after的局限。结果不是性能改进：默认one-shot AST/value路径显著回退，显式pooled只部分缓解且当前默认未启用；另发现MD5 release-only Prepare错误。targeted functional Demo仍完成，但这些证据再次确认`pr_ready=false`，后续须先修MD5 release路径和固定调度/materialization成本，不能用native fallback优化。
 - 用户明确当前同步evaluator（不是线程）的设计合理，但要求加快：本轮完成后停止把完善计账/测试矩阵当每族前置。以编译+核心语义检查推动真实SQL接管与native删除，边界/性能后补；不隐瞒失败、不引入native fallback。下一ASCII激活与5族共享后端已并行实施，不再多轮只交基础接口。
 
 - round10完成显式nativecap/value窄面，不冒充SQL迁移：7public caller用真实C4/NULL/复用/冲突scope/两类panic/前置错误/PrepareInvoke，8新adapter保留typed原cause，2外crate公共value错到terminal确实通过；107focused通过1ignored，完整1363/4旧failure/94ignored，renderer9/1旧Sequence。A独立逐句审guard切换无gap、8源hash前后一致；原Scope/string指针断言保留并加强sameArc/phase。当前TEST ELF独立8×192/free与负控86，不能升级为heap/peak/OOM证明。Observe只有site结构证据；body必须从boundcap取effective scope，不自动代理另一个captured handle。C发现下一生命周期不能照搬每begin新epoch：nested EXECUTE/IMPORT、PointGet fallback、旧detached Close、subquery内部Close、SET_VAR时序都要测；现有配置不是poolpolicy，下一显式配置接线不猜defaults、不抹旧债务。公开Execution.close目前是调用方discipline，若要类型级借用权限须另定API。整体目标仍active，完成族0/245。
