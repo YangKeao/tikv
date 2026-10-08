@@ -240,6 +240,23 @@ impl NativeDecimalParseValue {
             .and_then(Self::from_shared)
             .expect("shared native decimal precision cast failed")
     }
+
+    /// Fits an assignment value to `DECIMAL(precision, scale)`, rounding first
+    /// and clamping overflow to the signed maximum. `None` denotes an invalid
+    /// shape (`precision < scale`); the boolean reports integer-part overflow.
+    pub fn fit_precision_scale(&self, precision: u32, scale: u32) -> Option<(Self, bool)> {
+        let integer_budget = precision.checked_sub(scale)?;
+        let rounded = self.round_to_scale(scale as i32);
+        let parts = rounded.as_ref();
+        let digits = digit_str(parts.digits);
+        let split = digits.len() - parts.scale as usize;
+        let significant_integer = digits[..split].trim_start_matches('0').len() as u32;
+        if significant_integer <= integer_budget {
+            Some((rounded, false))
+        } else {
+            Some((Self::max_or_min(parts.negative, precision, scale), true))
+        }
+    }
 }
 
 impl NativeDecimalParseRef<'_> {
@@ -957,6 +974,37 @@ fn native_decimal_to_f64_keeps_visible_rounding_raw_sign_and_panic_domain() {
         };
         assert!(std::panic::catch_unwind(|| value.to_f64()).is_err());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn native_decimal_assignment_fit_rounds_before_signed_clamp() {
+    for (literal, expected, overflowed) in [
+        ("99.994", "99.99", false),
+        ("99.995", "99.99", true),
+        ("-99.995", "-99.99", true),
+        ("0.5", "0.50", false),
+    ] {
+        let value = native_decimal_from_literal(literal);
+        let (fitted, actual_overflow) = value.fit_precision_scale(4, 2).unwrap();
+        let fitted_parts = fitted.as_ref();
+        assert_eq!(
+            Decimal::native_format_visible(
+                fitted_parts.negative,
+                fitted_parts.digits,
+                fitted_parts.scale,
+                fitted_parts.storage_scale,
+            ),
+            expected,
+            "{literal}"
+        );
+        assert_eq!(actual_overflow, overflowed, "{literal}");
+    }
+    assert!(
+        native_decimal_from_literal("1")
+            .fit_precision_scale(1, 2)
+            .is_none()
+    );
 }
 
 #[cfg(test)]

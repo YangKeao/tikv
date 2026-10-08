@@ -413,7 +413,9 @@ short-circuit admission policy described above.
   SUM/COUNT division to shared MySQL decimal division; no native digit long-
   division loop remains. `NativeDecimalParseRef::{natural_precision_and_frac,
   hash_precision_and_frac}` uniquely own natural codec and hash-key shape
-  normalization; TiDB only encodes the resulting shape. Native Decimal presentation uses
+  normalization; TiDB only encodes the resulting shape. `NativeDecimalParseValue::fit_precision_scale`
+  owns assignment round-first integer-budget checks and signed maximum clamps;
+  TiDB retains diagnostic construction. Native Decimal presentation uses
   datatype-owned `native_format_visible`,
   `native_format_go_shortest_float` and `native_from_f64` methods. Visible
   HalfUp formatting is distinct from retained storage and the wire formatter.

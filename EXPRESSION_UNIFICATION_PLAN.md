@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round210收口（decimal-assignment-fit-204）：M2 Decimal assignment fit/clamp迁SDK：NativeDecimalParseValue::fit_precision_scale唯一拥有round-first、precision-scale integer budget、significant leading-zero scan、signed max/min clamp与invalid-shape None；TiDB fit API薄投影，datum conversion删除double-round、format max text、reparse与本地overflow判定，只保具体diagnostic/event/declared shape。SDK1、native rounding1、signed conversion1、target controller1 GREEN。首轮SDK test仅因测试误调不存在的coefficient_bytes而compile E0599，改as_ref后同命令GREEN并覆盖日志；无语义失败。remaining broader M2仅chunk fixed-cell fallback。功能240/245不变。
+
+round210启动（decimal-assignment-fit-204）：迁DECIMAL(M,D) round→fit→signed clamp完整值政策，保TiDB error/warning construction。
+
 round209收口（decimal-hash-shape-203）：M2 Decimal hash/natural shape去重：SDK NativeDecimalParseRef新增natural_precision_and_frac/hash_precision_and_frac，唯一拥有leading integer zero与trailing fraction zero归一、precision/fraction min1政策；TiDB precision_and_frac/to_hash_key/hash_key_size删除三份重复shape body，仅编码shared shape并保warning投影。SDK1、native hash vectors3、executor grouping1 GREEN；一次precision_and_frac filter零匹配0/0/513不计gate（hash vector已覆盖该调用）。natural codec shape阻塞随precision API消除；remaining M2为assignment fit/clamp与chunk fixed-cell fallback。功能240/245不变。
 
 round209启动（decimal-hash-shape-203）：迁hash-key normalization/size与natural PrecisionAndFrac到SDK，TiDB只保binary codec适配。
