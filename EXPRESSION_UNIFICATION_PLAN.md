@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round194收口（m0-m6-audit-188）：三独立只读审计M0–M6/全入口/证据。结论：accelerated Demo功能完成240/245+5逐项例外、未发现新增隐式fallback；但canonical goal不能完成，因broader M2 type/value、real request-owner/default-NoColumns/wrapper propagation及M6全门仍open，strict0。修复证据陈旧矛盾：remaining core清空、latest functional=CAST R190、240/245、RAND非例外、5 exceptions approved defer。ledger/links/JSON/diff验证，配对Plan+DCO docs；goal active。
+
+round194启动（m0-m6-audit-188）：3-agent final audit，区分Demo允许后补与真实M2/M4/M6 blocker；先清证据矛盾再决定goal状态。
+
 round193收口（m6-crypto-fips-187）：修M6 cargo-deny blocker而非绕过：tidb_query_crypto AES block与SHA1改workspace-approved OpenSSL，移RustCrypto aes/sha1及锁依赖；OpenSSL3 default provider DES-ECB unsupported导致6/1真实RED，保receipt后恢复仅Vitess fixed-key non-security shard-hash的Rust DES，并在deny只准cipher←des wrapper，其他AES/SHA仍禁。crypto check+7tests+focused clippy GREEN；full make clippy security/style/dashboard/docker/license/cargo-deny已过，后续全仓编译因grpcio-sys旧abseil与当前C++工具链错误exit2，非本变更Rust lint。功能240/245不变，M6 dependency blocker已解除、全仓toolchain blocker明记；goal active。
 
 round193启动（m6-crypto-fips-187）：三owner将AES/DES/SHA1 primitive换OpenSSL以解除deny，不改TiKV策略；真实provider/fixture/clippy验证后决定legacy DES边界。
