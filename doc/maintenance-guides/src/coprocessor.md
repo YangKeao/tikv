@@ -426,7 +426,9 @@ short-circuit admission policy described above.
   `NativeDurationParts` is the canonical raw `{nanoseconds, fsp}` storage,
   including unvalidated chunk metadata; TiDB's public duration is a thin wrapper.
   Likewise `time::NativeTemporalValue` owns raw calendar bits plus independent
-  kind/FSP metadata; TiDB's public `Time` retains only API projection.
+  kind/FSP metadata; TiDB's public `Time` retains only API projection. The SDK
+  `Time::*_from_core_bits` accessors uniquely own all seven unchecked field
+  projections; TiDB `CoreTime` forwards its public accessors.
   `time/native_extract.rs` owns the original unit sets and raw numeric extraction
   formulas without SQL range/FSP normalization. Query_expr `native_extract.rs`
   now uses these services in six EXTRACT profiles: metadata selection, raw

@@ -1474,6 +1474,30 @@ impl Time {
         ((raw >> 41) & 0x1f) as u32
     }
 
+    /// Projects the stored hour without validating the clock.
+    #[inline]
+    pub const fn hour_from_core_bits(raw: u64) -> u32 {
+        ((raw >> 36) & 0x1f) as u32
+    }
+
+    /// Projects the stored minute without validating the clock.
+    #[inline]
+    pub const fn minute_from_core_bits(raw: u64) -> u32 {
+        ((raw >> 30) & 0x3f) as u32
+    }
+
+    /// Projects the stored second without validating the clock.
+    #[inline]
+    pub const fn second_from_core_bits(raw: u64) -> u32 {
+        ((raw >> 24) & 0x3f) as u32
+    }
+
+    /// Projects the stored microsecond without FSP normalization.
+    #[inline]
+    pub const fn microsecond_from_core_bits(raw: u64) -> u32 {
+        ((raw >> 4) & 0x0f_ffff) as u32
+    }
+
     /// Rebuilds the native DATE core at midnight, irrespective of input kind.
     /// CoreTime::from_date stores Y/M/D in bits 63..41 and clears the low four
     /// reserved bits as well as all clock fields. Preserve even invalid stored
@@ -1509,15 +1533,14 @@ impl Time {
     /// normalization or changing reserved bits. This keeps representation
     /// projection in the datatype owner for consumers of actual SDK values.
     pub fn native_core_fields(raw: u64) -> [i32; 7] {
-        let value = Self(raw);
         [
-            value.year() as i32,
-            value.month() as i32,
-            value.day() as i32,
-            value.hour() as i32,
-            value.minute() as i32,
-            value.second() as i32,
-            value.micro() as i32,
+            Self::year_from_core_bits(raw) as i32,
+            Self::month_from_core_bits(raw) as i32,
+            Self::day_from_core_bits(raw) as i32,
+            Self::hour_from_core_bits(raw) as i32,
+            Self::minute_from_core_bits(raw) as i32,
+            Self::second_from_core_bits(raw) as i32,
+            Self::microsecond_from_core_bits(raw) as i32,
         ]
     }
 
