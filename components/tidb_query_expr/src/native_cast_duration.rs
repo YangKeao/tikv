@@ -7,6 +7,7 @@
 use chrono::TimeZone;
 use tidb_query_datatype::codec::{
     convert::native_warning_subject_byte_cap,
+    mysql::duration::native_parse_duration,
     native_duration_convert::{
         NativeDurationParts, NativeDurationTargetError, native_convert_to_duration_target,
         native_number_to_duration,
@@ -44,6 +45,33 @@ fn truncated(value: Option<NativeDurationParts>, input: &str) -> NativeDurationC
         )),
     }
 }
+
+/// Legacy duration casting folds conversion events into the returned raw value.
+pub fn native_legacy_cast_duration(input: NativeSqlStringInput<'_>) -> Option<NativeDurationParts> {
+    match input {
+        I::Duration { nanoseconds, fsp } => Some(NativeDurationParts { nanoseconds, fsp }),
+        I::Int(value) => native_number_to_duration(value as i64, 6)
+            .ok()
+            .map(|converted| converted.value),
+        I::UInt(value) => native_number_to_duration(value as i64, 6)
+            .ok()
+            .map(|converted| converted.value),
+        I::Real(_) | I::Float32(_) | I::Decimal(_) | I::String(_) | I::Bytes(_) => {
+            let text = native_sql_string(input).ok()?;
+            native_parse_duration(text.as_bytes(), 6)
+                .ok()
+                .map(|parsed| NativeDurationParts {
+                    nanoseconds: parsed.nanoseconds(),
+                    fsp: parsed.fsp(),
+                })
+        }
+        I::Json { .. } => native_convert_to_duration_target(input, 6, &chrono::Utc)
+            .ok()
+            .map(|converted| converted.value),
+        _ => None,
+    }
+}
+
 /// The explicit cast's private conversion controller. It intentionally lacks an
 /// early NULL guard: generic conversion consumes the zone before preserving a
 /// NULL, while an explicitly integer-typed mismatched NULL is unsupported.
@@ -333,4 +361,33 @@ mod tests {
         );
         assert_eq!(reads.get(), 5);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_duration_cast_preserves_numeric_text_identity_and_json_sources() {
+    use NativeSqlStringInput as I;
+    let visible = |input| native_legacy_cast_duration(input).map(|v| (v.nanoseconds, v.fsp));
+    assert_eq!(visible(I::Int(113045)), Some((41_445_000_000_000, 6)));
+    assert_eq!(visible(I::Real(113045.0)), Some((41_445_000_000_000, 6)));
+    assert_eq!(
+        visible(I::Bytes(b"11:30:45")),
+        Some((41_445_000_000_000, 6))
+    );
+    assert_eq!(
+        visible(I::Duration {
+            nanoseconds: 7,
+            fsp: 2
+        }),
+        Some((7, 2))
+    );
+    let json =
+        tidb_query_datatype::codec::native_json_parse::native_json_parse(r#""11:30:45""#).unwrap();
+    assert_eq!(
+        visible(I::Json {
+            type_code: json.0,
+            value: &json.1
+        }),
+        Some((41_445_000_000_000, 6))
+    );
 }

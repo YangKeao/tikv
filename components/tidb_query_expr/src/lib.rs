@@ -149,7 +149,7 @@ pub use native_cast_arg_string::{
 mod native_cast_duration;
 pub use native_cast_duration::{
     NativeDurationCastOutcome, NativeDurationCastSource, native_cast_arg_as_duration,
-    native_cast_duration, native_parse_computed_duration,
+    native_cast_duration, native_legacy_cast_duration, native_parse_computed_duration,
 };
 
 mod native_cast_float;

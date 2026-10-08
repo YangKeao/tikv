@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round187收口（legacy-cast-duration-181）：native_cast_duration接管Int/Real/Decimal/String/Duration及JSON legacy编排，U删本地format/parse/accessor。SDK+existing composition GREEN；新test 11:30:45纳秒算术oracle误写RED，test-only改正后绿。partial CAST无credit；239strict0remaining6。
+
+round187启动（legacy-cast-duration-181）：TiKV已有duration parser/number converter统一legacy六source+JSON；bridge投影MySqlDuration；U仅child/NULL。三owner。
+
 round186收口（legacy-json-scalar-cast-180）：native_mysql_json接管legacy JSON tag/payload→REAL/INT、lossy prefix及zero fold；cast_json窄bridge；U删2个本地解码体，仅child/NULL/result。最终SDK/bridge/Unistore 3/3 GREEN；partial CAST无credit，239strict0remaining6。
 
 round186启动（legacy-json-scalar-cast-180）：D native_mysql_json接管legacy JSON tag/payload→REAL/INT、lossy prefix及zero fold；A cast_json bridge；U删CastJsonAsReal/Int本地解码算法，仅child/NULL/result。三owner，父exports/tests；partial CAST no credit，239strict0remaining6。
