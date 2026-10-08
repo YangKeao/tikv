@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round200收口（null-rejection-context-194）：修复planner null-rejection丢live Columns：新增is_null_rejected_in，proof/nullify递归及最终eval全程显式ctx；旧API仅作为NoColumns compatibility wrapper。outer-to-inner rule用RuleContext.eval_context；join simplify/derive用builder.fold_context或明确NoColumns fallback。CONNECTION_ID条件回归先RED后GREEN，proof table1、outer rule1、pushdown1 GREEN。架构索引更新；R198已知wrapper-context gaps归零，功能240/245不变；broader M2/M6仍active。
+
+round200启动（null-rejection-context-194）：为null-rejection证明线程化live Columns并切换三个planner调用，避免session函数被NoColumns误折导致outer join错误转换。
+
 round199收口（window-param-marker-193）：修复window整数参数prepared binding：get_uint64_from_constant沿现有Columns::param_value解析ParamMarker order，负order/missing/error仍None，保留Null/negative/deferred/literal分类。新增unit先RED(None vs Some(7))后GREEN；原Go表1 GREEN；真实PREPARE NTILE(?)→EXECUTE USING @buckets SQL 1 GREEN，覆盖physical builder。未增fallback/owner。功能240/245不变；R198两gap剩null-rejection live-context一项。
 
 round199启动（window-param-marker-193）：让NTH_VALUE/LEAD/LAG/NTILE整数常量提取沿live Columns解析prepared ParamMarker；先RED再修，验证unit+真实SQL。
