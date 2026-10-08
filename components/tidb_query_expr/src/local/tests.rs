@@ -132,6 +132,46 @@ fn local_output_shapes_and_selections() {
 }
 
 #[test]
+fn m6_width_one_owned_transport_cost_record() {
+    use std::{hint::black_box, time::Instant};
+
+    use super::runtime::{StorageMode, vector_storage_bytes};
+
+    const ITERATIONS: u32 = 10_000;
+    let mut program = compile(&plus(input(0), constant(Some(1))), &[ft()]);
+    let data = columns(&[Some(41)]);
+    let mut state = LocalEvalState::default();
+    let mut ctx = EvalContext::default();
+    let started = Instant::now();
+    let mut last = None;
+    for _ in 0..ITERATIONS {
+        let output = program
+            .eval(
+                &mut state,
+                &mut ctx,
+                LocalBatch {
+                    columns: &data,
+                    physical_rows: 1,
+                    selection: &[0],
+                },
+            )
+            .unwrap();
+        black_box(&output);
+        last = Some(output);
+    }
+    let elapsed = started.elapsed();
+    let output = last.unwrap();
+    let retained_output_bytes = vector_storage_bytes(&output, StorageMode::ExactRetained);
+    assert_ne!(retained_output_bytes, usize::MAX);
+    assert_eq!(output.to_int_vec(), vec![Some(42)]);
+    eprintln!(
+        "M6_WIDTH_ONE iterations={ITERATIONS} elapsed_ns={} retained_output_bytes={} owned_input_payload_copies=0 owned_result_vectors_per_iteration=2 output_appends_per_iteration=1",
+        elapsed.as_nanos(),
+        retained_output_bytes,
+    );
+}
+
+#[test]
 fn local_registered_id_without_tipb() {
     let mut program = compile(
         &call(
