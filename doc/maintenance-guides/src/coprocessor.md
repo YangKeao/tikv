@@ -409,7 +409,9 @@ short-circuit admission policy described above.
   allocation are not claims of performance neutrality or full heap accounting.
   `NativeDecimalParseValue` is the canonical owned sign/coefficient/visible-scale/
   storage-scale/declared-shape value; TiDB's public Decimal is a thin wrapper
-  and retains its TiDB-only JSON/error adapters. Native Decimal presentation uses
+  and retains its TiDB-only JSON/error adapters. AVG finalization delegates its
+  SUM/COUNT division to shared MySQL decimal division; no native digit long-
+  division loop remains. Native Decimal presentation uses
   datatype-owned `native_format_visible`,
   `native_format_go_shortest_float` and `native_from_f64` methods. Visible
   HalfUp formatting is distinct from retained storage and the wire formatter.
