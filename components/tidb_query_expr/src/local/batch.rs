@@ -10213,6 +10213,9 @@ impl EvaluatedBytesWorker {
             .map_err(ReportedEvaluatedFailure::unreported)?;
         let mut sql_failure = None;
         let result = (|| {
+            // One fresh budget owns every preflight, driver/frame counter and
+            // output check in this public invocation.
+            let mut budget = EvalBudget::exact(self.limits)?;
             let materialization_available = if matches!(
                 args.role(),
                 EvaluatedArgsRole::DecimalUnary
@@ -10249,7 +10252,7 @@ impl EvaluatedBytesWorker {
                         .capacity()
                         .checked_add(temporal_zone_heap_bytes(&zone))
                         .ok_or_else(ready_value_storage_overflow)?;
-                    EvalBudget::exact(self.limits)?.check_output(64, input_bytes)?;
+                    budget.check_output(64, input_bytes)?;
                     (
                         [
                             ScalarValue::Bytes(Some(value)),
@@ -10278,7 +10281,7 @@ impl EvaluatedBytesWorker {
                         .checked_add(64)
                         .map(|bytes| bytes.max(11))
                         .ok_or_else(ready_value_storage_overflow)?;
-                    EvalBudget::exact(self.limits)?.check_output(bound, input_bytes)?;
+                    budget.check_output(bound, input_bytes)?;
                     (
                         [
                             ScalarValue::Bytes(Some(value)),
@@ -10313,7 +10316,7 @@ impl EvaluatedBytesWorker {
                     };
                     // The name is an owned invocation input, not a SQL slot. Check
                     // it with the reply bound before installing or invoking anything.
-                    EvalBudget::exact(self.limits)?.check_output(bound, input_bytes)?;
+                    budget.check_output(bound, input_bytes)?;
                     (
                         [
                             ScalarValue::Bytes(Some(value)),
@@ -10339,12 +10342,19 @@ impl EvaluatedBytesWorker {
                 // Ref first, then takes/drops the actual owned zone before lease finish.
                 let guard = TemporalBindingGuard { worker: self };
                 guard.worker.temporal_metadata()?.bind(zone)?;
-                guard.worker.eval_ready(ready, arity, &mut sql_failure)
+                guard
+                    .worker
+                    .eval_ready_with_budget(ready, arity, &mut budget, &mut sql_failure)
             } else if let Some(increment) = division_increment {
                 let guard = DecimalDivisionBindingGuard { worker: self };
                 guard.worker.decimal_division_metadata()?.bind(increment)?;
                 let before = guard.worker.witness.invocations();
-                let result = guard.worker.eval_ready(ready, arity, &mut sql_failure);
+                let result = guard.worker.eval_ready_with_budget(
+                    ready,
+                    arity,
+                    &mut budget,
+                    &mut sql_failure,
+                );
                 let checked = guard.worker.decimal_division_metadata()?.finish(
                     guard.worker.witness.invocations().checked_sub(before),
                     result.is_ok(),
@@ -10372,7 +10382,9 @@ impl EvaluatedBytesWorker {
                 // Arm the guard before binding, including any failing bind.
                 let guard = RegexpBindingGuard { worker: self };
                 guard.worker.regexp_metadata()?.bind(invocation, limit)?;
-                guard.worker.eval_ready(ready, arity, &mut sql_failure)
+                guard
+                    .worker
+                    .eval_ready_with_budget(ready, arity, &mut budget, &mut sql_failure)
                 // The guard clears binding/record before finish_invocation.
             } else if let Some(invocation) = like_invocation {
                 let input_bytes = ready[..arity]
@@ -10393,9 +10405,11 @@ impl EvaluatedBytesWorker {
                     .ok_or_else(ready_value_storage_overflow)?;
                 let guard = LikeBindingGuard { worker: self };
                 guard.worker.like_metadata()?.bind(invocation, limit)?;
-                guard.worker.eval_ready(ready, arity, &mut sql_failure)
+                guard
+                    .worker
+                    .eval_ready_with_budget(ready, arity, &mut budget, &mut sql_failure)
             } else {
-                self.eval_ready(ready, arity, &mut sql_failure)
+                self.eval_ready_with_budget(ready, arity, &mut budget, &mut sql_failure)
             }
         })();
         self.finish_invocation(result)
@@ -10437,10 +10451,22 @@ impl EvaluatedBytesWorker {
         }
     }
 
+    #[cfg(test)]
     fn eval_ready(
         &mut self,
         ready: [ScalarValue; 6],
         arity: usize,
+        sql_failure: &mut Option<EvaluatedSqlFailureKind>,
+    ) -> LocalResult<ComputedValue> {
+        let mut budget = EvalBudget::exact(self.limits)?;
+        self.eval_ready_with_budget(ready, arity, &mut budget, sql_failure)
+    }
+
+    fn eval_ready_with_budget(
+        &mut self,
+        ready: [ScalarValue; 6],
+        arity: usize,
+        budget: &mut EvalBudget,
         sql_failure: &mut Option<EvaluatedSqlFailureKind>,
     ) -> LocalResult<ComputedValue> {
         let input_bytes = ready[..arity].iter().try_fold(0usize, |total, value| {
@@ -10463,7 +10489,6 @@ impl EvaluatedBytesWorker {
             input_bytes
         };
         let row = [0];
-        let mut budget = EvalBudget::exact(self.limits)?;
         if self.operation.uses_native_temporal_zone() {
             budget.check_output(0, input_bytes)?;
         }
@@ -11247,7 +11272,7 @@ impl EvaluatedBytesWorker {
             self.operation.input_role(),
             &row,
             &mut self.witness,
-            &mut budget,
+            budget,
         );
         let division_status = if self.operation.decimal_division_kind().is_some() {
             match self.decimal_division_metadata()?.consume(
@@ -11550,7 +11575,7 @@ impl EvaluatedBytesWorker {
             {
                 let value = value
                     .map(|source| {
-                        materialize_native_vector(source, output_bytes, input_bytes, &budget)
+                        materialize_native_vector(source, output_bytes, input_bytes, budget)
                     })
                     .transpose()?;
                 let retained = value
@@ -12374,6 +12399,22 @@ mod ready_value_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
+
+    #[test]
+    fn public_evaluated_args_share_one_budget_across_preflight_and_driver() {
+        let source = include_str!("batch.rs");
+        let start = source
+            .find("pub fn eval_args_reported(")
+            .expect("public evaluated-args entry");
+        let end = source[start..]
+            .find("fn finish_invocation")
+            .map(|offset| start + offset)
+            .expect("invocation finish boundary");
+        let body = &source[start..end];
+        assert_eq!(body.matches("EvalBudget::exact(self.limits)").count(), 1);
+        assert_eq!(body.matches("eval_ready_with_budget").count(), 5);
+        assert_eq!(body.matches("budget.check_output").count(), 3);
+    }
 
     #[test]
     fn json_search_profile_preserves_actual_specs_ordered_scopes_and_null_results() {
