@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round201收口（decimal-binary-decode-195）：M2固定二进制Decimal reader迁SDK：tidb_query_datatype native_decimal_codec现唯一拥有sign bit、shape/bin size、nine-word clamp、partial-word big-endian、corrupt-word/consumed/warning/negative-zero算法；TiDB from_bin_with_failure只投影decoded words→私有Decimal及failure。删除native read_word/fixWordCnt及约130行decode body，write/size/decode同模块。SDK新1与native原3 tests GREEN，0零匹配；功能240/245不变，strict0，broader M2仍active。
+
+round201启动（decimal-binary-decode-195）：从长期M2清单选fixed binary reader，把完整word decoder迁入已有SDK codec模块并删除TiDB重复body；保private Decimal/error投影与Go cursor/negative-zero语义。
+
 round200收口（null-rejection-context-194）：修复planner null-rejection丢live Columns：新增is_null_rejected_in，proof/nullify递归及最终eval全程显式ctx；旧API仅作为NoColumns compatibility wrapper。outer-to-inner rule用RuleContext.eval_context；join simplify/derive用builder.fold_context或明确NoColumns fallback。CONNECTION_ID条件回归先RED后GREEN，proof table1、outer rule1、pushdown1 GREEN。架构索引更新；R198已知wrapper-context gaps归零，功能240/245不变；broader M2/M6仍active。
 
 round200启动（null-rejection-context-194）：为null-rejection证明线程化live Columns并切换三个planner调用，避免session函数被NoColumns误折导致outer join错误转换。

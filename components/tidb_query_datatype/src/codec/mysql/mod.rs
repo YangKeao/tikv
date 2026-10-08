@@ -53,9 +53,9 @@ pub use self::{
     },
     native_decimal_codec::{
         DecimalCodecError as NativeDecimalCodecError,
-        DecimalCodecWarning as NativeDecimalCodecWarning,
-        checked_bin_size as native_decimal_checked_bin_size,
-        decimal_bin_size as native_decimal_bin_size,
+        DecimalCodecWarning as NativeDecimalCodecWarning, NativeDecimalDecodeFailure,
+        NativeDecimalDecoded, checked_bin_size as native_decimal_checked_bin_size,
+        decimal_bin_size as native_decimal_bin_size, decode_bin as native_decimal_decode_bin,
         remove_leading_zeros as native_decimal_remove_leading_zeros,
         write_bin as native_decimal_write_bin,
     },

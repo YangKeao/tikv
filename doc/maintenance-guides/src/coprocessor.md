@@ -478,8 +478,9 @@ short-circuit admission policy described above.
   requested channels and generic MyDecimal preparation. Datatype
   `mysql/native_mydecimal.rs` now owns the fixed-word algorithms, while native
   `MyDecimal` retains its original private 40-byte storage facade and safe
-  raw-parts adaptation. `mysql/native_decimal_codec.rs` owns the required binary
-  writer/size primitives. `mysql/native_decimal_parse.rs` separately owns native
+  raw-parts adaptation. `mysql/native_decimal_codec.rs` owns fixed binary size,
+  writer and decoder algorithms; native Decimal only projects decoded words into
+  its private value and error types. `mysql/native_decimal_parse.rs` separately owns native
   digit-string literal/integer construction, normalization, MySQL parse/status
   and bounded-shift policy. Native Decimal keeps its private SmallVec24 and
   five metadata fields; owned parts move the real coefficient, and unchanged
