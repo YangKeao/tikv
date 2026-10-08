@@ -355,6 +355,70 @@ impl MyDecimal {
         Ok(value)
     }
 
+    /// Projects an arbitrary valid coefficient into the fixed nine-word cell.
+    /// Integer overflow retains the low 81 digits, while fraction overflow
+    /// retains the prefix that fits after the integer words, matching
+    /// `FromString` without formatting and reparsing a SQL literal.
+    pub fn from_decimal_parts_lossy(
+        negative: bool,
+        coefficient: &str,
+        storage_scale: u32,
+        result_frac: u32,
+        minimum_integer_digit: bool,
+    ) -> Result<(MyDecimal, Option<DecimalError>), DecimalError> {
+        match Self::from_decimal_parts(
+            negative,
+            coefficient,
+            storage_scale,
+            result_frac,
+            minimum_integer_digit,
+        ) {
+            Ok(value) => return Ok((value, None)),
+            Err(DecimalError::Overflow) => {}
+            Err(error) => return Err(error),
+        }
+
+        let bytes = coefficient.as_bytes();
+        let storage_scale = usize::try_from(storage_scale).map_err(|_| DecimalError::Overflow)?;
+        if bytes.is_empty()
+            || bytes.iter().any(|byte| !byte.is_ascii_digit())
+            || storage_scale > bytes.len()
+        {
+            return Err(DecimalError::BadNumber);
+        }
+        let integer_len = bytes.len() - storage_scale;
+        let stored_integer_len = if minimum_integer_digit {
+            integer_len.max(1)
+        } else {
+            integer_len
+        };
+        let words_int = digits_to_words(stored_integer_len as i32) as usize;
+        let (kept, kept_scale, disposition) = if words_int > MAX_WORD_BUF_LEN {
+            let kept_integer = MAX_WORD_BUF_LEN * DIGITS_PER_WORD as usize;
+            (
+                &coefficient[integer_len - kept_integer..integer_len],
+                0,
+                DecimalError::Overflow,
+            )
+        } else {
+            let kept_scale =
+                storage_scale.min((MAX_WORD_BUF_LEN - words_int) * DIGITS_PER_WORD as usize);
+            (
+                &coefficient[..integer_len + kept_scale],
+                kept_scale,
+                DecimalError::Truncated,
+            )
+        };
+        let value = Self::from_decimal_parts(
+            negative,
+            kept,
+            kept_scale as u32,
+            result_frac.min(kept_scale as u32),
+            minimum_integer_digit,
+        )?;
+        Ok((value, Some(disposition)))
+    }
+
     #[must_use]
     pub fn from_scaled_i128(
         value: i128,
@@ -1594,6 +1658,35 @@ fn parse_decimal_group(group: &[u8]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lossy_decimal_parts_match_fixed_word_parser_without_text_bridge() {
+        for (negative, coefficient, scale) in [
+            (false, format!("{}1", "9".repeat(81)), 1u32),
+            (true, format!("1{}", "2".repeat(81)), 0u32),
+            (false, format!("123{}", "4".repeat(90)), 90u32),
+            (true, "7".repeat(90), 90u32),
+        ] {
+            let split = coefficient.len() - scale as usize;
+            let literal = format!(
+                "{}{}{}{}",
+                if negative { "-" } else { "" },
+                if split == 0 {
+                    "0"
+                } else {
+                    &coefficient[..split]
+                },
+                if scale == 0 { "" } else { "." },
+                &coefficient[split..]
+            );
+            let parsed = MyDecimal::from_string(literal.as_bytes());
+            let projected =
+                MyDecimal::from_decimal_parts_lossy(negative, &coefficient, scale, scale, true)
+                    .unwrap();
+            assert_eq!(projected.1, parsed.1, "{literal}");
+            assert_eq!(projected.0.raw_parts(), parsed.0.raw_parts(), "{literal}");
+        }
+    }
 
     #[test]
     fn native_mydecimal_keeps_status_raw_storage_and_round_render_paths() {
