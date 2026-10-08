@@ -27,6 +27,56 @@ pub enum NativeFloatDiagnostic<'a> {
     UnhandledTruncated,
 }
 
+/// Preserves the legacy Go/Unistore numeric-prefix seam for native callers.
+///
+/// Scanning is deliberately ASCII byte based and does not trim. A decimal
+/// fraction and exponent are considered part of the prefix only when they
+/// contain at least one digit; `allow_float` enables both forms.
+pub fn native_legacy_numeric_prefix(text: &str, allow_float: bool) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut cursor = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let integer_start = cursor;
+
+    while matches!(bytes.get(cursor), Some(b'0'..=b'9')) {
+        cursor += 1;
+    }
+    let mut end = cursor;
+    let mut saw_digit = cursor != integer_start;
+
+    if allow_float && matches!(bytes.get(cursor), Some(b'.')) {
+        let fraction_start = cursor + 1;
+        let mut fraction_end = fraction_start;
+        while matches!(bytes.get(fraction_end), Some(b'0'..=b'9')) {
+            fraction_end += 1;
+        }
+        if fraction_end != fraction_start {
+            cursor = fraction_end;
+            end = fraction_end;
+            saw_digit = true;
+        }
+    }
+
+    if !saw_digit {
+        return None;
+    }
+
+    if allow_float && matches!(bytes.get(cursor), Some(b'e' | b'E')) {
+        let mut exponent_end = cursor + 1;
+        if matches!(bytes.get(exponent_end), Some(b'+' | b'-')) {
+            exponent_end += 1;
+        }
+        let exponent_start = exponent_end;
+        while matches!(bytes.get(exponent_end), Some(b'0'..=b'9')) {
+            exponent_end += 1;
+        }
+        if exponent_end != exponent_start {
+            end = exponent_end;
+        }
+    }
+
+    Some(text[..end].to_owned())
+}
+
 /// Native getValidFloatPrefix byte scanner, without context or trimming.
 pub fn native_valid_float_prefix(input: &str, is_function_cast: bool) -> NativeFloatPrefix<'_> {
     if is_function_cast && input.is_empty() {
@@ -199,4 +249,22 @@ fn native_float_parse_keeps_byte_prefix_and_reported_diagnostics_separate() {
     assert_eq!(native_float_warning_input(" 12\0tail "), "12");
     let boundary = format!("{}é", "a".repeat(127));
     assert_eq!(native_float_warning_input(&boundary), &boundary[..127]);
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_numeric_prefix_preserves_integer_fraction_and_exponent_boundaries() {
+    for (text, allow_float, expected) in [
+        ("-12tail", false, Some("-12")),
+        ("+1.25e-2x", true, Some("+1.25e-2")),
+        ("1.x", true, Some("1")),
+        ("1e+x", true, Some("1")),
+        (".5", true, Some(".5")),
+        ("+x", true, None),
+    ] {
+        assert_eq!(
+            native_legacy_numeric_prefix(text, allow_float).as_deref(),
+            expected
+        );
+    }
 }
