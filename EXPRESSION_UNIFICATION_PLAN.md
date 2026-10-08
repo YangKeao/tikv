@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round198收口（wrapper-classification-192）：window生产链Session→physical_builder::build_window→WindowExec<StmtContext>，partition/order/range/aggregate/value/lead-lag均用同一ctx；追加zero-slot SUM(ASCII(v)) OVER回归1 GREEN，确认无NoColumns owner loss。DDL default真实路径均live StmtContext；aggregation wrap_cast NoColumns仅literal metadata probe。发现两项未来修复：null-rejection helper丢planner live Columns可能误折session函数；window uint constant extractor拒绝ParamMarker。storage_class parse UTC/eval default-zone差异虽可疑，但首个UNIX_TIMESTAMP探针旧行为即绿，未证明语义bug，未改代码。功能240/245不变；两gap明确排入后续。
+
+round198启动（wrapper-classification-192）：分类window runtime与Rust standalone DDL/fold NoColumns；只修有可复现语义gap，不为ownerless构造伪造execution。
+
 round197收口（wrapper-owner-matrix-191）：三并行wrapper审计；query+DML确认StmtContext统一注入live execution，route优先scope/execution后才one-shot；range audit仅Go pkg无NoColumns，aggregate/window审计无有效结论，故不虚报全闭合。真实SQL immutable filters重跑：query+DML/COW1、execute/import1、predicate/filter zero-slot1、comparison typed/filter/tuple1、grouping/rollup1全GREEN。锁存wrapper局部证据；window及Rust standalone DDL/fold分类仍待，功能240/245不变，goal active。
 
 round197启动（wrapper-owner-matrix-191）：审计default/fold/DML、range/filter、aggregate/window传播，优先修真实live-context NoColumns，不改intentional standalone。
