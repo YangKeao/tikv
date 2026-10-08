@@ -411,7 +411,9 @@ short-circuit admission policy described above.
   storage-scale/declared-shape value; TiDB's public Decimal is a thin wrapper
   and retains its TiDB-only JSON/error adapters. AVG finalization delegates its
   SUM/COUNT division to shared MySQL decimal division; no native digit long-
-  division loop remains. Native Decimal presentation uses
+  division loop remains. `NativeDecimalParseRef::{natural_precision_and_frac,
+  hash_precision_and_frac}` uniquely own natural codec and hash-key shape
+  normalization; TiDB only encodes the resulting shape. Native Decimal presentation uses
   datatype-owned `native_format_visible`,
   `native_format_go_shortest_float` and `native_from_f64` methods. Visible
   HalfUp formatting is distinct from retained storage and the wire formatter.

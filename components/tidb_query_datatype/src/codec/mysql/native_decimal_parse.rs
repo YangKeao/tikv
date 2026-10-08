@@ -243,6 +243,28 @@ impl NativeDecimalParseValue {
 }
 
 impl NativeDecimalParseRef<'_> {
+    /// Source `MyDecimal.PrecisionAndFrac` over retained coefficient scale.
+    pub fn natural_precision_and_frac(self) -> (i32, i32) {
+        self.precision_and_frac(false)
+    }
+
+    /// Source hash-key shape, ignoring insignificant trailing fraction zeros.
+    pub fn hash_precision_and_frac(self) -> (i32, i32) {
+        self.precision_and_frac(true)
+    }
+
+    fn precision_and_frac(self, trim_fraction: bool) -> (i32, i32) {
+        let digits = digit_str(self.digits);
+        let split = digits.len() - self.storage_scale as usize;
+        let integer_digits = digits[..split].trim_start_matches('0').len() as i32;
+        let fraction = if trim_fraction {
+            digits[split..].trim_end_matches('0').len() as i32
+        } else {
+            self.storage_scale as i32
+        };
+        ((integer_digits + fraction).max(1), fraction)
+    }
+
     /// Native coefficient zero predicate, retaining UTF-8 validation and the
     /// original empty/all-zero coefficient behavior.
     pub fn is_zero(self) -> bool {
@@ -935,6 +957,29 @@ fn native_decimal_to_f64_keeps_visible_rounding_raw_sign_and_panic_domain() {
         };
         assert!(std::panic::catch_unwind(|| value.to_f64()).is_err());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn native_decimal_shapes_keep_natural_and_hash_fraction_policy() {
+    let value = NativeDecimalParseRef {
+        negative: false,
+        digits: b"001234500",
+        scale: 2,
+        storage_scale: 5,
+        declared_shape: Some((20, 2)),
+    };
+    assert_eq!(value.natural_precision_and_frac(), (7, 5));
+    assert_eq!(value.hash_precision_and_frac(), (5, 3));
+    let zero = NativeDecimalParseRef {
+        negative: true,
+        digits: b"0000",
+        scale: 4,
+        storage_scale: 4,
+        declared_shape: None,
+    };
+    assert_eq!(zero.natural_precision_and_frac(), (4, 4));
+    assert_eq!(zero.hash_precision_and_frac(), (1, 0));
 }
 
 #[cfg(test)]
