@@ -5,7 +5,8 @@
 use std::str::Utf8Error;
 
 use super::{
-    mysql::time::TimeType,
+    mysql::{json::native_binary_json_string_bytes, time::TimeType},
+    native_float_parse::native_legacy_numeric_prefix,
     native_json_construct::{
         NativeJsonConstructError, native_json_from_duration, native_json_from_f64,
         native_json_from_i64, native_json_from_opaque, native_json_from_string,
@@ -114,6 +115,45 @@ pub fn native_legacy_cast_json(input: NativeSqlStringInput<'_>) -> Option<(u8, V
         other => other,
     };
     native_convert_to_json_target(input).ok()
+}
+
+pub fn native_legacy_json_to_real(type_code: u8, value: &[u8]) -> f64 {
+    match type_code {
+        0x0b => <&[u8; 8]>::try_from(value)
+            .ok()
+            .map(|bytes| f64::from_le_bytes(*bytes))
+            .unwrap_or(0.0),
+        0x0c => native_binary_json_string_bytes(type_code, value)
+            .map(String::from_utf8_lossy)
+            .and_then(|text| native_legacy_numeric_prefix(text.trim_start(), true))
+            .and_then(|prefix| prefix.parse::<f64>().ok())
+            .unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+pub fn native_legacy_json_to_integer(type_code: u8, value: &[u8]) -> i128 {
+    match type_code {
+        0x09 => <&[u8; 8]>::try_from(value)
+            .ok()
+            .map(|bytes| i64::from_le_bytes(*bytes) as i128)
+            .unwrap_or(0),
+        0x0a => <&[u8; 8]>::try_from(value)
+            .ok()
+            .map(|bytes| u64::from_le_bytes(*bytes) as i128)
+            .unwrap_or(0),
+        0x0b => <&[u8; 8]>::try_from(value)
+            .ok()
+            .map(|bytes| f64::from_le_bytes(*bytes) as i128)
+            .unwrap_or(0),
+        0x0c => native_binary_json_string_bytes(type_code, value)
+            .map(String::from_utf8_lossy)
+            .and_then(|text| native_legacy_numeric_prefix(text.trim_start(), false))
+            .and_then(|prefix| prefix.parse::<i64>().ok())
+            .map(i128::from)
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 /// Aggregate-style opaque conversion: Bytes is unconditional, while String
@@ -454,4 +494,26 @@ fn legacy_json_cast_preserves_lossy_text_temporal_fsp_and_seven_source_routes() 
         })
         .ok()
     );
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_json_scalar_casts_preserve_numeric_text_and_zero_fallbacks() {
+    let string = native_json_parse(r#""12tail""#).unwrap();
+    assert_eq!(native_legacy_json_to_integer(string.0, &string.1), 12);
+    assert_eq!(native_legacy_json_to_real(string.0, &string.1), 12.0);
+    assert_eq!(
+        native_legacy_json_to_integer(0x09, &(-7_i64).to_le_bytes()),
+        -7
+    );
+    assert_eq!(
+        native_legacy_json_to_integer(0x0a, &u64::MAX.to_le_bytes()),
+        u64::MAX as i128
+    );
+    assert_eq!(
+        native_legacy_json_to_real(0x0b, &2.5_f64.to_le_bytes()),
+        2.5
+    );
+    assert_eq!(native_legacy_json_to_integer(0xff, b"bad"), 0);
+    assert_eq!(native_legacy_json_to_real(0xff, b"bad"), 0.0);
 }
