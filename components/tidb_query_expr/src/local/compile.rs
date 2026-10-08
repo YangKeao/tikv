@@ -25,6 +25,7 @@ pub(super) enum ProgramEntry {
     Row,
     ControlLineage,
     SqlNumericBatch,
+    SqlNumericVector,
     EvaluatedAscii,
     EvaluatedBytes,
 }
@@ -62,12 +63,14 @@ impl LocalProgram {
     }
 }
 
-/// Opaque ownership facade for checked SQL numeric-batch evaluation. It has no
-/// raw-RPN, LocalProgram, decoded or row-evaluation escape. The binding methods
-/// in the shared batch module select the operand-major execution domain.
+/// Opaque ownership facade for checked SQL numeric-batch evaluation. The
+/// reported binding entry retains the operand-major execution domain, while the
+/// decoded entry owns a separately compiled eager RPN over the same revalidated
+/// source. Both entries select the official generated kernel metadata.
 #[derive(Debug)]
 pub struct LocalNumericBatchProgram {
     pub(super) inner: LocalProgram,
+    pub(super) vector: LocalProgram,
 }
 
 impl LocalNumericBatchProgram {
@@ -364,6 +367,7 @@ enum CompileMode<'a> {
     Profiled(&'a OrdinaryProfileSpec),
     Lineaged(&'a ControlLineageFacts),
     NumericBatch(&'a NumericBatchFacts),
+    NumericVector(&'a NumericBatchFacts),
     EvaluatedAscii,
     EvaluatedBytes(EvaluatedBytesOp),
 }
@@ -374,6 +378,7 @@ impl CompileMode<'_> {
             Self::Legacy(_) | Self::Profiled(_) => ProgramEntry::Row,
             Self::Lineaged(_) => ProgramEntry::ControlLineage,
             Self::NumericBatch(_) => ProgramEntry::SqlNumericBatch,
+            Self::NumericVector(_) => ProgramEntry::SqlNumericVector,
             Self::EvaluatedAscii => ProgramEntry::EvaluatedAscii,
             Self::EvaluatedBytes(_) => ProgramEntry::EvaluatedBytes,
         }
@@ -633,7 +638,9 @@ pub fn compile_control_with_lineage(
 /// Every source/schema declaration and batch-only call site is revalidated with
 /// the current limits before the shared compiler clones descriptors or prepares
 /// a call. The opaque binding entry evaluates each complete left operand before
-/// its complete right operand, then invokes the same prepared kernel per lane.
+/// its complete right operand and invokes the prepared kernel per lane. A
+/// second closed decoded entry emits ordinary eager RPN nodes, so a real column
+/// batch reaches the same generated vector kernel once with `output_rows = N`.
 ///
 /// SQL origin and fixed native source kinds remain producer assertions, not
 /// authenticated facts. This does not admit PB, AST-value consumers,
@@ -650,6 +657,7 @@ pub fn compile_numeric_batch(
     facts.validate(spec, schema, cx.limits)?;
     Ok(LocalNumericBatchProgram {
         inner: compile(spec, schema, cx, CompileMode::NumericBatch(facts))?,
+        vector: compile(spec, schema, cx, CompileMode::NumericVector(facts))?,
     })
 }
 
@@ -925,6 +933,15 @@ fn compile(
                                     })?
                                     .clone(),
                             ),
+                            CompileMode::NumericVector(facts) => {
+                                facts.site(ordinal).ok_or_else(|| {
+                                    LocalError::InvalidSpec(
+                                        "numeric-vector facts are missing the current call occurrence"
+                                            .into(),
+                                    )
+                                })?;
+                                None
+                            }
                             CompileMode::Legacy(_) => {
                                 registry::check_local_admission(&shape, metadata)
                                     .map_err(invalid)?;
@@ -1062,7 +1079,7 @@ fn compile(
             ));
         }
     }
-    if let CompileMode::NumericBatch(facts) = mode {
+    if let CompileMode::NumericBatch(facts) | CompileMode::NumericVector(facts) = mode {
         if visited != facts.node_count() {
             return Err(LocalError::InvalidSpec(
                 "numeric-batch compilation did not retain every source occurrence".into(),

@@ -673,6 +673,16 @@ impl LocalProgram {
         ctx: &mut EvalContext,
         batch: LocalBatch<'_>,
     ) -> LocalResult<VectorValue> {
+        self.eval_decoded_entry(ProgramEntry::Row, limits, ctx, batch)
+    }
+
+    fn eval_decoded_entry(
+        &mut self,
+        entry: ProgramEntry,
+        limits: ExecutionLimits,
+        ctx: &mut EvalContext,
+        batch: LocalBatch<'_>,
+    ) -> LocalResult<VectorValue> {
         if batch.columns.columns_len() != self.schema.len() {
             return Err(LocalError::InvalidBatch(
                 "column count differs from compiled schema".into(),
@@ -695,7 +705,7 @@ impl LocalProgram {
             }
         }
         validate_selection(batch.physical_rows, batch.selection)?;
-        self.check_entry(ProgramEntry::Row)?;
+        self.check_entry(entry)?;
         if self.host_catalog.is_some() {
             return Err(LocalError::HostContract(
                 "host program requires runtime services".into(),
@@ -973,6 +983,22 @@ fn finish_numeric_output(
 }
 
 impl LocalNumericBatchProgram {
+    /// Evaluates already decoded columns through the ordinary eager RPN entry.
+    /// The checked SQL source and schema were revalidated before this private
+    /// vector program was compiled, so this does not widen generic admission.
+    /// Selection occurrence order (including duplicates) is passed unchanged to
+    /// the generated vector kernel; no singleton binding or parent lane loop is
+    /// involved.
+    pub fn eval_decoded(
+        &mut self,
+        limits: ExecutionLimits,
+        ctx: &mut EvalContext,
+        batch: LocalBatch<'_>,
+    ) -> LocalResult<VectorValue> {
+        self.vector
+            .eval_decoded_entry(ProgramEntry::SqlNumericVector, limits, ctx, batch)
+    }
+
     /// Evaluates the checked SQL numeric batch domain once over the whole
     /// borrowed selection. The original owned error is returned unchanged.
     pub fn eval_with_bindings(

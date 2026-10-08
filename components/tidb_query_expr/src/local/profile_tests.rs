@@ -9,7 +9,7 @@ use std::{
 };
 
 use tidb_query_datatype::{
-    FieldTypeAccessor, FieldTypeFlag, FieldTypeTp,
+    EvalType, FieldTypeAccessor, FieldTypeFlag, FieldTypeTp,
     codec::{
         batch::LazyBatchColumnVec,
         data_type::{ScalarValue, VectorValue},
@@ -20,6 +20,7 @@ use tikv_util::sys::thread::StdThreadBuildWrapper;
 use tipb::{FieldType, ScalarFuncSig as Sig};
 
 use super::*;
+use crate::RpnExpressionNode;
 
 fn ft() -> FieldType {
     FieldTypeTp::LongLong.into()
@@ -1109,6 +1110,71 @@ fn run_batch(
         selection,
         services,
     )
+}
+
+fn decoded_int_columns(columns: &[&[Option<i64>]]) -> LazyBatchColumnVec {
+    LazyBatchColumnVec::from(
+        columns
+            .iter()
+            .map(|column| {
+                let mut values = VectorValue::with_capacity(column.len(), EvalType::Int);
+                for value in *column {
+                    values.push_int(*value);
+                }
+                values
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+fn numeric_batch_decoded_entry_uses_eager_rpn_selection_and_nulls() {
+    let expr = plus(input(0), input(1));
+    let mut program = compile_batch(&expr, &[ft(), ft()]);
+    assert!(matches!(
+        program.vector.expression.as_ref().last(),
+        Some(RpnExpressionNode::FnCall { .. })
+    ));
+    assert!(
+        !program
+            .vector
+            .expression
+            .as_ref()
+            .iter()
+            .any(|node| matches!(node, RpnExpressionNode::OrdinaryFnCall { .. }))
+    );
+
+    let columns = decoded_int_columns(&[
+        &[Some(1), None, Some(7), Some(i64::MAX)],
+        &[Some(10), Some(20), None, Some(1)],
+    ]);
+    let selection = [2, 0, 2, 1];
+    let values = program
+        .eval_decoded(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            LocalBatch {
+                columns: &columns,
+                physical_rows: 4,
+                selection: &selection,
+            },
+        )
+        .unwrap()
+        .to_int_vec();
+    assert_eq!(values, vec![None, Some(11), None, None]);
+
+    let error = program
+        .eval_decoded(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            LocalBatch {
+                columns: &columns,
+                physical_rows: 4,
+                selection: &[3],
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, LocalError::Evaluation(_)));
 }
 
 fn batch_kernel_site(ordinal: usize, occurrence: usize, input_row: usize) -> LocalFailureSite {
