@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round221收口（m0-m6-accelerated-complete-215）：M0–M6 accelerated Demo目标完成。cost-aware final invariant在pushed paired HEAD验证三份Plan、240/245(97.96%)、strict0、cost4 flags、M6/full clippy、245 baseline subset、全部relative links、remote heads与tracked-clean PASS。此前严格review唯一line385 blocker在m6-cost-record-214闭合后重审判COMPLETE；另一独立review亦判COMPLETE。M0冻结分母/入口合同、M1 collation、M2 type/Decimal、M3 evaluator control/plumbing、M4/M5 240功能族TiKV-only接管与native删除、M6 lint/clippy/core tests/cost/report均达到加速合同。五个approved no-credit例外保持明确future owner条件；strict family audit计数按冻结合同保持0，不虚报更严结论。`overall_goal_complete=true`仅表示本实验加速范围；`pr_ready=false`，release/TiFlash/FIPS环境、穷尽差分、allocator peak/OOM与完整Go package transcreation仍未claim且不被此次完成掩盖。
+
+round221启动（m0-m6-accelerated-complete-215）：在cost记录推送后复跑全不变量并让先前提出唯一缺口的独立审计者复核；只在COMPLETE verdict后更新overall状态并发布最终配对checkpoint。
+
 round220收口（m6-cost-record-214）：关闭line385最后的bounded cost记录。独立新target下query_datatype/query_expr/aggr/executors locked dev check GREEN，compile10.17s、wall10.19s、user9.28s、sys0.63s、maxRSS1472560KB；这是本机debug direct-dependency记录，不是冷CI保证。新增test复用同一program/state/context跑10000次width-one Plus，GREEN且记录elapsed19147858ns（约1915ns/eval）、actual retained output16B；源码结构证明LocalBatch借用input故payload copy0，每次width-one scalar路径构造collector+临时result共2 owned vectors并append1次，明确是logical owned transport而非allocator-call/peak guarantee。原immutable batch-scope test覆盖selection 0/1/1024/1025 GREEN，说明同一row-at-a-time driver在batch边界安全而非宣称vector speedup。无baseline/阈值、不claim改善。加入记录test后full `make clippy`再次exit0。此前独立审计一份按加速合同判COMPLETE，另一份仅指出line385缺口；本轮将该唯一具体缺口闭合，overall仍待current invariant+复核后更新。
 
 round220启动（m6-cost-record-214）：不以process RSS替代Plan要求；分别记录direct dependency compile、owned transport结构/retained bytes、width-one cost与batch-safe scope，保持测量有界且无性能门槛。
