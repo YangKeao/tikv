@@ -418,6 +418,10 @@ Cargo manifests/lock、共享 `lib.rs`/`mod.rs` exports、公共 registry、生�
 
 主 agent 是本计划唯一写入者。每个检查点在本文 Progress 和后面的活动台账中记录任务/agent ID、owner 路径、接口 revision、依赖、状态、证据和恢复动作。收集仍相关的后台输出，停止已无关的后台 job，避免留下构建或测试服务。恢复会话时先读本文件和活动台账，再检查工作树差异及运行中的 jobs/agents，不能重新派发相同文件给第二个写入者。
 
+round197收口（wrapper-owner-matrix-191）：三并行wrapper审计；query+DML确认StmtContext统一注入live execution，route优先scope/execution后才one-shot；range audit仅Go pkg无NoColumns，aggregate/window审计无有效结论，故不虚报全闭合。真实SQL immutable filters重跑：query+DML/COW1、execute/import1、predicate/filter zero-slot1、comparison typed/filter/tuple1、grouping/rollup1全GREEN。锁存wrapper局部证据；window及Rust standalone DDL/fold分类仍待，功能240/245不变，goal active。
+
+round197启动（wrapper-owner-matrix-191）：审计default/fold/DML、range/filter、aggregate/window传播，优先修真实live-context NoColumns，不改intentional standalone。
+
 round196收口（dag-request-owner-190）：实现remote/local分离的server-local DAG owner：production build_dag用new_with_ascii_execution，每request固定1 lazy slot policy(16MiB pool/4MiB worker+creation/call,64steps,depth8)；RequestEvalContext经Columns借token并在最后Arc drop close。standalone new仍None，不跨DirectUnaryRequest传Session token。manual Debug仅披露has flag。新lifecycle1、真实DAG build1、legacy child priority1、context6 GREEN；无fallback。架构索引+lock同步。功能240/245不变；M4 request-root owner gap关闭一项，broader wrapper/M2/M6仍active。
 
 round196启动（dag-request-owner-190）：为remote Unistore DAG创建server-local per-request pool epoch，不复用跨进程Session token；standalone保持ownerless，Drop唯一close。
