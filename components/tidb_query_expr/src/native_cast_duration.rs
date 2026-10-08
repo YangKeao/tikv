@@ -7,7 +7,7 @@
 use chrono::TimeZone;
 use tidb_query_datatype::codec::{
     convert::native_warning_subject_byte_cap,
-    mysql::duration::native_parse_duration,
+    mysql::duration::{native_duration_from_time, native_parse_duration},
     native_duration_convert::{
         NativeDurationParts, NativeDurationTargetError, native_convert_to_duration_target,
         native_number_to_duration,
@@ -50,6 +50,9 @@ fn truncated(value: Option<NativeDurationParts>, input: &str) -> NativeDurationC
 pub fn native_legacy_cast_duration(input: NativeSqlStringInput<'_>) -> Option<NativeDurationParts> {
     match input {
         I::Duration { nanoseconds, fsp } => Some(NativeDurationParts { nanoseconds, fsp }),
+        I::Time(value) => native_duration_from_time(value.raw, i64::from(value.fsp))
+            .ok()
+            .map(|(nanoseconds, fsp)| NativeDurationParts { nanoseconds, fsp }),
         I::Int(value) => native_number_to_duration(value as i64, 6)
             .ok()
             .map(|converted| converted.value),
@@ -380,6 +383,18 @@ fn legacy_duration_cast_preserves_numeric_text_identity_and_json_sources() {
             fsp: 2
         }),
         Some((7, 2))
+    );
+    assert_eq!(
+        visible(I::Time(
+            tidb_query_datatype::codec::mysql::time::NativeTemporalValue {
+                raw: tidb_query_datatype::codec::mysql::Time::native_core_from_fields(
+                    2024, 3, 5, 11, 30, 45, 0,
+                ),
+                kind: tidb_query_datatype::codec::mysql::time::TimeType::DateTime,
+                fsp: 0,
+            }
+        )),
+        Some((41_445_000_000_000, 0))
     );
     let json =
         tidb_query_datatype::codec::native_json_parse::native_json_parse(r#""11:30:45""#).unwrap();
