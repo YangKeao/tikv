@@ -162,7 +162,11 @@ short-circuit admission policy described above.
   occurrence. Width-one scheduling preserves order/repeats and actual typed
   `LocalError` variants. Do not pre-convert dead branches or unselected rows.
 - Strict local controls never switch to eager at depth 32; the TiDB CASE bridge
-  also iterates at least 1,024 demanded pairs under one selected scope. Metadata traversal
+  also iterates at least 1,024 demanded pairs under one selected scope. TiDB
+  keeps constant REGEXP calls runtime-bound so malformed dead-branch patterns
+  are neither compiled nor cached during bottom-up folding; demanded constants
+  still use the normal kernel cache. String-IN metadata has an explicit
+  prepare-once marker reset only by argument-cache invalidation. Metadata traversal
   and program/spec destruction are iterative, including rejected construction;
   derived deep Clone/Debug are not guaranteed. Arc-share immutable specs instead.
   Caller-owned decoded root vectors retain their borrow/selection contract;
