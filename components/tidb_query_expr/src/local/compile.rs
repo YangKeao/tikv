@@ -342,13 +342,16 @@ fn check_evaluated_bytes_kernel(
         LocalError::InvalidSpec("evaluated operation has no call at this position".into())
     })?;
     let official = primitive.fn_meta();
+    // `compile` selected the kernel from this checked FunctionRef. Do not
+    // compare Rust function addresses afterward: optimized builds may emit the
+    // same function in multiple codegen units with different addresses. The
+    // closed operation plus canonical name/types/arity/metadata is stable.
     if !matches!(
         node,
         RpnExpressionNode::FnCall { func_meta, args_len, field_type, metadata }
             if *args_len == primitive.input_types().len()
                 && *args_len == (if call_index == 0 { operation.input_types().len() } else { 1 })
                 && func_meta.name == official.name
-                && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
                 && field_type == &primitive.return_type()
                 && primitive.metadata_matches(metadata.as_ref())
     ) {

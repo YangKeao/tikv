@@ -20,6 +20,7 @@ type FrameResult<T> = std::result::Result<T, NativeIdentityFrameError>;
 const ZERO_WARNING: &str = "Incorrect datetime value: '0000-00-00 00:00:00'";
 const INPUT_WARNING_PREFIX: &str = "Incorrect datetime value: '";
 const INPUT_WARNING_SUFFIX: &str = "' for function str_to_date";
+const INVALID_DATE_WARNING_SUFFIX: &str = "'";
 const STATE_HEADER: usize = 34;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,6 +126,15 @@ pub fn decode_native_str_to_date_result(report: &[u8]) -> Option<NativeStrToDate
                 message: text,
             })
         }
+        5 if text.starts_with(INPUT_WARNING_PREFIX)
+            && text.ends_with(INVALID_DATE_WARNING_SUFFIX)
+            && text.len() > INPUT_WARNING_PREFIX.len() + INVALID_DATE_WARNING_SUFFIX.len() =>
+        {
+            Some(NativeStrToDateResult::Warning {
+                code: 1292,
+                message: text,
+            })
+        }
         4 if clock_needs_prefix(text) => Some(NativeStrToDateResult::NeedTypedDateMode(text)),
         _ => None,
     }
@@ -208,6 +218,24 @@ fn warning_report(month_zero: bool, input: &str, bound: usize) -> FrameResult<Op
     } else {
         text_report(1, ZERO_WARNING, bound)
     }
+}
+
+fn invalid_date_warning_report(
+    value: &ParsedDateTime,
+    bound: usize,
+) -> FrameResult<Option<Vec<u8>>> {
+    let rendered = format!(
+        "{:04}-{:02}-{:02} {}",
+        value.year,
+        value.month,
+        value.day,
+        render_clock(value)
+    );
+    text_report(
+        5,
+        &format!("{INPUT_WARNING_PREFIX}{rendered}{INVALID_DATE_WARNING_SUFFIX}"),
+        bound,
+    )
 }
 
 fn date_state(value: &ParsedDateTime, input: &str, bound: usize) -> FrameResult<Option<Vec<u8>>> {
@@ -297,7 +325,11 @@ pub(crate) fn evaluate_str_to_date_finish_native(
         Time::native_days_in_month(value.year, value.month)
     };
     if value.month > 12 || value.day > max_day {
-        return warning_report(value.saw_date && value.month == 0, input, bound);
+        return if value.month == 0 {
+            warning_report(true, input, bound)
+        } else {
+            invalid_date_warning_report(&value, bound)
+        };
     }
     if no_zero_date == Some(1) && (value.year == 0 || value.month == 0 || value.day == 0) {
         return warning_report(value.saw_date && value.month == 0, input, bound);
@@ -735,7 +767,13 @@ mod tests {
         ));
         assert_eq!(finish(&partial, 1, 0)[0], 1);
         let invalid_date = head("2021-02-29", "%Y-%m-%d", None);
-        assert_eq!(finish(&invalid_date, 0, 0)[0], 1);
+        assert!(matches!(
+            decode_native_str_to_date_result(&finish(&invalid_date, 0, 0)),
+            Some(NativeStrToDateResult::Warning {
+                code: 1292,
+                message: "Incorrect datetime value: '2021-02-29 00:00:00'"
+            })
+        ));
         assert!(matches!(
             decode_native_str_to_date_result(&finish(&invalid_date, 0, 1)),
             Some(NativeStrToDateResult::Value("2021-02-29"))

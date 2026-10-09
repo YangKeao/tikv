@@ -2086,10 +2086,15 @@ pub(crate) fn evaluated_bytes_shape(
                 metadata,
             } => {
                 let official = primitive.fn_meta();
+                // The common compiler selected this kernel from the checked
+                // FunctionRef before constructing the private program. Rust
+                // function addresses are not stable identities across codegen
+                // units, so an optimized build may give the same function two
+                // addresses. The closed operation, canonical name/types/arity
+                // and typed metadata are the stable recipe identity here.
                 input_types_match
                     && *args_len == expected_arity
                     && func_meta.name == official.name
-                    && std::ptr::fn_addr_eq(func_meta.fn_ptr, official.fn_ptr)
                     && *field_type == primitive.return_type()
                     && (index + 1 != calls || *field_type == operation.return_type())
                     && primitive.metadata_matches(metadata.as_ref())
