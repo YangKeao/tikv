@@ -64,9 +64,9 @@ impl LocalProgram {
 }
 
 /// Opaque ownership facade for checked SQL numeric-batch evaluation. The
-/// reported binding entry retains the operand-major execution domain, while the
-/// decoded entry owns a separately compiled eager RPN over the same revalidated
-/// source. Both entries select the official generated kernel metadata.
+/// binding entry retains the operand-major execution domain, while the decoded
+/// entry owns a separately compiled eager RPN over the same revalidated source.
+/// Both entries select the official generated kernel metadata.
 #[derive(Debug)]
 pub struct LocalNumericBatchProgram {
     pub(super) inner: LocalProgram,

@@ -25,9 +25,8 @@ use tidb_query_datatype::{
 };
 
 use super::{
-    ExecutionLimits, FailureRecorder, LineageCarrier, LineagedBatch, LocalCompileContext,
-    LocalControlProgram, LocalError, LocalProgram, LocalResult, LocalRuntimeServices,
-    ReportedLocalFailure, ResultMetaId,
+    ExecutionLimits, LineageCarrier, LineagedBatch, LocalCompileContext, LocalControlProgram,
+    LocalError, LocalProgram, LocalResult, LocalRuntimeServices, ResultMetaId,
     compile::{
         LocalNumericBatchProgram, ProgramEntry, compile_evaluated_bytes,
         evaluated_native_vector_type, ready_value_bytes_type, ready_value_decimal_type,
@@ -716,7 +715,6 @@ impl LocalProgram {
             ctx,
             batch.selection,
             EvalInput::Decoded(batch.columns),
-            None,
             OutputMode::ConservativeInt,
         )?
         .into_legacy()
@@ -739,44 +737,9 @@ impl LocalProgram {
             physical_rows,
             selection,
             services,
-            None,
             OutputMode::ConservativeInt,
         )?
         .into_legacy()
-    }
-
-    /// Runs the same binding evaluator, retaining the original owned error and
-    /// an exact site only when read_input or a checked ordinary kernel fails.
-    /// Hosts are outside this reporting slice; the original entry still admits
-    /// them. Unannotated eager errors, validation and budgets gain no fake
-    /// site.
-    ///
-    /// Nothing is retained in state/program/ctx between calls. Warning count
-    /// and stored details stay untouched by reporting; callers may snapshot
-    /// both before/after normal return. Panic remains unwind, not a
-    /// reported error.
-    pub fn eval_with_bindings_reported(
-        &mut self,
-        limits: ExecutionLimits,
-        ctx: &mut EvalContext,
-        physical_rows: usize,
-        selection: &[usize],
-        services: &mut dyn LocalRuntimeServices,
-    ) -> std::result::Result<VectorValue, ReportedLocalFailure> {
-        let mut recorder = FailureRecorder::default();
-        // Exactly one invocation; no recovery/retry after a captured failure.
-        let result = self
-            .eval_bindings(
-                limits,
-                ctx,
-                physical_rows,
-                selection,
-                services,
-                Some(&mut recorder),
-                OutputMode::ConservativeInt,
-            )
-            .and_then(RowCollector::into_legacy);
-        result.map_err(|error| recorder.into_failure(error))
     }
 
     /// Only stable schema and row-bound checks: no value import, host hook or
@@ -802,7 +765,6 @@ impl LocalProgram {
         physical_rows: usize,
         selection: &[usize],
         services: &mut dyn LocalRuntimeServices,
-        recorder: Option<&mut FailureRecorder>,
         mode: OutputMode,
     ) -> LocalResult<RowCollector> {
         self.validate_bindings_preflight(physical_rows, selection, services)?;
@@ -810,11 +772,6 @@ impl LocalProgram {
             OutputMode::ConservativeInt => ProgramEntry::Row,
             OutputMode::Lineaged => ProgramEntry::ControlLineage,
         })?;
-        if recorder.is_some() && self.host_catalog.is_some() {
-            return Err(LocalError::HostContract(
-                "host programs are outside reported evaluation admission".into(),
-            ));
-        }
         if matches!(mode, OutputMode::Lineaged) && self.host_catalog.is_some() {
             return Err(LocalError::HostContract(
                 "host programs are outside lineaged evaluation admission".into(),
@@ -832,14 +789,7 @@ impl LocalProgram {
                 ));
             }
         }
-        self.eval_rows(
-            limits,
-            ctx,
-            selection,
-            EvalInput::Bindings(services),
-            recorder,
-            mode,
-        )
+        self.eval_rows(limits, ctx, selection, EvalInput::Bindings(services), mode)
     }
 
     fn eval_rows(
@@ -848,7 +798,6 @@ impl LocalProgram {
         ctx: &mut EvalContext,
         selection: &[usize],
         mut input: EvalInput<'_, '_>,
-        mut recorder: Option<&mut FailureRecorder>,
         mode: OutputMode,
     ) -> LocalResult<RowCollector> {
         // One occurrence loop and one work budget for both facades. Lineage
@@ -879,7 +828,7 @@ impl LocalProgram {
             selected_row[0] = row;
             let result = match mode {
                 OutputMode::ConservativeInt => FrameResult {
-                    node: self.expression.eval_with_input_recording(
+                    node: self.expression.eval_with_input(
                         ctx,
                         &self.schema,
                         &mut input,
@@ -888,7 +837,6 @@ impl LocalProgram {
                         occurrence,
                         self.host_catalog,
                         &mut budget,
-                        recorder.as_deref_mut(),
                     )?,
                     meta: None,
                 },
@@ -901,7 +849,6 @@ impl LocalProgram {
                     occurrence,
                     self.host_catalog,
                     &mut budget,
-                    recorder.as_deref_mut(),
                 )?,
             };
             output.append(result, &mut budget)?;
@@ -930,37 +877,9 @@ impl LocalControlProgram {
                 physical_rows,
                 selection,
                 services,
-                None,
                 OutputMode::Lineaged,
             )?
             .into_lineaged()
-    }
-
-    /// Uses the same collector and driver, with a fresh failure-only recorder.
-    /// Validation/output-budget failures gain no input/kernel site; warnings
-    /// stay in the caller's existing context, including on a refused final row.
-    pub fn eval_with_bindings_reported(
-        &mut self,
-        limits: ExecutionLimits,
-        ctx: &mut EvalContext,
-        physical_rows: usize,
-        selection: &[usize],
-        services: &mut dyn LocalRuntimeServices,
-    ) -> std::result::Result<LineagedBatch, ReportedLocalFailure> {
-        let mut recorder = FailureRecorder::default();
-        let result = self
-            .inner
-            .eval_bindings(
-                limits,
-                ctx,
-                physical_rows,
-                selection,
-                services,
-                Some(&mut recorder),
-                OutputMode::Lineaged,
-            )
-            .and_then(RowCollector::into_lineaged);
-        result.map_err(|error| recorder.into_failure(error))
     }
 }
 
@@ -1009,31 +928,7 @@ impl LocalNumericBatchProgram {
         selection: &[usize],
         services: &mut dyn LocalRuntimeServices,
     ) -> LocalResult<VectorValue> {
-        self.eval_with_bindings_reported(limits, ctx, physical_rows, selection, services)
-            .map_err(ReportedLocalFailure::into_error)
-    }
-
-    /// Uses the same single invocation with a fresh, failure-only recorder.
-    /// Pure preflight, resource and publication failures remain unsited; the
-    /// caller's warning count and stored warnings are never reset or replayed.
-    pub fn eval_with_bindings_reported(
-        &mut self,
-        limits: ExecutionLimits,
-        ctx: &mut EvalContext,
-        physical_rows: usize,
-        selection: &[usize],
-        services: &mut dyn LocalRuntimeServices,
-    ) -> std::result::Result<VectorValue, ReportedLocalFailure> {
-        let mut recorder = FailureRecorder::default();
-        let result = self.eval_numeric_bindings(
-            limits,
-            ctx,
-            physical_rows,
-            selection,
-            services,
-            &mut recorder,
-        );
-        result.map_err(|error| recorder.into_failure(error))
+        self.eval_numeric_bindings(limits, ctx, physical_rows, selection, services)
     }
 
     fn eval_numeric_bindings(
@@ -1043,7 +938,6 @@ impl LocalNumericBatchProgram {
         physical_rows: usize,
         selection: &[usize],
         services: &mut dyn LocalRuntimeServices,
-        recorder: &mut FailureRecorder,
     ) -> LocalResult<VectorValue> {
         self.inner
             .validate_bindings_preflight(physical_rows, selection, services)?;
@@ -1081,7 +975,6 @@ impl LocalNumericBatchProgram {
             &mut input,
             selection,
             &mut budget,
-            Some(recorder),
         )?;
         let output = match result {
             RpnStackNode::Scalar { value, .. } => {

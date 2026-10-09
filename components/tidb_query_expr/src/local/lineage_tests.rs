@@ -791,17 +791,15 @@ fn resource_run(
     selection: &[usize],
     bytes: usize,
     ctx: &mut EvalContext,
-) -> ReportedLocalFailure {
+) -> LocalError {
     let state = ExecutionLimits {
         max_retained_bytes: bytes,
         ..ExecutionLimits::default()
     };
     let report = program
-        .eval_with_bindings_reported(state, ctx, 1, selection, services)
+        .eval_with_bindings(state, ctx, 1, selection, services)
         .unwrap_err();
-    assert!(matches!(report.error(), LocalError::ResourceLimit(_)));
-    assert_eq!(report.stage(), LocalFailureStage::Resource);
-    assert!(report.site().is_none());
+    assert!(matches!(report, LocalError::ResourceLimit(_)));
     report
 }
 
@@ -1126,7 +1124,7 @@ fn lineage_selection_occurrences_align_ids_without_physical_row_memoization() {
 }
 
 #[test]
-fn lineage_demanded_contract_errors_keep_input_site_and_warning_prefix() {
+fn lineage_demanded_contract_errors_keep_raw_error_and_warning_set() {
     let ft = bytes_type(-46);
     let schema = [int_type(), ft.clone()];
     let spec = call(
@@ -1152,7 +1150,7 @@ fn lineage_demanded_contract_errors_keep_input_site_and_warning_prefix() {
     ));
     let mut ctx = EvalContext::default();
     let report = program
-        .eval_with_bindings_reported(
+        .eval_with_bindings(
             ExecutionLimits::default(),
             &mut ctx,
             2,
@@ -1160,18 +1158,7 @@ fn lineage_demanded_contract_errors_keep_input_site_and_warning_prefix() {
             &mut services,
         )
         .unwrap_err();
-    assert_eq!(report.stage(), LocalFailureStage::Input);
-    assert!(matches!(report.error(), LocalError::BindingContract(_)));
-    assert_eq!(
-        report.site(),
-        Some(&LocalFailureSite::InputSlot {
-            slot: 1,
-            row: InputRow {
-                occurrence: 1,
-                input_row: 1
-            }
-        })
-    );
+    assert!(matches!(report, LocalError::BindingContract(_)));
     assert_eq!(services.reads.len(), 3);
     assert_eq!(ctx.warnings.warning_cnt, 3);
     assert_eq!(ctx.warnings.warnings.len(), 3);
@@ -1186,7 +1173,7 @@ fn lineage_demanded_contract_errors_keep_input_site_and_warning_prefix() {
 }
 
 #[test]
-fn lineage_successful_malformed_replies_and_preflight_failures_are_unsited() {
+fn lineage_malformed_replies_and_preflight_failures_remain_raw() {
     let ft = bytes_type(63);
     let mut program = compile(&slot(0, &ft), &[ft.clone()]);
     let mut services = Bindings::new(&[ft.clone()], vec![vec![ScalarValue::Bytes(None)]]);
@@ -1198,7 +1185,7 @@ fn lineage_successful_malformed_replies_and_preflight_failures_are_unsited() {
         services.reads.clear();
         services.reply_at = Some((1, Reply::Value(reply)));
         let report = program
-            .eval_with_bindings_reported(
+            .eval_with_bindings(
                 ExecutionLimits::default(),
                 &mut EvalContext::default(),
                 1,
@@ -1206,15 +1193,13 @@ fn lineage_successful_malformed_replies_and_preflight_failures_are_unsited() {
                 &mut services,
             )
             .unwrap_err();
-        assert_eq!(report.stage(), LocalFailureStage::Validation);
-        assert!(report.site().is_none());
-        assert!(matches!(report.error(), LocalError::BindingContract(_)));
+        assert!(matches!(report, LocalError::BindingContract(_)));
         assert_eq!(services.reads.len(), 1);
     }
     services.reads.clear();
     for selection in [vec![1], vec![0, 1]] {
         let report = program
-            .eval_with_bindings_reported(
+            .eval_with_bindings(
                 ExecutionLimits::default(),
                 &mut EvalContext::default(),
                 1,
@@ -1222,13 +1207,12 @@ fn lineage_successful_malformed_replies_and_preflight_failures_are_unsited() {
                 &mut services,
             )
             .unwrap_err();
-        assert_eq!(report.stage(), LocalFailureStage::Validation);
-        assert!(report.site().is_none());
+        assert!(matches!(report, LocalError::InvalidBatch(_)));
         assert!(services.reads.is_empty());
     }
     services.schema[0].set_collate(-45);
     let report = program
-        .eval_with_bindings_reported(
+        .eval_with_bindings(
             ExecutionLimits::default(),
             &mut EvalContext::default(),
             1,
@@ -1236,8 +1220,7 @@ fn lineage_successful_malformed_replies_and_preflight_failures_are_unsited() {
             &mut services,
         )
         .unwrap_err();
-    assert_eq!(report.stage(), LocalFailureStage::Validation);
-    assert!(report.site().is_none());
+    assert!(matches!(report, LocalError::InvalidBatch(_)));
     assert!(services.reads.is_empty());
     services.schema[0] = ft;
     assert!(run(&mut program, &mut services, 1, &[]).values().is_empty());

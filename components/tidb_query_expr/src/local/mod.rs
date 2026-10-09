@@ -11,8 +11,8 @@
 //! It does not admit AST/argument-major batch profiles or supply native source-
 //! shaped diagnostics. Other domains remain gated. Callers must not pre-convert
 //! unvisited branches or hide native expression evaluation in services.
-//! The optional reported binding entry owns the unchanged error and an exact
-//! failing input/ordinary-kernel site; it is not native diagnostic adaptation.
+//! Binding entries return the unchanged local error without reconstructing a
+//! diagnostic source site.
 //! `compile_control_with_lineage` separately admits SQL TypedRow Int/Bytes
 //! selection controls and signed Int booleans with required result metadata
 //! IDs. It does not compose ordinary arithmetic or hosts, infer native/PB
@@ -144,9 +144,6 @@ mod batch;
 mod compile;
 #[cfg(test)]
 mod control_tests;
-mod diagnostic;
-#[cfg(test)]
-mod diagnostic_tests;
 pub(crate) mod host;
 #[cfg(test)]
 mod host_tests;
@@ -186,7 +183,6 @@ pub use self::{
         LocalNumericBatchProgram, LocalProgram, compile_control_with_lineage, compile_local,
         compile_local_profiled, compile_local_with_hosts, compile_numeric_batch,
     },
-    diagnostic::{LocalFailureSite, LocalFailureStage, ReportedLocalFailure},
     host::{
         ArgMode, HostArgReply, HostArgRequest, HostCatalog, HostCatalogKey, HostInvocation,
         HostSignature, HostSlot, HostStart, HostStep, HostTaskId, LocalHostServices,
@@ -208,7 +204,6 @@ pub(crate) use self::{
         NativeDecimalDivisionKind, NativeLikeCallMetadata, NativeRegexpCallMetadata,
         NativeRegexpKind, NativeTemporalCallMetadata,
     },
-    diagnostic::FailureRecorder,
     lineage::CheckedResultFlow,
 };
 pub use crate::{

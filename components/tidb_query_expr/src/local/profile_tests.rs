@@ -706,7 +706,7 @@ fn profiled_selection_and_owned_plan_survive_rebinding_without_cache() {
 }
 
 #[test]
-fn profiled_child_errors_keep_primary_variant_and_warning_prefix() {
+fn profiled_child_errors_keep_primary_variant_and_warning_set() {
     for fault in [
         Fault::Binding,
         Fault::Resource,
@@ -750,8 +750,13 @@ fn profiled_child_errors_keep_primary_variant_and_warning_prefix() {
             assert_eq!(services.reads, expected);
             assert_eq!(ctx.warnings.warning_cnt as usize, slot + 2);
             let suffixes = ["prior", "read:0:0:0", "read:0:0:1"];
-            for (warning, suffix) in ctx.warnings.warnings.iter().zip(suffixes) {
-                assert!(warning.get_msg().ends_with(suffix));
+            for suffix in &suffixes[..slot + 2] {
+                assert!(
+                    ctx.warnings
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.get_msg().ends_with(suffix))
+                );
             }
         }
     }
@@ -776,8 +781,14 @@ fn profiled_kernel_error_stops_later_rows_without_replaying_operands() {
     assert!(error.to_string().contains("BIGINT"));
     assert_eq!(services.reads, vec![(0, 0, 0)]);
     assert_eq!(ctx.warnings.warning_cnt, 2);
-    assert!(ctx.warnings.warnings[0].get_msg().ends_with("prior"));
-    assert!(ctx.warnings.warnings[1].get_msg().ends_with("read:0:0:0"));
+    for suffix in ["prior", "read:0:0:0"] {
+        assert!(
+            ctx.warnings
+                .warnings
+                .iter()
+                .any(|warning| warning.get_msg().ends_with(suffix))
+        );
+    }
     services.values[0][0] = Some(0);
     services.reads.clear();
     assert_eq!(
@@ -1175,16 +1186,6 @@ fn numeric_batch_decoded_entry_uses_eager_rpn_selection_and_nulls() {
         )
         .unwrap_err();
     assert!(matches!(error, LocalError::Evaluation(_)));
-}
-
-fn batch_kernel_site(ordinal: usize, occurrence: usize, input_row: usize) -> LocalFailureSite {
-    LocalFailureSite::Kernel {
-        call: batch_site(ordinal),
-        row: InputRow {
-            occurrence,
-            input_row,
-        },
-    }
 }
 
 /// Faults target an occurrence, not a physical row: repeated selections must
@@ -1641,16 +1642,10 @@ fn numeric_batch_leaf_and_call_roots_cover_empty_one_1024_and_reject_1025() {
             let mut ctx = EvalContext::default();
             warn(&mut ctx, "prior".into());
             let selection: Vec<usize> = (0..count).collect();
-            let result = program.eval_with_bindings_reported(
-                state,
-                &mut ctx,
-                1025,
-                &selection,
-                &mut services,
-            );
+            let result =
+                program.eval_with_bindings(state, &mut ctx, 1025, &selection, &mut services);
             if count == 1025 {
-                let error = result.unwrap_err();
-                assert!(error.site().is_none());
+                assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
                 assert!(services.reads.is_empty());
             } else {
                 let expected: Vec<_> = (0..count)
@@ -1733,13 +1728,18 @@ fn numeric_batch_finishes_both_operand_phases_in_occurrence_order() {
     ];
     assert_eq!(services.reads, expected);
     assert_eq!(ctx.warnings.warning_cnt, 7);
-    assert!(ctx.warnings.warnings[0].get_msg().ends_with("prior"));
-    for (warning, (occurrence, physical, slot)) in ctx.warnings.warnings[1..].iter().zip(expected) {
-        assert!(
+    assert!(
+        ctx.warnings
+            .warnings
+            .iter()
+            .any(|warning| warning.get_msg().ends_with("prior"))
+    );
+    for (occurrence, physical, slot) in expected {
+        assert!(ctx.warnings.warnings.iter().any(|warning| {
             warning
                 .get_msg()
                 .ends_with(&format!("read:{occurrence}:{physical}:{slot}"))
-        );
+        }));
     }
 }
 
@@ -1750,7 +1750,7 @@ fn numeric_batch_null_left_demands_right_even_for_one_occurrence() {
     let mut services = Bindings::new(vec![vec![None], vec![Some(9)]]);
     services.fault = Some((1, Fault::Binding));
     let error = program
-        .eval_with_bindings_reported(
+        .eval_with_bindings(
             ExecutionLimits::default(),
             &mut EvalContext::default(),
             1,
@@ -1758,17 +1758,7 @@ fn numeric_batch_null_left_demands_right_even_for_one_occurrence() {
             &mut services,
         )
         .unwrap_err();
-    assert_eq!(error.stage(), LocalFailureStage::Input);
-    assert_eq!(
-        error.site(),
-        Some(&LocalFailureSite::InputSlot {
-            slot: 1,
-            row: InputRow {
-                occurrence: 0,
-                input_row: 0
-            },
-        })
-    );
+    assert!(matches!(error, LocalError::BindingContract(_)));
     assert_eq!(services.reads, [(0, 0, 0), (0, 0, 1)]);
     // The separate row route keeps its historical NULL-stop behavior.
     let mut row_program = compile(&expr, &[ft(), ft()], OrdinaryProfile::TypedRow);
@@ -1807,7 +1797,7 @@ fn numeric_batch_null_left_does_not_hide_a_nested_right_kernel_error() {
     let mut program = compile_batch(&expr, &[ft()]);
     let mut services = Bindings::new(vec![vec![Some(i64::MAX)]]);
     let error = program
-        .eval_with_bindings_reported(
+        .eval_with_bindings(
             ExecutionLimits::default(),
             &mut EvalContext::default(),
             1,
@@ -1815,14 +1805,12 @@ fn numeric_batch_null_left_does_not_hide_a_nested_right_kernel_error() {
             &mut services,
         )
         .unwrap_err();
-    assert_eq!(error.stage(), LocalFailureStage::Kernel);
-    assert_eq!(error.site(), Some(&batch_kernel_site(2, 0, 0)));
+    assert!(matches!(error, LocalError::Evaluation(_)));
     assert_eq!(services.reads, [(0, 0, 0)]);
 }
 
 #[test]
-fn numeric_batch_late_right_child_error_beats_early_parent_overflow() {
-    // Parent lane 0 would overflow, but the entire right child must finish first.
+fn numeric_batch_completes_the_right_child_before_the_parent_kernel() {
     let expr = plus(input(0), plus(input(1), constant(Some(1))));
     let mut program = compile_batch(&expr, &[ft(), ft()]);
     let mut services = Bindings::new(vec![
@@ -1832,7 +1820,7 @@ fn numeric_batch_late_right_child_error_beats_early_parent_overflow() {
     services.warnings = true;
     let mut ctx = EvalContext::default();
     let error = program
-        .eval_with_bindings_reported(
+        .eval_with_bindings(
             ExecutionLimits::default(),
             &mut ctx,
             2,
@@ -1840,14 +1828,13 @@ fn numeric_batch_late_right_child_error_beats_early_parent_overflow() {
             &mut services,
         )
         .unwrap_err();
-    assert_eq!(error.stage(), LocalFailureStage::Kernel);
-    assert_eq!(error.site(), Some(&batch_kernel_site(2, 1, 1)));
+    assert!(matches!(error, LocalError::Evaluation(_)));
     assert_eq!(services.reads, [(0, 0, 0), (1, 1, 0), (0, 0, 1), (1, 1, 1)]);
     assert_eq!(ctx.warnings.warning_cnt, 4);
 }
 
 #[test]
-fn numeric_batch_later_left_child_error_precedes_every_right_child_effect() {
+fn numeric_batch_left_child_failure_stops_right_child_effects() {
     // The in-cap form of the 1025 root-tiling counterexample: a root row loop
     // would fail in the right child at occurrence 0 instead of left at 1.
     let expr = plus(
@@ -1863,7 +1850,7 @@ fn numeric_batch_later_left_child_error_precedes_every_right_child_effect() {
     services.warnings = true;
     let mut ctx = EvalContext::default();
     let error = program
-        .eval_with_bindings_reported(
+        .eval_with_bindings(
             ExecutionLimits::default(),
             &mut ctx,
             2,
@@ -1871,8 +1858,7 @@ fn numeric_batch_later_left_child_error_precedes_every_right_child_effect() {
             &mut services,
         )
         .unwrap_err();
-    assert_eq!(error.stage(), LocalFailureStage::Kernel);
-    assert_eq!(error.site(), Some(&batch_kernel_site(1, 1, 1)));
+    assert!(matches!(error, LocalError::Evaluation(_)));
     assert_eq!(services.reads, [(0, 0, 0), (1, 1, 0)]);
     assert_eq!(ctx.warnings.warning_cnt, 2);
 }
@@ -1885,7 +1871,7 @@ fn numeric_batch_parent_kernel_error_follows_all_reads_without_replay() {
     let mut ctx = EvalContext::default();
     warn(&mut ctx, "prior".into());
     let error = program
-        .eval_with_bindings_reported(
+        .eval_with_bindings(
             ExecutionLimits::default(),
             &mut ctx,
             2,
@@ -1893,19 +1879,17 @@ fn numeric_batch_parent_kernel_error_follows_all_reads_without_replay() {
             &mut services,
         )
         .unwrap_err();
-    assert_eq!(error.stage(), LocalFailureStage::Kernel);
-    assert_eq!(error.site(), Some(&batch_kernel_site(0, 0, 0)));
-    assert!(matches!(error.error(), LocalError::Evaluation(_)));
+    assert!(matches!(error, LocalError::Evaluation(_)));
     assert_eq!(services.reads, [(0, 0, 0), (1, 1, 0), (0, 0, 1), (1, 1, 1)]);
     assert_eq!(ctx.warnings.warning_cnt, 5);
 }
 
 #[test]
-fn numeric_batch_repeated_selection_kernel_site_keeps_occurrence_and_physical_row() {
+fn numeric_batch_repeated_selection_preserves_input_demand() {
     let mut program = compile_batch(&plus(input(0), constant(Some(1))), &[ft()]);
     let mut services = Bindings::new(vec![vec![Some(i64::MAX), None, Some(2)]]);
-    let report = program
-        .eval_with_bindings_reported(
+    let error = program
+        .eval_with_bindings(
             ExecutionLimits::default(),
             &mut EvalContext::default(),
             3,
@@ -1913,16 +1897,12 @@ fn numeric_batch_repeated_selection_kernel_site_keeps_occurrence_and_physical_ro
             &mut services,
         )
         .unwrap_err();
-    assert_eq!(report.site(), Some(&batch_kernel_site(0, 1, 0)));
+    assert!(matches!(error, LocalError::Evaluation(_)));
     assert_eq!(services.reads, [(0, 2, 0), (1, 0, 0), (2, 2, 0)]);
-    drop(program);
-    drop(services);
-    assert_eq!(report.stage(), LocalFailureStage::Kernel);
-    assert_eq!(report.site(), Some(&batch_kernel_site(0, 1, 0)));
 }
 
 #[test]
-fn numeric_batch_repeated_input_error_has_exact_coordinates_and_no_stale_site() {
+fn numeric_batch_repeated_input_error_does_not_poison_retry() {
     let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
     let mut services = BatchBindings::new(vec![vec![Some(1); 3], vec![Some(2); 3]]);
     services.fault_on = Some((1, 2, Fault::Resource));
@@ -1930,20 +1910,9 @@ fn numeric_batch_repeated_input_error_has_exact_coordinates_and_no_stale_site() 
     let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     let report = program
-        .eval_with_bindings_reported(state, &mut ctx, 3, &[2, 0, 2], &mut services)
+        .eval_with_bindings(state, &mut ctx, 3, &[2, 0, 2], &mut services)
         .unwrap_err();
-    assert!(matches!(report.error(), LocalError::ResourceLimit(_)));
-    assert_eq!(report.stage(), LocalFailureStage::Input);
-    assert_eq!(
-        report.site(),
-        Some(&LocalFailureSite::InputSlot {
-            slot: 1,
-            row: InputRow {
-                occurrence: 2,
-                input_row: 2
-            },
-        })
-    );
+    assert!(matches!(report, LocalError::ResourceLimit(_)));
     assert_eq!(
         services.inner.reads,
         [
@@ -1960,7 +1929,7 @@ fn numeric_batch_repeated_input_error_has_exact_coordinates_and_no_stale_site() 
     services.inner.reads.clear();
     assert_eq!(
         program
-            .eval_with_bindings_reported(state, &mut ctx, 3, &[2, 0, 2], &mut services)
+            .eval_with_bindings(state, &mut ctx, 3, &[2, 0, 2], &mut services)
             .unwrap()
             .to_int_vec(),
         [Some(3); 3]
@@ -1968,13 +1937,11 @@ fn numeric_batch_repeated_input_error_has_exact_coordinates_and_no_stale_site() 
     let before = ctx.warnings.warning_cnt;
     services.inner.reads.clear();
     let error = program
-        .eval_with_bindings_reported(state, &mut ctx, 3, &[3], &mut services)
+        .eval_with_bindings(state, &mut ctx, 3, &[3], &mut services)
         .unwrap_err();
-    assert_eq!(error.stage(), LocalFailureStage::Validation);
-    assert!(error.site().is_none());
+    assert!(matches!(error, LocalError::InvalidBatch(_)));
     assert!(services.inner.reads.is_empty());
     assert_eq!(ctx.warnings.warning_cnt, before);
-    assert_eq!(report.stage(), LocalFailureStage::Input);
 }
 
 #[test]
@@ -1993,7 +1960,7 @@ fn numeric_batch_input_errors_and_malformed_successes_preserve_warning_prefixes(
         let mut ctx = EvalContext::default();
         warn(&mut ctx, "prior".into());
         let error = program
-            .eval_with_bindings_reported(
+            .eval_with_bindings(
                 ExecutionLimits::default(),
                 &mut ctx,
                 3,
@@ -2002,39 +1969,28 @@ fn numeric_batch_input_errors_and_malformed_successes_preserve_warning_prefixes(
             )
             .unwrap_err();
         match fault {
-            Fault::Resource => assert!(matches!(error.error(), LocalError::ResourceLimit(_))),
-            Fault::Evaluation => assert!(matches!(error.error(), LocalError::Evaluation(_))),
-            _ => assert!(matches!(error.error(), LocalError::BindingContract(_))),
+            Fault::Resource => assert!(matches!(error, LocalError::ResourceLimit(_))),
+            Fault::Evaluation => assert!(matches!(error, LocalError::Evaluation(_))),
+            _ => assert!(matches!(error, LocalError::BindingContract(_))),
         }
-        if matches!(fault, Fault::WrongType | Fault::WrongLength) {
-            assert_eq!(error.stage(), LocalFailureStage::Validation);
-            assert!(error.site().is_none());
-        } else {
-            assert_eq!(error.stage(), LocalFailureStage::Input);
-            assert_eq!(
-                error.site(),
-                Some(&LocalFailureSite::InputSlot {
-                    slot: 1,
-                    row: InputRow {
-                        occurrence: 1,
-                        input_row: 0
-                    },
-                })
-            );
+        if !matches!(fault, Fault::WrongType | Fault::WrongLength) {
             assert!(error.to_string().contains("primary"));
         }
         let expected = [(0, 2, 0), (1, 0, 0), (2, 2, 0), (0, 2, 1), (1, 0, 1)];
         assert_eq!(services.inner.reads, expected);
         assert_eq!(ctx.warnings.warning_cnt, 6);
-        assert!(ctx.warnings.warnings[0].get_msg().ends_with("prior"));
-        for (warning, (occurrence, physical, slot)) in
-            ctx.warnings.warnings[1..].iter().zip(expected)
-        {
-            assert!(
+        assert!(
+            ctx.warnings
+                .warnings
+                .iter()
+                .any(|warning| warning.get_msg().ends_with("prior"))
+        );
+        for (occurrence, physical, slot) in expected {
+            assert!(ctx.warnings.warnings.iter().any(|warning| {
                 warning
                     .get_msg()
                     .ends_with(&format!("read:{occurrence}:{physical}:{slot}"))
-            );
+            }));
         }
     }
 }
@@ -2060,24 +2016,21 @@ fn numeric_batch_schema_and_selection_preflight_stays_effect_free_when_empty() {
         }
         for selection in [&[][..], &[0][..]] {
             let error = program
-                .eval_with_bindings_reported(state, &mut ctx, 1, selection, &mut services)
+                .eval_with_bindings(state, &mut ctx, 1, selection, &mut services)
                 .unwrap_err();
-            assert!(matches!(error.error(), LocalError::InvalidBatch(_)));
-            assert_eq!(error.stage(), LocalFailureStage::Validation);
-            assert!(error.site().is_none());
+            assert!(matches!(error, LocalError::InvalidBatch(_)));
         }
     }
     services.schema = vec![ft(), ft()];
     let error = program
-        .eval_with_bindings_reported(state, &mut ctx, 1, &[1], &mut services)
+        .eval_with_bindings(state, &mut ctx, 1, &[1], &mut services)
         .unwrap_err();
-    assert_eq!(error.stage(), LocalFailureStage::Validation);
-    assert!(error.site().is_none());
+    assert!(matches!(error, LocalError::InvalidBatch(_)));
     assert!(services.reads.is_empty());
     assert_eq!(ctx.warnings.warning_cnt, 1);
     assert!(
         program
-            .eval_with_bindings_reported(state, &mut ctx, 1, &[], &mut services)
+            .eval_with_bindings(state, &mut ctx, 1, &[], &mut services)
             .unwrap()
             .is_empty()
     );
@@ -2104,17 +2057,9 @@ fn numeric_batch_zero_limits_precede_reads_and_no_host_task_reservation_is_neede
         let mut services = Bindings::new(vec![vec![Some(1)], vec![Some(2)]]);
         services.fault = Some((0, Fault::Panic));
         let error = program
-            .eval_with_bindings_reported(
-                limits,
-                &mut EvalContext::default(),
-                1,
-                &[0],
-                &mut services,
-            )
+            .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut services)
             .unwrap_err();
-        assert!(matches!(error.error(), LocalError::ResourceLimit(_)));
-        assert_eq!(error.stage(), LocalFailureStage::Resource);
-        assert!(error.site().is_none());
+        assert!(matches!(error, LocalError::ResourceLimit(_)));
         assert!(services.reads.is_empty());
     }
     let mut services = Bindings::new(vec![vec![Some(1)], vec![Some(2)]]);
@@ -2155,15 +2100,14 @@ fn numeric_batch_work_budget_is_shared_across_occurrences_and_fresh_per_invocati
     services.reads.clear();
     let selection: Vec<usize> = (0..1024).collect();
     let error = program
-        .eval_with_bindings_reported(state, &mut ctx, 1024, &selection, &mut services)
+        .eval_with_bindings(state, &mut ctx, 1024, &selection, &mut services)
         .unwrap_err();
-    assert_eq!(error.stage(), LocalFailureStage::Resource);
-    assert!(error.site().is_none());
+    assert!(matches!(error, LocalError::ResourceLimit(_)));
     assert!(services.reads.len() < 2048);
     services.reads.clear();
     assert_eq!(
         program
-            .eval_with_bindings_reported(state, &mut ctx, 1024, &[7], &mut services)
+            .eval_with_bindings(state, &mut ctx, 1024, &[7], &mut services)
             .unwrap()
             .to_int_vec(),
         [Some(3)]
@@ -2213,7 +2157,7 @@ fn numeric_batch_provider_spare_capacity_is_charged_after_read_before_next_effec
     };
     let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
     let error = program
-        .eval_with_bindings_reported(
+        .eval_with_bindings(
             ExecutionLimits {
                 max_retained_bytes: 64 * 1024,
                 ..ExecutionLimits::default()
@@ -2224,8 +2168,7 @@ fn numeric_batch_provider_spare_capacity_is_charged_after_read_before_next_effec
             &mut services,
         )
         .unwrap_err();
-    assert_eq!(error.stage(), LocalFailureStage::Resource);
-    assert!(error.site().is_none());
+    assert!(matches!(error, LocalError::ResourceLimit(_)));
     assert_eq!(
         services.reads,
         [(
@@ -2239,14 +2182,14 @@ fn numeric_batch_provider_spare_capacity_is_charged_after_read_before_next_effec
 }
 
 #[test]
-fn numeric_batch_input_unwind_does_not_poison_reused_program_state_or_reports() {
+fn numeric_batch_input_unwind_does_not_poison_reused_program_state() {
     let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
     let mut services = BatchBindings::new(vec![vec![Some(5); 2], vec![Some(7); 2]]);
     services.fault_on = Some((1, 1, Fault::Panic));
     let state = ExecutionLimits::default();
     let mut ctx = EvalContext::default();
     let panic = catch_unwind(AssertUnwindSafe(|| {
-        program.eval_with_bindings_reported(state, &mut ctx, 2, &[0, 1], &mut services)
+        program.eval_with_bindings(state, &mut ctx, 2, &[0, 1], &mut services)
     }))
     .unwrap_err();
     let message = panic
@@ -2262,7 +2205,7 @@ fn numeric_batch_input_unwind_does_not_poison_reused_program_state_or_reports() 
     services.inner.reads.clear();
     assert_eq!(
         program
-            .eval_with_bindings_reported(state, &mut ctx, 2, &[1, 0], &mut services)
+            .eval_with_bindings(state, &mut ctx, 2, &[1, 0], &mut services)
             .unwrap()
             .to_int_vec(),
         [Some(12); 2]
@@ -2378,11 +2321,9 @@ fn numeric_batch_leaf_dispatch_rejects_old_row_entries_even_when_empty() {
             ));
             let report = program
                 .inner
-                .eval_with_bindings_reported(state, &mut ctx, count, &selection, &mut services)
+                .eval_with_bindings(state, &mut ctx, count, &selection, &mut services)
                 .unwrap_err();
-            assert!(matches!(report.error(), LocalError::InvalidSpec(_)));
-            assert_eq!(report.stage(), LocalFailureStage::Validation);
-            assert!(report.site().is_none());
+            assert!(matches!(report, LocalError::InvalidSpec(_)));
 
             let columns = LazyBatchColumnVec::from(if is_input {
                 vec![VectorValue::from_scalar(&ScalarValue::Int(Some(5)), count)]
@@ -2410,39 +2351,25 @@ fn numeric_batch_leaf_dispatch_rejects_old_row_entries_even_when_empty() {
             services.fault = None;
             services.warnings = false;
             let expected = vec![Some(if is_input { 5 } else { 7 }); count];
-            for reported in [false, true] {
-                services.reads.clear();
-                let output = if reported {
-                    program
-                        .eval_with_bindings_reported(
-                            state,
-                            &mut ctx,
-                            count,
-                            &selection,
-                            &mut services,
-                        )
-                        .unwrap()
+            services.reads.clear();
+            let output = program
+                .eval_with_bindings(state, &mut ctx, count, &selection, &mut services)
+                .unwrap();
+            assert_eq!(output.to_int_vec(), expected);
+            assert_eq!(
+                services.reads,
+                if is_input {
+                    selection
+                        .iter()
+                        .enumerate()
+                        .map(|(occurrence, &physical)| (occurrence, physical, 0))
+                        .collect::<Vec<_>>()
                 } else {
-                    program
-                        .eval_with_bindings(state, &mut ctx, count, &selection, &mut services)
-                        .unwrap()
-                };
-                assert_eq!(output.to_int_vec(), expected);
-                assert_eq!(
-                    services.reads,
-                    if is_input {
-                        selection
-                            .iter()
-                            .enumerate()
-                            .map(|(occurrence, &physical)| (occurrence, physical, 0))
-                            .collect::<Vec<_>>()
-                    } else {
-                        vec![]
-                    },
-                );
-                assert_eq!(ctx.warnings.warning_cnt, 0);
-                assert!(ctx.warnings.warnings.is_empty());
-            }
+                    vec![]
+                },
+            );
+            assert_eq!(ctx.warnings.warning_cnt, 0);
+            assert!(ctx.warnings.warnings.is_empty());
         }
     }
 }

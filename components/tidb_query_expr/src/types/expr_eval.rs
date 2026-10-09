@@ -18,11 +18,10 @@ use super::{
 use crate::{
     impl_op::LogicalAccumulator,
     local::{
-        ArgMode, CheckedResultFlow, EvaluatedArgsRole, EvaluatedBytesOp, FailureRecorder,
-        HostArgReply, HostArgRequest, HostCatalogKey, HostInvocation, HostStart, HostStep,
-        HostTaskId, InputRow, LineageCarrier, LocalError, LocalHostServices, LocalResult,
-        LocalRuntimeServices, OrdinaryProfile, PreparedHostCall, PreparedOrdinaryCall,
-        ResultMetaId,
+        ArgMode, CheckedResultFlow, EvaluatedArgsRole, EvaluatedBytesOp, HostArgReply,
+        HostArgRequest, HostCatalogKey, HostInvocation, HostStart, HostStep, HostTaskId, InputRow,
+        LineageCarrier, LocalError, LocalHostServices, LocalResult, LocalRuntimeServices,
+        OrdinaryProfile, PreparedHostCall, PreparedOrdinaryCall, ResultMetaId,
         runtime::{
             EvalBudget, StorageMode, bytes_min_storage_bytes, decimal_min_storage_bytes,
             int_min_storage_bytes, int_storage_bytes, int_vector_storage_bytes,
@@ -2942,7 +2941,6 @@ impl<'a> OrdinaryFrame<'a> {
         ctx: &mut EvalContext,
         budget: &mut EvalBudget,
         other_live_bytes: usize,
-        mut recorder: Option<&mut FailureRecorder>,
     ) -> LocalResult<RpnStackNode<'a>> {
         EvalExecution::SqlNumericBatch.check_ordinary(self.prepared, self.rows.len())?;
         if self.stopped || self.values.len() != 2 || self.next != 2 {
@@ -2971,16 +2969,7 @@ impl<'a> OrdinaryFrame<'a> {
                 numeric_lane_view(&self.values[0], &position)?,
                 numeric_lane_view(&self.values[1], &position)?,
             ];
-            let value = eval_ordinary_kernel(
-                ctx,
-                self.prepared,
-                &args,
-                Some(InputRow {
-                    occurrence: lane,
-                    input_row: self.rows.physical()[lane],
-                }),
-                recorder.as_deref_mut(),
-            )?;
+            let value = eval_ordinary_kernel(ctx, self.prepared, &args)?;
             validate_frame_result(&value, 1)?;
             let ScalarValueRef::Int(item) = value.get_logical_scalar_ref(0) else {
                 return Err(LocalError::InvalidSpec(
@@ -3036,14 +3025,11 @@ fn numeric_lane_view<'b>(
     }
 }
 
-/// The only ordinary-kernel error capture. A batch supplies the actual lane
-/// being invoked, never an inferred row from an unlocalized vector failure.
+/// Runs the prepared ordinary kernel and preserves its original error.
 fn eval_ordinary_kernel<'a>(
     ctx: &mut EvalContext,
     prepared: &'a PreparedOrdinaryCall,
     args: &[RpnStackNode<'_>],
-    row: Option<InputRow>,
-    recorder: Option<&mut FailureRecorder>,
 ) -> LocalResult<RpnStackNode<'a>> {
     let (func_meta, metadata) = prepared.kernel();
     eval_prepared_kernel(
@@ -3055,28 +3041,17 @@ fn eval_ordinary_kernel<'a>(
         metadata,
         None,
     )
-    .map_err(|error| match (recorder, row) {
-        (Some(recorder), Some(row)) => recorder.capture_kernel(prepared.site(), row, error),
-        _ => error,
-    })
 }
 
-/// The only input error capture. Successful shape/storage checks remain
-/// unsited; all domains preserve the exact moved callback error.
+/// Reads one binding and preserves the callback's original error.
 fn read_binding_value(
     services: &mut dyn LocalRuntimeServices,
     ctx: &mut EvalContext,
     slot: usize,
     row: InputRow,
     field_type: &FieldType,
-    recorder: Option<&mut FailureRecorder>,
 ) -> LocalResult<VectorValue> {
-    services
-        .read_input(ctx, slot, row, field_type)
-        .map_err(|error| match recorder {
-            Some(recorder) => recorder.capture_input(slot, row, error),
-            None => error,
-        })
+    services.read_input(ctx, slot, row, field_type)
 }
 
 /// Import one demanded numeric leaf over the complete occurrence map. The
@@ -3090,7 +3065,6 @@ fn read_numeric_binding_phase(
     field_type: &FieldType,
     budget: &mut EvalBudget,
     other_live_bytes: usize,
-    mut recorder: Option<&mut FailureRecorder>,
 ) -> LocalResult<VectorValue> {
     let count = rows.len();
     if count == 0 || count > BATCH_MAX_SIZE || rows.physical().len() != count {
@@ -3120,7 +3094,6 @@ fn read_numeric_binding_phase(
                 input_row,
             },
             field_type,
-            recorder.as_deref_mut(),
         )?;
         if value.eval_type() != tidb_query_datatype::EvalType::Int || value.len() != 1 {
             return Err(LocalError::BindingContract(
@@ -3293,7 +3266,6 @@ fn eval_frames<'a, 'data: 'a>(
     occurrence: usize,
     host_catalog: Option<HostCatalogKey>,
     budget: &mut EvalBudget,
-    mut recorder: Option<&mut FailureRecorder>,
     execution: EvalExecution,
 ) -> LocalResult<FrameResult<'a>> {
     execution.check_budget(budget)?;
@@ -3332,7 +3304,6 @@ fn eval_frames<'a, 'data: 'a>(
                 budget,
                 &frame.nodes[0],
                 &[],
-                recorder.as_deref_mut(),
                 frame.flow,
                 execution,
                 0,
@@ -3484,7 +3455,6 @@ fn eval_frames<'a, 'data: 'a>(
                         budget,
                         node,
                         &frame.stack,
-                        recorder.as_deref_mut(),
                         frame.flow,
                         execution,
                         retained,
@@ -3592,12 +3562,7 @@ fn eval_frames<'a, 'data: 'a>(
                         tasks.storage(),
                     )?;
                 } else if execution == EvalExecution::SqlNumericBatch {
-                    let value = frame.finish_numeric_batch(
-                        ctx,
-                        budget,
-                        retained,
-                        recorder.as_deref_mut(),
-                    )?;
+                    let value = frame.finish_numeric_batch(ctx, budget, retained)?;
                     budget.storage(retained.saturating_add(node_storage(&value, budget.mode())))?;
                     returned = Some(FrameResult::unannotated(value));
                 } else {
@@ -3615,19 +3580,7 @@ fn eval_frames<'a, 'data: 'a>(
                             field_type: frame.prepared.return_type(),
                         }
                     } else {
-                        // Raw legacy calls may have no physical coordinate;
-                        // do not fabricate row0 for their failures.
-                        let row = frame.rows.physical().first().map(|&input_row| InputRow {
-                            occurrence,
-                            input_row,
-                        });
-                        eval_ordinary_kernel(
-                            ctx,
-                            frame.prepared,
-                            &frame.values,
-                            row,
-                            recorder.as_deref_mut(),
-                        )?
+                        eval_ordinary_kernel(ctx, frame.prepared, &frame.values)?
                     };
                     validate_frame_result(&value, 1)?;
                     if !matches!(value.get_logical_scalar_ref(0), ScalarValueRef::Int(_)) {
@@ -3761,7 +3714,6 @@ pub(crate) fn eval_logical_entry(
         0,
         None,
         &mut EvalBudget::legacy(),
-        None,
         EvalExecution::Unannotated,
     )
     .and_then(FrameResult::into_unannotated)
@@ -3871,33 +3823,6 @@ impl RpnExpression {
         host_catalog: Option<HostCatalogKey>,
         budget: &mut EvalBudget,
     ) -> LocalResult<RpnStackNode<'a>> {
-        self.eval_with_input_recording(
-            ctx,
-            schema,
-            input,
-            input_logical_rows,
-            output_rows,
-            occurrence,
-            host_catalog,
-            budget,
-            None,
-        )
-    }
-
-    /// Optional failure-only observation. The recorder's borrow cannot escape
-    /// in a returned RPN value; legacy callers always use the None wrapper.
-    pub(crate) fn eval_with_input_recording<'a, 'data: 'a>(
-        &'a self,
-        ctx: &mut EvalContext,
-        schema: &'a [FieldType],
-        input: &mut EvalInput<'data, '_>,
-        input_logical_rows: &'a [usize],
-        output_rows: usize,
-        occurrence: usize,
-        host_catalog: Option<HostCatalogKey>,
-        budget: &mut EvalBudget,
-        recorder: Option<&mut FailureRecorder>,
-    ) -> LocalResult<RpnStackNode<'a>> {
         assert!(output_rows > 0 && output_rows <= BATCH_MAX_SIZE);
         if self.checked_result_flow().is_some() || budget.mode() != StorageMode::ConservativeInt {
             return Err(LocalError::InvalidSpec(
@@ -3915,7 +3840,6 @@ impl RpnExpression {
             occurrence,
             host_catalog,
             budget,
-            recorder,
             EvalExecution::Unannotated,
         )
         .and_then(FrameResult::into_unannotated)
@@ -3931,7 +3855,6 @@ impl RpnExpression {
         occurrence: usize,
         host_catalog: Option<HostCatalogKey>,
         budget: &mut EvalBudget,
-        recorder: Option<&mut FailureRecorder>,
     ) -> LocalResult<FrameResult<'a>> {
         if self.checked_result_flow().is_none()
             || budget.mode() != StorageMode::ExactRetained
@@ -3954,7 +3877,6 @@ impl RpnExpression {
             occurrence,
             None,
             budget,
-            recorder,
             EvalExecution::SqlControlLineage,
         )?;
         if result.meta.is_none() {
@@ -3975,7 +3897,6 @@ impl RpnExpression {
         input: &mut EvalInput<'data, '_>,
         input_logical_rows: &'a [usize],
         budget: &mut EvalBudget,
-        recorder: Option<&mut FailureRecorder>,
     ) -> LocalResult<RpnStackNode<'a>> {
         let output_rows = input_logical_rows.len();
         if self.checked_result_flow().is_some()
@@ -3998,7 +3919,6 @@ impl RpnExpression {
             0,
             None,
             budget,
-            recorder,
             EvalExecution::SqlNumericBatch,
         )
         .and_then(FrameResult::into_unannotated)
@@ -4109,7 +4029,6 @@ impl RpnExpression {
             0,
             None,
             budget,
-            None,
             execution,
         )
         .and_then(FrameResult::into_unannotated)
@@ -4125,7 +4044,6 @@ impl RpnExpression {
         budget: &mut EvalBudget,
         node: &'a RpnExpressionNode,
         stack: &[RpnStackNode<'a>],
-        recorder: Option<&mut FailureRecorder>,
         flow: Option<CheckedResultFlow>,
         execution: EvalExecution,
         other_live_bytes: usize,
@@ -4212,7 +4130,6 @@ impl RpnExpression {
                             field_type,
                             budget,
                             other_live_bytes,
-                            recorder,
                         )?;
                         RpnStackNodeVectorValue::Generated { physical_value }
                     }
@@ -4227,10 +4144,7 @@ impl RpnExpression {
                             occurrence,
                             input_row: rows.physical()[0],
                         };
-                        let value =
-                            read_binding_value(*services, ctx, *offset, row, field_type, recorder)?;
-                        // A successful callback did not record anything. Reply
-                        // validation/normalization failures must remain unsited.
+                        let value = read_binding_value(*services, ctx, *offset, row, field_type)?;
                         let expected = match flow.map(CheckedResultFlow::carrier) {
                             None | Some(LineageCarrier::Int) => tidb_query_datatype::EvalType::Int,
                             Some(LineageCarrier::Bytes) => tidb_query_datatype::EvalType::Bytes,
@@ -4377,7 +4291,6 @@ mod tests {
                 0,
                 None,
                 &mut budget,
-                None,
                 domain,
             );
             assert!(matches!(result, Err(LocalError::InvalidSpec(_))));
@@ -4500,7 +4413,6 @@ mod tests {
             0,
             None,
             &mut budget,
-            None,
             EvalExecution::Unannotated,
         )
         .unwrap();
@@ -5358,7 +5270,6 @@ mod tests {
                 ..ExecutionLimits::default()
             })
             .unwrap();
-            let mut recorder = FailureRecorder::default();
             let error = read_numeric_binding_phase(
                 &mut services,
                 &mut EvalContext::default(),
@@ -5367,12 +5278,10 @@ mod tests {
                 &field_type,
                 &mut budget,
                 base,
-                Some(&mut recorder),
             )
             .unwrap_err();
             assert!(matches!(error, LocalError::ResourceLimit(_)));
             assert_eq!(services.rows.len(), expected_reads);
-            assert!(recorder.into_failure(error).site().is_none());
         }
         let mut services = Services {
             schema: vec![field_type.clone()],
@@ -5388,7 +5297,6 @@ mod tests {
             &field_type,
             &mut budget,
             base,
-            None,
         )
         .unwrap();
         let mut expected = ChunkedVecSized::<Int>::with_capacity(3);
