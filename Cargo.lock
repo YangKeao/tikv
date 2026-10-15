@@ -8523,7 +8523,6 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "smallvec",
  "static_assertions",
  "tidb_query_codegen",
  "tidb_query_common",

@@ -1,6 +1,5 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use smallvec::SmallVec;
 use tidb_query_common::Result;
 pub use tidb_query_datatype::codec::data_type::{
     BATCH_MAX_SIZE, IDENTICAL_LOGICAL_ROWS, LogicalRows,
@@ -3063,103 +3062,31 @@ impl<'a> OrdinaryFrame<'a> {
             .storage(other_live_bytes.saturating_add(
                 batch_min_storage_bytes(output_type, count).unwrap_or(usize::MAX),
             ))?;
-        let mut output = VectorValue::with_capacity(count, output_type);
-        let mut output_bytes = vector_storage_bytes(&output, budget.mode());
-        budget.storage(other_live_bytes.saturating_add(output_bytes))?;
-        // This is ONLY this node's kernel phase. Every whole operand program
-        // has already completed; neither children nor a failed lane are replayed.
-        for lane in 0..count {
-            budget.charge()?;
-            budget.storage(
-                other_live_bytes
-                    .saturating_add(output_bytes)
-                    .saturating_add(batch_min_storage_bytes(output_type, 1).unwrap_or(usize::MAX)),
-            )?;
-            let position = [lane];
-            let mut lane_args: SmallVec<[RpnStackNode<'_>; 4]> = SmallVec::new();
-            for operand in &self.values {
-                lane_args.push(batch_lane_view(operand, &position)?);
-            }
-            let value = eval_ordinary_kernel(ctx, self.prepared, &lane_args)?;
-            validate_frame_result(&value, 1)?;
-            let item = value.get_logical_scalar_ref(0);
-            if item.eval_type() != output_type {
-                return Err(LocalError::InvalidSpec(
-                    "batch kernel result carrier differs from its declaration".into(),
-                ));
-            }
-            let incoming = node_storage(&value, budget.mode());
-            budget.storage(
-                other_live_bytes
-                    .saturating_add(output_bytes)
-                    .saturating_add(incoming),
-            )?;
-            match (&mut output, item) {
-                (VectorValue::Int(output), ScalarValueRef::Int(item)) => {
-                    output.push(item.copied());
-                }
-                (VectorValue::Real(output), ScalarValueRef::Real(item)) => {
-                    output.push(item.copied());
-                }
-                (VectorValue::Decimal(output), ScalarValueRef::Decimal(item)) => {
-                    output.push(item.cloned());
-                }
-                (VectorValue::Bytes(output), ScalarValueRef::Bytes(item)) => {
-                    output.push_ref(item);
-                }
-                (VectorValue::DateTime(output), ScalarValueRef::DateTime(item)) => {
-                    output.push(item.copied());
-                }
-                (VectorValue::Duration(output), ScalarValueRef::Duration(item)) => {
-                    output.push(item.copied());
-                }
-                (VectorValue::Json(output), ScalarValueRef::Json(item)) => {
-                    output.push(item.map(|item| item.to_owned()));
-                }
-                (VectorValue::VectorFloat32(output), ScalarValueRef::VectorFloat32(item)) => {
-                    output.push(item.map(|item| item.to_owned()));
-                }
-                _ => unreachable!("checked batch result carrier"),
-            }
-            output_bytes = vector_storage_bytes(&output, budget.mode());
-            budget.storage(
-                other_live_bytes
-                    .saturating_add(output_bytes)
-                    .saturating_add(incoming),
-            )?;
-            // The singleton result is not retained across the next kernel lane.
-            drop(value);
+        // Every operand program has completed in selected-occurrence order.
+        // Charge the whole pure kernel phase before dispatch, preserving the
+        // per-lane work cost without invoking the generated wrapper per lane.
+        budget.charge_many(count as u64)?;
+        let (func_meta, metadata) = self.prepared.kernel();
+        let value = eval_prepared_kernel(
+            ctx,
+            count,
+            &self.values,
+            func_meta,
+            self.prepared.return_type(),
+            metadata,
+            None,
+        )?;
+        validate_frame_result(&value, count)?;
+        if value.get_logical_scalar_ref(0).eval_type() != output_type {
+            return Err(LocalError::InvalidSpec(
+                "batch kernel result carrier differs from its declaration".into(),
+            ));
         }
-        Ok(RpnStackNode::Vector {
-            value: RpnStackNodeVectorValue::Generated {
-                physical_value: output,
-            },
-            field_type: self.prepared.return_type(),
-        })
-    }
-}
-
-fn batch_lane_view<'b>(
-    node: &'b RpnStackNode<'_>,
-    position: &'b [usize; 1],
-) -> LocalResult<RpnStackNode<'b>> {
-    match node {
-        RpnStackNode::Scalar { value, field_type } => {
-            Ok(RpnStackNode::Scalar { value, field_type })
-        }
-        RpnStackNode::Vector {
-            value: RpnStackNodeVectorValue::Generated { physical_value },
-            field_type,
-        } => Ok(RpnStackNode::Vector {
-            value: RpnStackNodeVectorValue::Ref {
-                physical_value,
-                logical_rows: position,
-            },
-            field_type,
-        }),
-        _ => Err(LocalError::InvalidSpec(
-            "batch operands require owned selection-order vectors or immutable broadcasts".into(),
-        )),
+        // Variable-width output capacity is known after the kernel. Account
+        // it before publication or any subsequent expression effect; this is
+        // a retained-owner budget, not a hard allocator-peak guarantee.
+        budget.storage(other_live_bytes.saturating_add(node_storage(&value, budget.mode())))?;
+        Ok(value)
     }
 }
 

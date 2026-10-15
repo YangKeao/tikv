@@ -219,9 +219,11 @@ flag or eligibility policy described above.
   `ExactRetained`) remain independent. Batch execution checks actual retained
   owners, including suspended operands and output capacity, before subsequent
   effects/publication. This is not a hard allocator-peak bound. The current
-  ordinary frame still calls the prepared kernel once per lane with singleton
-  views; owned input import and output append remain. Whole-selection program
-  execution therefore does not imply one vector kernel call or zero-copy IO.
+  ordinary frame charges the complete kernel lane count before invoking the
+  generated evaluator once with all operands. It validates shape/carrier and
+  retained output storage before publication or the next expression effect.
+  Owned input import and output append remain; a vector kernel call does not
+  imply zero-copy IO.
 - `prepare_evaluated_bytes` constructs one closed operation over canonical ready
   slots and returns an opaque worker, not a raw program/context/graph. Its legacy
   name also covers fixed Int, Decimal, full i128 and multi-input string operations.

@@ -314,10 +314,14 @@ impl EvalBudget {
     }
 
     pub(crate) fn charge(&mut self) -> LocalResult<()> {
+        self.charge_many(1)
+    }
+
+    pub(crate) fn charge_many(&mut self, count: u64) -> LocalResult<()> {
         if self.checked {
             self.steps = self
                 .steps
-                .checked_add(1)
+                .checked_add(count)
                 .ok_or_else(|| LocalError::ResourceLimit("evaluation work overflow".into()))?;
             if self.steps > self.limits.max_steps {
                 return Err(LocalError::ResourceLimit(
@@ -370,6 +374,28 @@ mod tests {
     use tidb_query_datatype::{EvalType, codec::data_type::ChunkedVecBytes};
 
     use super::*;
+
+    #[test]
+    fn batch_work_charge_checks_exact_limit_and_overflow() {
+        let mut budget = EvalBudget::exact(ExecutionLimits {
+            max_steps: 1024,
+            ..ExecutionLimits::default()
+        })
+        .unwrap();
+        budget.charge_many(1023).unwrap();
+        budget.charge().unwrap();
+        assert!(matches!(budget.charge(), Err(LocalError::ResourceLimit(_))));
+        let mut budget = EvalBudget::exact(ExecutionLimits {
+            max_steps: u64::MAX,
+            ..ExecutionLimits::default()
+        })
+        .unwrap();
+        budget.charge_many(u64::MAX).unwrap();
+        assert!(matches!(
+            budget.charge_many(2),
+            Err(LocalError::ResourceLimit(_))
+        ));
+    }
 
     #[test]
     fn test_decimal_exact_storage_includes_owned_spill() {
