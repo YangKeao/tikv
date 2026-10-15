@@ -48,6 +48,8 @@ fn batch_signature_contract(
         return None;
     };
     match signature {
+        ScalarFuncSig::UnaryNotInt => Some((INT, EvalType::Int, true, false)),
+        ScalarFuncSig::Asin | ScalarFuncSig::Acos => Some((REAL, EvalType::Real, false, false)),
         ScalarFuncSig::IntIsNull => Some((INT, EvalType::Int, true, false)),
         ScalarFuncSig::RealIsNull => Some((REAL, EvalType::Int, false, false)),
         ScalarFuncSig::DecimalIsNull => Some((DECIMAL, EvalType::Int, false, false)),

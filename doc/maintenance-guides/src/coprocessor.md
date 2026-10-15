@@ -230,6 +230,11 @@ flag or eligibility policy described above.
   unsigned bits. JSON is excluded from native batch IS NULL because the Go
   catalog requires CastJsonAsString then StringIsNull; do not substitute the wire
   JsonIsNull signature or bypass that cast as a special per-function route.
+  UnaryNotInt permits unsigned input bits and returns signed0/1/NULL. ASIN/ACOS
+  admit Real and share the existing asin_f64/acos_f64 primitive with native raw
+  workers; out-of-domain NaN results become NULL and signed zero is preserved.
+  This does not admit SIN/COS/ATAN's distinct native Go/libm policies or ROUND's
+  different native/wire rounding behavior.
   Lazy/effectful calls remain outside this domain. The former
   numeric-vector program, compile mode and decoded/raw entry have been removed.
   Row/ControlLineage/SqlBatch/EvaluatedAscii identities remain separate and are
