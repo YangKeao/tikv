@@ -2370,6 +2370,85 @@ impl Decimal {
         Ok(value)
     }
 
+    /// Projects a checked native MyDecimal cell into the logical native-math
+    /// domain without an intermediate ASCII coefficient. This is value
+    /// normalization, not physical-cell import: discard inactive/padding bits,
+    /// trim integer zeroes, clear zero sign and extend storage to result scale.
+    /// The same per-owner word budget as `try_from_native_digits` applies.
+    pub fn try_from_native_cell(
+        cell: super::NativeMyDecimal,
+        limit: usize,
+    ) -> NativeDecimalResult<Self> {
+        let (integer, fraction, result, negative, raw) = cell.raw_parts();
+        if integer < 0 || fraction < 0 || result < 0 {
+            return Err(NativeDecimalError::InvalidInput(
+                "negative native cell count",
+            ));
+        }
+        let integer = integer as usize;
+        let fraction = fraction as usize;
+        let result = result as usize;
+        let int_words = integer.div_ceil(DIGITS_PER_WORD);
+        let frac_words = fraction.div_ceil(DIGITS_PER_WORD);
+        let source_active = int_words + frac_words;
+        if source_active > WORD_BUF_LEN
+            || raw[..source_active]
+                .iter()
+                .any(|word| *word < 0 || *word as u32 >= WORD_BASE)
+        {
+            return Err(NativeDecimalError::InvalidInput(
+                "invalid native cell active words",
+            ));
+        }
+        let mut words = raw.map(|word| word as u32);
+        // Native coefficient extraction emits only the declared digits of the
+        // first/last partial words. Physical cells may contain extra padding.
+        let head = integer % DIGITS_PER_WORD;
+        if head != 0 {
+            words[0] %= TEN_POW[head];
+        }
+        let tail = fraction % DIGITS_PER_WORD;
+        if tail != 0 {
+            let padding = TEN_POW[DIGITS_PER_WORD - tail];
+            words[source_active - 1] = words[source_active - 1] / padding * padding;
+        }
+        let start = words[..int_words]
+            .iter()
+            .position(|word| *word != 0)
+            .unwrap_or(int_words);
+        let kept_int_words = int_words - start;
+        let mut integer = if kept_int_words == 0 {
+            0
+        } else {
+            (kept_int_words - 1) * DIGITS_PER_WORD + words[start].ilog10() as usize + 1
+        };
+        let storage = fraction.max(result);
+        // The old normalized coefficient retains one digit for scale-zero zero.
+        if integer == 0 && storage == 0 {
+            integer = 1;
+        }
+        let target_int_words = integer.div_ceil(DIGITS_PER_WORD);
+        let active = target_int_words + storage.div_ceil(DIGITS_PER_WORD);
+        native_decimal_word_budget(active, limit)?;
+        let mut value = Self {
+            int_cnt: integer,
+            frac_cnt: storage,
+            result_frac_cnt: result,
+            negative,
+            word_buf: SmallVec::from_buf([0; WORD_BUF_LEN]),
+        };
+        value
+            .try_reserve_words(active)
+            .map_err(NativeDecimalError::Core)?;
+        value.word_buf[..kept_int_words].copy_from_slice(&words[start..int_words]);
+        value.word_buf[target_int_words..target_int_words + frac_words]
+            .copy_from_slice(&words[int_words..source_active]);
+        if value.word_buf[..active].iter().all(|word| *word == 0) {
+            value.negative = false;
+        }
+        Ok(value)
+    }
+
     /// Fallible logical-value extraction for the native math result carrier.
     /// This does not admit raw physical cells, visible-only padding, or
     /// inactive heap payloads as native coefficients. The sign of zero is
