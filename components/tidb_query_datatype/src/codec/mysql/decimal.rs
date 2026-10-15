@@ -2331,11 +2331,21 @@ impl Decimal {
             .checked_add(fraction.div_ceil(DIGITS_PER_WORD))
             .ok_or(NativeDecimalError::Resource("active word count overflow"))?;
         native_decimal_word_budget(active, limit)?;
-        let mut words = Vec::new();
-        words
-            .try_reserve_exact(active)
-            .map_err(|_| NativeDecimalError::Resource("coefficient word allocation failed"))?;
-        words.resize(active, 0);
+        // Counts and ASCII digits are checked above. Parsing each bounded
+        // chunk below guarantees base-1e9 ranges and partial-word padding, so
+        // construct the owner directly instead of allocating a temporary Vec,
+        // validating it again and copying it into a second owner.
+        let mut value = Self {
+            int_cnt: integer,
+            frac_cnt: fraction,
+            result_frac_cnt: result as usize,
+            negative,
+            word_buf: SmallVec::from_buf([0; WORD_BUF_LEN]),
+        };
+        value
+            .try_reserve_words(active)
+            .map_err(NativeDecimalError::Core)?;
+        let words = &mut value.word_buf[..active];
         let word = |chunk: &[u8]| {
             chunk
                 .iter()
@@ -2357,14 +2367,7 @@ impl Decimal {
         {
             *destination = word(chunk) * TEN_POW[DIGITS_PER_WORD - chunk.len()];
         }
-        Self::try_from_words(DecimalWordsRef {
-            int_digits: integer,
-            storage_frac: storage,
-            result_frac: result,
-            negative,
-            words: &words,
-        })
-        .map_err(NativeDecimalError::Core)
+        Ok(value)
     }
 
     /// Fallible logical-value extraction for the native math result carrier.
@@ -3222,6 +3225,7 @@ impl Decimal {
     /// Exact logical import, private until every reachable wide consumer is
     /// closed. This extends strict parts validation, not physical admission.
     /// Supplied inactive cells, count padding and raw zero sign are preserved.
+    #[cfg(test)]
     fn try_from_words(parts: DecimalWordsRef<'_>) -> Result<Self> {
         let storage_frac = usize::try_from(parts.storage_frac)
             .map_err(|_| decimal_resource_error("storage scale exceeds indexing width"))?;
