@@ -3,7 +3,10 @@
 use std::{alloc::Layout, mem};
 
 use tidb_query_datatype::{
-    codec::data_type::{ChunkRef, ChunkedVec, ChunkedVecSized, Decimal, Int, VectorValue},
+    codec::data_type::{
+        ChunkRef, ChunkedVec, ChunkedVecSized, DateTime, Decimal, Duration, Evaluable,
+        EvaluableRet, Int, Real, VectorValue,
+    },
     expr::EvalContext,
 };
 use tipb::FieldType;
@@ -32,6 +35,23 @@ pub trait LocalRuntimeServices {
         row: InputRow,
         expected: &FieldType,
     ) -> LocalResult<VectorValue>;
+
+    /// Imports one complete occurrence map in selection order when the caller
+    /// can expose a column efficiently. The returned vector owns only this
+    /// invocation's compact carrier; callers may fill it from fixed-width
+    /// cells or from borrowed byte slices backed by one arena. This hook is
+    /// side-effect-free: demand/error ordering belongs to expression kernels,
+    /// not to storage access. Adapters without a batch view retain the checked
+    /// singleton import below.
+    fn read_input_batch(
+        &mut self,
+        _ctx: &mut EvalContext,
+        _slot: usize,
+        _physical_rows: &[usize],
+        _expected: &FieldType,
+    ) -> LocalResult<Option<VectorValue>> {
+        Ok(None)
+    }
 
     /// Reborrowing is nonpanicking and side-effect-free. When hosts are bound,
     /// every reborrow during an invocation must expose the same catalog and
@@ -101,9 +121,14 @@ pub(crate) fn vector_storage_bytes(value: &VectorValue, mode: StorageMode) -> us
         StorageMode::ConservativeInt => int_storage_bytes(value.capacity()),
         StorageMode::ExactRetained => match value {
             VectorValue::Int(values) => int_vector_storage_bytes(values),
+            VectorValue::Real(values) => real_vector_storage_bytes(values),
             VectorValue::Bytes(values) => values.retained_heap_bytes(),
             VectorValue::Decimal(values) => decimal_vector_storage_bytes(values),
-            _ => None,
+            VectorValue::DateTime(values) => sized_vector_storage_bytes(values),
+            VectorValue::Duration(values) => sized_vector_storage_bytes(values),
+            VectorValue::Json(values) => values.retained_heap_bytes(),
+            VectorValue::VectorFloat32(values) => values.retained_heap_bytes(),
+            VectorValue::Enum(_) | VectorValue::Set(_) => None,
         }
         .unwrap_or(usize::MAX),
     }
@@ -116,6 +141,23 @@ pub(crate) fn int_vector_storage_bytes(values: &ChunkedVecSized<Int>) -> Option<
     values
         .capacity()
         .checked_mul(mem::size_of::<Int>())?
+        .checked_add(values.get_bit_vec().retained_heap_bytes()?)
+}
+
+pub(crate) fn real_vector_storage_bytes(values: &ChunkedVecSized<Real>) -> Option<usize> {
+    values
+        .capacity()
+        .checked_mul(mem::size_of::<Real>())?
+        .checked_add(values.get_bit_vec().retained_heap_bytes()?)
+}
+
+fn sized_vector_storage_bytes<T>(values: &ChunkedVecSized<T>) -> Option<usize>
+where
+    T: Evaluable + EvaluableRet,
+{
+    values
+        .capacity()
+        .checked_mul(mem::size_of::<T>())?
         .checked_add(values.get_bit_vec().retained_heap_bytes()?)
 }
 
@@ -147,9 +189,27 @@ pub(crate) fn int_min_storage_bytes(rows: usize) -> Option<usize> {
     minimum_array_bytes::<Int>(rows)?.checked_add(bitmap_min_storage_bytes(rows)?)
 }
 
+pub(crate) fn real_min_storage_bytes(rows: usize) -> Option<usize> {
+    minimum_array_bytes::<Real>(rows)?.checked_add(bitmap_min_storage_bytes(rows)?)
+}
+
 /// Minimum Decimal cell/bitmap layout only; live spills are charged separately.
 pub(crate) fn decimal_min_storage_bytes(rows: usize) -> Option<usize> {
     minimum_array_bytes::<Decimal>(rows)?.checked_add(bitmap_min_storage_bytes(rows)?)
+}
+
+pub(crate) fn datetime_min_storage_bytes(rows: usize) -> Option<usize> {
+    minimum_array_bytes::<DateTime>(rows)?.checked_add(bitmap_min_storage_bytes(rows)?)
+}
+
+pub(crate) fn duration_min_storage_bytes(rows: usize) -> Option<usize> {
+    minimum_array_bytes::<Duration>(rows)?.checked_add(bitmap_min_storage_bytes(rows)?)
+}
+
+/// Compact variable-width layout minimum. Payload is charged from the actual
+/// owner after construction.
+pub(crate) fn compact_min_storage_bytes(rows: usize, data_bytes: usize) -> Option<usize> {
+    bytes_min_storage_bytes(rows, data_bytes)
 }
 
 /// Minimum data/offset/bitmap layout, including the empty vector's zero offset.
@@ -358,10 +418,12 @@ mod tests {
         bytes.truncate(0);
         let bytes_bytes = bytes.retained_heap_bytes().unwrap();
         assert!(bytes_bytes >= bytes_min_storage_bytes(65, 128).unwrap());
+        let reals = VectorValue::with_capacity(3, EvalType::Real);
+        let real_bytes = vector_storage_bytes(&reals, StorageMode::ExactRetained);
         for (value, exact) in [
             (VectorValue::Int(ints), int_bytes),
             (VectorValue::Bytes(bytes), bytes_bytes),
-            (VectorValue::with_capacity(3, EvalType::Real), usize::MAX),
+            (reals, real_bytes),
         ] {
             assert_eq!(
                 vector_storage_bytes(&value, StorageMode::ConservativeInt),

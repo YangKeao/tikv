@@ -1,10 +1,12 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use smallvec::SmallVec;
 use tidb_query_common::Result;
 pub use tidb_query_datatype::codec::data_type::{
     BATCH_MAX_SIZE, IDENTICAL_LOGICAL_ROWS, LogicalRows,
 };
 use tidb_query_datatype::{
+    EvalType, FieldTypeAccessor,
     codec::{batch::LazyBatchColumnVec, data_type::*},
     expr::EvalContext,
 };
@@ -23,9 +25,9 @@ use crate::{
         LineageCarrier, LocalError, LocalHostServices, LocalResult, LocalRuntimeServices,
         OrdinaryProfile, PreparedHostCall, PreparedOrdinaryCall, ResultMetaId,
         runtime::{
-            EvalBudget, StorageMode, bytes_min_storage_bytes, decimal_min_storage_bytes,
-            int_min_storage_bytes, int_storage_bytes, int_vector_storage_bytes,
-            vector_storage_bytes,
+            EvalBudget, StorageMode, bytes_min_storage_bytes, compact_min_storage_bytes,
+            datetime_min_storage_bytes, decimal_min_storage_bytes, duration_min_storage_bytes,
+            int_min_storage_bytes, int_storage_bytes, real_min_storage_bytes, vector_storage_bytes,
         },
     },
 };
@@ -1667,12 +1669,16 @@ impl ReadyValueDispatchWitness {
 enum EvalExecution {
     Unannotated,
     SqlControlLineage,
-    SqlNumericBatch,
+    SqlBatch,
     EvaluatedAscii,
     EvaluatedBytes(EvaluatedBytesOp),
 }
 
 impl EvalExecution {
+    fn batch_signature(function: crate::FunctionRef) -> Option<(usize, EvalType)> {
+        crate::local::batch_signature(function).map(|(inputs, output)| (inputs.len(), output))
+    }
+
     fn evaluated_bytes_operation(self) -> Option<EvaluatedBytesOp> {
         match self {
             Self::EvaluatedAscii => Some(EvaluatedBytesOp::Ascii),
@@ -1685,7 +1691,7 @@ impl EvalExecution {
         let valid = match self {
             Self::Unannotated => budget.mode() == StorageMode::ConservativeInt,
             Self::SqlControlLineage
-            | Self::SqlNumericBatch
+            | Self::SqlBatch
             | Self::EvaluatedAscii
             | Self::EvaluatedBytes(_) => {
                 budget.is_checked() && budget.mode() == StorageMode::ExactRetained
@@ -1728,17 +1734,21 @@ impl EvalExecution {
 
     fn check_ordinary(self, prepared: &PreparedOrdinaryCall, rows: usize) -> LocalResult<()> {
         let site = prepared.site();
+        let function = prepared.function();
         let valid = match (self, site.profile(), site.original_pb_signature()) {
             (Self::Unannotated, OrdinaryProfile::TypedRow, None) => rows == 1,
             (Self::Unannotated, OrdinaryProfile::PbRow, Some(signature)) => {
                 rows == 1 && signature == tipb::ScalarFuncSig::PlusInt as i32
             }
-            (Self::SqlNumericBatch, OrdinaryProfile::NativeNumericBatch, None) => {
-                rows > 0 && rows <= BATCH_MAX_SIZE
+            (Self::SqlBatch, OrdinaryProfile::NativeBatch, None) => {
+                rows > 0 && rows <= BATCH_MAX_SIZE && Self::batch_signature(function).is_some()
             }
             _ => false,
         };
-        if !valid || prepared.function() != crate::FunctionRef::TiPb(tipb::ScalarFuncSig::PlusInt) {
+        if !valid
+            || (self == Self::Unannotated
+                && function != crate::FunctionRef::TiPb(tipb::ScalarFuncSig::PlusInt))
+        {
             return Err(LocalError::InvalidSpec(
                 "ordinary source profile and execution domain differ".into(),
             ));
@@ -1747,14 +1757,88 @@ impl EvalExecution {
     }
 }
 
-// Defensive check for the fixed numeric entry. Immutable compilation facts
+// Defensive check for the eager batch entry. Immutable compilation facts
 // apply the same batch-only raw-type policy before copying any descriptor.
-fn numeric_batch_int_type(field_type: &FieldType) -> bool {
+fn batch_eval_type(field_type: &FieldType) -> Option<EvalType> {
     let excluded = (1 << 5) | (1 << 8) | (1 << 11) | (1 << 18) | (1 << 21);
     let documented = (1 << 25) - 1;
-    field_type.get_tp() == tidb_query_datatype::FieldTypeTp::LongLong as i32
-        && !field_type.get_array()
-        && field_type.get_flag() & (excluded | !documented) == 0
+    if field_type.get_array() || field_type.get_flag() & (excluded | !documented) != 0 {
+        return None;
+    }
+    let raw_type = field_type.get_tp();
+    match EvalType::try_from(field_type.as_accessor().tp()).ok()? {
+        EvalType::Int if raw_type == tidb_query_datatype::FieldTypeTp::LongLong as i32 => {
+            Some(EvalType::Int)
+        }
+        EvalType::Real if raw_type == tidb_query_datatype::FieldTypeTp::Double as i32 => {
+            Some(EvalType::Real)
+        }
+        EvalType::Decimal if raw_type == tidb_query_datatype::FieldTypeTp::NewDecimal as i32 => {
+            Some(EvalType::Decimal)
+        }
+        EvalType::Bytes
+            if matches!(
+                raw_type,
+                value if value == tidb_query_datatype::FieldTypeTp::VarChar as i32
+                    || value == tidb_query_datatype::FieldTypeTp::VarString as i32
+                    || value == tidb_query_datatype::FieldTypeTp::String as i32
+                    || value == tidb_query_datatype::FieldTypeTp::Blob as i32
+                    || value == tidb_query_datatype::FieldTypeTp::TinyBlob as i32
+                    || value == tidb_query_datatype::FieldTypeTp::MediumBlob as i32
+                    || value == tidb_query_datatype::FieldTypeTp::LongBlob as i32
+            ) =>
+        {
+            Some(EvalType::Bytes)
+        }
+        EvalType::DateTime
+            if matches!(
+                raw_type,
+                value if value == tidb_query_datatype::FieldTypeTp::Date as i32
+                    || value == tidb_query_datatype::FieldTypeTp::DateTime as i32
+                    || value == tidb_query_datatype::FieldTypeTp::Timestamp as i32
+            ) =>
+        {
+            Some(EvalType::DateTime)
+        }
+        EvalType::Duration if raw_type == tidb_query_datatype::FieldTypeTp::Duration as i32 => {
+            Some(EvalType::Duration)
+        }
+        EvalType::Json if raw_type == tidb_query_datatype::FieldTypeTp::Json as i32 => {
+            Some(EvalType::Json)
+        }
+        EvalType::VectorFloat32
+            if raw_type == tidb_query_datatype::FieldTypeTp::TiDbVectorFloat32 as i32 =>
+        {
+            Some(EvalType::VectorFloat32)
+        }
+        _ => None,
+    }
+}
+
+fn batch_min_storage_bytes(eval_type: EvalType, rows: usize) -> Option<usize> {
+    match eval_type {
+        EvalType::Int => int_min_storage_bytes(rows),
+        EvalType::Real => real_min_storage_bytes(rows),
+        EvalType::Decimal => decimal_min_storage_bytes(rows),
+        EvalType::Bytes => bytes_min_storage_bytes(rows, 0),
+        EvalType::DateTime => datetime_min_storage_bytes(rows),
+        EvalType::Duration => duration_min_storage_bytes(rows),
+        EvalType::Json | EvalType::VectorFloat32 => compact_min_storage_bytes(rows, 0),
+        _ => None,
+    }
+}
+
+fn node_batch_eval_type(node: &RpnExpressionNode, schema: &[FieldType]) -> Option<EvalType> {
+    match node {
+        RpnExpressionNode::Constant { field_type, .. }
+        | RpnExpressionNode::FnCall { field_type, .. }
+        | RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => batch_eval_type(field_type),
+        RpnExpressionNode::OrdinaryFnCall { prepared, .. } => {
+            batch_eval_type(prepared.return_type())
+        }
+        RpnExpressionNode::ColumnRef { offset } => schema.get(*offset).and_then(batch_eval_type),
+        RpnExpressionNode::HostCall { .. } => None,
+    }
 }
 
 // Fresh scalar-only canonical protobuf values have no heap owners. Comparing
@@ -2209,7 +2293,7 @@ impl<'a> ProgramFrame<'a> {
                     && self.rows.physical() == [0]
                     && evaluated_bytes_shape(operation, self.nodes, schema)
             }
-            EvalExecution::SqlNumericBatch => {
+            EvalExecution::SqlBatch => {
                 if self.flow.is_some()
                     || self.nodes.len() != 1
                     || self.rows.len() == 0
@@ -2217,20 +2301,21 @@ impl<'a> ProgramFrame<'a> {
                     || self.rows.physical().len() != self.rows.len()
                 {
                     return Err(LocalError::InvalidSpec(
-                        "numeric batch requires its untagged singleton-structured phase".into(),
+                        "batch requires its untagged singleton-structured phase".into(),
                     ));
                 }
                 match &self.nodes[0] {
-                    RpnExpressionNode::Constant {
-                        value: ScalarValue::Int(_),
-                        field_type,
-                    } => numeric_batch_int_type(field_type),
+                    RpnExpressionNode::Constant { value, field_type } => {
+                        batch_eval_type(field_type) == Some(value.eval_type())
+                    }
                     RpnExpressionNode::ColumnRef { offset } => {
-                        schema.get(*offset).is_some_and(numeric_batch_int_type)
+                        schema.get(*offset).and_then(batch_eval_type).is_some()
                     }
                     RpnExpressionNode::OrdinaryFnCall { prepared, args } => {
                         execution.check_ordinary(prepared, self.rows.len())?;
-                        args.len() == 2 && numeric_batch_int_type(prepared.return_type())
+                        EvalExecution::batch_signature(prepared.function())
+                            == batch_eval_type(prepared.return_type())
+                                .map(|eval_type| (args.len(), eval_type))
                     }
                     _ => false,
                 }
@@ -2265,13 +2350,20 @@ impl<'a> ProgramFrame<'a> {
         }
     }
 
-    fn result_precharge(&self, node: &RpnExpressionNode, execution: EvalExecution) -> usize {
+    fn result_precharge(
+        &self,
+        node: &RpnExpressionNode,
+        execution: EvalExecution,
+        schema: &[FieldType],
+    ) -> usize {
         if execution == EvalExecution::Unannotated {
             int_storage_bytes(self.rows.len())
         } else if matches!(node, RpnExpressionNode::Constant { .. }) {
             0 // borrowed compiled scalar; do not materialize an unneeded value.
-        } else if execution == EvalExecution::SqlNumericBatch {
-            int_min_storage_bytes(self.rows.len()).unwrap_or(usize::MAX)
+        } else if execution == EvalExecution::SqlBatch {
+            node_batch_eval_type(node, schema)
+                .and_then(|eval_type| batch_min_storage_bytes(eval_type, self.rows.len()))
+                .unwrap_or(usize::MAX)
         } else if let Some(operation) = execution.evaluated_bytes_operation() {
             match node {
                 RpnExpressionNode::ColumnRef { offset }
@@ -2876,13 +2968,18 @@ impl<'a> OrdinaryFrame<'a> {
         execution: EvalExecution,
     ) -> LocalResult<Self> {
         execution.check_ordinary(prepared, rows.len())?;
-        if args.len() != 2 {
+        let expected_arity = if execution == EvalExecution::SqlBatch {
+            EvalExecution::batch_signature(prepared.function()).map(|(arity, _)| arity)
+        } else {
+            Some(2)
+        };
+        if expected_arity != Some(args.len()) {
             return Err(LocalError::InvalidSpec(
-                "ordinary demand requires its checked singleton binary shape".into(),
+                "ordinary demand requires its checked Int call shape".into(),
             ));
         }
         let mut values = Vec::new();
-        reserve(&mut values, 2)?;
+        reserve(&mut values, args.len())?;
         Ok(Self {
             prepared,
             args,
@@ -2922,68 +3019,109 @@ impl<'a> OrdinaryFrame<'a> {
                 "ordinary operand complete field type changed".into(),
             ));
         }
-        let ScalarValueRef::Int(value) = child.get_logical_scalar_ref(0) else {
+        let child_ref = child.get_logical_scalar_ref(0);
+        if execution == EvalExecution::SqlBatch {
+            let expected = batch_eval_type(self.args[index].ret_field_type(schema));
+            if expected != Some(child_ref.eval_type()) {
+                return Err(LocalError::InvalidSpec(
+                    "batch operand carrier differs from its checked declaration".into(),
+                ));
+            }
+        } else if !matches!(child_ref, ScalarValueRef::Int(_)) {
             return Err(LocalError::InvalidSpec(
                 "ordinary operand is outside Int admission".into(),
             ));
-        };
+        }
         // Identity is the only admitted operand conversion. Row demand stops
-        // on left NULL; numeric batch MUST complete both operand phases, even
+        // on left NULL; batch MUST complete both operand phases, even
         // at width one or when every left lane is NULL.
-        self.stopped = execution == EvalExecution::Unannotated && index == 0 && value.is_none();
+        self.stopped = execution == EvalExecution::Unannotated
+            && index == 0
+            && matches!(child_ref, ScalarValueRef::Int(None));
         self.next = index + 1;
-        self.values.push(child); // two slots were reserved before either child.
+        self.values.push(child);
         Ok(())
     }
 
-    fn finish_numeric_batch(
+    fn finish_batch(
         &self,
         ctx: &mut EvalContext,
         budget: &mut EvalBudget,
         other_live_bytes: usize,
     ) -> LocalResult<RpnStackNode<'a>> {
-        EvalExecution::SqlNumericBatch.check_ordinary(self.prepared, self.rows.len())?;
-        if self.stopped || self.values.len() != 2 || self.next != 2 {
+        EvalExecution::SqlBatch.check_ordinary(self.prepared, self.rows.len())?;
+        if self.stopped || self.values.len() != self.args.len() || self.next != self.args.len() {
             return Err(LocalError::InvalidSpec(
-                "numeric kernel phase requires both complete operands".into(),
+                "batch kernel phase requires every complete operand".into(),
             ));
         }
         let count = self.rows.len();
-        budget.storage(
-            other_live_bytes.saturating_add(int_min_storage_bytes(count).unwrap_or(usize::MAX)),
-        )?;
-        let mut output = ChunkedVecSized::<Int>::with_capacity(count);
-        let mut output_bytes = int_vector_storage_bytes(&output).unwrap_or(usize::MAX);
+        let output_type = batch_eval_type(self.prepared.return_type()).ok_or_else(|| {
+            LocalError::InvalidSpec("batch kernel has an unsupported output carrier".into())
+        })?;
+        budget
+            .storage(other_live_bytes.saturating_add(
+                batch_min_storage_bytes(output_type, count).unwrap_or(usize::MAX),
+            ))?;
+        let mut output = VectorValue::with_capacity(count, output_type);
+        let mut output_bytes = vector_storage_bytes(&output, budget.mode());
         budget.storage(other_live_bytes.saturating_add(output_bytes))?;
-        // This is ONLY this node's kernel phase. Both whole operand programs
-        // have already completed; neither children nor a failed lane are replayed.
+        // This is ONLY this node's kernel phase. Every whole operand program
+        // has already completed; neither children nor a failed lane are replayed.
         for lane in 0..count {
             budget.charge()?;
             budget.storage(
                 other_live_bytes
                     .saturating_add(output_bytes)
-                    .saturating_add(int_min_storage_bytes(1).unwrap_or(usize::MAX)),
+                    .saturating_add(batch_min_storage_bytes(output_type, 1).unwrap_or(usize::MAX)),
             )?;
             let position = [lane];
-            let args = [
-                numeric_lane_view(&self.values[0], &position)?,
-                numeric_lane_view(&self.values[1], &position)?,
-            ];
-            let value = eval_ordinary_kernel(ctx, self.prepared, &args)?;
+            let mut lane_args: SmallVec<[RpnStackNode<'_>; 4]> = SmallVec::new();
+            for operand in &self.values {
+                lane_args.push(batch_lane_view(operand, &position)?);
+            }
+            let value = eval_ordinary_kernel(ctx, self.prepared, &lane_args)?;
             validate_frame_result(&value, 1)?;
-            let ScalarValueRef::Int(item) = value.get_logical_scalar_ref(0) else {
+            let item = value.get_logical_scalar_ref(0);
+            if item.eval_type() != output_type {
                 return Err(LocalError::InvalidSpec(
-                    "numeric kernel result is not Int".into(),
+                    "batch kernel result carrier differs from its declaration".into(),
                 ));
-            };
+            }
             let incoming = node_storage(&value, budget.mode());
             budget.storage(
                 other_live_bytes
                     .saturating_add(output_bytes)
                     .saturating_add(incoming),
             )?;
-            output.push(item.copied());
-            output_bytes = int_vector_storage_bytes(&output).unwrap_or(usize::MAX);
+            match (&mut output, item) {
+                (VectorValue::Int(output), ScalarValueRef::Int(item)) => {
+                    output.push(item.copied());
+                }
+                (VectorValue::Real(output), ScalarValueRef::Real(item)) => {
+                    output.push(item.copied());
+                }
+                (VectorValue::Decimal(output), ScalarValueRef::Decimal(item)) => {
+                    output.push(item.cloned());
+                }
+                (VectorValue::Bytes(output), ScalarValueRef::Bytes(item)) => {
+                    output.push_ref(item);
+                }
+                (VectorValue::DateTime(output), ScalarValueRef::DateTime(item)) => {
+                    output.push(item.copied());
+                }
+                (VectorValue::Duration(output), ScalarValueRef::Duration(item)) => {
+                    output.push(item.copied());
+                }
+                (VectorValue::Json(output), ScalarValueRef::Json(item)) => {
+                    output.push(item.map(|item| item.to_owned()));
+                }
+                (VectorValue::VectorFloat32(output), ScalarValueRef::VectorFloat32(item)) => {
+                    output.push(item.map(|item| item.to_owned()));
+                }
+                _ => unreachable!("checked batch result carrier"),
+            }
+            output_bytes = vector_storage_bytes(&output, budget.mode());
             budget.storage(
                 other_live_bytes
                     .saturating_add(output_bytes)
@@ -2994,14 +3132,14 @@ impl<'a> OrdinaryFrame<'a> {
         }
         Ok(RpnStackNode::Vector {
             value: RpnStackNodeVectorValue::Generated {
-                physical_value: VectorValue::Int(output),
+                physical_value: output,
             },
             field_type: self.prepared.return_type(),
         })
     }
 }
 
-fn numeric_lane_view<'b>(
+fn batch_lane_view<'b>(
     node: &'b RpnStackNode<'_>,
     position: &'b [usize; 1],
 ) -> LocalResult<RpnStackNode<'b>> {
@@ -3020,7 +3158,7 @@ fn numeric_lane_view<'b>(
             field_type,
         }),
         _ => Err(LocalError::InvalidSpec(
-            "numeric operands require owned selection-order vectors or immutable broadcasts".into(),
+            "batch operands require owned selection-order vectors or immutable broadcasts".into(),
         )),
     }
 }
@@ -3054,10 +3192,10 @@ fn read_binding_value(
     services.read_input(ctx, slot, row, field_type)
 }
 
-/// Import one demanded numeric leaf over the complete occurrence map. The
+/// Import one demanded batch leaf over the complete occurrence map. The
 /// explicit base includes suspended siblings/frames; this is not a per-lane
 /// budget reset or a second root-expression loop.
-fn read_numeric_binding_phase(
+fn read_batch_binding_phase(
     services: &mut dyn LocalRuntimeServices,
     ctx: &mut EvalContext,
     slot: usize,
@@ -3069,20 +3207,36 @@ fn read_numeric_binding_phase(
     let count = rows.len();
     if count == 0 || count > BATCH_MAX_SIZE || rows.physical().len() != count {
         return Err(LocalError::InvalidSpec(
-            "numeric binding phase has an invalid occurrence map".into(),
+            "batch binding phase has an invalid occurrence map".into(),
         ));
     }
+    let eval_type = batch_eval_type(field_type).ok_or_else(|| {
+        LocalError::BindingContract("batch binding has an unsupported carrier".into())
+    })?;
+    if let Some(output) = services.read_input_batch(ctx, slot, rows.physical(), field_type)? {
+        if output.eval_type() != eval_type || output.len() != count {
+            return Err(LocalError::BindingContract(
+                "read_input_batch returned a different carrier or row count".into(),
+            ));
+        }
+        budget.charge()?;
+        budget.storage(
+            other_live_bytes.saturating_add(vector_storage_bytes(&output, budget.mode())),
+        )?;
+        return Ok(output);
+    }
     budget.storage(
-        other_live_bytes.saturating_add(int_min_storage_bytes(count).unwrap_or(usize::MAX)),
+        other_live_bytes
+            .saturating_add(batch_min_storage_bytes(eval_type, count).unwrap_or(usize::MAX)),
     )?;
-    let mut output = ChunkedVecSized::<Int>::with_capacity(count);
-    let mut output_bytes = int_vector_storage_bytes(&output).unwrap_or(usize::MAX);
+    let mut output = VectorValue::with_capacity(count, eval_type);
+    let mut output_bytes = vector_storage_bytes(&output, budget.mode());
     budget.storage(other_live_bytes.saturating_add(output_bytes))?;
     for (occurrence, &input_row) in rows.physical().iter().enumerate() {
         budget.storage(
             other_live_bytes
                 .saturating_add(output_bytes)
-                .saturating_add(int_min_storage_bytes(1).unwrap_or(usize::MAX)),
+                .saturating_add(batch_min_storage_bytes(eval_type, 1).unwrap_or(usize::MAX)),
         )?;
         budget.charge()?;
         let value = read_binding_value(
@@ -3095,9 +3249,9 @@ fn read_numeric_binding_phase(
             },
             field_type,
         )?;
-        if value.eval_type() != tidb_query_datatype::EvalType::Int || value.len() != 1 {
+        if value.eval_type() != eval_type || value.len() != 1 {
             return Err(LocalError::BindingContract(
-                "numeric read_input must return one Int value".into(),
+                "batch read_input must return one value of its declared carrier".into(),
             ));
         }
         let incoming = vector_storage_bytes(&value, budget.mode());
@@ -3106,11 +3260,32 @@ fn read_numeric_binding_phase(
                 .saturating_add(output_bytes)
                 .saturating_add(incoming),
         )?;
-        let ScalarValueRef::Int(item) = value.get_scalar_ref(0) else {
-            unreachable!("checked Int carrier");
-        };
-        output.push(item.copied());
-        output_bytes = int_vector_storage_bytes(&output).unwrap_or(usize::MAX);
+        match (&mut output, value.get_scalar_ref(0)) {
+            (VectorValue::Int(output), ScalarValueRef::Int(item)) => {
+                output.push(item.copied());
+            }
+            (VectorValue::Bytes(output), ScalarValueRef::Bytes(item)) => {
+                output.push_ref(item);
+            }
+            (VectorValue::Real(output), ScalarValueRef::Real(item)) => output.push(item.copied()),
+            (VectorValue::Decimal(output), ScalarValueRef::Decimal(item)) => {
+                output.push(item.cloned());
+            }
+            (VectorValue::DateTime(output), ScalarValueRef::DateTime(item)) => {
+                output.push(item.copied());
+            }
+            (VectorValue::Duration(output), ScalarValueRef::Duration(item)) => {
+                output.push(item.copied());
+            }
+            (VectorValue::Json(output), ScalarValueRef::Json(item)) => {
+                output.push(item.map(|item| item.to_owned()));
+            }
+            (VectorValue::VectorFloat32(output), ScalarValueRef::VectorFloat32(item)) => {
+                output.push(item.map(|item| item.to_owned()));
+            }
+            _ => unreachable!("checked batch input carrier"),
+        }
+        output_bytes = vector_storage_bytes(&output, budget.mode());
         budget.storage(
             other_live_bytes
                 .saturating_add(output_bytes)
@@ -3118,7 +3293,7 @@ fn read_numeric_binding_phase(
         )?;
         drop(value);
     }
-    Ok(VectorValue::Int(output))
+    Ok(output)
 }
 
 /// Both eager FnCall and staged ordinary demand enter this one prepared kernel
@@ -3294,7 +3469,7 @@ fn eval_frames<'a, 'data: 'a>(
         {
             budget.depth(1)?;
             budget.charge()?;
-            budget.storage(frame.result_precharge(&frame.nodes[0], execution))?;
+            budget.storage(frame.result_precharge(&frame.nodes[0], execution, schema))?;
             let (_, value) = RpnExpression::eval_one_node(
                 ctx,
                 schema,
@@ -3444,7 +3619,7 @@ fn eval_frames<'a, 'data: 'a>(
                     // Charge space for the result while all argument values are
                     // still live, before invoking a kernel or input service.
                     budget.storage(
-                        retained.saturating_add(frame.result_precharge(node, execution)),
+                        retained.saturating_add(frame.result_precharge(node, execution, schema)),
                     )?;
                     let (used, value) = RpnExpression::eval_one_node(
                         ctx,
@@ -3540,7 +3715,7 @@ fn eval_frames<'a, 'data: 'a>(
                         .saturating_add(tasks.storage());
                     budget.storage(retained)?;
                 }
-                if (execution == EvalExecution::SqlNumericBatch || !frame.stopped)
+                if (execution == EvalExecution::SqlBatch || !frame.stopped)
                     && frame.next < frame.args.len()
                 {
                     budget.charge()?;
@@ -3561,8 +3736,8 @@ fn eval_frames<'a, 'data: 'a>(
                         budget,
                         tasks.storage(),
                     )?;
-                } else if execution == EvalExecution::SqlNumericBatch {
-                    let value = frame.finish_numeric_batch(ctx, budget, retained)?;
+                } else if execution == EvalExecution::SqlBatch {
+                    let value = frame.finish_batch(ctx, budget, retained)?;
                     budget.storage(retained.saturating_add(node_storage(&value, budget.mode())))?;
                     returned = Some(FrameResult::unannotated(value));
                 } else {
@@ -3887,10 +4062,10 @@ impl RpnExpression {
         Ok(result)
     }
 
-    /// Fixed whole-selection numeric entry. Its opaque local facade has already
+    /// Whole-selection eager batch entry. Its opaque local facade has already
     /// validated the stored compiled-entry tag, complete schema and row bounds.
     /// Empty selections are published by that facade without entering a frame.
-    pub(crate) fn eval_with_input_numeric_batch<'a, 'data: 'a>(
+    pub(crate) fn eval_with_input_batch<'a, 'data: 'a>(
         &'a self,
         ctx: &mut EvalContext,
         schema: &'a [FieldType],
@@ -3905,7 +4080,7 @@ impl RpnExpression {
             || !matches!(input, EvalInput::Bindings(_))
         {
             return Err(LocalError::InvalidSpec(
-                "numeric batch requires its untagged bounded binding domain".into(),
+                "batch requires its untagged bounded binding domain".into(),
             ));
         }
         eval_frames(
@@ -3919,7 +4094,7 @@ impl RpnExpression {
             0,
             None,
             budget,
-            EvalExecution::SqlNumericBatch,
+            EvalExecution::SqlBatch,
         )
         .and_then(FrameResult::into_unannotated)
     }
@@ -4119,10 +4294,8 @@ impl RpnExpression {
                             }
                         }
                     }
-                    EvalInput::Bindings(services)
-                        if execution == EvalExecution::SqlNumericBatch =>
-                    {
-                        let physical_value = read_numeric_binding_phase(
+                    EvalInput::Bindings(services) if execution == EvalExecution::SqlBatch => {
+                        let physical_value = read_batch_binding_phase(
                             *services,
                             ctx,
                             *offset,
@@ -4233,7 +4406,10 @@ mod tests {
     use tipb_helper::ExprDefBuilder;
 
     use super::*;
-    use crate::{RpnExpressionBuilder, RpnFnMeta, impl_arithmetic::*, impl_compare::*};
+    use crate::{
+        RpnExpressionBuilder, RpnFnMeta, impl_arithmetic::*, impl_compare::*,
+        local::runtime::int_vector_storage_bytes,
+    };
 
     fn evaluated_ascii_test_recipe() -> (RpnExpression, Vec<FieldType>) {
         (
@@ -4263,7 +4439,7 @@ mod tests {
         for domain in [
             EvalExecution::Unannotated,
             EvalExecution::SqlControlLineage,
-            EvalExecution::SqlNumericBatch,
+            EvalExecution::SqlBatch,
         ] {
             assert!(domain.check_input(&input).is_err());
         }
@@ -5157,10 +5333,7 @@ mod tests {
         let row = EvalBudget::local(ExecutionLimits::default(), 1).unwrap();
         assert!(EvalExecution::Unannotated.check_budget(&row).is_ok());
         assert!(EvalExecution::Unannotated.check_budget(&exact).is_err());
-        for domain in [
-            EvalExecution::SqlControlLineage,
-            EvalExecution::SqlNumericBatch,
-        ] {
+        for domain in [EvalExecution::SqlControlLineage, EvalExecution::SqlBatch] {
             assert!(domain.check_budget(&exact).is_ok());
             assert!(domain.check_budget(&row).is_err());
         }
@@ -5172,11 +5345,7 @@ mod tests {
         };
         let raw = make();
         let frame = ProgramFrame::new(&raw, FrameRows::Borrowed(&[0], 1));
-        assert!(
-            frame
-                .check_execution(EvalExecution::SqlNumericBatch, &[])
-                .is_ok()
-        );
+        assert!(frame.check_execution(EvalExecution::SqlBatch, &[]).is_ok());
         assert!(
             frame
                 .check_execution(EvalExecution::SqlControlLineage, &[])
@@ -5201,11 +5370,7 @@ mod tests {
                 .check_execution(EvalExecution::SqlControlLineage, &[])
                 .is_ok()
         );
-        assert!(
-            frame
-                .check_execution(EvalExecution::SqlNumericBatch, &[])
-                .is_err()
-        );
+        assert!(frame.check_execution(EvalExecution::SqlBatch, &[]).is_err());
         assert!(
             frame
                 .check_execution(EvalExecution::Unannotated, &[])
@@ -5270,7 +5435,7 @@ mod tests {
                 ..ExecutionLimits::default()
             })
             .unwrap();
-            let error = read_numeric_binding_phase(
+            let error = read_batch_binding_phase(
                 &mut services,
                 &mut EvalContext::default(),
                 0,
@@ -5289,7 +5454,7 @@ mod tests {
             capacity: 1,
         };
         let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
-        let value = read_numeric_binding_phase(
+        let value = read_batch_binding_phase(
             &mut services,
             &mut EvalContext::default(),
             0,

@@ -20,6 +20,19 @@ pub struct ChunkedVecJson {
 }
 
 impl ChunkedVecJson {
+    /// Retained payload owned by this compact column, excluding inline fields
+    /// and allocator bookkeeping.
+    pub fn retained_heap_bytes(&self) -> Option<usize> {
+        self.data
+            .capacity()
+            .checked_add(
+                self.var_offset
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<usize>())?,
+            )?
+            .checked_add(self.bitmap.retained_heap_bytes()?)
+    }
+
     #[inline]
     pub fn get(&self, idx: usize) -> Option<JsonRef<'_>> {
         assert!(idx < self.len());

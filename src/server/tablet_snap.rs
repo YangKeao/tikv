@@ -99,7 +99,7 @@ async fn read_to(
         .inc_by(cost as u64);
     to.clear();
     to.reserve_exact(size);
-    let mut buf: BorrowedBuf<'_> = to.spare_capacity_mut().into();
+    let mut buf = BorrowedBuf::from(to.spare_capacity_mut());
     f.read_buf_exact(buf.unfilled())?;
     unsafe {
         to.set_len(size);

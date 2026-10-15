@@ -53,7 +53,7 @@ impl<T: Copy> PeekableRemoteStat<T> {
     /// be accessible.)
     unsafe fn peek(&self) -> Option<T> {
         self.0.map(|nlp| unsafe {
-            core::intrinsics::atomic_load::<T, { core::intrinsics::AtomicOrdering::SeqCst }>(
+            core::intrinsics::atomic_load::<T, { core::intrinsics::AtomicOrdering::SeqCst }, false>(
                 nlp.as_ptr(),
             )
         })

@@ -4,9 +4,9 @@ use tidb_query_datatype::codec::data_type::ScalarValue;
 use tipb::{FieldType, ScalarFuncSig};
 
 use super::{
-    CheckedResultFlow, ControlLineageFacts, EvaluatedArgsRole, EvaluatedBytesOp,
+    BatchFacts, CheckedResultFlow, ControlLineageFacts, EvaluatedArgsRole, EvaluatedBytesOp,
     EvaluatedKernelKind, HostCatalog, HostCatalogKey, LocalCompileContext, LocalControlProgram,
-    LocalError, LocalExpr, LocalResult, NumericBatchFacts, OrdinaryProfileSpec, PreparedHostCall,
+    LocalError, LocalExpr, LocalResult, OrdinaryProfileSpec, PreparedHostCall,
     PreparedOrdinaryCall, registry,
 };
 use crate::{
@@ -18,14 +18,13 @@ use crate::{
 };
 
 /// Compiled ownership domain, not inferred from a root node or its annotations.
-/// In particular, a numeric-batch leaf has neither an Ordinary call site nor a
+/// In particular, a batch leaf has neither an Ordinary call site nor a
 /// lineage tag, but still must not enter the row evaluator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ProgramEntry {
     Row,
     ControlLineage,
-    SqlNumericBatch,
-    SqlNumericVector,
+    SqlBatch,
     EvaluatedAscii,
     EvaluatedBytes,
 }
@@ -63,17 +62,15 @@ impl LocalProgram {
     }
 }
 
-/// Opaque ownership facade for checked SQL numeric-batch evaluation. The
-/// binding entry retains the operand-major execution domain, while the decoded
-/// entry owns a separately compiled eager RPN over the same revalidated source.
-/// Both entries select the official generated kernel metadata.
+/// Opaque ownership facade for checked SQL batch evaluation. The
+/// binding entry retains the operand-major execution domain and selects the
+/// official generated kernel metadata.
 #[derive(Debug)]
-pub struct LocalNumericBatchProgram {
+pub struct LocalBatchProgram {
     pub(super) inner: LocalProgram,
-    pub(super) vector: LocalProgram,
 }
 
-impl LocalNumericBatchProgram {
+impl LocalBatchProgram {
     pub fn return_type(&self) -> &FieldType {
         self.inner.return_type()
     }
@@ -369,8 +366,7 @@ enum CompileMode<'a> {
     Legacy(Option<&'a HostCatalog>),
     Profiled(&'a OrdinaryProfileSpec),
     Lineaged(&'a ControlLineageFacts),
-    NumericBatch(&'a NumericBatchFacts),
-    NumericVector(&'a NumericBatchFacts),
+    Batch(&'a BatchFacts),
     EvaluatedAscii,
     EvaluatedBytes(EvaluatedBytesOp),
 }
@@ -380,8 +376,7 @@ impl CompileMode<'_> {
         match self {
             Self::Legacy(_) | Self::Profiled(_) => ProgramEntry::Row,
             Self::Lineaged(_) => ProgramEntry::ControlLineage,
-            Self::NumericBatch(_) => ProgramEntry::SqlNumericBatch,
-            Self::NumericVector(_) => ProgramEntry::SqlNumericVector,
+            Self::Batch(_) => ProgramEntry::SqlBatch,
             Self::EvaluatedAscii => ProgramEntry::EvaluatedAscii,
             Self::EvaluatedBytes(_) => ProgramEntry::EvaluatedBytes,
         }
@@ -413,6 +408,11 @@ impl CompileMode<'_> {
                     "evaluated Bytes field type differs from its canonical ABI",
                 ));
             }
+        } else if matches!(self, Self::Batch(_)) {
+            // BatchFacts has already snapshotted and revalidated every
+            // complete native EvalType declaration. Do not reapply the
+            // legacy signed-Int row gate while emitting those
+            // checked descriptors.
         } else if !self.is_lineaged() {
             registry::check_signed_int_type(field_type).map_err(invalid)?;
         }
@@ -427,7 +427,23 @@ fn check_literal(value: &ScalarValue, mode: CompileMode<'_>) -> LocalResult<()> 
     if mode.is_lineaged() {
         if !matches!(value, ScalarValue::Int(_) | ScalarValue::Bytes(_)) {
             return Err(LocalError::InvalidSpec(
-                "lineaged literal representation is not Int or Bytes".into(),
+                "checked literal representation is not Int or Bytes".into(),
+            ));
+        }
+    } else if matches!(mode, CompileMode::Batch(_)) {
+        if !matches!(
+            value,
+            ScalarValue::Int(_)
+                | ScalarValue::Real(_)
+                | ScalarValue::Decimal(_)
+                | ScalarValue::Bytes(_)
+                | ScalarValue::DateTime(_)
+                | ScalarValue::Duration(_)
+                | ScalarValue::Json(_)
+                | ScalarValue::VectorFloat32(_)
+        ) {
+            return Err(LocalError::InvalidSpec(
+                "checked batch literal representation is not a native EvalType carrier".into(),
             ));
         }
     } else if !matches!(value, ScalarValue::Int(_)) {
@@ -472,9 +488,9 @@ fn take_expression(
     mode: CompileMode<'_>,
 ) -> LocalResult<RpnExpression> {
     let expression = RpnExpression::from(std::mem::take(&mut buffers[index]));
-    if matches!(mode, CompileMode::NumericBatch(_)) && expression.len() != 1 {
+    if matches!(mode, CompileMode::Batch(_)) && expression.len() != 1 {
         return Err(LocalError::InvalidSpec(
-            "numeric-batch compilation requires one node per structured subprogram".into(),
+            "batch compilation requires one node per structured subprogram".into(),
         ));
     }
     if let Some(operation) = mode.evaluated_bytes_operation() {
@@ -637,13 +653,11 @@ pub fn compile_control_with_lineage(
     })
 }
 
-/// Compiles the closed signed LongLong PlusInt203 SQL numeric-batch domain.
+/// Compiles the closed signed LongLong integer-call SQL batch domain.
 /// Every source/schema declaration and batch-only call site is revalidated with
 /// the current limits before the shared compiler clones descriptors or prepares
-/// a call. The opaque binding entry evaluates each complete left operand before
-/// its complete right operand and invokes the prepared kernel per lane. A
-/// second closed decoded entry emits ordinary eager RPN nodes, so a real column
-/// batch reaches the same generated vector kernel once with `output_rows = N`.
+/// a call. The opaque binding entry evaluates each complete operand program in
+/// source order and invokes the prepared kernel per lane.
 ///
 /// SQL origin and fixed native source kinds remain producer assertions, not
 /// authenticated facts. This does not admit PB, AST-value consumers,
@@ -651,16 +665,15 @@ pub fn compile_control_with_lineage(
 /// row entrypoints. CompileLimits bounds nodes/depth; source/type metadata
 /// bytes remain a caller responsibility. The evaluator separately bounds
 /// selection occurrences.
-pub fn compile_numeric_batch(
+pub fn compile_batch(
     spec: &LocalExpr,
     schema: &[FieldType],
     cx: LocalCompileContext,
-    facts: &NumericBatchFacts,
-) -> LocalResult<LocalNumericBatchProgram> {
+    facts: &BatchFacts,
+) -> LocalResult<LocalBatchProgram> {
     facts.validate(spec, schema, cx.limits)?;
-    Ok(LocalNumericBatchProgram {
-        inner: compile(spec, schema, cx, CompileMode::NumericBatch(facts))?,
-        vector: compile(spec, schema, cx, CompileMode::NumericVector(facts))?,
+    Ok(LocalBatchProgram {
+        inner: compile(spec, schema, cx, CompileMode::Batch(facts))?,
     })
 }
 
@@ -925,26 +938,17 @@ fn compile(
                                         .clone(),
                                 )
                             }
-                            CompileMode::NumericBatch(facts) => Some(
+                            CompileMode::Batch(facts) => Some(
                                 facts
                                     .site(ordinal)
                                     .ok_or_else(|| {
                                         LocalError::InvalidSpec(
-                                            "numeric-batch facts are missing the current call occurrence"
+                                            "batch facts are missing the current call occurrence"
                                                 .into(),
                                         )
                                     })?
                                     .clone(),
                             ),
-                            CompileMode::NumericVector(facts) => {
-                                facts.site(ordinal).ok_or_else(|| {
-                                    LocalError::InvalidSpec(
-                                        "numeric-vector facts are missing the current call occurrence"
-                                            .into(),
-                                    )
-                                })?;
-                                None
-                            }
                             CompileMode::Legacy(_) => {
                                 registry::check_local_admission(&shape, metadata)
                                     .map_err(invalid)?;
@@ -1082,10 +1086,10 @@ fn compile(
             ));
         }
     }
-    if let CompileMode::NumericBatch(facts) | CompileMode::NumericVector(facts) = mode {
+    if let CompileMode::Batch(facts) = mode {
         if visited != facts.node_count() {
             return Err(LocalError::InvalidSpec(
-                "numeric-batch compilation did not retain every source occurrence".into(),
+                "batch compilation did not retain every source occurrence".into(),
             ));
         }
     }
@@ -1287,7 +1291,7 @@ mod lineage_compile_tests {
 }
 
 #[cfg(test)]
-mod numeric_batch_compile_tests {
+mod batch_compile_tests {
     use tidb_query_datatype::FieldTypeTp;
 
     use super::*;
@@ -1320,18 +1324,14 @@ mod numeric_batch_compile_tests {
         }
     }
 
-    fn batch_facts(
-        spec: &LocalExpr,
-        schema: &[FieldType],
-        ordinals: &[usize],
-    ) -> NumericBatchFacts {
-        NumericBatchFacts::sql_native_numeric_batch(
+    fn batch_facts(spec: &LocalExpr, schema: &[FieldType], ordinals: &[usize]) -> BatchFacts {
+        BatchFacts::sql_native_batch(
             spec,
             schema,
             ordinals
                 .iter()
                 .map(|&ordinal| {
-                    OrdinaryCallSite::sql_native_numeric_batch(
+                    OrdinaryCallSite::sql_native_batch(
                         ordinal,
                         OrdinarySourceId::new(u64::MAX, 1 << 63),
                     )
@@ -1346,7 +1346,7 @@ mod numeric_batch_compile_tests {
         for entry in [
             ProgramEntry::Row,
             ProgramEntry::ControlLineage,
-            ProgramEntry::SqlNumericBatch,
+            ProgramEntry::SqlBatch,
         ] {
             let result = program.check_entry(entry);
             if entry == expected {
@@ -1358,7 +1358,7 @@ mod numeric_batch_compile_tests {
     }
 
     #[test]
-    fn compile_numeric_batch_retains_every_call_ordinal_without_lineage_flow() {
+    fn compile_batch_retains_every_call_ordinal_without_lineage_flow() {
         let ft: FieldType = FieldTypeTp::LongLong.into();
         let spec = plus(
             plus(input(&ft), constant(Some(1), &ft), &ft),
@@ -1368,8 +1368,8 @@ mod numeric_batch_compile_tests {
         let schema = [ft.clone()];
         let facts = batch_facts(&spec, &schema, &[0, 1, 4]);
         let program =
-            compile_numeric_batch(&spec, &schema, LocalCompileContext::default(), &facts).unwrap();
-        assert_entry(&program.inner, ProgramEntry::SqlNumericBatch);
+            compile_batch(&spec, &schema, LocalCompileContext::default(), &facts).unwrap();
+        assert_entry(&program.inner, ProgramEntry::SqlBatch);
         assert_eq!(program.return_type(), &ft);
         assert_eq!(program.inner.expression.node_count(), 7);
         assert_eq!(program.inner.expression.work_count(), 7);
@@ -1388,17 +1388,14 @@ mod numeric_batch_compile_tests {
                         FunctionRef::TiPb(ScalarFuncSig::PlusInt)
                     );
                     assert_eq!(prepared.site(), facts.site(ordinal).unwrap());
-                    assert_eq!(
-                        prepared.site().profile(),
-                        OrdinaryProfile::NativeNumericBatch
-                    );
+                    assert_eq!(prepared.site().profile(), OrdinaryProfile::NativeBatch);
                     assert_eq!(prepared.site().original_pb_signature(), None);
                     assert_eq!(args.len(), 2);
                     call_ordinals.push(ordinal);
                     pending.extend(args.iter().rev());
                 }
                 RpnExpressionNode::Constant { .. } | RpnExpressionNode::ColumnRef { .. } => {}
-                _ => panic!("numeric-batch compiler emitted a non-ordinary executable node"),
+                _ => panic!("batch compiler emitted a non-ordinary executable node"),
             }
             ordinal += 1;
         }
@@ -1407,16 +1404,15 @@ mod numeric_batch_compile_tests {
     }
 
     #[test]
-    fn compile_leaf_entry_tags_distinguish_rows_lineage_and_numeric_batch() {
+    fn compile_leaf_entry_tags_distinguish_rows_lineage_and_batch() {
         let ft: FieldType = FieldTypeTp::LongLong.into();
         let schema = [ft.clone()];
         let hosts = HostCatalog::new(Vec::new()).unwrap();
         for spec in [constant(Some(7), &ft), input(&ft)] {
             let facts = batch_facts(&spec, &schema, &[]);
             let numeric =
-                compile_numeric_batch(&spec, &schema, LocalCompileContext::default(), &facts)
-                    .unwrap();
-            assert_entry(&numeric.inner, ProgramEntry::SqlNumericBatch);
+                compile_batch(&spec, &schema, LocalCompileContext::default(), &facts).unwrap();
+            assert_entry(&numeric.inner, ProgramEntry::SqlBatch);
             assert_eq!(numeric.inner.expression.checked_result_flow(), None);
             let row_facts = OrdinaryProfileSpec::new(
                 &spec,
@@ -1466,20 +1462,20 @@ mod numeric_batch_compile_tests {
     }
 
     #[test]
-    fn compile_numeric_batch_revalidates_source_schema_and_current_limits() {
+    fn compile_batch_revalidates_source_schema_and_current_limits() {
         let ft: FieldType = FieldTypeTp::LongLong.into();
         let schema = [ft.clone()];
         let spec = plus(input(&ft), constant(Some(1), &ft), &ft);
         let facts = batch_facts(&spec, &schema, &[0]);
         let changed = plus(input(&ft), constant(Some(2), &ft), &ft);
         assert!(matches!(
-            compile_numeric_batch(&changed, &schema, LocalCompileContext::default(), &facts),
+            compile_batch(&changed, &schema, LocalCompileContext::default(), &facts),
             Err(LocalError::InvalidSpec(_))
         ));
         let mut changed_type = ft;
         changed_type.set_flen(123);
         assert!(matches!(
-            compile_numeric_batch(
+            compile_batch(
                 &spec,
                 &[changed_type],
                 LocalCompileContext::default(),
@@ -1498,7 +1494,7 @@ mod numeric_batch_compile_tests {
             },
         ] {
             assert!(matches!(
-                compile_numeric_batch(&spec, &schema, LocalCompileContext { limits }, &facts),
+                compile_batch(&spec, &schema, LocalCompileContext { limits }, &facts),
                 Err(LocalError::ResourceLimit(_))
             ));
         }
@@ -1980,7 +1976,7 @@ mod ready_value_compile_tests {
         for entry in [
             ProgramEntry::Row,
             ProgramEntry::ControlLineage,
-            ProgramEntry::SqlNumericBatch,
+            ProgramEntry::SqlBatch,
         ] {
             assert!(matches!(
                 program.check_entry(entry),
@@ -2305,7 +2301,7 @@ mod ready_value_compile_tests {
             for entry in [
                 ProgramEntry::Row,
                 ProgramEntry::ControlLineage,
-                ProgramEntry::SqlNumericBatch,
+                ProgramEntry::SqlBatch,
                 ProgramEntry::EvaluatedAscii,
                 ProgramEntry::EvaluatedBytes,
             ] {
@@ -2500,7 +2496,7 @@ mod ready_value_compile_tests {
             Err(LocalError::InvalidSpec(_))
         ));
         assert!(matches!(
-            NumericBatchFacts::sql_native_numeric_batch(&spec, &schema, vec![], cx.limits),
+            BatchFacts::sql_native_batch(&spec, &schema, vec![], cx.limits),
             Err(LocalError::InvalidSpec(_))
         ));
         assert!(matches!(

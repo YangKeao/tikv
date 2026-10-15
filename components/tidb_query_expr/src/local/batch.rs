@@ -8,7 +8,7 @@ use std::{
 
 use tidb_query_common::error::{ErrorInner, EvaluateError};
 use tidb_query_datatype::{
-    EvalType,
+    EvalType, FieldTypeAccessor,
     codec::{
         batch::LazyBatchColumnVec,
         collation::native::NativeCollation,
@@ -28,11 +28,14 @@ use super::{
     ExecutionLimits, LineageCarrier, LineagedBatch, LocalCompileContext, LocalControlProgram,
     LocalError, LocalProgram, LocalResult, LocalRuntimeServices, ResultMetaId,
     compile::{
-        LocalNumericBatchProgram, ProgramEntry, compile_evaluated_bytes,
-        evaluated_native_vector_type, ready_value_bytes_type, ready_value_decimal_type,
-        ready_value_int_type,
+        LocalBatchProgram, ProgramEntry, compile_evaluated_bytes, evaluated_native_vector_type,
+        ready_value_bytes_type, ready_value_decimal_type, ready_value_int_type,
     },
-    runtime::{EvalBudget, bytes_min_storage_bytes, int_min_storage_bytes, vector_storage_bytes},
+    runtime::{
+        EvalBudget, bytes_min_storage_bytes, compact_min_storage_bytes, datetime_min_storage_bytes,
+        decimal_min_storage_bytes, duration_min_storage_bytes, int_min_storage_bytes,
+        real_min_storage_bytes, vector_storage_bytes,
+    },
 };
 use crate::{
     BinaryArithmeticErrorKind, BinaryArithmeticOperation, LegacyBinaryArithmeticError,
@@ -885,14 +888,15 @@ impl LocalControlProgram {
 
 /// Publishes the already-owned root without a second collector or donor copy.
 /// Driver frames have been dropped, so the root is charged once as output.
-fn finish_numeric_output(
+fn finish_batch_output(
     output: VectorValue,
+    expected: EvalType,
     rows: usize,
     budget: &mut EvalBudget,
 ) -> LocalResult<VectorValue> {
-    if output.eval_type() != EvalType::Int || output.len() != rows {
+    if output.eval_type() != expected || output.len() != rows {
         return Err(LocalError::InvalidBatch(
-            "numeric batch RPN returned an invalid Int result shape".into(),
+            "batch RPN returned a result with the wrong carrier or row count".into(),
         ));
     }
     let bytes = vector_storage_bytes(&output, budget.mode());
@@ -901,24 +905,8 @@ fn finish_numeric_output(
     Ok(output)
 }
 
-impl LocalNumericBatchProgram {
-    /// Evaluates already decoded columns through the ordinary eager RPN entry.
-    /// The checked SQL source and schema were revalidated before this private
-    /// vector program was compiled, so this does not widen generic admission.
-    /// Selection occurrence order (including duplicates) is passed unchanged to
-    /// the generated vector kernel; no singleton binding or parent lane loop is
-    /// involved.
-    pub fn eval_decoded(
-        &mut self,
-        limits: ExecutionLimits,
-        ctx: &mut EvalContext,
-        batch: LocalBatch<'_>,
-    ) -> LocalResult<VectorValue> {
-        self.vector
-            .eval_decoded_entry(ProgramEntry::SqlNumericVector, limits, ctx, batch)
-    }
-
-    /// Evaluates the checked SQL numeric batch domain once over the whole
+impl LocalBatchProgram {
+    /// Evaluates the checked SQL batch domain once over the whole
     /// borrowed selection. The original owned error is returned unchanged.
     pub fn eval_with_bindings(
         &mut self,
@@ -928,10 +916,10 @@ impl LocalNumericBatchProgram {
         selection: &[usize],
         services: &mut dyn LocalRuntimeServices,
     ) -> LocalResult<VectorValue> {
-        self.eval_numeric_bindings(limits, ctx, physical_rows, selection, services)
+        self.eval_batch_bindings(limits, ctx, physical_rows, selection, services)
     }
 
-    fn eval_numeric_bindings(
+    fn eval_batch_bindings(
         &mut self,
         limits: ExecutionLimits,
         ctx: &mut EvalContext,
@@ -941,12 +929,12 @@ impl LocalNumericBatchProgram {
     ) -> LocalResult<VectorValue> {
         self.inner
             .validate_bindings_preflight(physical_rows, selection, services)?;
-        self.inner.check_entry(ProgramEntry::SqlNumericBatch)?;
+        self.inner.check_entry(ProgramEntry::SqlBatch)?;
         if self.inner.host_catalog.is_some()
             || self.inner.expression.checked_result_flow().is_some()
         {
             return Err(LocalError::InvalidSpec(
-                "numeric batch program carries host or result-lineage state".into(),
+                "batch program carries host or result-lineage state".into(),
             ));
         }
         // Bound selected occurrences, not the caller's physical row universe.
@@ -954,13 +942,32 @@ impl LocalNumericBatchProgram {
         let rows = selection.len();
         if rows > BATCH_MAX_SIZE {
             return Err(LocalError::ResourceLimit(
-                "numeric batch selection exceeds 1024 occurrences".into(),
+                "batch selection exceeds 1024 occurrences".into(),
             ));
         }
         let mut budget = EvalBudget::exact(limits)?;
+        let output_type = EvalType::try_from(self.inner.return_type().as_accessor().tp())
+            .ok()
+            .filter(|eval_type| {
+                matches!(
+                    eval_type,
+                    EvalType::Int
+                        | EvalType::Real
+                        | EvalType::Decimal
+                        | EvalType::Bytes
+                        | EvalType::DateTime
+                        | EvalType::Duration
+                        | EvalType::Json
+                        | EvalType::VectorFloat32
+                )
+            })
+            .ok_or_else(|| {
+                LocalError::InvalidSpec("batch result carrier is not a native EvalType".into())
+            })?;
         if rows == 0 {
-            return finish_numeric_output(
-                VectorValue::with_capacity(0, EvalType::Int),
+            return finish_batch_output(
+                VectorValue::with_capacity(0, output_type),
+                output_type,
                 0,
                 &mut budget,
             );
@@ -969,7 +976,7 @@ impl LocalNumericBatchProgram {
         let mut input = EvalInput::Bindings(services);
         // Exactly one driver invocation. The driver owns all intermediate and
         // root charges until it returns; there is no per-occurrence root loop.
-        let result = self.inner.expression.eval_with_input_numeric_batch(
+        let result = self.inner.expression.eval_with_input_batch(
             ctx,
             &self.inner.schema,
             &mut input,
@@ -978,22 +985,44 @@ impl LocalNumericBatchProgram {
         )?;
         let output = match result {
             RpnStackNode::Scalar { value, .. } => {
-                let ScalarValue::Int(value) = value else {
+                if value.eval_type() != output_type {
                     return Err(LocalError::InvalidBatch(
-                        "numeric batch scalar result is not Int".into(),
+                        "batch scalar result has the wrong carrier".into(),
                     ));
-                };
-                let minimum = int_min_storage_bytes(rows).ok_or_else(|| {
-                    LocalError::ResourceLimit("numeric batch output layout overflow".into())
-                })?;
-                budget.check_output(minimum, 0)?;
-                let mut output = VectorValue::with_capacity(rows, EvalType::Int);
-                // Requested rows are not an actual-capacity prediction. All
-                // Int/bitmap capacity is checked before filling reserved slots.
-                budget.check_output(vector_storage_bytes(&output, budget.mode()), 0)?;
-                for _ in 0..rows {
-                    output.push_int(*value);
                 }
+                let minimum = match output_type {
+                    EvalType::Int => int_min_storage_bytes(rows),
+                    EvalType::Real => real_min_storage_bytes(rows),
+                    EvalType::Decimal => decimal_min_storage_bytes(rows),
+                    EvalType::Bytes => {
+                        let payload = match value {
+                            ScalarValue::Bytes(Some(bytes)) => bytes.len().checked_mul(rows),
+                            ScalarValue::Bytes(None) => Some(0),
+                            _ => None,
+                        };
+                        payload.and_then(|bytes| bytes_min_storage_bytes(rows, bytes))
+                    }
+                    EvalType::DateTime => datetime_min_storage_bytes(rows),
+                    EvalType::Duration => duration_min_storage_bytes(rows),
+                    EvalType::Json => {
+                        let payload = match value {
+                            ScalarValue::Json(Some(json)) => json
+                                .value
+                                .len()
+                                .checked_add(1)
+                                .and_then(|bytes| bytes.checked_mul(rows)),
+                            ScalarValue::Json(None) => Some(0),
+                            _ => None,
+                        };
+                        payload.and_then(|bytes| compact_min_storage_bytes(rows, bytes))
+                    }
+                    EvalType::VectorFloat32 => compact_min_storage_bytes(rows, 0),
+                    _ => None,
+                }
+                .ok_or_else(|| LocalError::ResourceLimit("batch output layout overflow".into()))?;
+                budget.check_output(minimum, 0)?;
+                let output = VectorValue::from_scalar(value, rows);
+                budget.check_output(vector_storage_bytes(&output, budget.mode()), 0)?;
                 output
             }
             RpnStackNode::Vector {
@@ -1005,11 +1034,11 @@ impl LocalNumericBatchProgram {
                 ..
             } => {
                 return Err(LocalError::InvalidBatch(
-                    "numeric batch bindings returned a borrowed root".into(),
+                    "batch bindings returned a borrowed root".into(),
                 ));
             }
         };
-        finish_numeric_output(output, rows, &mut budget)
+        finish_batch_output(output, output_type, rows, &mut budget)
     }
 }
 

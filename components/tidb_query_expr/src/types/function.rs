@@ -834,13 +834,14 @@ impl PreparedCall {
         self,
         site: crate::local::OrdinaryCallSite,
     ) -> Result<PreparedOrdinaryCall> {
-        if self.function != FunctionRef::TiPb(ScalarFuncSig::PlusInt)
+        let arity = crate::local::batch_signature(self.function).map(|(inputs, _)| inputs.len());
+        if arity.is_none()
             || self.control.is_some()
-            || self.retained_args != [0, 1]
+            || !(0..arity.unwrap()).eq(self.retained_args.iter().copied())
             || !self.metadata.is::<()>()
         {
             return Err(other_err!(
-                "Ordinary demand requires checked203, unit metadata and source-order arguments"
+                "Ordinary demand requires a checked eager call, unit metadata and source-order arguments"
             ));
         }
         Ok(PreparedOrdinaryCall {

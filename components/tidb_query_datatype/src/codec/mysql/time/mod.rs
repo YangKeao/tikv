@@ -724,6 +724,22 @@ bitfield! {
     u8, get_fsp_tt, set_fsp_tt: 3, 0;
 }
 
+impl Time {
+    /// Imports TiDB's exact in-memory Go-compatible time word. The caller has
+    /// already validated the SQL FieldType; this transport deliberately does
+    /// not normalize zero/invalid calendar fields or timezone metadata.
+    #[inline]
+    pub const fn from_go_raw_like_go(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Exports the exact Go-compatible time word without SQL conversion.
+    #[inline]
+    pub const fn go_raw(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub enum TimeType {
     Date,

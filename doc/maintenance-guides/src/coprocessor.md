@@ -200,24 +200,28 @@ flag or eligibility policy described above.
   Source/site identity and preserved LocalError variants are not a site-aware
   native SQL diagnostic adapter. The trusted implicit-cast constructor is not an
   unchecked local entry; further domains require explicit admission.
-- `NumericBatchFacts` / `compile_numeric_batch` are a distinct, closed signed
-  LongLong/PlusInt203 domain. `LocalNumericBatchProgram` has no raw or row escape;
-  compiled Row/ControlLineage/SqlNumericBatch/EvaluatedAscii identities are checked
-  even for empty and leaf programs. A shared flat snapshot worker does not merge row/batch facts.
-  One driver invocation completes the whole left child, whole right child, then
-  parent kernel lanes in selected-occurrence order. There is no left-NULL stop,
-  including width one, and no per-row tree replay or root tiling. The bound is
-  1024 selected occurrences, not physical rows; repeats/reordering remain distinct.
-  The caller must prove the genuine suite/global-vectorization entry on every
-  invocation. Library facts do not prove native eligibility or activate SQL.
-- Execution semantics (`Unannotated`, SQL control lineage, SQL numeric batch,
-  closed evaluated arguments, including the legacy ASCII entry) and
-  retained-storage policy (`ConservativeInt`, `ExactRetained`) are independent.
-  Numeric batches use actual retained owners, including both suspended operands
-  and output capacity, checked before the next effect/publication. They do not
-  gain control/result lineage, byte kernels, hosts or a hard allocator-peak bound.
-  Reported numeric calls use the same fresh failure-only recorder and preserve
-  genuine input versus kernel sites without replay or guessed SQL diagnostics.
+- `BatchFacts` / `compile_batch` and `LocalBatchProgram` are the closed eager
+  batch domain. `batch_signature` is the single capability registry consumed by
+  preparation, execution and the TiDB consumer; signatures specify input/output
+  carriers and arity. Int, Real, Decimal, Bytes, DateTime, Duration, JSON and
+  VectorFloat32 have owned typed transport; storage width is not an admission
+  criterion. Lazy/effectful calls remain outside this domain. The former
+  numeric-vector program, compile mode and decoded/raw entry have been removed.
+  Row/ControlLineage/SqlBatch/EvaluatedAscii identities remain separate and are
+  checked even for empty and leaf programs.
+- One program invocation evaluates children before parent lanes in selected
+  occurrence order, with no left-NULL stop or per-row tree replay. The bound is
+  1024 selected occurrences per invocation; the TiDB adapter streams larger
+  selections through consecutive windows. Repeats/reordering remain distinct.
+  The caller must prove its genuine suite/global-vectorization entry. Library
+  facts do not prove native eligibility or activate SQL.
+- Execution semantics and retained-storage policy (`ConservativeInt`,
+  `ExactRetained`) remain independent. Batch execution checks actual retained
+  owners, including suspended operands and output capacity, before subsequent
+  effects/publication. This is not a hard allocator-peak bound. The current
+  ordinary frame still calls the prepared kernel once per lane with singleton
+  views; owned input import and output append remain. Whole-selection program
+  execution therefore does not imply one vector kernel call or zero-copy IO.
 - `prepare_evaluated_bytes` constructs one closed operation over canonical ready
   slots and returns an opaque worker, not a raw program/context/graph. Its legacy
   name also covers fixed Int, Decimal, full i128 and multi-input string operations.

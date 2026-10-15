@@ -1,7 +1,7 @@
 // Copyright 2026 TiKV Project Authors. Licensed under Apache-2.0.
 
 //! These are local admission/demand tests, not proof of native PB ingestion,
-//! nonidentity coercion, native diagnostics, or native numeric batch semantics.
+//! nonidentity coercion, native diagnostics, or native batch semantics.
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -12,7 +12,7 @@ use tidb_query_datatype::{
     EvalType, FieldTypeAccessor, FieldTypeFlag, FieldTypeTp,
     codec::{
         batch::LazyBatchColumnVec,
-        data_type::{ScalarValue, VectorValue},
+        data_type::{Decimal, Real, ScalarValue, VectorValue},
     },
     expr::{Error, EvalContext},
 };
@@ -20,10 +20,14 @@ use tikv_util::sys::thread::StdThreadBuildWrapper;
 use tipb::{FieldType, ScalarFuncSig as Sig};
 
 use super::*;
-use crate::RpnExpressionNode;
-
 fn ft() -> FieldType {
     FieldTypeTp::LongLong.into()
+}
+fn real_ft() -> FieldType {
+    FieldTypeTp::Double.into()
+}
+fn decimal_ft() -> FieldType {
+    FieldTypeTp::NewDecimal.into()
 }
 fn constant(value: Option<i64>) -> LocalExpr {
     LocalExpr::Constant {
@@ -99,6 +103,26 @@ fn rejected(spec: &LocalExpr, schema: &[FieldType]) {
         ),
         Err(LocalError::InvalidSpec(_))
     ));
+}
+
+#[test]
+fn batch_registry_covers_every_native_eval_type_carrier() {
+    for (signature, carrier) in [
+        (Sig::IntAnyValue, EvalType::Int),
+        (Sig::RealAnyValue, EvalType::Real),
+        (Sig::DecimalAnyValue, EvalType::Decimal),
+        (Sig::StringAnyValue, EvalType::Bytes),
+        (Sig::TimeAnyValue, EvalType::DateTime),
+        (Sig::DurationAnyValue, EvalType::Duration),
+        (Sig::JsonAnyValue, EvalType::Json),
+        (Sig::VectorFloat32AnyValue, EvalType::VectorFloat32),
+    ] {
+        assert_eq!(
+            batch_signature(FunctionRef::TiPb(signature)),
+            Some((std::slice::from_ref(&carrier), carrier)),
+            "missing carrier for {signature:?}",
+        );
+    }
 }
 
 #[test]
@@ -214,7 +238,7 @@ fn profile_leaf_roots_need_no_sites_but_still_require_an_admitted_consumer() {
     }
     for profile in [
         OrdinaryProfile::AstValueScalar,
-        OrdinaryProfile::NativeNumericBatch,
+        OrdinaryProfile::NativeBatch,
     ] {
         assert!(matches!(
             OrdinaryProfileSpec::new(
@@ -295,7 +319,6 @@ fn profile_admission_is_exact_signed_longlong_typed_int_and_203() {
     for sig in [
         Sig::PlusIntSignedSigned,
         Sig::PlusReal,
-        Sig::EqInt,
         Sig::GtInt,
         Sig::ModIntSignedSigned,
         Sig::ModIntSignedUnsigned,
@@ -1059,7 +1082,7 @@ fn profiled_deep_execution_snapshot_metadata_and_drop_are_iterative() {
 // C3c is a separate admission and scheduling contract. These source-authored
 // fixtures do not establish a native TiDB consumer route or diagnostic parity.
 fn batch_site(ordinal: usize) -> OrdinaryCallSite {
-    OrdinaryCallSite::sql_native_numeric_batch(ordinal, source(ordinal as u64))
+    OrdinaryCallSite::sql_native_batch(ordinal, source(ordinal as u64))
 }
 
 fn batch_sites(spec: &LocalExpr) -> Vec<OrdinaryCallSite> {
@@ -1076,18 +1099,12 @@ fn batch_sites(spec: &LocalExpr) -> Vec<OrdinaryCallSite> {
     result
 }
 
-fn batch_facts(spec: &LocalExpr, schema: &[FieldType]) -> NumericBatchFacts {
-    NumericBatchFacts::sql_native_numeric_batch(
-        spec,
-        schema,
-        batch_sites(spec),
-        CompileLimits::default(),
-    )
-    .unwrap()
+fn batch_facts(spec: &LocalExpr, schema: &[FieldType]) -> BatchFacts {
+    BatchFacts::sql_native_batch(spec, schema, batch_sites(spec), CompileLimits::default()).unwrap()
 }
 
-fn compile_batch(spec: &LocalExpr, schema: &[FieldType]) -> LocalNumericBatchProgram {
-    compile_numeric_batch(
+fn compile_batch_program(spec: &LocalExpr, schema: &[FieldType]) -> LocalBatchProgram {
+    super::compile_batch(
         spec,
         schema,
         LocalCompileContext::default(),
@@ -1097,19 +1114,16 @@ fn compile_batch(spec: &LocalExpr, schema: &[FieldType]) -> LocalNumericBatchPro
 }
 
 fn batch_rejected(spec: &LocalExpr, schema: &[FieldType]) {
-    assert!(matches!(
-        NumericBatchFacts::sql_native_numeric_batch(
-            spec,
-            schema,
-            batch_sites(spec),
-            CompileLimits::default(),
-        ),
-        Err(LocalError::InvalidSpec(_))
-    ));
+    let result =
+        BatchFacts::sql_native_batch(spec, schema, batch_sites(spec), CompileLimits::default());
+    assert!(
+        matches!(result, Err(LocalError::InvalidSpec(_))),
+        "unexpected batch admission: {spec:?}: {result:?}"
+    );
 }
 
 fn run_batch(
-    program: &mut LocalNumericBatchProgram,
+    program: &mut LocalBatchProgram,
     services: &mut dyn LocalRuntimeServices,
     physical_rows: usize,
     selection: &[usize],
@@ -1123,69 +1137,148 @@ fn run_batch(
     )
 }
 
-fn decoded_int_columns(columns: &[&[Option<i64>]]) -> LazyBatchColumnVec {
-    LazyBatchColumnVec::from(
-        columns
-            .iter()
-            .map(|column| {
-                let mut values = VectorValue::with_capacity(column.len(), EvalType::Int);
-                for value in *column {
-                    values.push_int(*value);
-                }
-                values
-            })
-            .collect::<Vec<_>>(),
-    )
+#[test]
+fn batch_admits_the_closed_signed_int_family() {
+    for (signature, expected) in [
+        (Sig::PlusInt, vec![Some(11), None, Some(7)]),
+        (Sig::MinusInt, vec![Some(-9), None, Some(7)]),
+        (Sig::MultiplyInt, vec![Some(10), None, Some(0)]),
+        (Sig::EqInt, vec![Some(0), None, Some(0)]),
+        (Sig::GtInt, vec![Some(0), None, Some(1)]),
+    ] {
+        let expr = call(signature, vec![input(0), input(1)]);
+        let mut program = compile_batch_program(&expr, &[ft(), ft()]);
+        let mut services = BatchBindings::new(vec![
+            vec![Some(1), None, Some(7)],
+            vec![Some(10), Some(2), Some(0)],
+        ]);
+        assert_eq!(
+            run_batch(&mut program, &mut services, 3, &[0, 1, 2])
+                .unwrap()
+                .to_int_vec(),
+            expected,
+            "{signature:?}"
+        );
+    }
+    let expr = call(Sig::AbsInt, vec![input(0)]);
+    let mut program = compile_batch_program(&expr, &[ft()]);
+    let mut services = BatchBindings::new(vec![vec![Some(-3), None, Some(7)]]);
+    assert_eq!(
+        run_batch(&mut program, &mut services, 3, &[0, 1, 2])
+            .unwrap()
+            .to_int_vec(),
+        vec![Some(3), None, Some(7)]
+    );
 }
 
 #[test]
-fn numeric_batch_decoded_entry_uses_eager_rpn_selection_and_nulls() {
-    let expr = plus(input(0), input(1));
-    let mut program = compile_batch(&expr, &[ft(), ft()]);
-    assert!(matches!(
-        program.vector.expression.as_ref().last(),
-        Some(RpnExpressionNode::FnCall { .. })
-    ));
-    assert!(
-        !program
-            .vector
-            .expression
-            .as_ref()
-            .iter()
-            .any(|node| matches!(node, RpnExpressionNode::OrdinaryFnCall { .. }))
-    );
-
-    let columns = decoded_int_columns(&[
-        &[Some(1), None, Some(7), Some(i64::MAX)],
-        &[Some(10), Some(20), None, Some(1)],
-    ]);
-    let selection = [2, 0, 2, 1];
-    let values = program
-        .eval_decoded(
-            ExecutionLimits::default(),
-            &mut EvalContext::default(),
-            LocalBatch {
-                columns: &columns,
-                physical_rows: 4,
-                selection: &selection,
+fn batch_admits_real_arithmetic_through_the_same_registry() {
+    let field = real_ft();
+    let expr = LocalExpr::Call {
+        function: FunctionRef::TiPb(Sig::PlusReal),
+        args: vec![
+            LocalExpr::InputSlot {
+                slot: 0,
+                field_type: field.clone(),
             },
-        )
-        .unwrap()
-        .to_int_vec();
-    assert_eq!(values, vec![None, Some(11), None, None]);
-
-    let error = program
-        .eval_decoded(
-            ExecutionLimits::default(),
-            &mut EvalContext::default(),
-            LocalBatch {
-                columns: &columns,
-                physical_rows: 4,
-                selection: &[3],
+            LocalExpr::Constant {
+                value: ScalarValue::Real(Some(Real::new(2.5).unwrap())),
+                field_type: field.clone(),
+                literal_kind: LiteralKind::Typed,
             },
-        )
-        .unwrap_err();
-    assert!(matches!(error, LocalError::Evaluation(_)));
+        ]
+        .into_boxed_slice(),
+        return_type: field.clone(),
+        metadata: CallMetadata::None,
+    };
+    drop(compile_batch_program(&expr, &[field]));
+}
+
+#[test]
+fn batch_admits_decimal_arithmetic_through_the_same_registry() {
+    let field = decimal_ft();
+    let expr = LocalExpr::Call {
+        function: FunctionRef::TiPb(Sig::PlusDecimal),
+        args: vec![
+            LocalExpr::InputSlot {
+                slot: 0,
+                field_type: field.clone(),
+            },
+            LocalExpr::Constant {
+                value: ScalarValue::Decimal(Some(Decimal::from(2_i64))),
+                field_type: field.clone(),
+                literal_kind: LiteralKind::Typed,
+            },
+        ]
+        .into_boxed_slice(),
+        return_type: field.clone(),
+        metadata: CallMetadata::None,
+    };
+    drop(compile_batch_program(&expr, &[field]));
+}
+
+#[test]
+fn batch_admits_bytes_to_fixed_and_varlen_signatures() {
+    let mut bytes: FieldType = FieldTypeTp::VarString.into();
+    bytes.set_charset("utf8mb4".into());
+    bytes.set_collate(46);
+    for (signature, return_type) in [(Sig::CharLengthUtf8, ft()), (Sig::LowerUtf8, bytes.clone())] {
+        let expr = LocalExpr::Call {
+            function: FunctionRef::TiPb(signature),
+            args: vec![LocalExpr::InputSlot {
+                slot: 0,
+                field_type: bytes.clone(),
+            }]
+            .into_boxed_slice(),
+            return_type,
+            metadata: CallMetadata::None,
+        };
+        drop(compile_batch_program(&expr, &[bytes.clone()]));
+    }
+
+    for (signature, args) in [
+        (
+            Sig::Substring2ArgsUtf8,
+            vec![
+                LocalExpr::InputSlot {
+                    slot: 0,
+                    field_type: bytes.clone(),
+                },
+                constant(Some(2)),
+            ],
+        ),
+        (
+            Sig::Substring3ArgsUtf8,
+            vec![
+                LocalExpr::InputSlot {
+                    slot: 0,
+                    field_type: bytes.clone(),
+                },
+                constant(Some(2)),
+                constant(Some(3)),
+            ],
+        ),
+    ] {
+        let expr = LocalExpr::Call {
+            function: FunctionRef::TiPb(signature),
+            args: args.into_boxed_slice(),
+            return_type: bytes.clone(),
+            metadata: CallMetadata::None,
+        };
+        drop(compile_batch_program(&expr, &[bytes.clone()]));
+    }
+
+    let mismatched = LocalExpr::Call {
+        function: FunctionRef::TiPb(Sig::CharLengthUtf8),
+        args: vec![LocalExpr::InputSlot {
+            slot: 0,
+            field_type: bytes.clone(),
+        }]
+        .into_boxed_slice(),
+        return_type: bytes.clone(),
+        metadata: CallMetadata::None,
+    };
+    batch_rejected(&mismatched, &[bytes]);
 }
 
 /// Faults target an occurrence, not a physical row: repeated selections must
@@ -1223,14 +1316,14 @@ impl LocalRuntimeServices for BatchBindings {
     }
 
     fn host_services(&mut self) -> Option<&mut dyn LocalHostServices> {
-        panic!("numeric batch consulted the optional host hook")
+        panic!("batch consulted the optional host hook")
     }
 }
 
 #[test]
-fn numeric_batch_facts_cover_all_node_ordinals_without_source_id_allocation() {
+fn batch_facts_cover_all_node_ordinals_without_source_id_allocation() {
     fn send_sync<T: Send + Sync>() {}
-    send_sync::<NumericBatchFacts>();
+    send_sync::<BatchFacts>();
     let expr = plus(
         constant(Some(4)),
         plus(input(0), plus(constant(Some(1)), input(1))),
@@ -1238,9 +1331,9 @@ fn numeric_batch_facts_cover_all_node_ordinals_without_source_id_allocation() {
     let same_source = OrdinarySourceId::new(u64::MAX, u64::MAX);
     let declared: Vec<_> = [0, 2, 4]
         .into_iter()
-        .map(|ordinal| OrdinaryCallSite::sql_native_numeric_batch(ordinal, same_source))
+        .map(|ordinal| OrdinaryCallSite::sql_native_batch(ordinal, same_source))
         .collect();
-    let facts = NumericBatchFacts::sql_native_numeric_batch(
+    let facts = BatchFacts::sql_native_batch(
         &expr,
         &[ft(), ft()],
         declared.clone(),
@@ -1253,21 +1346,21 @@ fn numeric_batch_facts_cover_all_node_ordinals_without_source_id_allocation() {
         let site = facts.site(ordinal).unwrap();
         assert_eq!(site.ordinal(), ordinal);
         assert_eq!(site.source(), same_source);
-        assert_eq!(site.profile(), OrdinaryProfile::NativeNumericBatch);
+        assert_eq!(site.profile(), OrdinaryProfile::NativeBatch);
         assert_eq!(site.original_pb_signature(), None);
     }
     for ordinal in [1, 3, 5, 6, usize::MAX] {
         assert!(facts.site(ordinal).is_none());
     }
     let detached = facts.clone();
-    assert!(format!("{detached:?}").contains("NativeNumericBatch"));
+    assert!(format!("{detached:?}").contains("NativeBatch"));
     detached
         .validate(&expr, &[ft(), ft()], CompileLimits::default())
         .unwrap();
 }
 
 #[test]
-fn numeric_batch_sites_reject_missing_extra_unsorted_duplicate_and_row_labels() {
+fn batch_sites_reject_missing_extra_unsorted_duplicate_and_row_labels() {
     let expr = plus(constant(None), plus(constant(Some(1)), constant(Some(2))));
     for declared in [
         vec![],
@@ -1283,17 +1376,12 @@ fn numeric_batch_sites_reject_missing_extra_unsorted_duplicate_and_row_labels() 
         vec![batch_site(0), site(2, OrdinaryProfile::PbRow)],
     ] {
         assert!(matches!(
-            NumericBatchFacts::sql_native_numeric_batch(
-                &expr,
-                &[],
-                declared,
-                CompileLimits::default(),
-            ),
+            BatchFacts::sql_native_batch(&expr, &[], declared, CompileLimits::default(),),
             Err(LocalError::InvalidSpec(_))
         ));
     }
     assert!(matches!(
-        NumericBatchFacts::sql_native_numeric_batch(
+        BatchFacts::sql_native_batch(
             &constant(None),
             &[],
             vec![batch_site(0)],
@@ -1304,7 +1392,7 @@ fn numeric_batch_sites_reject_missing_extra_unsorted_duplicate_and_row_labels() 
 }
 
 #[test]
-fn numeric_batch_labels_cannot_enter_the_old_row_consumer_or_child_route() {
+fn batch_labels_cannot_enter_the_old_row_consumer_or_child_route() {
     let expr = plus(constant(None), plus(constant(Some(1)), constant(Some(2))));
     for consumer in [OrdinaryProfile::TypedRow, OrdinaryProfile::PbRow] {
         for declared in [
@@ -1323,7 +1411,7 @@ fn numeric_batch_labels_cannot_enter_the_old_row_consumer_or_child_route() {
             OrdinaryProfileSpec::new(
                 &expr,
                 &[],
-                OrdinaryProfile::NativeNumericBatch,
+                OrdinaryProfile::NativeBatch,
                 batch_sites(&expr),
                 CompileLimits::default(),
             ),
@@ -1333,12 +1421,10 @@ fn numeric_batch_labels_cannot_enter_the_old_row_consumer_or_child_route() {
 }
 
 #[test]
-fn numeric_batch_strict_raw_type_gate_covers_nodes_and_unused_schema() {
+fn batch_strict_raw_type_gate_covers_nodes_and_unused_schema() {
     let mut bad_types: Vec<FieldType> = vec![
         FieldTypeTp::Tiny.into(),
         FieldTypeTp::Long.into(),
-        FieldTypeTp::Double.into(),
-        FieldTypeTp::VarString.into(),
         FieldTypeTp::Null.into(),
     ];
     let mut array = ft();
@@ -1373,7 +1459,7 @@ fn numeric_batch_strict_raw_type_gate_covers_nodes_and_unused_schema() {
                 Err(LocalError::InvalidSpec(_))
             ));
             assert!(matches!(
-                compile_numeric_batch(&expr, &[], LocalCompileContext::default(), &facts),
+                compile_batch(&expr, &[], LocalCompileContext::default(), &facts),
                 Err(LocalError::InvalidSpec(_))
             ));
         }
@@ -1389,7 +1475,7 @@ fn numeric_batch_strict_raw_type_gate_covers_nodes_and_unused_schema() {
 }
 
 #[test]
-fn numeric_batch_preserves_documented_raw_flags_without_narrowing_old_row_policy() {
+fn batch_preserves_documented_raw_flags_without_narrowing_old_row_policy() {
     let excluded = (1u32 << 5) | (1 << 8) | (1 << 11) | (1 << 18) | (1 << 21);
     let allowed = ((1u32 << 25) - 1) & !excluded;
     for flags in (0..25)
@@ -1414,7 +1500,7 @@ fn numeric_batch_preserves_documented_raw_flags_without_narrowing_old_row_policy
                 CompileLimits::default(),
             )
             .unwrap();
-        let program = compile_numeric_batch(
+        let program = compile_batch(
             &expr,
             std::slice::from_ref(&field),
             LocalCompileContext::default(),
@@ -1447,7 +1533,7 @@ fn numeric_batch_preserves_documented_raw_flags_without_narrowing_old_row_policy
 }
 
 #[test]
-fn numeric_batch_snapshot_rejects_changed_values_slots_shape_and_full_types() {
+fn batch_snapshot_rejects_changed_values_slots_shape_and_full_types() {
     let expr = plus(input(0), constant(Some(5)));
     let schema = [ft(), ft()];
     let facts = batch_facts(&expr, &schema);
@@ -1476,7 +1562,7 @@ fn numeric_batch_snapshot_rejects_changed_values_slots_shape_and_full_types() {
             Err(LocalError::InvalidSpec(_))
         ));
         assert!(matches!(
-            compile_numeric_batch(&changed, &schema, LocalCompileContext::default(), &facts),
+            compile_batch(&changed, &schema, LocalCompileContext::default(), &facts),
             Err(LocalError::InvalidSpec(_))
         ));
     }
@@ -1485,18 +1571,17 @@ fn numeric_batch_snapshot_rejects_changed_values_slots_shape_and_full_types() {
     changed_schema[1].set_collate(changed_collation);
     for schema in [changed_schema.to_vec(), vec![ft()], vec![ft(); 3]] {
         assert!(matches!(
-            compile_numeric_batch(&expr, &schema, LocalCompileContext::default(), &facts),
+            compile_batch(&expr, &schema, LocalCompileContext::default(), &facts),
             Err(LocalError::InvalidSpec(_))
         ));
     }
 }
 
 #[test]
-fn numeric_batch_only_admits_exact_203_arity_metadata_and_typed_int_literals() {
+fn batch_rejects_unregistered_signatures_bad_arity_metadata_and_literals() {
     for sig in [
         Sig::PlusIntSignedSigned,
         Sig::PlusReal,
-        Sig::EqInt,
         Sig::CastIntAsInt,
         Sig::LogicalAnd,
         Sig::LogicalOr,
@@ -1569,16 +1654,15 @@ fn numeric_batch_only_admits_exact_203_arity_metadata_and_typed_int_literals() {
 }
 
 #[test]
-fn numeric_batch_fact_capture_revalidation_and_compile_obey_exact_limits() {
+fn batch_fact_capture_revalidation_and_compile_obey_exact_limits() {
     let expr = plus(constant(None), constant(Some(2)));
     let exact = CompileLimits {
         max_nodes: 3,
         max_depth: 2,
     };
-    let facts = NumericBatchFacts::sql_native_numeric_batch(&expr, &[], vec![batch_site(0)], exact)
-        .unwrap();
+    let facts = BatchFacts::sql_native_batch(&expr, &[], vec![batch_site(0)], exact).unwrap();
     facts.validate(&expr, &[], exact).unwrap();
-    compile_numeric_batch(&expr, &[], LocalCompileContext { limits: exact }, &facts).unwrap();
+    compile_batch(&expr, &[], LocalCompileContext { limits: exact }, &facts).unwrap();
     for limits in [
         CompileLimits {
             max_nodes: 0,
@@ -1598,7 +1682,7 @@ fn numeric_batch_fact_capture_revalidation_and_compile_obey_exact_limits() {
         },
     ] {
         assert!(matches!(
-            NumericBatchFacts::sql_native_numeric_batch(&expr, &[], vec![batch_site(0)], limits,),
+            BatchFacts::sql_native_batch(&expr, &[], vec![batch_site(0)], limits,),
             Err(LocalError::ResourceLimit(_))
         ));
         assert!(matches!(
@@ -1606,14 +1690,14 @@ fn numeric_batch_fact_capture_revalidation_and_compile_obey_exact_limits() {
             Err(LocalError::ResourceLimit(_))
         ));
         assert!(matches!(
-            compile_numeric_batch(&expr, &[], LocalCompileContext { limits }, &facts),
+            compile_batch(&expr, &[], LocalCompileContext { limits }, &facts),
             Err(LocalError::ResourceLimit(_))
         ));
     }
 }
 
 #[test]
-fn numeric_batch_leaf_and_call_roots_cover_empty_one_1024_and_reject_1025() {
+fn batch_leaf_and_call_roots_cover_empty_one_1024_and_reject_1025() {
     for shape in 0..4 {
         let expr = match shape {
             0 => constant(Some(7)),
@@ -1627,7 +1711,7 @@ fn numeric_batch_leaf_and_call_roots_cover_empty_one_1024_and_reject_1025() {
             assert_eq!(facts.node_count(), 1);
             assert!(facts.call_sites().is_empty());
         }
-        let mut program = compile_batch(&expr, &schema);
+        let mut program = compile_batch_program(&expr, &schema);
         assert_eq!(program.return_type(), &ft());
         let state = ExecutionLimits::default();
         for count in [0, 1, 1024, 1025] {
@@ -1672,11 +1756,11 @@ fn numeric_batch_leaf_and_call_roots_cover_empty_one_1024_and_reject_1025() {
 }
 
 #[test]
-fn numeric_batch_owned_program_rebinds_without_retaining_source_or_values() {
+fn batch_owned_program_rebinds_without_retaining_source_or_values() {
     let mut program = {
         let expr = plus(input(0), constant(Some(1)));
         let facts = batch_facts(&expr, &[ft()]);
-        compile_numeric_batch(&expr, &[ft()], LocalCompileContext::default(), &facts).unwrap()
+        compile_batch(&expr, &[ft()], LocalCompileContext::default(), &facts).unwrap()
     };
     let mut services = Bindings::new(vec![vec![Some(5), None, Some(-3)]]);
     let state = ExecutionLimits::default();
@@ -1699,8 +1783,8 @@ fn numeric_batch_owned_program_rebinds_without_retaining_source_or_values() {
 }
 
 #[test]
-fn numeric_batch_finishes_both_operand_phases_in_occurrence_order() {
-    let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
+fn batch_finishes_both_operand_phases_in_occurrence_order() {
+    let mut program = compile_batch_program(&plus(input(0), input(1)), &[ft(), ft()]);
     let mut services = Bindings::new(vec![
         vec![Some(1), None, Some(4)],
         vec![Some(10), Some(20), Some(40)],
@@ -1744,9 +1828,9 @@ fn numeric_batch_finishes_both_operand_phases_in_occurrence_order() {
 }
 
 #[test]
-fn numeric_batch_null_left_demands_right_even_for_one_occurrence() {
+fn batch_null_left_demands_right_even_for_one_occurrence() {
     let expr = plus(input(0), input(1));
-    let mut program = compile_batch(&expr, &[ft(), ft()]);
+    let mut program = compile_batch_program(&expr, &[ft(), ft()]);
     let mut services = Bindings::new(vec![vec![None], vec![Some(9)]]);
     services.fault = Some((1, Fault::Binding));
     let error = program
@@ -1792,9 +1876,9 @@ fn numeric_batch_null_left_demands_right_even_for_one_occurrence() {
 }
 
 #[test]
-fn numeric_batch_null_left_does_not_hide_a_nested_right_kernel_error() {
+fn batch_null_left_does_not_hide_a_nested_right_kernel_error() {
     let expr = plus(constant(None), plus(input(0), constant(Some(1))));
-    let mut program = compile_batch(&expr, &[ft()]);
+    let mut program = compile_batch_program(&expr, &[ft()]);
     let mut services = Bindings::new(vec![vec![Some(i64::MAX)]]);
     let error = program
         .eval_with_bindings(
@@ -1810,9 +1894,9 @@ fn numeric_batch_null_left_does_not_hide_a_nested_right_kernel_error() {
 }
 
 #[test]
-fn numeric_batch_completes_the_right_child_before_the_parent_kernel() {
+fn batch_completes_the_right_child_before_the_parent_kernel() {
     let expr = plus(input(0), plus(input(1), constant(Some(1))));
-    let mut program = compile_batch(&expr, &[ft(), ft()]);
+    let mut program = compile_batch_program(&expr, &[ft(), ft()]);
     let mut services = Bindings::new(vec![
         vec![Some(i64::MAX), Some(0)],
         vec![Some(0), Some(i64::MAX)],
@@ -1834,14 +1918,14 @@ fn numeric_batch_completes_the_right_child_before_the_parent_kernel() {
 }
 
 #[test]
-fn numeric_batch_left_child_failure_stops_right_child_effects() {
+fn batch_left_child_failure_stops_right_child_effects() {
     // The in-cap form of the 1025 root-tiling counterexample: a root row loop
     // would fail in the right child at occurrence 0 instead of left at 1.
     let expr = plus(
         plus(input(0), constant(Some(1))),
         plus(input(1), constant(Some(1))),
     );
-    let mut program = compile_batch(&expr, &[ft(), ft()]);
+    let mut program = compile_batch_program(&expr, &[ft(), ft()]);
     let mut services = Bindings::new(vec![
         vec![Some(0), Some(i64::MAX)],
         vec![Some(i64::MAX), Some(0)],
@@ -1864,8 +1948,8 @@ fn numeric_batch_left_child_failure_stops_right_child_effects() {
 }
 
 #[test]
-fn numeric_batch_parent_kernel_error_follows_all_reads_without_replay() {
-    let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
+fn batch_parent_kernel_error_follows_all_reads_without_replay() {
+    let mut program = compile_batch_program(&plus(input(0), input(1)), &[ft(), ft()]);
     let mut services = Bindings::new(vec![vec![Some(i64::MAX), Some(2)], vec![Some(1), Some(3)]]);
     services.warnings = true;
     let mut ctx = EvalContext::default();
@@ -1885,8 +1969,8 @@ fn numeric_batch_parent_kernel_error_follows_all_reads_without_replay() {
 }
 
 #[test]
-fn numeric_batch_repeated_selection_preserves_input_demand() {
-    let mut program = compile_batch(&plus(input(0), constant(Some(1))), &[ft()]);
+fn batch_repeated_selection_preserves_input_demand() {
+    let mut program = compile_batch_program(&plus(input(0), constant(Some(1))), &[ft()]);
     let mut services = Bindings::new(vec![vec![Some(i64::MAX), None, Some(2)]]);
     let error = program
         .eval_with_bindings(
@@ -1902,8 +1986,8 @@ fn numeric_batch_repeated_selection_preserves_input_demand() {
 }
 
 #[test]
-fn numeric_batch_repeated_input_error_does_not_poison_retry() {
-    let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
+fn batch_repeated_input_error_does_not_poison_retry() {
+    let mut program = compile_batch_program(&plus(input(0), input(1)), &[ft(), ft()]);
     let mut services = BatchBindings::new(vec![vec![Some(1); 3], vec![Some(2); 3]]);
     services.fault_on = Some((1, 2, Fault::Resource));
     services.inner.warnings = true;
@@ -1945,7 +2029,7 @@ fn numeric_batch_repeated_input_error_does_not_poison_retry() {
 }
 
 #[test]
-fn numeric_batch_input_errors_and_malformed_successes_preserve_warning_prefixes() {
+fn batch_input_errors_and_malformed_successes_preserve_warning_prefixes() {
     for fault in [
         Fault::Binding,
         Fault::Resource,
@@ -1953,7 +2037,7 @@ fn numeric_batch_input_errors_and_malformed_successes_preserve_warning_prefixes(
         Fault::WrongType,
         Fault::WrongLength,
     ] {
-        let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
+        let mut program = compile_batch_program(&plus(input(0), input(1)), &[ft(), ft()]);
         let mut services = BatchBindings::new(vec![vec![Some(1); 3], vec![Some(2); 3]]);
         services.fault_on = Some((1, 1, fault));
         services.inner.warnings = true;
@@ -1996,8 +2080,8 @@ fn numeric_batch_input_errors_and_malformed_successes_preserve_warning_prefixes(
 }
 
 #[test]
-fn numeric_batch_schema_and_selection_preflight_stays_effect_free_when_empty() {
-    let mut program = compile_batch(&plus(input(0), constant(Some(1))), &[ft(), ft()]);
+fn batch_schema_and_selection_preflight_stays_effect_free_when_empty() {
+    let mut program = compile_batch_program(&plus(input(0), constant(Some(1))), &[ft(), ft()]);
     let mut services = Bindings::new(vec![vec![None], vec![Some(4)]]);
     services.fault = Some((0, Fault::Panic));
     services.warnings = true;
@@ -2038,8 +2122,8 @@ fn numeric_batch_schema_and_selection_preflight_stays_effect_free_when_empty() {
 }
 
 #[test]
-fn numeric_batch_zero_limits_precede_reads_and_no_host_task_reservation_is_needed() {
-    let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
+fn batch_zero_limits_precede_reads_and_no_host_task_reservation_is_needed() {
+    let mut program = compile_batch_program(&plus(input(0), input(1)), &[ft(), ft()]);
     for limits in [
         ExecutionLimits {
             max_steps: 0,
@@ -2082,8 +2166,8 @@ fn numeric_batch_zero_limits_precede_reads_and_no_host_task_reservation_is_neede
 }
 
 #[test]
-fn numeric_batch_work_budget_is_shared_across_occurrences_and_fresh_per_invocation() {
-    let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
+fn batch_work_budget_is_shared_across_occurrences_and_fresh_per_invocation() {
+    let mut program = compile_batch_program(&plus(input(0), input(1)), &[ft(), ft()]);
     let mut services = Bindings::new(vec![vec![Some(1); 1024], vec![Some(2); 1024]]);
     let state = ExecutionLimits {
         max_steps: 256,
@@ -2116,7 +2200,7 @@ fn numeric_batch_work_budget_is_shared_across_occurrences_and_fresh_per_invocati
 }
 
 #[test]
-fn numeric_batch_provider_spare_capacity_is_charged_after_read_before_next_effect() {
+fn batch_provider_spare_capacity_is_charged_after_read_before_next_effect() {
     use tidb_query_datatype::{EvalType, codec::data_type::ChunkedVec};
 
     struct SpareCapacity {
@@ -2148,14 +2232,14 @@ fn numeric_batch_provider_spare_capacity_is_charged_after_read_before_next_effec
             Ok(value)
         }
         fn host_services(&mut self) -> Option<&mut dyn LocalHostServices> {
-            panic!("numeric batch must not consult host services")
+            panic!("batch must not consult host services")
         }
     }
     let mut services = SpareCapacity {
         schema: vec![ft(), ft()],
         reads: vec![],
     };
-    let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
+    let mut program = compile_batch_program(&plus(input(0), input(1)), &[ft(), ft()]);
     let error = program
         .eval_with_bindings(
             ExecutionLimits {
@@ -2182,8 +2266,8 @@ fn numeric_batch_provider_spare_capacity_is_charged_after_read_before_next_effec
 }
 
 #[test]
-fn numeric_batch_input_unwind_does_not_poison_reused_program_state() {
-    let mut program = compile_batch(&plus(input(0), input(1)), &[ft(), ft()]);
+fn batch_input_unwind_does_not_poison_reused_program_state() {
+    let mut program = compile_batch_program(&plus(input(0), input(1)), &[ft(), ft()]);
     let mut services = BatchBindings::new(vec![vec![Some(5); 2], vec![Some(7); 2]]);
     services.fault_on = Some((1, 1, Fault::Panic));
     let state = ExecutionLimits::default();
@@ -2217,23 +2301,23 @@ fn numeric_batch_input_unwind_does_not_poison_reused_program_state() {
 }
 
 #[test]
-fn numeric_batch_equal_source_ids_do_not_merge_distinct_subtree_occurrences() {
+fn batch_equal_source_ids_do_not_merge_distinct_subtree_occurrences() {
     let expr = plus(
         plus(input(0), constant(Some(1))),
         plus(input(0), constant(Some(1))),
     );
-    let facts = NumericBatchFacts::sql_native_numeric_batch(
+    let facts = BatchFacts::sql_native_batch(
         &expr,
         &[ft()],
         [0, 1, 4]
             .into_iter()
-            .map(|ordinal| OrdinaryCallSite::sql_native_numeric_batch(ordinal, source(99)))
+            .map(|ordinal| OrdinaryCallSite::sql_native_batch(ordinal, source(99)))
             .collect(),
         CompileLimits::default(),
     )
     .unwrap();
     let mut program =
-        compile_numeric_batch(&expr, &[ft()], LocalCompileContext::default(), &facts).unwrap();
+        compile_batch(&expr, &[ft()], LocalCompileContext::default(), &facts).unwrap();
     let mut services = Bindings::new(vec![vec![Some(3), Some(7)]]);
     assert_eq!(
         run_batch(&mut program, &mut services, 2, &[1, 0])
@@ -2245,7 +2329,7 @@ fn numeric_batch_equal_source_ids_do_not_merge_distinct_subtree_occurrences() {
 }
 
 #[test]
-fn numeric_batch_deep_snapshots_compile_execution_and_drop_are_iterative() {
+fn batch_deep_snapshots_compile_execution_and_drop_are_iterative() {
     thread::Builder::new()
         .stack_size(256 * 1024)
         .spawn_wrapper(|| {
@@ -2258,21 +2342,16 @@ fn numeric_batch_deep_snapshots_compile_execution_and_drop_are_iterative() {
                     max_nodes: depth * 2 + 1,
                     max_depth: depth + 1,
                 };
-                let facts = NumericBatchFacts::sql_native_numeric_batch(
-                    &expr,
-                    &[ft()],
-                    batch_sites(&expr),
-                    limits,
-                )
-                .unwrap();
+                let facts =
+                    BatchFacts::sql_native_batch(&expr, &[ft()], batch_sites(&expr), limits)
+                        .unwrap();
                 assert_eq!(facts.node_count(), depth * 2 + 1);
                 assert_eq!(facts.call_sites().len(), depth);
                 let detached = facts.clone();
-                assert!(format!("{detached:?}").contains("NativeNumericBatch"));
+                assert!(format!("{detached:?}").contains("NativeBatch"));
                 detached.validate(&expr, &[ft()], limits).unwrap();
                 let mut program =
-                    compile_numeric_batch(&expr, &[ft()], LocalCompileContext { limits }, &facts)
-                        .unwrap();
+                    compile_batch(&expr, &[ft()], LocalCompileContext { limits }, &facts).unwrap();
                 let mut services = Bindings::new(vec![vec![Some(1), Some(7), Some(11)]]);
                 assert_eq!(
                     run_batch(&mut program, &mut services, 3, &[2, 0, 2])
@@ -2293,11 +2372,11 @@ fn numeric_batch_deep_snapshots_compile_execution_and_drop_are_iterative() {
 }
 
 #[test]
-fn numeric_batch_leaf_dispatch_rejects_old_row_entries_even_when_empty() {
+fn batch_leaf_dispatch_rejects_old_row_entries_even_when_empty() {
     for expr in [constant(Some(7)), input(0)] {
         let is_input = matches!(&expr, LocalExpr::InputSlot { .. });
         let schema = if is_input { vec![ft()] } else { vec![] };
-        let mut program = compile_batch(&expr, &schema);
+        let mut program = compile_batch_program(&expr, &schema);
         for count in [0, 1] {
             let selection: Vec<usize> = (0..count).collect();
             let mut services = Bindings::new(if is_input {

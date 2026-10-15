@@ -3,16 +3,77 @@
 //! Closed ordinary-call demand facts, not a second function selector or graph.
 //!
 //! C3a admits identity-domain signed Int PLUS under the two row profiles. C3c
-//! separately admits SQL native numeric-batch demand with stricter type facts;
+//! separately admits SQL native batch demand with stricter type facts;
 //! its facts cannot be passed to the row-only constructor or compiler.
 //! Consumer/origin labels are producer assertions. This layer validates the
 //! closed source shape, not native consumer selection or protobuf ingestion.
 
-use tidb_query_datatype::{FieldTypeTp, codec::data_type::ScalarValue};
+use tidb_query_datatype::{
+    EvalType, FieldTypeAccessor, FieldTypeTp, codec::data_type::ScalarValue,
+};
 use tipb::{FieldType, ScalarFuncSig};
 
 use super::{CompileLimits, LocalError, LocalExpr, LocalResult, registry};
 use crate::{CallMetadata, FunctionRef, LiteralKind};
+
+const INT: &[EvalType] = &[EvalType::Int];
+const INT_INT: &[EvalType] = &[EvalType::Int, EvalType::Int];
+const REAL: &[EvalType] = &[EvalType::Real];
+const REAL_REAL: &[EvalType] = &[EvalType::Real, EvalType::Real];
+const DECIMAL: &[EvalType] = &[EvalType::Decimal];
+const DECIMAL_DECIMAL: &[EvalType] = &[EvalType::Decimal, EvalType::Decimal];
+const BYTES: &[EvalType] = &[EvalType::Bytes];
+const DATETIME: &[EvalType] = &[EvalType::DateTime];
+const DURATION: &[EvalType] = &[EvalType::Duration];
+const JSON: &[EvalType] = &[EvalType::Json];
+const VECTOR_FLOAT32: &[EvalType] = &[EvalType::VectorFloat32];
+const BYTES_INT: &[EvalType] = &[EvalType::Bytes, EvalType::Int];
+const BYTES_INT_INT: &[EvalType] = &[EvalType::Bytes, EvalType::Int, EvalType::Int];
+
+/// Exact pure, strict, eager function metadata admitted by the shared batch
+/// driver. This is the single capability registry used by admission,
+/// compilation, and execution; storage width does not select a driver.
+pub fn batch_signature(function: FunctionRef) -> Option<(&'static [EvalType], EvalType)> {
+    let FunctionRef::TiPb(signature) = function else {
+        return None;
+    };
+    match signature {
+        ScalarFuncSig::AbsInt => Some((INT, EvalType::Int)),
+        ScalarFuncSig::IntAnyValue => Some((INT, EvalType::Int)),
+        ScalarFuncSig::PlusInt
+        | ScalarFuncSig::MinusInt
+        | ScalarFuncSig::MultiplyInt
+        | ScalarFuncSig::EqInt
+        | ScalarFuncSig::GtInt => Some((INT_INT, EvalType::Int)),
+        ScalarFuncSig::AbsReal => Some((REAL, EvalType::Real)),
+        ScalarFuncSig::RealAnyValue => Some((REAL, EvalType::Real)),
+        ScalarFuncSig::PlusReal | ScalarFuncSig::MinusReal | ScalarFuncSig::MultiplyReal => {
+            Some((REAL_REAL, EvalType::Real))
+        }
+        ScalarFuncSig::AbsDecimal => Some((DECIMAL, EvalType::Decimal)),
+        ScalarFuncSig::DecimalAnyValue => Some((DECIMAL, EvalType::Decimal)),
+        ScalarFuncSig::PlusDecimal
+        | ScalarFuncSig::MinusDecimal
+        | ScalarFuncSig::MultiplyDecimal => Some((DECIMAL_DECIMAL, EvalType::Decimal)),
+        ScalarFuncSig::CharLength | ScalarFuncSig::CharLengthUtf8 => Some((BYTES, EvalType::Int)),
+        ScalarFuncSig::StringAnyValue => Some((BYTES, EvalType::Bytes)),
+        ScalarFuncSig::Lower
+        | ScalarFuncSig::LowerUtf8
+        | ScalarFuncSig::Upper
+        | ScalarFuncSig::UpperUtf8 => Some((BYTES, EvalType::Bytes)),
+        ScalarFuncSig::Substring2Args | ScalarFuncSig::Substring2ArgsUtf8 => {
+            Some((BYTES_INT, EvalType::Bytes))
+        }
+        ScalarFuncSig::Substring3Args | ScalarFuncSig::Substring3ArgsUtf8 => {
+            Some((BYTES_INT_INT, EvalType::Bytes))
+        }
+        ScalarFuncSig::TimeAnyValue => Some((DATETIME, EvalType::DateTime)),
+        ScalarFuncSig::DurationAnyValue => Some((DURATION, EvalType::Duration)),
+        ScalarFuncSig::JsonAnyValue => Some((JSON, EvalType::Json)),
+        ScalarFuncSig::VectorFloat32AnyValue => Some((VECTOR_FLOAT32, EvalType::VectorFloat32)),
+        _ => None,
+    }
+}
 
 /// The consumer's execution contract, not a property inferred from a function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,14 +83,14 @@ pub enum OrdinaryProfile {
     /// Representable for explicit rejection; not admitted by C3a.
     AstValueScalar,
     /// Requires an operand-major scheduler; not admitted by C3a.
-    NativeNumericBatch,
+    NativeBatch,
 }
 
 impl OrdinaryProfile {
     fn check_admitted(self) -> LocalResult<()> {
         match self {
             Self::TypedRow | Self::PbRow => Ok(()),
-            Self::AstValueScalar | Self::NativeNumericBatch => Err(LocalError::InvalidSpec(
+            Self::AstValueScalar | Self::NativeBatch => Err(LocalError::InvalidSpec(
                 "ordinary consumer profile is outside the C3a row domain".into(),
             )),
         }
@@ -95,13 +156,13 @@ impl OrdinaryCallSite {
         }
     }
 
-    /// Asserts SQL native numeric-batch demand, without a PB-origin assertion.
-    /// Only `NumericBatchFacts` admits this label; row facts still reject it.
-    pub const fn sql_native_numeric_batch(ordinal: usize, source: OrdinarySourceId) -> Self {
+    /// Asserts SQL native batch demand, without a PB-origin assertion.
+    /// Only `BatchFacts` admits this label; row facts still reject it.
+    pub const fn sql_native_batch(ordinal: usize, source: OrdinarySourceId) -> Self {
         Self {
             ordinal,
             source,
-            profile: OrdinaryProfile::NativeNumericBatch,
+            profile: OrdinaryProfile::NativeBatch,
             original_pb_signature: None,
         }
     }
@@ -123,18 +184,22 @@ impl OrdinaryCallSite {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 enum NodeKind {
     Constant {
-        value: Option<i64>,
+        value: ScalarValue,
         literal_kind: LiteralKind,
     },
     InputSlot {
         slot: usize,
     },
-    /// Exactly TiPb PlusInt=203, arity 2, CallMetadata::None. All three facts
-    /// are checked before this variant is produced, including during validate.
-    PlusInt,
+    /// One closed signed-Int arithmetic kernel with its exact arity and
+    /// CallMetadata::None. The exact TiPB signature is retained in the source
+    /// snapshot and checked again during validation.
+    BatchCall {
+        signature: i32,
+        arity: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -145,11 +210,11 @@ struct NodeSnapshot {
 
 /// Immutable row-only admission facts. Mixed TypedRow/PbRow children retain
 /// their individual row demand; neither the consumer nor a child may use the
-/// numeric-batch label. There is no conversion from NumericBatchFacts.
+/// batch label. There is no conversion from BatchFacts.
 #[derive(Clone, Debug)]
 pub struct OrdinaryProfileSpec {
     consumer: OrdinaryProfile,
-    snapshot: ClosedInt203Snapshot,
+    snapshot: ClosedSourceSnapshot,
     sites: Box<[OrdinaryCallSite]>,
 }
 
@@ -173,7 +238,7 @@ impl OrdinaryProfileSpec {
                 "ordinary call sites must have strictly increasing source ordinals",
             ));
         }
-        let snapshot = ClosedInt203Snapshot::capture(
+        let snapshot = ClosedSourceSnapshot::capture(
             spec,
             schema,
             limits,
@@ -217,46 +282,44 @@ impl OrdinaryProfileSpec {
     }
 }
 
-/// Immutable SQL numeric-batch admission facts for closed signed Int203 trees.
+/// Immutable SQL batch admission facts for closed eager typed trees.
 ///
 /// Every call has a batch-only site; all nodes and schema fields satisfy the
 /// strict batch type policy. Full source/schema snapshots are rechecked by the
 /// batch compiler. The label asserts demand, not a proven native consumer path.
 /// Leaf roots are allowed without sites; this does not claim that a native
-/// numeric-batch entry is selected for every standalone constant or column.
+/// batch entry is selected for every standalone constant or column.
 /// These facts contain no executable graph, evaluator, cache or row-facts
 /// escape.
 #[derive(Clone, Debug)]
-pub struct NumericBatchFacts {
-    snapshot: ClosedInt203Snapshot,
+pub struct BatchFacts {
+    snapshot: ClosedSourceSnapshot,
     sites: Box<[OrdinaryCallSite]>,
 }
 
-impl NumericBatchFacts {
-    pub fn sql_native_numeric_batch(
+impl BatchFacts {
+    pub fn sql_native_batch(
         spec: &LocalExpr,
         schema: &[FieldType],
         sites: Vec<OrdinaryCallSite>,
         limits: CompileLimits,
     ) -> LocalResult<Self> {
         if sites.len() > limits.max_nodes {
-            return Err(resource(
-                "numeric batch call-site count exceeds node budget",
-            ));
+            return Err(resource("batch call-site count exceeds node budget"));
         }
         if sites
             .windows(2)
             .any(|pair| pair[0].ordinal >= pair[1].ordinal)
         {
             return Err(invalid(
-                "numeric batch call sites must have strictly increasing source ordinals",
+                "batch call sites must have strictly increasing source ordinals",
             ));
         }
-        let snapshot = ClosedInt203Snapshot::capture(
+        let snapshot = ClosedSourceSnapshot::capture(
             spec,
             schema,
             limits,
-            TypePolicy::SqlNativeNumericBatch,
+            TypePolicy::SqlNativeBatch,
             |nodes| check_batch_sites(nodes, &sites),
         )?;
         Ok(Self {
@@ -280,7 +343,7 @@ impl NumericBatchFacts {
         limits: CompileLimits,
     ) -> LocalResult<()> {
         self.snapshot
-            .validate(spec, schema, limits, TypePolicy::SqlNativeNumericBatch)
+            .validate(spec, schema, limits, TypePolicy::SqlNativeBatch)
     }
 
     pub(crate) fn site(&self, ordinal: usize) -> Option<&OrdinaryCallSite> {
@@ -295,12 +358,12 @@ impl NumericBatchFacts {
 /// PlusInt arity makes preorder sufficient to preserve shape. Clone/Debug/Drop
 /// never recurse through a LocalExpr; neither public facade shares admission.
 #[derive(Clone, Debug)]
-struct ClosedInt203Snapshot {
+struct ClosedSourceSnapshot {
     nodes: Box<[NodeSnapshot]>,
     schema: Box<[FieldType]>,
 }
 
-impl ClosedInt203Snapshot {
+impl ClosedSourceSnapshot {
     fn capture(
         spec: &LocalExpr,
         schema: &[FieldType],
@@ -308,7 +371,7 @@ impl ClosedInt203Snapshot {
         policy: TypePolicy,
         check_sites: impl FnOnce(&[NodeSnapshot]) -> LocalResult<()>,
     ) -> LocalResult<Self> {
-        if matches!(policy, TypePolicy::SqlNativeNumericBatch) {
+        if matches!(policy, TypePolicy::SqlNativeBatch) {
             // Reject an invalid descendant/schema or exceeded budget before
             // copying any descriptors. Row construction keeps its old policy.
             let mut preflight = Walk::new(spec, schema, limits, policy)?;
@@ -380,7 +443,7 @@ fn check_sites(
 ) -> LocalResult<()> {
     let mut next = 0;
     for (ordinal, node) in nodes.iter().enumerate() {
-        if node.kind != NodeKind::PlusInt {
+        if !matches!(node.kind, NodeKind::BatchCall { .. }) {
             continue;
         }
         let site = sites
@@ -418,28 +481,26 @@ fn check_sites(
 fn check_batch_sites(nodes: &[NodeSnapshot], sites: &[OrdinaryCallSite]) -> LocalResult<()> {
     let mut next = 0;
     for (ordinal, node) in nodes.iter().enumerate() {
-        if node.kind != NodeKind::PlusInt {
+        if !matches!(node.kind, NodeKind::BatchCall { .. }) {
             continue;
         }
         let site = sites
             .get(next)
-            .ok_or_else(|| invalid("numeric batch is missing a call site"))?;
+            .ok_or_else(|| invalid("batch is missing a call site"))?;
         if site.ordinal != ordinal {
             return Err(invalid(
-                "numeric batch call site does not identify the next source call",
+                "batch call site does not identify the next source call",
             ));
         }
-        if site.profile != OrdinaryProfile::NativeNumericBatch
-            || site.original_pb_signature.is_some()
-        {
+        if site.profile != OrdinaryProfile::NativeBatch || site.original_pb_signature.is_some() {
             return Err(invalid(
-                "numeric batch calls require SQL batch sites without PB provenance",
+                "batch calls require SQL batch sites without PB provenance",
             ));
         }
         next += 1;
     }
     if next != sites.len() {
-        return Err(invalid("numeric batch contains an extra call site"));
+        return Err(invalid("batch contains an extra call site"));
     }
     Ok(())
 }
@@ -455,7 +516,7 @@ fn resource(message: &str) -> LocalError {
 #[derive(Clone, Copy)]
 enum TypePolicy {
     RowBaseline,
-    SqlNativeNumericBatch,
+    SqlNativeBatch,
 }
 
 // Keep raw protobuf flags: TiKV's FieldTypeFlag accessor names only a subset.
@@ -470,13 +531,40 @@ fn check_type(field_type: &FieldType, policy: TypePolicy) -> LocalResult<()> {
     match policy {
         TypePolicy::RowBaseline => registry::check_signed_int_type(field_type)
             .map_err(|error| LocalError::InvalidSpec(error.to_string())),
-        TypePolicy::SqlNativeNumericBatch => {
-            if field_type.get_tp() != FieldTypeTp::LongLong as i32
+        TypePolicy::SqlNativeBatch => {
+            let eval_type = EvalType::try_from(field_type.as_accessor().tp()).ok();
+            let raw_type = field_type.get_tp();
+            let raw_matches = match eval_type {
+                Some(EvalType::Int) => raw_type == FieldTypeTp::LongLong as i32,
+                Some(EvalType::Real) => raw_type == FieldTypeTp::Double as i32,
+                Some(EvalType::Decimal) => raw_type == FieldTypeTp::NewDecimal as i32,
+                Some(EvalType::Bytes) => matches!(
+                    raw_type,
+                    value if value == FieldTypeTp::VarChar as i32
+                        || value == FieldTypeTp::VarString as i32
+                        || value == FieldTypeTp::String as i32
+                        || value == FieldTypeTp::Blob as i32
+                        || value == FieldTypeTp::TinyBlob as i32
+                        || value == FieldTypeTp::MediumBlob as i32
+                        || value == FieldTypeTp::LongBlob as i32
+                ),
+                Some(EvalType::DateTime) => matches!(
+                    raw_type,
+                    value if value == FieldTypeTp::Date as i32
+                        || value == FieldTypeTp::DateTime as i32
+                        || value == FieldTypeTp::Timestamp as i32
+                ),
+                Some(EvalType::Duration) => raw_type == FieldTypeTp::Duration as i32,
+                Some(EvalType::Json) => raw_type == FieldTypeTp::Json as i32,
+                Some(EvalType::VectorFloat32) => raw_type == FieldTypeTp::TiDbVectorFloat32 as i32,
+                _ => false,
+            };
+            if !raw_matches
                 || field_type.get_array()
                 || field_type.get_flag() & (BATCH_EXCLUDED_FLAGS | !DOCUMENTED_FLAGS) != 0
             {
                 return Err(invalid(
-                    "numeric batch requires non-array signed LongLong with supported raw flags",
+                    "batch requires a supported non-array native EvalType and raw flags",
                 ));
             }
             Ok(())
@@ -492,16 +580,34 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
             literal_kind,
             ..
         } => {
-            let ScalarValue::Int(value) = value else {
+            if matches!(policy, TypePolicy::RowBaseline) && !matches!(value, ScalarValue::Int(_)) {
                 return Err(invalid("ordinary constants require the Int carrier"));
-            };
+            }
+            if matches!(policy, TypePolicy::SqlNativeBatch)
+                && (!matches!(
+                    value,
+                    ScalarValue::Int(_)
+                        | ScalarValue::Real(_)
+                        | ScalarValue::Decimal(_)
+                        | ScalarValue::Bytes(_)
+                        | ScalarValue::DateTime(_)
+                        | ScalarValue::Duration(_)
+                        | ScalarValue::Json(_)
+                        | ScalarValue::VectorFloat32(_)
+                ) || EvalType::try_from(expr.field_type().as_accessor().tp()).ok()
+                    != Some(value.eval_type()))
+            {
+                return Err(invalid(
+                    "batch constants must match their declared native EvalType carrier",
+                ));
+            }
             if *literal_kind != LiteralKind::Typed {
                 return Err(invalid(
                     "ordinary constants require Typed literal provenance",
                 ));
             }
             Ok(NodeKind::Constant {
-                value: *value,
+                value: value.clone(),
                 literal_kind: *literal_kind,
             })
         }
@@ -519,15 +625,46 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
             metadata,
             ..
         } => {
-            if *function != FunctionRef::TiPb(ScalarFuncSig::PlusInt)
-                || args.len() != 2
+            let FunctionRef::TiPb(signature) = *function else {
+                return Err(invalid(
+                    "ordinary C3a calls require a TiPB Int arithmetic signature",
+                ));
+            };
+            let signature = FunctionRef::TiPb(signature);
+            let admitted = match policy {
+                TypePolicy::RowBaseline
+                    if signature == FunctionRef::TiPb(ScalarFuncSig::PlusInt) =>
+                {
+                    Some((INT_INT, EvalType::Int))
+                }
+                TypePolicy::RowBaseline => None,
+                TypePolicy::SqlNativeBatch => batch_signature(signature),
+            };
+            let (input_types, output_type) = admitted.unwrap_or((&[], EvalType::Int));
+            let actual_output = EvalType::try_from(expr.field_type().as_accessor().tp()).ok();
+            let inputs_match = args.iter().zip(input_types).all(|(arg, input_type)| {
+                EvalType::try_from(arg.field_type().as_accessor().tp()).ok() == Some(*input_type)
+            });
+            if admitted.is_none()
+                || args.len() != input_types.len()
                 || !matches!(metadata, CallMetadata::None)
             {
                 return Err(invalid(
-                    "ordinary C3a calls require exact PlusInt=203, arity 2 and no metadata",
+                    "ordinary calls require an admitted batch signature, exact arity and no metadata",
                 ));
             }
-            Ok(NodeKind::PlusInt)
+            if actual_output != Some(output_type) || !inputs_match {
+                return Err(invalid(
+                    "batch call input/output carriers differ from its exact signature",
+                ));
+            }
+            Ok(NodeKind::BatchCall {
+                signature: match signature {
+                    FunctionRef::TiPb(signature) => signature as i32,
+                    FunctionRef::Local(_) => unreachable!("checked TiPB batch signature"),
+                },
+                arity: input_types.len(),
+            })
         }
         LocalExpr::HostCall { .. } => {
             Err(invalid("host calls are outside the ordinary C3a profile"))
