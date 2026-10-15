@@ -48,6 +48,13 @@ fn batch_signature_contract(
         return None;
     };
     match signature {
+        ScalarFuncSig::IntIsNull => Some((INT, EvalType::Int, true, false)),
+        ScalarFuncSig::RealIsNull => Some((REAL, EvalType::Int, false, false)),
+        ScalarFuncSig::DecimalIsNull => Some((DECIMAL, EvalType::Int, false, false)),
+        ScalarFuncSig::StringIsNull => Some((BYTES, EvalType::Int, false, false)),
+        ScalarFuncSig::TimeIsNull => Some((DATETIME, EvalType::Int, false, false)),
+        ScalarFuncSig::DurationIsNull => Some((DURATION, EvalType::Int, false, false)),
+        ScalarFuncSig::VectorFloat32IsNull => Some((VECTOR_FLOAT32, EvalType::Int, false, false)),
         ScalarFuncSig::AbsInt => Some((INT, EvalType::Int, false, false)),
         ScalarFuncSig::IntAnyValue => Some((INT, EvalType::Int, false, false)),
         ScalarFuncSig::PlusInt | ScalarFuncSig::MinusInt | ScalarFuncSig::MultiplyInt => {

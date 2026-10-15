@@ -225,6 +225,11 @@ flag or eligibility policy described above.
   official kernel returns a non-NULL boolean. The same seven comparisons admit
   same-domain Double (excluding NaN) and signed Decimal operands, with signed
   Int results. This does not admit mixed-domain casts or string collation rules.
+  Seven IS NULL signatures admit Int/Real/Decimal/Bytes/DateTime/Duration/vector
+  inputs, with signed non-NULL Boolean results even for NULL input. Int permits
+  unsigned bits. JSON is excluded from native batch IS NULL because the Go
+  catalog requires CastJsonAsString then StringIsNull; do not substitute the wire
+  JsonIsNull signature or bypass that cast as a special per-function route.
   Lazy/effectful calls remain outside this domain. The former
   numeric-vector program, compile mode and decoded/raw entry have been removed.
   Row/ControlLineage/SqlBatch/EvaluatedAscii identities remain separate and are

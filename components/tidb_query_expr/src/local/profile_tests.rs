@@ -2722,3 +2722,45 @@ fn bitwise_batch_requires_unsigned_result_and_preserves_operand_flags() {
         .is_err()
     );
 }
+
+#[test]
+fn is_null_batch_has_signed_results_for_each_exact_carrier() {
+    for (sig, tp) in [
+        (Sig::IntIsNull, FieldTypeTp::LongLong),
+        (Sig::RealIsNull, FieldTypeTp::Double),
+        (Sig::DecimalIsNull, FieldTypeTp::NewDecimal),
+        (Sig::StringIsNull, FieldTypeTp::VarString),
+        (Sig::TimeIsNull, FieldTypeTp::DateTime),
+        (Sig::DurationIsNull, FieldTypeTp::Duration),
+        (Sig::VectorFloat32IsNull, FieldTypeTp::TiDbVectorFloat32),
+    ] {
+        for unsigned_input in [false, true] {
+            let mut field: FieldType = tp.into();
+            if unsigned_input {
+                field.set_flag(FieldTypeFlag::UNSIGNED.bits());
+            }
+            let expr = LocalExpr::Call {
+                function: FunctionRef::TiPb(sig),
+                args: vec![LocalExpr::InputSlot {
+                    slot: 0,
+                    field_type: field.clone(),
+                }]
+                .into_boxed_slice(),
+                return_type: ft(),
+                metadata: CallMetadata::None,
+            };
+            assert_eq!(
+                BatchFacts::sql_native_batch(
+                    &expr,
+                    &[field],
+                    batch_sites(&expr),
+                    CompileLimits::default()
+                )
+                .is_ok(),
+                !unsigned_input || sig == Sig::IntIsNull,
+                "{sig:?} unsigned={unsigned_input}"
+            );
+        }
+    }
+    assert!(batch_signature(FunctionRef::TiPb(Sig::JsonIsNull)).is_none());
+}
