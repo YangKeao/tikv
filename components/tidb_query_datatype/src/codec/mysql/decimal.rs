@@ -2370,36 +2370,26 @@ impl Decimal {
         Ok(value)
     }
 
-    /// Projects a checked native MyDecimal cell into the logical native-math
+    /// Decodes native MyDecimal bytes once into the logical native-math
     /// domain without an intermediate ASCII coefficient. This is value
     /// normalization, not physical-cell import: discard inactive/padding bits,
     /// trim integer zeroes, clear zero sign and extend storage to result scale.
     /// The same per-owner word budget as `try_from_native_digits` applies.
-    pub fn try_from_native_cell(
-        cell: super::NativeMyDecimal,
+    pub fn try_from_native_cell_bytes(
+        bytes: [u8; super::NATIVE_MYDECIMAL_STRUCT_SIZE],
         limit: usize,
     ) -> NativeDecimalResult<Self> {
+        let cell = super::NativeMyDecimal::from_raw_bytes(bytes)
+            .map_err(NativeDecimalError::InvalidInput)?;
         let (integer, fraction, result, negative, raw) = cell.raw_parts();
-        if integer < 0 || fraction < 0 || result < 0 {
-            return Err(NativeDecimalError::InvalidInput(
-                "negative native cell count",
-            ));
-        }
+        // The shared checked decoder proves nonnegative counts, bounded active
+        // extent and base-1e9 active words. Do not validate that proof again.
         let integer = integer as usize;
         let fraction = fraction as usize;
         let result = result as usize;
         let int_words = integer.div_ceil(DIGITS_PER_WORD);
         let frac_words = fraction.div_ceil(DIGITS_PER_WORD);
         let source_active = int_words + frac_words;
-        if source_active > WORD_BUF_LEN
-            || raw[..source_active]
-                .iter()
-                .any(|word| *word < 0 || *word as u32 >= WORD_BASE)
-        {
-            return Err(NativeDecimalError::InvalidInput(
-                "invalid native cell active words",
-            ));
-        }
         let mut words = raw.map(|word| word as u32);
         // Native coefficient extraction emits only the declared digits of the
         // first/last partial words. Physical cells may contain extra padding.

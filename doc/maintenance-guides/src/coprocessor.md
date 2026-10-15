@@ -1999,13 +1999,14 @@ flag or eligibility policy described above.
   prefixes, oversized status payloads and noncanonical physical shapes do not
   necessarily fit the strict logical contract. Do not assume that every value
   visible through `words()` can pass the bounded import/export pair.
-- `Decimal::try_from_native_cell` is a logical value projection of a checked
-  native MyDecimal, not the physical-cell decoder. It validates nonnegative
-  counts/active base-1e9 words, discards inactive and partial-word padding,
+- `Decimal::try_from_native_cell_bytes` is a logical value projection of a checked
+  native MyDecimal bytes, not a raw physical-cell copy. It consumes the existing
+  checked native decoder once, then discards inactive and partial-word padding,
   trims integer zeros, clears zero sign and extends storage to visible scale.
   The final owner uses the existing per-buffer word budget including nine inline
-  cells. TiDB batch input consumes this directly; the intermediate ASCII
-  coefficient owner is removed there. This does not change native value
+  cells. TiDB batch input borrows one raw-cell view per window and consumes this
+  directly; duplicate typed-cell validation, the obsolete facade input adapter
+  and the intermediate ASCII coefficient owner are removed there. This does not change native value
   normalization, the physical format or general wide-consumer admission.
 - `Decimal::try_to_native_cell` is the reverse strict logical projection,
   preserving the old active-word/head/tail/result-scale checks and logical
