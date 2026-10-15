@@ -205,7 +205,14 @@ flag or eligibility policy described above.
   preparation, execution and the TiDB consumer; signatures specify input/output
   carriers and arity. Int, Real, Decimal, Bytes, DateTime, Duration, JSON and
   VectorFloat32 have owned typed transport; storage width is not an admission
-  criterion. Lazy/effectful calls remain outside this domain. The former
+  criterion. LongLong Int transport preserves all 64 bits; the same capability
+  registry admits unsigned operands for the seven integer comparisons and the
+  canonical selector reads each operand's flags. Arithmetic and other registered
+  families retain their signed-only input/result contract. An unused unsigned
+  Int schema entry is transport metadata, not permission to execute unsigned
+  arithmetic. The older row profile remains signed-only. NULL-safe equality is
+  pure/eager but not NULL-strict: both complete child phases execute, then its
+  official kernel returns a non-NULL boolean. Lazy/effectful calls remain outside this domain. The former
   numeric-vector program, compile mode and decoded/raw entry have been removed.
   Row/ControlLineage/SqlBatch/EvaluatedAscii identities remain separate and are
   checked even for empty and leaf programs.

@@ -1172,6 +1172,69 @@ fn batch_admits_the_closed_signed_int_family() {
 }
 
 #[test]
+fn batch_null_safe_equality_completes_both_operands_in_selection_order() {
+    let mut program = compile_batch_program(
+        &call(Sig::NullEqInt, vec![input(0), input(1)]),
+        &[ft(), ft()],
+    );
+    let mut services = BatchBindings::new(vec![
+        vec![None, None, Some(1), Some(1)],
+        vec![None, Some(1), None, Some(1)],
+    ]);
+    let selection = [3, 1, 0, 2, 3];
+    assert_eq!(
+        run_batch(&mut program, &mut services, 4, &selection)
+            .unwrap()
+            .to_int_vec(),
+        [Some(1), Some(0), Some(1), Some(0), Some(1)]
+    );
+    let expected: Vec<_> = (0..2)
+        .flat_map(|slot| {
+            selection
+                .iter()
+                .enumerate()
+                .map(move |(occurrence, &row)| (occurrence, row, slot))
+        })
+        .collect();
+    assert_eq!(services.inner.reads, expected);
+}
+
+#[test]
+fn unsigned_int_transport_is_admitted_only_by_comparison_contracts() {
+    let mut field = ft();
+    field.set_flag(1 << 5);
+    let unsigned = LocalExpr::Constant {
+        value: ScalarValue::Int(Some(-1)),
+        field_type: field.clone(),
+        literal_kind: LiteralKind::Typed,
+    };
+    for signature in [Sig::PlusInt, Sig::MinusInt, Sig::MultiplyInt] {
+        batch_rejected(
+            &call(signature, vec![unsigned.clone(), constant(Some(1))]),
+            &[],
+        );
+    }
+    for signature in [Sig::AbsInt, Sig::IntAnyValue] {
+        batch_rejected(&call(signature, vec![unsigned.clone()]), &[]);
+    }
+    let mut program = compile_batch_program(
+        &call(Sig::LtInt, vec![unsigned.clone(), constant(Some(1))]),
+        &[],
+    );
+    let mut services = Bindings::new(vec![]);
+    assert_eq!(
+        run_batch(&mut program, &mut services, 1, &[0, 0, 0])
+            .unwrap()
+            .to_int_vec(),
+        [Some(0); 3]
+    );
+    assert!(services.reads.is_empty());
+    // An unused unsigned Int declaration is storage metadata, not permission
+    // to execute unsigned arithmetic or to change the older row domain.
+    drop(batch_facts(&constant(Some(1)), &[field]));
+}
+
+#[test]
 fn batch_admits_real_arithmetic_through_the_same_registry() {
     let field = real_ft();
     let expr = LocalExpr::Call {
@@ -1435,7 +1498,7 @@ fn batch_strict_raw_type_gate_covers_nodes_and_unused_schema() {
         field.set_tp(raw_type);
         bad_types.push(field);
     }
-    for bit in [5, 8, 11, 18, 21, 25, 26, 27, 28, 29, 30, 31] {
+    for bit in [8, 11, 18, 21, 25, 26, 27, 28, 29, 30, 31] {
         let mut field = ft();
         field.set_flag(1u32 << bit);
         bad_types.push(field);
