@@ -212,7 +212,10 @@ flag or eligibility policy described above.
   Int schema entry is transport metadata, not permission to execute unsigned
   arithmetic. The older row profile remains signed-only. NULL-safe equality is
   pure/eager but not NULL-strict: both complete child phases execute, then its
-  official kernel returns a non-NULL boolean. Lazy/effectful calls remain outside this domain. The former
+  official kernel returns a non-NULL boolean. The same seven comparisons admit
+  same-domain Double (excluding NaN) and signed Decimal operands, with signed
+  Int results. This does not admit mixed-domain casts or string collation rules.
+  Lazy/effectful calls remain outside this domain. The former
   numeric-vector program, compile mode and decoded/raw entry have been removed.
   Row/ControlLineage/SqlBatch/EvaluatedAscii identities remain separate and are
   checked even for empty and leaf programs.

@@ -2515,3 +2515,74 @@ fn batch_leaf_dispatch_rejects_old_row_entries_even_when_empty() {
         }
     }
 }
+
+#[test]
+fn batch_numeric_comparisons_keep_exact_carriers_and_signed_results() {
+    for (field, signatures) in [
+        (
+            real_ft(),
+            [
+                Sig::LtReal,
+                Sig::LeReal,
+                Sig::GtReal,
+                Sig::GeReal,
+                Sig::EqReal,
+                Sig::NeReal,
+                Sig::NullEqReal,
+            ],
+        ),
+        (
+            decimal_ft(),
+            [
+                Sig::LtDecimal,
+                Sig::LeDecimal,
+                Sig::GtDecimal,
+                Sig::GeDecimal,
+                Sig::EqDecimal,
+                Sig::NeDecimal,
+                Sig::NullEqDecimal,
+            ],
+        ),
+    ] {
+        for signature in signatures {
+            let make = |input_field: FieldType, result: FieldType| LocalExpr::Call {
+                function: FunctionRef::TiPb(signature),
+                args: [0, 1]
+                    .map(|slot| LocalExpr::InputSlot {
+                        slot,
+                        field_type: input_field.clone(),
+                    })
+                    .into(),
+                return_type: result,
+                metadata: CallMetadata::None,
+            };
+            let expr = make(field.clone(), ft());
+            drop(compile_batch_program(
+                &expr,
+                &[field.clone(), field.clone()],
+            ));
+            let mut unsigned = field.clone();
+            unsigned.set_flag(FieldTypeFlag::UNSIGNED.bits());
+            assert!(
+                BatchFacts::sql_native_batch(
+                    &make(unsigned.clone(), ft()),
+                    &[unsigned.clone(), unsigned],
+                    batch_sites(&expr),
+                    CompileLimits::default()
+                )
+                .is_err()
+            );
+            let mut result = ft();
+            result.set_flag(FieldTypeFlag::UNSIGNED.bits());
+            assert!(
+                BatchFacts::sql_native_batch(
+                    &make(field.clone(), result),
+                    &[field.clone(), field.clone()],
+                    batch_sites(&expr),
+                    CompileLimits::default()
+                )
+                .is_err()
+            );
+        }
+    }
+}

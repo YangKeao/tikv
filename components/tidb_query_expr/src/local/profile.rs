@@ -59,6 +59,20 @@ fn batch_signature_contract(
         | ScalarFuncSig::GeInt
         | ScalarFuncSig::NeInt
         | ScalarFuncSig::NullEqInt => Some((INT_INT, EvalType::Int, true)),
+        ScalarFuncSig::LtReal
+        | ScalarFuncSig::LeReal
+        | ScalarFuncSig::GtReal
+        | ScalarFuncSig::GeReal
+        | ScalarFuncSig::EqReal
+        | ScalarFuncSig::NeReal
+        | ScalarFuncSig::NullEqReal => Some((REAL_REAL, EvalType::Int, false)),
+        ScalarFuncSig::LtDecimal
+        | ScalarFuncSig::LeDecimal
+        | ScalarFuncSig::GtDecimal
+        | ScalarFuncSig::GeDecimal
+        | ScalarFuncSig::EqDecimal
+        | ScalarFuncSig::NeDecimal
+        | ScalarFuncSig::NullEqDecimal => Some((DECIMAL_DECIMAL, EvalType::Int, false)),
         ScalarFuncSig::AbsReal => Some((REAL, EvalType::Real, false)),
         ScalarFuncSig::RealAnyValue => Some((REAL, EvalType::Real, false)),
         ScalarFuncSig::PlusReal | ScalarFuncSig::MinusReal | ScalarFuncSig::MultiplyReal => {
