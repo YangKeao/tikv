@@ -2802,3 +2802,59 @@ fn integer_identity_result_flags_must_follow_the_first_argument() {
         }
     }
 }
+
+#[test]
+fn batch_niladic_pi_is_exact_and_stateful_niladic_functions_stay_excluded() {
+    let expr = LocalExpr::Call {
+        function: FunctionRef::TiPb(Sig::Pi),
+        args: Box::new([]),
+        return_type: real_ft(),
+        metadata: CallMetadata::None,
+    };
+    assert_eq!(
+        batch_signature(FunctionRef::TiPb(Sig::Pi)),
+        Some((&[][..], EvalType::Real))
+    );
+    let mut program = compile_batch_program(&expr, &[]);
+    let mut services = BatchBindings::new(vec![]);
+    assert_eq!(
+        run_batch(&mut program, &mut services, 4, &[3, 1, 1])
+            .unwrap()
+            .to_real_vec(),
+        vec![Real::new(3.141592653589793).ok(); 3]
+    );
+    assert!(services.inner.reads.is_empty());
+    for limits in [
+        ExecutionLimits {
+            max_steps: 0,
+            ..ExecutionLimits::default()
+        },
+        ExecutionLimits {
+            max_retained_bytes: 0,
+            ..ExecutionLimits::default()
+        },
+    ] {
+        assert!(matches!(
+            program.eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut services),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert!(services.inner.reads.is_empty());
+    }
+    assert!(batch_signature(FunctionRef::TiPb(Sig::Rand)).is_none());
+    let mut wrong = expr.clone();
+    if let LocalExpr::Call { args, .. } = &mut wrong {
+        *args = vec![constant(Some(1))].into_boxed_slice();
+    }
+    assert!(
+        BatchFacts::sql_native_batch(&wrong, &[], batch_sites(&wrong), CompileLimits::default())
+            .is_err()
+    );
+    let mut wrong = expr.clone();
+    if let LocalExpr::Call { return_type, .. } = &mut wrong {
+        *return_type = ft();
+    }
+    assert!(
+        BatchFacts::sql_native_batch(&wrong, &[], batch_sites(&wrong), CompileLimits::default())
+            .is_err()
+    );
+}

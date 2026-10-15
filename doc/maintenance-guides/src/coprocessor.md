@@ -240,6 +240,11 @@ flag or eligibility policy described above.
   workers; out-of-domain NaN results become NULL and signed zero is preserved.
   This does not admit SIN/COS/ATAN's distinct native Go/libm policies or ROUND's
   different native/wire rounding behavior.
+  Pi is the only newly admitted pure niladic signature: exact arity0 and Real
+  result, using the existing prepared-kernel explicit output row count even
+  without input columns. This is not blanket zero-argument admission; RAND and
+  other stateful/contextual calls remain outside this registry. Empty selection,
+  row-window order and execution/storage budgets retain their normal contracts.
   Lazy/effectful calls remain outside this domain. The former
   numeric-vector program, compile mode and decoded/raw entry have been removed.
   Row/ControlLineage/SqlBatch/EvaluatedAscii identities remain separate and are

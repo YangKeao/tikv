@@ -57,6 +57,7 @@ fn batch_signature_contract(
         return None;
     };
     match signature {
+        ScalarFuncSig::Pi => Some((&[], EvalType::Real, false, ResultSignedness::Signed)),
         ScalarFuncSig::UnaryNotInt => Some((INT, EvalType::Int, true, ResultSignedness::Signed)),
         ScalarFuncSig::Asin | ScalarFuncSig::Acos => {
             Some((REAL, EvalType::Real, false, ResultSignedness::Signed))
