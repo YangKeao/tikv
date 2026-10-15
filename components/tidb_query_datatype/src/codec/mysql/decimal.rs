@@ -2394,7 +2394,7 @@ impl Decimal {
         // Native coefficient extraction emits only the declared digits of the
         // first/last partial words. Physical cells may contain extra padding.
         let head = integer % DIGITS_PER_WORD;
-        if head != 0 {
+        if head != 0 && words[0] >= TEN_POW[head] {
             words[0] %= TEN_POW[head];
         }
         let tail = fraction % DIGITS_PER_WORD;
