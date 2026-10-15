@@ -2764,3 +2764,41 @@ fn is_null_batch_has_signed_results_for_each_exact_carrier() {
     }
     assert!(batch_signature(FunctionRef::TiPb(Sig::JsonIsNull)).is_none());
 }
+
+#[test]
+fn integer_identity_result_flags_must_follow_the_first_argument() {
+    for sig in [Sig::RoundInt, Sig::IntAnyValue] {
+        for input_unsigned in [false, true] {
+            for result_unsigned in [false, true] {
+                let field = |unsigned| {
+                    let mut x = ft();
+                    if unsigned {
+                        x.set_flag(FieldTypeFlag::UNSIGNED.bits());
+                    }
+                    x
+                };
+                let expr = LocalExpr::Call {
+                    function: FunctionRef::TiPb(sig),
+                    args: vec![LocalExpr::InputSlot {
+                        slot: 0,
+                        field_type: field(input_unsigned),
+                    }]
+                    .into_boxed_slice(),
+                    return_type: field(result_unsigned),
+                    metadata: CallMetadata::None,
+                };
+                assert_eq!(
+                    BatchFacts::sql_native_batch(
+                        &expr,
+                        &[field(input_unsigned)],
+                        batch_sites(&expr),
+                        CompileLimits::default()
+                    )
+                    .is_ok(),
+                    input_unsigned == result_unsigned,
+                    "{sig:?} flags={input_unsigned}/{result_unsigned}"
+                );
+            }
+        }
+    }
+}

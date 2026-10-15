@@ -210,7 +210,12 @@ flag or eligibility policy described above.
   Datum reads have a separate signedness rule; BIT/ENUM/SET remain hybrid types.
   The same capability
   registry admits unsigned operands for the seven integer comparisons and the
-  canonical selector reads each operand's flags. Arithmetic and other registered
+  canonical selector reads each operand's flags. ResultSignedness independently
+  declares Signed/Unsigned/FirstArgument. IntAnyValue and one-argument RoundInt
+  admit unsigned Int bits and require the result flag to follow their first
+  argument; signedness mismatches are refused. Both are exact identities,
+  including values beyond53bits. Scaled/noninteger ROUND stays outside this
+  admission because its native/wire policies differ. Other admitted arithmetic
   families retain their signed-only input/result contract, except the five
   integer bit operations (AND/OR/XOR/left/right shift), whose operands preserve
   all raw bits and whose results MUST declare UNSIGNED. The registry records
