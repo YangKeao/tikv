@@ -81,7 +81,7 @@ impl<T: Clone + Default> ChunkedVec<T> for ChunkedVecSized<T> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn push_data(&mut self, value: T) {
         self.bitmap.push(true);
         self.data.push(value);
