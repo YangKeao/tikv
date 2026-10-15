@@ -2652,3 +2652,73 @@ fn batch_narrow_integer_admission_does_not_admit_hybrid_types_or_unsigned_arithm
         );
     }
 }
+
+#[test]
+fn bitwise_batch_requires_unsigned_result_and_preserves_operand_flags() {
+    for sig in [
+        Sig::BitAndSig,
+        Sig::BitOrSig,
+        Sig::BitXorSig,
+        Sig::LeftShift,
+        Sig::RightShift,
+    ] {
+        for left_unsigned in [false, true] {
+            for right_unsigned in [false, true] {
+                let field = |unsigned| {
+                    let mut value = ft();
+                    if unsigned {
+                        value.set_flag(FieldTypeFlag::UNSIGNED.bits());
+                    }
+                    value
+                };
+                let schema = [field(left_unsigned), field(right_unsigned)];
+                for result_unsigned in [false, true] {
+                    let expr = LocalExpr::Call {
+                        function: FunctionRef::TiPb(sig),
+                        args: vec![
+                            LocalExpr::InputSlot {
+                                slot: 0,
+                                field_type: schema[0].clone(),
+                            },
+                            LocalExpr::InputSlot {
+                                slot: 1,
+                                field_type: schema[1].clone(),
+                            },
+                        ]
+                        .into_boxed_slice(),
+                        return_type: field(result_unsigned),
+                        metadata: CallMetadata::None,
+                    };
+                    assert_eq!(
+                        BatchFacts::sql_native_batch(
+                            &expr,
+                            &schema,
+                            batch_sites(&expr),
+                            CompileLimits::default()
+                        )
+                        .is_ok(),
+                        result_unsigned,
+                        "{sig:?} result={result_unsigned} operands={left_unsigned}/{right_unsigned}"
+                    );
+                }
+            }
+        }
+    }
+    let mut unsigned = ft();
+    unsigned.set_flag(FieldTypeFlag::UNSIGNED.bits());
+    let comparison = LocalExpr::Call {
+        function: FunctionRef::TiPb(Sig::EqInt),
+        args: vec![input(0), input(1)].into_boxed_slice(),
+        return_type: unsigned,
+        metadata: CallMetadata::None,
+    };
+    assert!(
+        BatchFacts::sql_native_batch(
+            &comparison,
+            &[ft(), ft()],
+            batch_sites(&comparison),
+            CompileLimits::default()
+        )
+        .is_err()
+    );
+}

@@ -211,7 +211,14 @@ flag or eligibility policy described above.
   The same capability
   registry admits unsigned operands for the seven integer comparisons and the
   canonical selector reads each operand's flags. Arithmetic and other registered
-  families retain their signed-only input/result contract. An unused unsigned
+  families retain their signed-only input/result contract, except the five
+  integer bit operations (AND/OR/XOR/left/right shift), whose operands preserve
+  all raw bits and whose results MUST declare UNSIGNED. The registry records
+  unsigned input permission separately from the required result flag; signed
+  bitwise results and unsigned comparison results are rejected. Shift counts
+  interpreted as u64 at least64 (including negative i64 bits) produce zero.
+  TiDB's catalog uses Signed/FirstArgument/Always result policies, so PB lowering
+  does not infer a bitwise result flag from the first argument. An unused unsigned
   Int schema entry is transport metadata, not permission to execute unsigned
   arithmetic. The older row profile remains signed-only. NULL-safe equality is
   pure/eager but not NULL-strict: both complete child phases execute, then its

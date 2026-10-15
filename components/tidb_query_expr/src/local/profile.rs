@@ -34,74 +34,82 @@ const BYTES_INT_INT: &[EvalType] = &[EvalType::Bytes, EvalType::Int, EvalType::I
 /// driver. This is the single capability registry used by admission,
 /// compilation, and execution; storage width does not select a driver.
 pub fn batch_signature(function: FunctionRef) -> Option<(&'static [EvalType], EvalType)> {
-    batch_signature_contract(function).map(|(inputs, output, _)| (inputs, output))
+    batch_signature_contract(function).map(|(inputs, output, _, _)| (inputs, output))
 }
 
 // The third fact admits unsigned Int operands. Their carrier preserves all
 // bits; the official comparison selector uses each operand's FieldType.
-// Other families retain their current signed-only contract.
+// The fourth fact requires unsigned results for bit operations.
+// Other families retain their current signed-only result contract.
 fn batch_signature_contract(
     function: FunctionRef,
-) -> Option<(&'static [EvalType], EvalType, bool)> {
+) -> Option<(&'static [EvalType], EvalType, bool, bool)> {
     let FunctionRef::TiPb(signature) = function else {
         return None;
     };
     match signature {
-        ScalarFuncSig::AbsInt => Some((INT, EvalType::Int, false)),
-        ScalarFuncSig::IntAnyValue => Some((INT, EvalType::Int, false)),
+        ScalarFuncSig::AbsInt => Some((INT, EvalType::Int, false, false)),
+        ScalarFuncSig::IntAnyValue => Some((INT, EvalType::Int, false, false)),
         ScalarFuncSig::PlusInt | ScalarFuncSig::MinusInt | ScalarFuncSig::MultiplyInt => {
-            Some((INT_INT, EvalType::Int, false))
+            Some((INT_INT, EvalType::Int, false, false))
         }
+        ScalarFuncSig::BitAndSig
+        | ScalarFuncSig::BitOrSig
+        | ScalarFuncSig::BitXorSig
+        | ScalarFuncSig::LeftShift
+        | ScalarFuncSig::RightShift => Some((INT_INT, EvalType::Int, true, true)),
         ScalarFuncSig::EqInt
         | ScalarFuncSig::GtInt
         | ScalarFuncSig::LtInt
         | ScalarFuncSig::LeInt
         | ScalarFuncSig::GeInt
         | ScalarFuncSig::NeInt
-        | ScalarFuncSig::NullEqInt => Some((INT_INT, EvalType::Int, true)),
+        | ScalarFuncSig::NullEqInt => Some((INT_INT, EvalType::Int, true, false)),
         ScalarFuncSig::LtReal
         | ScalarFuncSig::LeReal
         | ScalarFuncSig::GtReal
         | ScalarFuncSig::GeReal
         | ScalarFuncSig::EqReal
         | ScalarFuncSig::NeReal
-        | ScalarFuncSig::NullEqReal => Some((REAL_REAL, EvalType::Int, false)),
+        | ScalarFuncSig::NullEqReal => Some((REAL_REAL, EvalType::Int, false, false)),
         ScalarFuncSig::LtDecimal
         | ScalarFuncSig::LeDecimal
         | ScalarFuncSig::GtDecimal
         | ScalarFuncSig::GeDecimal
         | ScalarFuncSig::EqDecimal
         | ScalarFuncSig::NeDecimal
-        | ScalarFuncSig::NullEqDecimal => Some((DECIMAL_DECIMAL, EvalType::Int, false)),
-        ScalarFuncSig::AbsReal => Some((REAL, EvalType::Real, false)),
-        ScalarFuncSig::RealAnyValue => Some((REAL, EvalType::Real, false)),
+        | ScalarFuncSig::NullEqDecimal => Some((DECIMAL_DECIMAL, EvalType::Int, false, false)),
+        ScalarFuncSig::AbsReal => Some((REAL, EvalType::Real, false, false)),
+        ScalarFuncSig::RealAnyValue => Some((REAL, EvalType::Real, false, false)),
         ScalarFuncSig::PlusReal | ScalarFuncSig::MinusReal | ScalarFuncSig::MultiplyReal => {
-            Some((REAL_REAL, EvalType::Real, false))
+            Some((REAL_REAL, EvalType::Real, false, false))
         }
-        ScalarFuncSig::AbsDecimal => Some((DECIMAL, EvalType::Decimal, false)),
-        ScalarFuncSig::DecimalAnyValue => Some((DECIMAL, EvalType::Decimal, false)),
+        ScalarFuncSig::AbsDecimal => Some((DECIMAL, EvalType::Decimal, false, false)),
+        ScalarFuncSig::DecimalAnyValue => Some((DECIMAL, EvalType::Decimal, false, false)),
         ScalarFuncSig::PlusDecimal
         | ScalarFuncSig::MinusDecimal
-        | ScalarFuncSig::MultiplyDecimal => Some((DECIMAL_DECIMAL, EvalType::Decimal, false)),
-        ScalarFuncSig::CharLength | ScalarFuncSig::CharLengthUtf8 => {
-            Some((BYTES, EvalType::Int, false))
+        | ScalarFuncSig::MultiplyDecimal => {
+            Some((DECIMAL_DECIMAL, EvalType::Decimal, false, false))
         }
-        ScalarFuncSig::StringAnyValue => Some((BYTES, EvalType::Bytes, false)),
+        ScalarFuncSig::CharLength | ScalarFuncSig::CharLengthUtf8 => {
+            Some((BYTES, EvalType::Int, false, false))
+        }
+        ScalarFuncSig::StringAnyValue => Some((BYTES, EvalType::Bytes, false, false)),
         ScalarFuncSig::Lower
         | ScalarFuncSig::LowerUtf8
         | ScalarFuncSig::Upper
-        | ScalarFuncSig::UpperUtf8 => Some((BYTES, EvalType::Bytes, false)),
+        | ScalarFuncSig::UpperUtf8 => Some((BYTES, EvalType::Bytes, false, false)),
         ScalarFuncSig::Substring2Args | ScalarFuncSig::Substring2ArgsUtf8 => {
-            Some((BYTES_INT, EvalType::Bytes, false))
+            Some((BYTES_INT, EvalType::Bytes, false, false))
         }
         ScalarFuncSig::Substring3Args | ScalarFuncSig::Substring3ArgsUtf8 => {
-            Some((BYTES_INT_INT, EvalType::Bytes, false))
+            Some((BYTES_INT_INT, EvalType::Bytes, false, false))
         }
-        ScalarFuncSig::TimeAnyValue => Some((DATETIME, EvalType::DateTime, false)),
-        ScalarFuncSig::DurationAnyValue => Some((DURATION, EvalType::Duration, false)),
-        ScalarFuncSig::JsonAnyValue => Some((JSON, EvalType::Json, false)),
+        ScalarFuncSig::TimeAnyValue => Some((DATETIME, EvalType::DateTime, false, false)),
+        ScalarFuncSig::DurationAnyValue => Some((DURATION, EvalType::Duration, false, false)),
+        ScalarFuncSig::JsonAnyValue => Some((JSON, EvalType::Json, false, false)),
         ScalarFuncSig::VectorFloat32AnyValue => {
-            Some((VECTOR_FLOAT32, EvalType::VectorFloat32, false))
+            Some((VECTOR_FLOAT32, EvalType::VectorFloat32, false, false))
         }
         _ => None,
     }
@@ -672,13 +680,13 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
                 TypePolicy::RowBaseline
                     if signature == FunctionRef::TiPb(ScalarFuncSig::PlusInt) =>
                 {
-                    Some((INT_INT, EvalType::Int, false))
+                    Some((INT_INT, EvalType::Int, false, false))
                 }
                 TypePolicy::RowBaseline => None,
                 TypePolicy::SqlNativeBatch => batch_signature_contract(signature),
             };
-            let (input_types, output_type, unsigned_inputs) =
-                admitted.unwrap_or((&[], EvalType::Int, false));
+            let (input_types, output_type, unsigned_inputs, unsigned_result) =
+                admitted.unwrap_or((&[], EvalType::Int, false, false));
             let actual_output = EvalType::try_from(expr.field_type().as_accessor().tp()).ok();
             let inputs_match = args.iter().zip(input_types).all(|(arg, input_type)| {
                 EvalType::try_from(arg.field_type().as_accessor().tp()).ok() == Some(*input_type)
@@ -691,7 +699,7 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
                     "ordinary calls require an admitted batch signature, exact arity and no metadata",
                 ));
             }
-            if expr.field_type().get_flag() & (1 << 5) != 0
+            if (expr.field_type().get_flag() & (1 << 5) != 0) != unsigned_result
                 || (!unsigned_inputs
                     && args
                         .iter()
