@@ -567,7 +567,11 @@ fn check_type(field_type: &FieldType, policy: TypePolicy) -> LocalResult<()> {
             let eval_type = EvalType::try_from(field_type.as_accessor().tp()).ok();
             let raw_type = field_type.get_tp();
             let raw_matches = match eval_type {
-                Some(EvalType::Int) => raw_type == FieldTypeTp::LongLong as i32,
+                Some(EvalType::Int) => {
+                    matches!(raw_type, value if value == FieldTypeTp::Tiny as i32
+                    || value == FieldTypeTp::Short as i32 || value == FieldTypeTp::Int24 as i32
+                    || value == FieldTypeTp::Long as i32 || value == FieldTypeTp::LongLong as i32)
+                }
                 Some(EvalType::Real) => raw_type == FieldTypeTp::Double as i32,
                 Some(EvalType::Decimal) => raw_type == FieldTypeTp::NewDecimal as i32,
                 Some(EvalType::Bytes) => matches!(

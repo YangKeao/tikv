@@ -1759,20 +1759,22 @@ impl EvalExecution {
 // Defensive check for the eager batch entry. Immutable compilation facts
 // apply the same batch-only raw-type policy before copying any descriptor.
 fn batch_eval_type(field_type: &FieldType) -> Option<EvalType> {
+    let raw_type = field_type.get_tp();
+    let integer = matches!(raw_type, value if value == tidb_query_datatype::FieldTypeTp::Tiny as i32
+        || value == tidb_query_datatype::FieldTypeTp::Short as i32
+        || value == tidb_query_datatype::FieldTypeTp::Int24 as i32
+        || value == tidb_query_datatype::FieldTypeTp::Long as i32
+        || value == tidb_query_datatype::FieldTypeTp::LongLong as i32);
     let excluded = (1 << 8) | (1 << 11) | (1 << 18) | (1 << 21);
     let documented = (1 << 25) - 1;
-    if (field_type.get_flag() & (1 << 5) != 0
-        && field_type.get_tp() != tidb_query_datatype::FieldTypeTp::LongLong as i32)
+    if (field_type.get_flag() & (1 << 5) != 0 && !integer)
         || field_type.get_array()
         || field_type.get_flag() & (excluded | !documented) != 0
     {
         return None;
     }
-    let raw_type = field_type.get_tp();
     match EvalType::try_from(field_type.as_accessor().tp()).ok()? {
-        EvalType::Int if raw_type == tidb_query_datatype::FieldTypeTp::LongLong as i32 => {
-            Some(EvalType::Int)
-        }
+        EvalType::Int if integer => Some(EvalType::Int),
         EvalType::Real if raw_type == tidb_query_datatype::FieldTypeTp::Double as i32 => {
             Some(EvalType::Real)
         }

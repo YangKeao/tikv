@@ -205,7 +205,10 @@ flag or eligibility policy described above.
   preparation, execution and the TiDB consumer; signatures specify input/output
   carriers and arity. Int, Real, Decimal, Bytes, DateTime, Duration, JSON and
   VectorFloat32 have owned typed transport; storage width is not an admission
-  criterion. LongLong Int transport preserves all 64 bits; the same capability
+  criterion. Tiny, Short, Int24, Long and LongLong share the eight-byte Int
+  carrier and preserve unsigned bits. Year remains excluded because native
+  Datum reads have a separate signedness rule; BIT/ENUM/SET remain hybrid types.
+  The same capability
   registry admits unsigned operands for the seven integer comparisons and the
   canonical selector reads each operand's flags. Arithmetic and other registered
   families retain their signed-only input/result contract. An unused unsigned

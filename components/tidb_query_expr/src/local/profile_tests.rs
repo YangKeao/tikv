@@ -1486,8 +1486,8 @@ fn batch_labels_cannot_enter_the_old_row_consumer_or_child_route() {
 #[test]
 fn batch_strict_raw_type_gate_covers_nodes_and_unused_schema() {
     let mut bad_types: Vec<FieldType> = vec![
-        FieldTypeTp::Tiny.into(),
-        FieldTypeTp::Long.into(),
+        FieldTypeTp::Year.into(),
+        FieldTypeTp::Bit.into(),
         FieldTypeTp::Null.into(),
     ];
     let mut array = ft();
@@ -2584,5 +2584,71 @@ fn batch_numeric_comparisons_keep_exact_carriers_and_signed_results() {
                 .is_err()
             );
         }
+    }
+}
+
+#[test]
+fn batch_narrow_integer_admission_does_not_admit_hybrid_types_or_unsigned_arithmetic() {
+    for raw in [
+        FieldTypeTp::Tiny,
+        FieldTypeTp::Short,
+        FieldTypeTp::Int24,
+        FieldTypeTp::Long,
+    ] {
+        let field: FieldType = raw.into();
+        let make = |sig, field: FieldType| {
+            call(
+                sig,
+                [0, 1]
+                    .map(|slot| LocalExpr::InputSlot {
+                        slot,
+                        field_type: field.clone(),
+                    })
+                    .into(),
+            )
+        };
+        let plus = make(Sig::PlusInt, field.clone());
+        drop(compile_batch_program(
+            &plus,
+            &[field.clone(), field.clone()],
+        ));
+        let mut unsigned = field.clone();
+        unsigned.set_flag(FieldTypeFlag::UNSIGNED.bits());
+        let comparison = make(Sig::LtInt, unsigned.clone());
+        drop(compile_batch_program(
+            &comparison,
+            &[unsigned.clone(), unsigned.clone()],
+        ));
+        let plus = make(Sig::PlusInt, unsigned.clone());
+        assert!(
+            BatchFacts::sql_native_batch(
+                &plus,
+                &[unsigned.clone(), unsigned],
+                batch_sites(&plus),
+                CompileLimits::default()
+            )
+            .is_err()
+        );
+    }
+    for raw in [
+        FieldTypeTp::Year,
+        FieldTypeTp::Bit,
+        FieldTypeTp::Enum,
+        FieldTypeTp::Set,
+    ] {
+        let field: FieldType = raw.into();
+        let expr = LocalExpr::InputSlot {
+            slot: 0,
+            field_type: field.clone(),
+        };
+        assert!(
+            BatchFacts::sql_native_batch(
+                &expr,
+                &[field],
+                batch_sites(&expr),
+                CompileLimits::default()
+            )
+            .is_err()
+        );
     }
 }
