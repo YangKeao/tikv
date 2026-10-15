@@ -2007,6 +2007,15 @@ flag or eligibility policy described above.
   cells. TiDB batch input consumes this directly; the intermediate ASCII
   coefficient owner is removed there. This does not change native value
   normalization, the physical format or general wide-consumer admission.
+- `Decimal::try_to_native_cell` is the reverse strict logical projection,
+  preserving the old active-word/head/tail/result-scale checks and logical
+  byte-span preflight before trimming integer zeros and bounding the native
+  nine-word result. Zero sign is cleared like the native coefficient producer;
+  inactive cells are zero. Wide integer zero prefixes can normalize into a
+  bounded cell, but retained wide fractions cannot. TiDB output prevalidates
+  the accounted converted cell Vec before any publication; its intermediate
+  ASCII coefficient allocation is removed. Physical/raw status export and
+  generic wide-math consumer admission remain separate.
 - SQL declared precision/scale belongs to the typed caller, separately from
   Decimal storage/result scale. Keep `Res::Ok`/`Truncated`/`Overflow` until that
   caller applies warning/error policy; transport must not erase disposition by

@@ -2449,6 +2449,100 @@ impl Decimal {
         Ok(value)
     }
 
+    /// Projects a strict logical math value into a bounded native cell without
+    /// an intermediate coefficient. Preserve the native value bridge's logical
+    /// byte-span preflight, leading-zero normalization and zero-sign policy.
+    /// This does not export arbitrary physical/status payloads.
+    pub fn try_to_native_cell(&self, limit: usize) -> NativeDecimalResult<super::NativeMyDecimal> {
+        if self.result_frac_cnt > self.frac_cnt {
+            return Err(NativeDecimalError::InvalidInput(
+                "result scale exceeds storage scale",
+            ));
+        }
+        let int_words = self.int_cnt.div_ceil(DIGITS_PER_WORD);
+        let frac_words = self.frac_cnt.div_ceil(DIGITS_PER_WORD);
+        let active = int_words
+            .checked_add(frac_words)
+            .ok_or(NativeDecimalError::Resource("active word count overflow"))?;
+        if active == 0 || active > self.word_buf.len() {
+            return Err(NativeDecimalError::InvalidInput(
+                "native coefficient requires initialized active words",
+            ));
+        }
+        let bytes = self
+            .int_cnt
+            .checked_add(self.frac_cnt)
+            .filter(|bytes| *bytes <= isize::MAX as usize)
+            .ok_or(NativeDecimalError::Resource(
+                "coefficient byte count overflow",
+            ))?;
+        if bytes > limit {
+            return Err(NativeDecimalError::Resource(
+                "coefficient buffer exceeds limit",
+            ));
+        }
+        if self.word_buf[..active]
+            .iter()
+            .any(|word| *word >= WORD_BASE)
+        {
+            return Err(NativeDecimalError::InvalidInput(
+                "active word is not base-1e9",
+            ));
+        }
+        let head = self.int_cnt % DIGITS_PER_WORD;
+        if head != 0 && self.word_buf[0] >= TEN_POW[head] {
+            return Err(NativeDecimalError::InvalidInput(
+                "leading word exceeds its digit count",
+            ));
+        }
+        let tail = self.frac_cnt % DIGITS_PER_WORD;
+        if tail != 0 && self.word_buf[active - 1] % TEN_POW[DIGITS_PER_WORD - tail] != 0 {
+            return Err(NativeDecimalError::InvalidInput(
+                "fractional word has nonzero padding",
+            ));
+        }
+        let start = self.word_buf[..int_words]
+            .iter()
+            .position(|word| *word != 0)
+            .unwrap_or(int_words);
+        let kept_int_words = int_words - start;
+        let mut integer = if kept_int_words == 0 {
+            0
+        } else {
+            (kept_int_words - 1) * DIGITS_PER_WORD + self.word_buf[start].ilog10() as usize + 1
+        };
+        if integer == 0 && self.frac_cnt == 0 {
+            integer = 1;
+        }
+        let target_int_words = integer.div_ceil(DIGITS_PER_WORD);
+        if target_int_words + frac_words > WORD_BUF_LEN {
+            return Err(NativeDecimalError::InvalidInput(
+                "logical result does not fit a native cell",
+            ));
+        }
+        let mut words = [0_i32; WORD_BUF_LEN];
+        for (destination, source) in words[..kept_int_words]
+            .iter_mut()
+            .zip(&self.word_buf[start..int_words])
+        {
+            *destination = *source as i32;
+        }
+        for (destination, source) in words[target_int_words..target_int_words + frac_words]
+            .iter_mut()
+            .zip(&self.word_buf[int_words..active])
+        {
+            *destination = *source as i32;
+        }
+        let negative = self.negative && words.iter().any(|word| *word != 0);
+        Ok(super::NativeMyDecimal::from_raw_parts((
+            integer as i8,
+            self.frac_cnt as i8,
+            self.result_frac_cnt as i8,
+            negative,
+            words,
+        )))
+    }
+
     /// Fallible logical-value extraction for the native math result carrier.
     /// This does not admit raw physical cells, visible-only padding, or
     /// inactive heap payloads as native coefficients. The sign of zero is
@@ -10420,5 +10514,53 @@ mod tests {
         overflow_res
             .into_result_impl(&mut ctx, None, Some(error))
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod native_cell_logical_export_tests {
+    use super::*;
+
+    #[test]
+    fn physical_cell_admission_does_not_authorize_logical_native_export() {
+        for parts in [
+            DecimalParts {
+                int_digits: 1,
+                frac_digits: 1,
+                result_frac_digits: 1,
+                negative: false,
+                words: [99, 100_000_000, 0, 0, 0, 0, 0, 0, 0],
+            },
+            DecimalParts {
+                int_digits: 1,
+                frac_digits: 1,
+                result_frac_digits: 1,
+                negative: false,
+                words: [1, 123_456_789, 0, 0, 0, 0, 0, 0, 0],
+            },
+            DecimalParts {
+                int_digits: 0,
+                frac_digits: 0,
+                result_frac_digits: 0,
+                negative: true,
+                words: [0; 9],
+            },
+            DecimalParts {
+                int_digits: 1,
+                frac_digits: 1,
+                result_frac_digits: 255,
+                negative: false,
+                words: [1, 100_000_000, 0, 0, 0, 0, 0, 0, 0],
+            },
+        ] {
+            let physical = Decimal::from_fixed_parts(parts, true).unwrap();
+            assert!(matches!(
+                physical.try_to_native_cell(1024),
+                Err(NativeDecimalError::InvalidInput(_))
+            ));
+        }
+        let valid = Decimal::from_str("-1.20").unwrap();
+        let cell = valid.try_to_native_cell(1024).unwrap();
+        assert_eq!(cell.to_decimal_parts().1.as_slice(), b"120");
     }
 }
