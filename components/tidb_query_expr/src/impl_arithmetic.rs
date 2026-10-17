@@ -289,7 +289,9 @@ where
     }
 }
 
-fn native_integer_binary(
+/// Shared native integer computation; flags describe the original operands.
+/// Only Add, Subtract and Multiply use this value entry.
+pub fn native_integer_binary_value(
     lhs: Int,
     rhs: Int,
     operation: BinaryArithmeticOperation,
@@ -331,7 +333,7 @@ macro_rules! native_integer_binary_recipe {
     ($name:ident, $operation:ident, $left:expr, $right:expr, $forced:expr) => {
         #[rpn_fn]
         fn $name(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-            native_integer_binary(
+            native_integer_binary_value(
                 *lhs,
                 *rhs,
                 BinaryArithmeticOperation::$operation,
@@ -366,14 +368,32 @@ fn binary_raw_f64(value: Option<BytesRef>) -> Result<Option<f64>> {
     Ok(Some(f64::from_bits(u64::from_le_bytes(bytes))))
 }
 
-fn real_binary(
-    lhs: Option<BytesRef>,
-    rhs: Option<BytesRef>,
+/// Shared raw IEEE computation with the original native finite-result policy.
+/// Only Add, Subtract and Multiply use this value entry.
+pub fn native_real_binary_value(
+    lhs: Option<f64>,
+    rhs: Option<f64>,
+    operation: BinaryArithmeticOperation,
+) -> Result<Option<f64>> {
+    real_binary_value(lhs, rhs, operation, true)
+}
+
+fn real_binary_value(
+    lhs: Option<f64>,
+    rhs: Option<f64>,
     operation: BinaryArithmeticOperation,
     native: bool,
-) -> Result<Option<Bytes>> {
-    let lhs = binary_raw_f64(lhs)?;
-    let rhs = binary_raw_f64(rhs)?;
+) -> Result<Option<f64>> {
+    if !matches!(
+        operation,
+        BinaryArithmeticOperation::Add
+            | BinaryArithmeticOperation::Subtract
+            | BinaryArithmeticOperation::Multiply
+    ) {
+        return Err(other_err!(
+            "Arithmetic value entry requires ADD, SUBTRACT or MULTIPLY"
+        ));
+    }
     let Some((lhs, rhs)) = lhs.zip(rhs) else {
         return Ok(None);
     };
@@ -384,7 +404,23 @@ fn real_binary(
             BinaryArithmeticErrorKind::FloatOverflow,
         ));
     }
-    Ok(Some(value.to_bits().to_le_bytes().to_vec()))
+    Ok(Some(value))
+}
+
+fn real_binary(
+    lhs: Option<BytesRef>,
+    rhs: Option<BytesRef>,
+    operation: BinaryArithmeticOperation,
+    native: bool,
+) -> Result<Option<Bytes>> {
+    let lhs = binary_raw_f64(lhs)?;
+    let rhs = binary_raw_f64(rhs)?;
+    let result = if native {
+        native_real_binary_value(lhs, rhs, operation)
+    } else {
+        real_binary_value(lhs, rhs, operation, false)
+    }?;
+    Ok(result.map(|value| value.to_bits().to_le_bytes().to_vec()))
 }
 
 macro_rules! real_binary_recipe {
@@ -403,6 +439,16 @@ real_binary_recipe!(add_real_legacy, Add, false);
 real_binary_recipe!(sub_real_legacy, Subtract, false);
 real_binary_recipe!(mul_real_legacy, Multiply, false);
 
+/// Shared wide-decimal native arithmetic under a checked finite allowance.
+pub fn native_decimal_binary_value(
+    lhs: &Decimal,
+    rhs: &Decimal,
+    budget: &Int,
+    operation: BinaryArithmeticOperation,
+) -> Result<Option<Decimal>> {
+    decimal_binary(lhs, rhs, budget, operation, true)
+}
+
 fn decimal_binary(
     lhs: &Decimal,
     rhs: &Decimal,
@@ -410,6 +456,16 @@ fn decimal_binary(
     operation: BinaryArithmeticOperation,
     native: bool,
 ) -> Result<Option<Decimal>> {
+    if !matches!(
+        operation,
+        BinaryArithmeticOperation::Add
+            | BinaryArithmeticOperation::Subtract
+            | BinaryArithmeticOperation::Multiply
+    ) {
+        return Err(other_err!(
+            "Arithmetic value entry requires ADD, SUBTRACT or MULTIPLY"
+        ));
+    }
     let value = lhs
         .try_native_binary(
             rhs,
@@ -431,13 +487,17 @@ macro_rules! decimal_binary_recipe {
     ($name:ident, $operation:ident, $native:expr) => {
         #[rpn_fn]
         fn $name(lhs: &Decimal, rhs: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
-            decimal_binary(
-                lhs,
-                rhs,
-                budget,
-                BinaryArithmeticOperation::$operation,
-                $native,
-            )
+            if $native {
+                native_decimal_binary_value(lhs, rhs, budget, BinaryArithmeticOperation::$operation)
+            } else {
+                decimal_binary(
+                    lhs,
+                    rhs,
+                    budget,
+                    BinaryArithmeticOperation::$operation,
+                    false,
+                )
+            }
         }
     };
 }
@@ -914,14 +974,19 @@ fn div_decimal_legacy(
     )
 }
 
-#[rpn_fn(nullable)]
-fn binary_arithmetic_null_native(witness: Option<&Int>) -> Result<Option<Int>> {
+/// The original NULL witness policy, shared without an argument program.
+pub fn binary_arithmetic_null_native_value(witness: Option<&Int>) -> Result<Option<Int>> {
     match witness {
         None => Ok(None),
         Some(_) => Err(other_err!(
             "Binary arithmetic NULL witness must be an actual NULL"
         )),
     }
+}
+
+#[rpn_fn(nullable)]
+fn binary_arithmetic_null_native(witness: Option<&Int>) -> Result<Option<Int>> {
+    binary_arithmetic_null_native_value(witness)
 }
 
 #[rpn_fn]

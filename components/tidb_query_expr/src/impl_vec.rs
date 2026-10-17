@@ -151,7 +151,14 @@ fn native_vector_from_packed(arg: VectorFloat32Ref) -> NativeVectorFloat32 {
 }
 
 macro_rules! native_vector_binary_recipe {
-    ($name:ident, $method:ident) => {
+    ($name:ident, $value:ident, $method:ident) => {
+        /// Shares the original native vector arithmetic and typed cause.
+        pub fn $value(
+            lhs: &NativeVectorFloat32,
+            rhs: &NativeVectorFloat32,
+        ) -> std::result::Result<NativeVectorFloat32, NativeVectorError> {
+            lhs.$method(rhs)
+        }
         #[rpn_fn]
         fn $name(lhs: VectorFloat32Ref, rhs: VectorFloat32Ref) -> Result<Option<Bytes>> {
             let lhs = native_vector_from_packed(lhs);
@@ -159,15 +166,15 @@ macro_rules! native_vector_binary_recipe {
             // Reuse the full public arithmetic policy and its actual typed
             // cause, then the same real LE output protocol as VecFromText.
             Ok(Some(
-                lhs.$method(&rhs).map_err(native_vector_error)?.serialize(),
+                $value(&lhs, &rhs).map_err(native_vector_error)?.serialize(),
             ))
         }
     };
 }
 
-native_vector_binary_recipe!(add_vector_native, add);
-native_vector_binary_recipe!(sub_vector_native, sub);
-native_vector_binary_recipe!(mul_vector_native, mul);
+native_vector_binary_recipe!(add_vector_native, add_vector_native_value, add);
+native_vector_binary_recipe!(sub_vector_native, sub_vector_native_value, sub);
+native_vector_binary_recipe!(mul_vector_native, mul_vector_native_value, mul);
 
 #[rpn_fn(nullable)]
 #[inline]
