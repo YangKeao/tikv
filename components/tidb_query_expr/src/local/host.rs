@@ -42,15 +42,22 @@ pub struct HostSignature {
 pub enum SqlBatchHostOperation {
     Concat,
     ConcatWs,
+    RegexpLike { case_insensitive: bool },
 }
 
 impl SqlBatchHostOperation {
     pub fn accepts_arity(self, arity: usize) -> bool {
-        arity
-            >= match self {
-                Self::Concat => 1,
-                Self::ConcatWs => 2,
-            }
+        match self {
+            Self::Concat => arity >= 1,
+            Self::ConcatWs => arity >= 2,
+            Self::RegexpLike { .. } => matches!(arity, 2 | 3),
+        }
+    }
+    pub fn output_type(self) -> EvalType {
+        match self {
+            Self::Concat | Self::ConcatWs => EvalType::Bytes,
+            Self::RegexpLike { .. } => EvalType::Int,
+        }
     }
 }
 
@@ -103,17 +110,25 @@ impl HostCatalog {
                     "SQL host operation arity differs from its contract".into(),
                 ));
             }
-            for field in signature
-                .arg_types
-                .iter()
-                .chain(std::iter::once(&signature.return_type))
-            {
+            for field in signature.arg_types.iter() {
                 super::profile::check_batch_type(field)?;
                 if EvalType::try_from(field.as_accessor().tp()).ok() != Some(EvalType::Bytes) {
                     return Err(LocalError::InvalidSpec(
-                        "SQL CONCAT host requires ready Bytes arguments and result".into(),
+                        "SQL batch host requires ready Bytes arguments".into(),
                     ));
                 }
+            }
+            super::profile::check_batch_type(&signature.return_type)?;
+            if EvalType::try_from(signature.return_type.as_accessor().tp()).ok()
+                != Some(operation.output_type())
+            {
+                return Err(LocalError::InvalidSpec(
+                    "SQL host result differs from its operation".into(),
+                ));
+            }
+            if operation.output_type() == EvalType::Int {
+                registry::check_signed_int_type(&signature.return_type)
+                    .map_err(|error| LocalError::InvalidSpec(error.to_string()))?;
             }
             operations.push(operation);
             signatures.push(signature);
@@ -616,5 +631,45 @@ mod sql_batch_tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod regexp_batch_tests {
+    use tidb_query_datatype::FieldTypeTp;
+
+    use super::*;
+    #[test]
+    fn regexp_catalog_requires_exact_arity_bytes_and_signed_int_result() {
+        let operation = SqlBatchHostOperation::RegexpLike {
+            case_insensitive: true,
+        };
+        for arity in [0, 1, 2, 3, 4] {
+            let signature = HostSignature {
+                arg_types: vec![FieldTypeTp::VarString.into(); arity].into_boxed_slice(),
+                return_type: FieldTypeTp::LongLong.into(),
+            };
+            assert_eq!(
+                HostCatalog::for_sql_batch(vec![(operation, signature)]).is_ok(),
+                matches!(arity, 2 | 3)
+            );
+        }
+        let signature = |result| HostSignature {
+            arg_types: vec![FieldTypeTp::VarString.into(); 2].into_boxed_slice(),
+            return_type: result,
+        };
+        assert!(
+            HostCatalog::for_sql_batch(vec![(operation, signature(FieldTypeTp::VarString.into()))])
+                .is_err()
+        );
+        assert!(
+            HostCatalog::for_sql_batch(vec![(operation, signature(FieldTypeTp::Tiny.into()))])
+                .is_err()
+        );
+        let mut unsigned: FieldType = FieldTypeTp::LongLong.into();
+        unsigned
+            .as_mut_accessor()
+            .set_flag(tidb_query_datatype::FieldTypeFlag::UNSIGNED);
+        assert!(HostCatalog::for_sql_batch(vec![(operation, signature(unsigned))]).is_err());
     }
 }

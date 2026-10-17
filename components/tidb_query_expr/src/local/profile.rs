@@ -81,7 +81,7 @@ impl BatchCallSignature {
     pub fn for_host(operation: SqlBatchHostOperation, arity: usize) -> Option<Self> {
         operation.accepts_arity(arity).then_some(Self {
             fixed: &[],
-            output: EvalType::Bytes,
+            output: operation.output_type(),
             arity,
             control: None,
             host: Some(operation),

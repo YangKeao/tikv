@@ -230,7 +230,38 @@ impl Clone for NativeRegexpInvocation {
     }
 }
 
+/// A resolved native LIKE pattern, shared with the statement cache. Resolving
+/// stays lazy; callers must observe known retained bytes before execution.
+/// Regex engine allocations remain opaque, as in the original native kernel.
+pub struct PreparedNativeRegexpLike {
+    cached: Arc<NativeCachedRegexp>,
+}
+impl PreparedNativeRegexpLike {
+    pub fn known_cache_bytes(&self) -> Option<usize> {
+        known_pattern_cache_bytes(&self.cached)
+    }
+    pub fn execute(&self, text: &str) -> Result<bool, NativeRegexpError> {
+        self.cached
+            .result
+            .as_ref()
+            .map(|pattern| pattern.is_match(text))
+            .map_err(|error| NativeRegexpError::Compile(error.clone()))
+    }
+}
+
 impl NativeRegexpInvocation {
+    /// Rebind context without looking up or initializing either cache.
+    pub fn with_context_id(&self, context_id: u64) -> Self {
+        let mut invocation = self.clone();
+        invocation.context_id = context_id;
+        invocation
+    }
+
+    pub fn prepare_like(&self, pattern: &str, match_type: &str) -> PreparedNativeRegexpLike {
+        PreparedNativeRegexpLike {
+            cached: self.resolve_pattern(pattern, match_type),
+        }
+    }
     /// Capture live owner handles without any lookup, context eviction or work.
     pub fn new(
         pattern_cache: &NativeContextCache<NativeCachedRegexp>,
@@ -471,5 +502,41 @@ mod tests {
             }
         });
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod direct_like_tests {
+    use super::*;
+    #[test]
+    fn direct_like_preserves_live_cached_failures_and_context_rebinding() {
+        let patterns = NativeContextCache::new();
+        let replacements = NativeContextCache::new();
+        let handle = NativeRegexpInvocation::new(&patterns, &replacements, 0, true, false);
+        let bound = handle.with_context_id(7);
+        assert!(patterns.get_cache(7).is_none());
+        let failure = bound.prepare_like("(", "");
+        assert!(failure.known_cache_bytes().unwrap() > 0);
+        assert!(matches!(
+            failure.execute("x"),
+            Err(NativeRegexpError::Compile(
+                NativeRegexpCompileError::InvalidPattern(_)
+            ))
+        ));
+        assert!(bound.prepare_like("x", "i").execute("X").is_err());
+        let success = handle.with_context_id(8).prepare_like("x", "i");
+        assert!(success.execute("X").unwrap());
+        // A live borrowed result survives eviction from the single owner slot.
+        assert!(failure.execute("x").is_err());
+        assert!(patterns.get_cache(7).is_none());
+        assert!(
+            !handle
+                .with_context_id(7)
+                .prepare_like("x", "c")
+                .execute("X")
+                .unwrap()
+        );
+        let bypass = NativeRegexpInvocation::new(&patterns, &replacements, 7, false, false);
+        assert!(bypass.prepare_like("X", "c").execute("X").unwrap());
     }
 }

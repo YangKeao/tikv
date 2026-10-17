@@ -441,9 +441,12 @@ fn get_regexp_like_native(
     let pattern = native_regexp_text(args, 1)?;
     // The caller has already prepended only its original collation-derived flag.
     let match_type = native_regexp_text(args, 2)?;
-    let cached = native_regexp_resolve_pattern(metadata, &invocation, pattern, match_type)?;
+    let prepared = invocation.prepare_like(pattern, match_type);
+    metadata
+        .record_known_cache_bytes(prepared.known_cache_bytes())
+        .map_err(native_regexp_infrastructure_error)?;
     Ok(Some(i64::from(
-        native_regexp_pattern(&cached)?.is_match(text),
+        prepared.execute(text).map_err(native_regexp_error)?,
     )))
 }
 

@@ -342,7 +342,8 @@ pub use native_like::{
 mod native_regexp;
 pub use native_regexp::{
     NativeCachedRegexp, NativeContextCache, NativeRegexpCompileError, NativeRegexpError,
-    NativeRegexpInvocation, compile_native_regexp, regexp_match_bin_collation_native,
+    NativeRegexpInvocation, PreparedNativeRegexpLike, compile_native_regexp,
+    regexp_match_bin_collation_native,
 };
 
 mod native_time_add;
