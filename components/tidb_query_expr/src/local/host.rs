@@ -62,6 +62,12 @@ pub enum SqlBatchHostOperation {
     IfNative,
     /// Flattened native condition/result pairs with optional ELSE.
     CaseNative,
+    /// Nullable logical AND over demanded native values.
+    AndNative,
+    /// Nullable logical OR over demanded native values.
+    OrNative,
+    /// Truth normalization that preserves genuine SQL NULL.
+    IsTrueWithNullNative,
 }
 
 impl SqlBatchHostOperation {
@@ -69,8 +75,9 @@ impl SqlBatchHostOperation {
         match self {
             Self::Concat | Self::CoalesceNative | Self::CaseNative => arity >= 1,
             Self::ConcatWs => arity >= 2,
-            Self::IfNullNative => arity == 2,
+            Self::IfNullNative | Self::AndNative | Self::OrNative => arity == 2,
             Self::IfNative => arity == 3,
+            Self::IsTrueWithNullNative => arity == 1,
             Self::RegexpLike { .. } => matches!(arity, 2 | 3),
             Self::CastCharInt { .. } | Self::CastCharNative { .. } | Self::CastNative => arity == 1,
         }
@@ -86,7 +93,10 @@ impl SqlBatchHostOperation {
             | Self::CoalesceNative
             | Self::IfNullNative
             | Self::IfNative
-            | Self::CaseNative => EvalType::Bytes,
+            | Self::CaseNative
+            | Self::AndNative
+            | Self::OrNative
+            | Self::IsTrueWithNullNative => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
@@ -99,7 +109,10 @@ impl SqlBatchHostOperation {
             | Self::CoalesceNative
             | Self::IfNullNative
             | Self::IfNative
-            | Self::CaseNative => EvalType::Bytes,
+            | Self::CaseNative
+            | Self::AndNative
+            | Self::OrNative
+            | Self::IsTrueWithNullNative => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
