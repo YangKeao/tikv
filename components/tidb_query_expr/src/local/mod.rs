@@ -207,8 +207,9 @@ pub use self::{
         LineagedBatch, LocalControlProgram, ResultMetaId,
     },
     profile::{
-        BatchCallSignature, BatchFacts, OrdinaryCallSite, OrdinaryProfile, OrdinaryProfileSpec,
-        OrdinarySourceId, batch_signature, batch_signature_for_arity,
+        BatchCallSignature, BatchFacts, BatchIntKind, OrdinaryCallSite, OrdinaryProfile,
+        OrdinaryProfileSpec, OrdinarySourceId, batch_int_kind, batch_signature,
+        batch_signature_for_arity,
     },
     runtime::{ExecutionLimits, InputRow, LocalRuntimeServices},
     spec::{

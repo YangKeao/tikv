@@ -44,6 +44,7 @@ pub enum SqlBatchHostOperation {
     ConcatWs,
     RegexpLike { case_insensitive: bool },
     CastCharInt { len: Option<u32> },
+    CastCharNative { len: Option<u32> },
 }
 
 impl SqlBatchHostOperation {
@@ -52,18 +53,24 @@ impl SqlBatchHostOperation {
             Self::Concat => arity >= 1,
             Self::ConcatWs => arity >= 2,
             Self::RegexpLike { .. } => matches!(arity, 2 | 3),
-            Self::CastCharInt { .. } => arity == 1,
+            Self::CastCharInt { .. } | Self::CastCharNative { .. } => arity == 1,
         }
     }
     pub fn argument_type(self) -> EvalType {
         match self {
             Self::CastCharInt { .. } => EvalType::Int,
-            Self::Concat | Self::ConcatWs | Self::RegexpLike { .. } => EvalType::Bytes,
+            Self::Concat
+            | Self::ConcatWs
+            | Self::RegexpLike { .. }
+            | Self::CastCharNative { .. } => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
         match self {
-            Self::Concat | Self::ConcatWs | Self::CastCharInt { .. } => EvalType::Bytes,
+            Self::Concat
+            | Self::ConcatWs
+            | Self::CastCharInt { .. }
+            | Self::CastCharNative { .. } => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }

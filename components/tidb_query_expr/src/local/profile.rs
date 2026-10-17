@@ -63,6 +63,32 @@ pub fn batch_signature(function: FunctionRef) -> Option<(&'static [EvalType], Ev
     batch_signature_contract(function).map(|(inputs, output, ..)| (inputs, output))
 }
 
+/// Native integer result kind for admitted exact-carrier calls. Identities
+/// preserve the actual input kind, independently of its declaration's flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchIntKind {
+    Signed,
+    Unsigned,
+    FirstArgument,
+}
+
+/// Shares the registry's result policy instead of another frontend function
+/// map.
+pub fn batch_int_kind(function: FunctionRef) -> Option<BatchIntKind> {
+    if matches!(batch_control(function), Some((_, EvalType::Int))) {
+        return Some(BatchIntKind::Signed);
+    }
+    let (_, output, _, kind) = batch_signature_contract(function)?;
+    if output != EvalType::Int {
+        return None;
+    }
+    Some(match kind {
+        ResultSignedness::Signed => BatchIntKind::Signed,
+        ResultSignedness::Unsigned => BatchIntKind::Unsigned,
+        ResultSignedness::FirstArgument => BatchIntKind::FirstArgument,
+    })
+}
+
 /// Complete call contract, including variable-arity demanded controls.
 /// A singleton control stays in the same compiled frame driver; it does not
 /// grant an alternate evaluator or demand a skipped argument.
@@ -92,6 +118,14 @@ impl BatchCallSignature {
     }
     pub fn output_type(self) -> EvalType {
         self.output
+    }
+    /// Inputs come from checked native value bindings instead of frontend wire
+    /// carrier coercion. Actual SQL argument declarations remain in the owner.
+    pub fn uses_native_value_inputs(self) -> bool {
+        matches!(
+            self.host,
+            Some(SqlBatchHostOperation::CastCharNative { .. })
+        )
     }
     pub fn requires_singleton(self) -> bool {
         self.control.is_some() || self.host.is_some()
@@ -1162,5 +1196,35 @@ impl<'a> Walk<'a> {
             }
         }
         Ok(Some((kind, expr.field_type())))
+    }
+}
+
+#[cfg(test)]
+mod native_integer_kind_tests {
+    use super::*;
+    #[test]
+    fn native_integer_kind_policy_shares_registry_identity_and_computed_rules() {
+        use tipb::ScalarFuncSig::*;
+        assert_eq!(
+            batch_int_kind(FunctionRef::TiPb(IntAnyValue)),
+            Some(BatchIntKind::FirstArgument)
+        );
+        assert_eq!(
+            batch_int_kind(FunctionRef::TiPb(RoundInt)),
+            Some(BatchIntKind::FirstArgument)
+        );
+        assert_eq!(
+            batch_int_kind(FunctionRef::TiPb(BitXorSig)),
+            Some(BatchIntKind::Unsigned)
+        );
+        assert_eq!(
+            batch_int_kind(FunctionRef::TiPb(IntIsNull)),
+            Some(BatchIntKind::Signed)
+        );
+        assert_eq!(
+            batch_int_kind(FunctionRef::TiPb(LogicalAnd)),
+            Some(BatchIntKind::Signed)
+        );
+        assert_eq!(batch_int_kind(FunctionRef::TiPb(Lower)), None);
     }
 }
