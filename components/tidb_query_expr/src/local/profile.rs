@@ -142,6 +142,7 @@ impl BatchCallSignature {
                     | SqlBatchHostOperation::IsNotFalseNative
                     | SqlBatchHostOperation::IsUnknownNative
                     | SqlBatchHostOperation::IsNotUnknownNative
+                    | SqlBatchHostOperation::CompareNative(_)
             )
         )
     }
