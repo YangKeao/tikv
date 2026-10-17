@@ -43,6 +43,7 @@ pub enum SqlBatchHostOperation {
     Concat,
     ConcatWs,
     RegexpLike { case_insensitive: bool },
+    CastCharInt { len: Option<u32> },
 }
 
 impl SqlBatchHostOperation {
@@ -51,11 +52,18 @@ impl SqlBatchHostOperation {
             Self::Concat => arity >= 1,
             Self::ConcatWs => arity >= 2,
             Self::RegexpLike { .. } => matches!(arity, 2 | 3),
+            Self::CastCharInt { .. } => arity == 1,
+        }
+    }
+    pub fn argument_type(self) -> EvalType {
+        match self {
+            Self::CastCharInt { .. } => EvalType::Int,
+            Self::Concat | Self::ConcatWs | Self::RegexpLike { .. } => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
         match self {
-            Self::Concat | Self::ConcatWs => EvalType::Bytes,
+            Self::Concat | Self::ConcatWs | Self::CastCharInt { .. } => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
@@ -112,9 +120,11 @@ impl HostCatalog {
             }
             for field in signature.arg_types.iter() {
                 super::profile::check_batch_type(field)?;
-                if EvalType::try_from(field.as_accessor().tp()).ok() != Some(EvalType::Bytes) {
+                if EvalType::try_from(field.as_accessor().tp()).ok()
+                    != Some(operation.argument_type())
+                {
                     return Err(LocalError::InvalidSpec(
-                        "SQL batch host requires ready Bytes arguments".into(),
+                        "SQL batch host argument differs from its operation".into(),
                     ));
                 }
             }
@@ -671,5 +681,42 @@ mod regexp_batch_tests {
             .as_mut_accessor()
             .set_flag(tidb_query_datatype::FieldTypeFlag::UNSIGNED);
         assert!(HostCatalog::for_sql_batch(vec![(operation, signature(unsigned))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod integer_char_cast_tests {
+    use tidb_query_datatype::{FieldTypeFlag, FieldTypeTp};
+
+    use super::*;
+    #[test]
+    fn integer_char_cast_catalog_retains_input_signedness_and_has_one_argument() {
+        let operation = SqlBatchHostOperation::CastCharInt { len: Some(1) };
+        let mut integer: FieldType = FieldTypeTp::LongLong.into();
+        integer.as_mut_accessor().set_flag(FieldTypeFlag::UNSIGNED);
+        let signature = HostSignature {
+            arg_types: vec![integer.clone()].into_boxed_slice(),
+            return_type: FieldTypeTp::VarString.into(),
+        };
+        let catalog = HostCatalog::for_sql_batch(vec![(operation, signature)]).unwrap();
+        assert_eq!(
+            catalog
+                .signature(catalog.slot(0).unwrap())
+                .unwrap()
+                .arg_types[0],
+            integer
+        );
+        assert_eq!(
+            super::super::BatchCallSignature::for_host(operation, 1)
+                .unwrap()
+                .argument_type(0),
+            Some(EvalType::Int)
+        );
+        assert!(super::super::BatchCallSignature::for_host(operation, 2).is_none());
+        let wrong = HostSignature {
+            arg_types: vec![FieldTypeTp::VarString.into()].into_boxed_slice(),
+            return_type: FieldTypeTp::VarString.into(),
+        };
+        assert!(HostCatalog::for_sql_batch(vec![(operation, wrong)]).is_err());
     }
 }

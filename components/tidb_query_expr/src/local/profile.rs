@@ -107,7 +107,7 @@ impl BatchCallSignature {
             }
             Some(ControlKind::And | ControlKind::Or) => EvalType::Int,
             Some(_) => self.output,
-            None if self.host.is_some() => EvalType::Bytes,
+            None if self.host.is_some() => self.host.expect("checked host").argument_type(),
             None => self.fixed[index],
         })
     }
