@@ -84,6 +84,10 @@ pub enum SqlBatchHostOperation {
     NullIfNative,
     /// Native ABS over the actual demanded value kind.
     AbsNative,
+    /// Native additive arithmetic with signature-specific argument demand.
+    AddNative,
+    SubtractNative,
+    MultiplyNative,
 }
 
 impl SqlBatchHostOperation {
@@ -96,7 +100,10 @@ impl SqlBatchHostOperation {
             | Self::OrNative
             | Self::CompareNative(_)
             | Self::NullSafeEqNative
-            | Self::NullIfNative => arity == 2,
+            | Self::NullIfNative
+            | Self::AddNative
+            | Self::SubtractNative
+            | Self::MultiplyNative => arity == 2,
             Self::IfNative => arity == 3,
             Self::IsTrueWithNullNative
             | Self::UnaryNotNative
@@ -138,7 +145,10 @@ impl SqlBatchHostOperation {
             | Self::CompareNative(_)
             | Self::NullSafeEqNative
             | Self::NullIfNative
-            | Self::AbsNative => EvalType::Bytes,
+            | Self::AbsNative
+            | Self::AddNative
+            | Self::SubtractNative
+            | Self::MultiplyNative => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
@@ -166,7 +176,10 @@ impl SqlBatchHostOperation {
             | Self::CompareNative(_)
             | Self::NullSafeEqNative
             | Self::NullIfNative
-            | Self::AbsNative => EvalType::Bytes,
+            | Self::AbsNative
+            | Self::AddNative
+            | Self::SubtractNative
+            | Self::MultiplyNative => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
