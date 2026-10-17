@@ -54,13 +54,18 @@ pub enum SqlBatchHostOperation {
     /// One native value argument and one native value result. Kernel target
     /// and producer/consumer provenance are immutable source metadata.
     CastNative,
+    /// Native nullable selection over actual value handles.
+    CoalesceNative,
+    /// Exactly two native nullable arguments.
+    IfNullNative,
 }
 
 impl SqlBatchHostOperation {
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
-            Self::Concat => arity >= 1,
+            Self::Concat | Self::CoalesceNative => arity >= 1,
             Self::ConcatWs => arity >= 2,
+            Self::IfNullNative => arity == 2,
             Self::RegexpLike { .. } => matches!(arity, 2 | 3),
             Self::CastCharInt { .. } | Self::CastCharNative { .. } | Self::CastNative => arity == 1,
         }
@@ -72,7 +77,9 @@ impl SqlBatchHostOperation {
             | Self::ConcatWs
             | Self::RegexpLike { .. }
             | Self::CastCharNative { .. }
-            | Self::CastNative => EvalType::Bytes,
+            | Self::CastNative
+            | Self::CoalesceNative
+            | Self::IfNullNative => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
@@ -81,7 +88,9 @@ impl SqlBatchHostOperation {
             | Self::ConcatWs
             | Self::CastCharInt { .. }
             | Self::CastCharNative { .. }
-            | Self::CastNative => EvalType::Bytes,
+            | Self::CastNative
+            | Self::CoalesceNative
+            | Self::IfNullNative => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
