@@ -19,6 +19,10 @@
 //! origin, or widen the old entrypoints. Its caller owns the matching
 //! materialization table and validates fixed native kind/collation contracts at
 //! each demanded read.
+//! SQL batch additionally admits StrcmpNative with a constant checked native
+//! collation-policy argument. It composes the existing ready-value kernel in
+//! the same batch graph; other private operations and all row entries retain
+//! their original admission. Policy tags are not supplied by row bindings.
 //! `compile_batch` is another closed entry: explicitly admitted eager
 //! Int/Real/Decimal/Bytes calls under a whole-source SQL batch assertion, with
 //! complete argument-program demand in source order before per-lane parent

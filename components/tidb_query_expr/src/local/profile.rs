@@ -14,7 +14,7 @@ use tidb_query_datatype::{
 use tipb::{FieldType, ScalarFuncSig};
 
 use super::{CompileLimits, LocalError, LocalExpr, LocalResult, registry};
-use crate::{CallMetadata, FunctionRef, LiteralKind};
+use crate::{CallMetadata, FunctionRef, LiteralKind, LocalFunctionId};
 
 const INT: &[EvalType] = &[EvalType::Int];
 const INT_INT: &[EvalType] = &[EvalType::Int, EvalType::Int];
@@ -30,6 +30,18 @@ const VECTOR_FLOAT32: &[EvalType] = &[EvalType::VectorFloat32];
 const BYTES_INT: &[EvalType] = &[EvalType::Bytes, EvalType::Int];
 const BYTES_INT_INT: &[EvalType] = &[EvalType::Bytes, EvalType::Int, EvalType::Int];
 
+// Only these native policy kernels may compose in a checked SQL batch graph.
+// Other private operations retain their existing opaque ready-value entry.
+// The operation supplies the same arity and metadata constructor used there.
+pub(super) fn batch_native_operation(function: FunctionRef) -> Option<super::EvaluatedBytesOp> {
+    match function {
+        FunctionRef::Local(LocalFunctionId::StrcmpNative) => {
+            Some(super::EvaluatedBytesOp::StrcmpNative)
+        }
+        _ => None,
+    }
+}
+
 // Result flags are independent of operand carrier permission. Integer
 // identities retain the first argument's flag; bit operations always set it.
 #[derive(Clone, Copy, Debug)]
@@ -43,16 +55,25 @@ enum ResultSignedness {
 /// driver. This is the single capability registry used by admission,
 /// compilation, and execution; storage width does not select a driver.
 pub fn batch_signature(function: FunctionRef) -> Option<(&'static [EvalType], EvalType)> {
-    batch_signature_contract(function).map(|(inputs, output, _, _)| (inputs, output))
+    batch_signature_contract(function).map(|(inputs, output, ..)| (inputs, output))
 }
 
 // The third fact admits unsigned Int operands. Their carrier preserves all
 // bits; the official comparison selector uses each operand's FieldType.
-// The fourth fact declares the result flag policy, including integer identities.
-// Other families retain their current signed-only result contract.
+// The fourth fact declares the result flag policy, including integer
+// identities. Other families retain their current signed-only result contract.
 fn batch_signature_contract(
     function: FunctionRef,
 ) -> Option<(&'static [EvalType], EvalType, bool, ResultSignedness)> {
+    if let Some(operation) = batch_native_operation(function) {
+        let output = EvalType::try_from(operation.return_type().as_accessor().tp()).ok()?;
+        return Some((
+            operation.input_types(),
+            output,
+            false,
+            ResultSignedness::Signed,
+        ));
+    }
     let FunctionRef::TiPb(signature) = function else {
         return None;
     };
@@ -311,11 +332,10 @@ enum NodeKind {
     InputSlot {
         slot: usize,
     },
-    /// One closed signed-Int arithmetic kernel with its exact arity and
-    /// CallMetadata::None. The exact TiPB signature is retained in the source
-    /// snapshot and checked again during validation.
+    /// One admitted wire or native-policy kernel with exact arity and no
+    /// metadata. The complete function identity is snapshotted and revalidated.
     BatchCall {
-        signature: i32,
+        signature: FunctionRef,
         arity: usize,
     },
 }
@@ -748,12 +768,18 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
             metadata,
             ..
         } => {
-            let FunctionRef::TiPb(signature) = *function else {
-                return Err(invalid(
-                    "ordinary C3a calls require a TiPB Int arithmetic signature",
-                ));
-            };
-            let signature = FunctionRef::TiPb(signature);
+            let signature = *function;
+            if matches!(signature, FunctionRef::Local(LocalFunctionId::StrcmpNative)) {
+                use tidb_query_datatype::codec::collation::native::NativeCollation;
+                if !matches!(args.get(2), Some(LocalExpr::Constant {
+                    value: ScalarValue::Int(Some(tag)), ..
+                }) if NativeCollation::from_tag(*tag).is_some())
+                {
+                    return Err(invalid(
+                        "native batch comparison requires a fixed known collation policy",
+                    ));
+                }
+            }
             let admitted = match policy {
                 TypePolicy::RowBaseline
                     if signature == FunctionRef::TiPb(ScalarFuncSig::PlusInt) =>
@@ -800,10 +826,7 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
                 ));
             }
             Ok(NodeKind::BatchCall {
-                signature: match signature {
-                    FunctionRef::TiPb(signature) => signature as i32,
-                    FunctionRef::Local(_) => unreachable!("checked TiPB batch signature"),
-                },
+                signature,
                 arity: input_types.len(),
             })
         }

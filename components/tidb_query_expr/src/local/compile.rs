@@ -959,7 +959,12 @@ fn compile(
                             | CompileMode::EvaluatedBytes(_) => None,
                         };
                         let mut call = CallBuild::local(shape, metadata.clone());
-                        let prepared = match mode.evaluated_bytes_operation() {
+                        let batch_operation = if matches!(mode, CompileMode::Batch(_)) {
+                            super::profile::batch_native_operation(*function)
+                        } else {
+                            None
+                        };
+                        let prepared = match mode.evaluated_bytes_operation().or(batch_operation) {
                             Some(operation)
                                 if matches!(
                                     operation.kernel_kind(),

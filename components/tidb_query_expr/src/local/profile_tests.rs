@@ -2821,7 +2821,7 @@ fn batch_niladic_pi_is_exact_and_stateful_niladic_functions_stay_excluded() {
         run_batch(&mut program, &mut services, 4, &[3, 1, 1])
             .unwrap()
             .to_real_vec(),
-        vec![Real::new(3.141592653589793).ok(); 3]
+        vec![Real::new(std::f64::consts::PI).ok(); 3]
     );
     assert!(services.inner.reads.is_empty());
     for limits in [
@@ -2857,4 +2857,72 @@ fn batch_niladic_pi_is_exact_and_stateful_niladic_functions_stay_excluded() {
         BatchFacts::sql_native_batch(&wrong, &[], batch_sites(&wrong), CompileLimits::default())
             .is_err()
     );
+}
+
+#[test]
+fn batch_native_strcmp_composes_with_a_fixed_collation_policy_only() {
+    use tidb_query_datatype::codec::collation::native::NativeCollation;
+
+    use crate::LocalFunctionId;
+    let text = |value: Option<&[u8]>| LocalExpr::Constant {
+        value: ScalarValue::Bytes(value.map(<[u8]>::to_vec)),
+        field_type: FieldTypeTp::VarString.into(),
+        literal_kind: LiteralKind::Typed,
+    };
+    let compare = |left, right, policy| LocalExpr::Call {
+        function: FunctionRef::Local(LocalFunctionId::StrcmpNative),
+        args: vec![left, right, constant(Some(policy))].into_boxed_slice(),
+        return_type: ft(),
+        metadata: CallMetadata::None,
+    };
+    for (policy, expected) in [
+        (NativeCollation::Binary, -1),
+        (NativeCollation::Utf8Mb4GeneralCi, 0),
+        (NativeCollation::Utf8Mb4UnicodeCi, 0),
+    ] {
+        let cmp = compare(text(Some(b"A")), text(Some(b"a")), policy.tag());
+        let expr = plus(cmp.clone(), constant(Some(10)));
+        let mut program = compile_batch_program(&expr, &[]);
+        let mut bindings = BatchBindings::new(vec![]);
+        assert_eq!(
+            run_batch(&mut program, &mut bindings, 4, &[3, 1, 1])
+                .unwrap()
+                .to_int_vec(),
+            vec![Some(expected + 10); 3]
+        );
+        assert!(bindings.inner.reads.is_empty());
+        assert!(
+            compile_local(&cmp, &[], LocalCompileContext::default()).is_err(),
+            "the legacy entry must not inherit native batch permissions"
+        );
+        let null = compare(text(None), text(Some(b"a")), policy.tag());
+        assert_eq!(
+            run_batch(
+                &mut compile_batch_program(&null, &[]),
+                &mut bindings,
+                1,
+                &[0]
+            )
+            .unwrap()
+            .to_int_vec(),
+            vec![None]
+        );
+    }
+    let good = compare(
+        text(Some(b"a")),
+        text(Some(b"b")),
+        NativeCollation::Binary.tag(),
+    );
+    for replacement in [constant(None), constant(Some(i64::MAX)), input(0)] {
+        let mut bad = good.clone();
+        if let LocalExpr::Call { args, .. } = &mut bad {
+            args[2] = replacement;
+        }
+        batch_rejected(&bad, &[ft()]);
+    }
+    let mut wrong = good;
+    if let LocalExpr::Call { args, .. } = &mut wrong {
+        *args = args[..2].to_vec().into_boxed_slice();
+    }
+    batch_rejected(&wrong, &[]);
 }
