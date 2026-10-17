@@ -157,10 +157,36 @@ macro_rules! fixed_comparison_recipe {
     };
 }
 
+macro_rules! comparison_value_call {
+    ($helper:ident, $predicate:ty, ($($arg:ident: $arg_type:ty),+)) => {
+        $helper::<$predicate>($($arg),+)
+    };
+}
+macro_rules! comparison_value_selector {
+    ($value:ident, $helper:ident, ($($arg:ident: $arg_type:ty),+), $($variant:ident => $predicate:ty),+) => {
+        comparison_value_selector!(@unpack $value, $helper, ($($arg: $arg_type),+), ($($variant => $predicate),+));
+    };
+    (@unpack $value:ident, $helper:ident, $args:tt, $predicates:tt) => {
+        comparison_value_selector!(@signature $value, $helper, $args, $predicates);
+    };
+    (@signature $value:ident, $helper:ident, ($($arg:ident: $arg_type:ty),+), $predicates:tt) => {
+        /// Executes the same pure helper as the fixed generated comparison kernels.
+        pub fn $value(operation: ComparisonOp, $($arg: $arg_type),+) -> Result<Option<Int>> {
+            comparison_value_selector!(@dispatch operation, $helper, ($($arg: $arg_type),+), $predicates)
+        }
+    };
+    (@dispatch $operation:ident, $helper:ident, $args:tt, ($($variant:ident => $predicate:ty),+)) => {
+        match $operation {
+            $(ComparisonOp::$variant => comparison_value_call!($helper, $predicate, $args),)+
+        }
+    };
+}
+
 macro_rules! fixed_comparison_profile {
-    ($selector:ident, $helper:ident, $args:tt,
+    ($selector:ident, $value:ident, $helper:ident, $args:tt,
         $($variant:ident => ($function:ident, $getter:ident, $predicate:ty)),+ $(,)?) => {
         $(fixed_comparison_recipe!($function, $helper, $predicate, $args);)+
+        comparison_value_selector!($value, $helper, $args, $($variant => $predicate),+);
 
         pub fn $selector(operation: ComparisonOp) -> RpnFnMeta {
             match operation {
@@ -170,7 +196,7 @@ macro_rules! fixed_comparison_profile {
     };
 }
 
-fixed_comparison_profile!(compare_int_ss_native_fn_meta, native_compare_int_ss, (left: &Int, right: &Int),
+fixed_comparison_profile!(compare_int_ss_native_fn_meta, compare_int_ss_native_value, native_compare_int_ss, (left: &Int, right: &Int),
     Eq => (compare_eq_int_ss_native, compare_eq_int_ss_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_int_ss_native, compare_ne_int_ss_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_int_ss_native, compare_lt_int_ss_native_fn_meta, CmpOpLt),
@@ -178,7 +204,7 @@ fixed_comparison_profile!(compare_int_ss_native_fn_meta, native_compare_int_ss, 
     Gt => (compare_gt_int_ss_native, compare_gt_int_ss_native_fn_meta, CmpOpGt),
     Ge => (compare_ge_int_ss_native, compare_ge_int_ss_native_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_int_su_native_fn_meta, native_compare_int_su, (left: &Int, right: &Int),
+fixed_comparison_profile!(compare_int_su_native_fn_meta, compare_int_su_native_value, native_compare_int_su, (left: &Int, right: &Int),
     Eq => (compare_eq_int_su_native, compare_eq_int_su_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_int_su_native, compare_ne_int_su_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_int_su_native, compare_lt_int_su_native_fn_meta, CmpOpLt),
@@ -186,7 +212,7 @@ fixed_comparison_profile!(compare_int_su_native_fn_meta, native_compare_int_su, 
     Gt => (compare_gt_int_su_native, compare_gt_int_su_native_fn_meta, CmpOpGt),
     Ge => (compare_ge_int_su_native, compare_ge_int_su_native_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_int_us_native_fn_meta, native_compare_int_us, (left: &Int, right: &Int),
+fixed_comparison_profile!(compare_int_us_native_fn_meta, compare_int_us_native_value, native_compare_int_us, (left: &Int, right: &Int),
     Eq => (compare_eq_int_us_native, compare_eq_int_us_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_int_us_native, compare_ne_int_us_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_int_us_native, compare_lt_int_us_native_fn_meta, CmpOpLt),
@@ -194,7 +220,7 @@ fixed_comparison_profile!(compare_int_us_native_fn_meta, native_compare_int_us, 
     Gt => (compare_gt_int_us_native, compare_gt_int_us_native_fn_meta, CmpOpGt),
     Ge => (compare_ge_int_us_native, compare_ge_int_us_native_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_int_uu_native_fn_meta, native_compare_int_uu, (left: &Int, right: &Int),
+fixed_comparison_profile!(compare_int_uu_native_fn_meta, compare_int_uu_native_value, native_compare_int_uu, (left: &Int, right: &Int),
     Eq => (compare_eq_int_uu_native, compare_eq_int_uu_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_int_uu_native, compare_ne_int_uu_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_int_uu_native, compare_lt_int_uu_native_fn_meta, CmpOpLt),
@@ -202,7 +228,7 @@ fixed_comparison_profile!(compare_int_uu_native_fn_meta, native_compare_int_uu, 
     Gt => (compare_gt_int_uu_native, compare_gt_int_uu_native_fn_meta, CmpOpGt),
     Ge => (compare_ge_int_uu_native, compare_ge_int_uu_native_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_int128_legacy_fn_meta, legacy_compare_int128, (left: BytesRef, right: BytesRef),
+fixed_comparison_profile!(compare_int128_legacy_fn_meta, compare_int128_legacy_value, legacy_compare_int128, (left: BytesRef, right: BytesRef),
     Eq => (compare_eq_int128_legacy, compare_eq_int128_legacy_fn_meta, CmpOpEq),
     Ne => (compare_ne_int128_legacy, compare_ne_int128_legacy_fn_meta, CmpOpNe),
     Lt => (compare_lt_int128_legacy, compare_lt_int128_legacy_fn_meta, CmpOpLt),
@@ -210,7 +236,7 @@ fixed_comparison_profile!(compare_int128_legacy_fn_meta, legacy_compare_int128, 
     Gt => (compare_gt_int128_legacy, compare_gt_int128_legacy_fn_meta, CmpOpGt),
     Ge => (compare_ge_int128_legacy, compare_ge_int128_legacy_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_real_native_fn_meta, native_compare_real, (left: BytesRef, right: BytesRef),
+fixed_comparison_profile!(compare_real_native_fn_meta, compare_real_native_value, native_compare_real, (left: BytesRef, right: BytesRef),
     Eq => (compare_eq_real_native, compare_eq_real_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_real_native, compare_ne_real_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_real_native, compare_lt_real_native_fn_meta, CmpOpLt),
@@ -218,7 +244,7 @@ fixed_comparison_profile!(compare_real_native_fn_meta, native_compare_real, (lef
     Gt => (compare_gt_real_native, compare_gt_real_native_fn_meta, CmpOpGt),
     Ge => (compare_ge_real_native, compare_ge_real_native_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_real_legacy_fn_meta, legacy_compare_real, (left: BytesRef, right: BytesRef),
+fixed_comparison_profile!(compare_real_legacy_fn_meta, compare_real_legacy_value, legacy_compare_real, (left: BytesRef, right: BytesRef),
     Eq => (compare_eq_real_legacy, compare_eq_real_legacy_fn_meta, CmpOpEq),
     Ne => (compare_ne_real_legacy, compare_ne_real_legacy_fn_meta, CmpOpNe),
     Lt => (compare_lt_real_legacy, compare_lt_real_legacy_fn_meta, CmpOpLt),
@@ -226,7 +252,7 @@ fixed_comparison_profile!(compare_real_legacy_fn_meta, legacy_compare_real, (lef
     Gt => (compare_gt_real_legacy, compare_gt_real_legacy_fn_meta, CmpOpGt),
     Ge => (compare_ge_real_legacy, compare_ge_real_legacy_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_decimal_native_fn_meta, native_compare_decimal, (left: &Decimal, right: &Decimal, budget: &Int),
+fixed_comparison_profile!(compare_decimal_native_fn_meta, compare_decimal_native_value, native_compare_decimal, (left: &Decimal, right: &Decimal, budget: &Int),
     Eq => (compare_eq_decimal_native, compare_eq_decimal_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_decimal_native, compare_ne_decimal_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_decimal_native, compare_lt_decimal_native_fn_meta, CmpOpLt),
@@ -234,7 +260,7 @@ fixed_comparison_profile!(compare_decimal_native_fn_meta, native_compare_decimal
     Gt => (compare_gt_decimal_native, compare_gt_decimal_native_fn_meta, CmpOpGt),
     Ge => (compare_ge_decimal_native, compare_ge_decimal_native_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_bytes_native_fn_meta, native_compare_bytes, (left: BytesRef, right: BytesRef, tag: &Int),
+fixed_comparison_profile!(compare_bytes_native_fn_meta, compare_bytes_native_value, native_compare_bytes, (left: BytesRef, right: BytesRef, tag: &Int),
     Eq => (compare_eq_bytes_native, compare_eq_bytes_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_bytes_native, compare_ne_bytes_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_bytes_native, compare_lt_bytes_native_fn_meta, CmpOpLt),
@@ -242,7 +268,7 @@ fixed_comparison_profile!(compare_bytes_native_fn_meta, native_compare_bytes, (l
     Gt => (compare_gt_bytes_native, compare_gt_bytes_native_fn_meta, CmpOpGt),
     Ge => (compare_ge_bytes_native, compare_ge_bytes_native_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_vector_native_fn_meta, native_compare_vector, (left: VectorFloat32Ref, right: VectorFloat32Ref),
+fixed_comparison_profile!(compare_vector_native_fn_meta, compare_vector_native_value, native_compare_vector, (left: VectorFloat32Ref, right: VectorFloat32Ref),
     Eq => (compare_eq_vector_native, compare_eq_vector_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_vector_native, compare_ne_vector_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_vector_native, compare_lt_vector_native_fn_meta, CmpOpLt),
@@ -250,7 +276,7 @@ fixed_comparison_profile!(compare_vector_native_fn_meta, native_compare_vector, 
     Gt => (compare_gt_vector_native, compare_gt_vector_native_fn_meta, CmpOpGt),
     Ge => (compare_ge_vector_native, compare_ge_vector_native_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_time_core_native_fn_meta, native_compare_time_core, (left: BytesRef, right: BytesRef),
+fixed_comparison_profile!(compare_time_core_native_fn_meta, compare_time_core_native_value, native_compare_time_core, (left: BytesRef, right: BytesRef),
     Eq => (compare_eq_time_core_native, compare_eq_time_core_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_time_core_native, compare_ne_time_core_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_time_core_native, compare_lt_time_core_native_fn_meta, CmpOpLt),
@@ -258,7 +284,7 @@ fixed_comparison_profile!(compare_time_core_native_fn_meta, native_compare_time_
     Gt => (compare_gt_time_core_native, compare_gt_time_core_native_fn_meta, CmpOpGt),
     Ge => (compare_ge_time_core_native, compare_ge_time_core_native_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_duration_native_fn_meta, native_compare_int_ss, (left: &Int, right: &Int),
+fixed_comparison_profile!(compare_duration_native_fn_meta, compare_duration_native_value, native_compare_int_ss, (left: &Int, right: &Int),
     Eq => (compare_eq_duration_native, compare_eq_duration_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_duration_native, compare_ne_duration_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_duration_native, compare_lt_duration_native_fn_meta, CmpOpLt),
@@ -266,7 +292,7 @@ fixed_comparison_profile!(compare_duration_native_fn_meta, native_compare_int_ss
     Gt => (compare_gt_duration_native, compare_gt_duration_native_fn_meta, CmpOpGt),
     Ge => (compare_ge_duration_native, compare_ge_duration_native_fn_meta, CmpOpGe),
 );
-fixed_comparison_profile!(compare_json_native_fn_meta, native_compare_json, (left: BytesRef, right: BytesRef),
+fixed_comparison_profile!(compare_json_native_fn_meta, compare_json_native_value, native_compare_json, (left: BytesRef, right: BytesRef),
     Eq => (compare_eq_json_native, compare_eq_json_native_fn_meta, CmpOpEq),
     Ne => (compare_ne_json_native, compare_ne_json_native_fn_meta, CmpOpNe),
     Lt => (compare_lt_json_native, compare_lt_json_native_fn_meta, CmpOpLt),
@@ -276,7 +302,7 @@ fixed_comparison_profile!(compare_json_native_fn_meta, native_compare_json, (lef
 );
 
 #[rpn_fn(nullable)]
-fn compare_null_native(witness: Option<&Int>) -> Result<Option<Int>> {
+pub fn compare_null_native(witness: Option<&Int>) -> Result<Option<Int>> {
     match witness {
         None => Ok(None),
         Some(_) => Err(other_err!("Comparison NULL witness must be an actual NULL")),
