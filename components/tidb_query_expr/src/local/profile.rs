@@ -129,6 +129,8 @@ impl BatchCallSignature {
                     | SqlBatchHostOperation::CastNative
                     | SqlBatchHostOperation::CoalesceNative
                     | SqlBatchHostOperation::IfNullNative
+                    | SqlBatchHostOperation::IfNative
+                    | SqlBatchHostOperation::CaseNative
             )
         )
     }

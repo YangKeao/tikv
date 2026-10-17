@@ -58,14 +58,19 @@ pub enum SqlBatchHostOperation {
     CoalesceNative,
     /// Exactly two native nullable arguments.
     IfNullNative,
+    /// One native truth predicate and exactly one selected branch.
+    IfNative,
+    /// Flattened native condition/result pairs with optional ELSE.
+    CaseNative,
 }
 
 impl SqlBatchHostOperation {
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
-            Self::Concat | Self::CoalesceNative => arity >= 1,
+            Self::Concat | Self::CoalesceNative | Self::CaseNative => arity >= 1,
             Self::ConcatWs => arity >= 2,
             Self::IfNullNative => arity == 2,
+            Self::IfNative => arity == 3,
             Self::RegexpLike { .. } => matches!(arity, 2 | 3),
             Self::CastCharInt { .. } | Self::CastCharNative { .. } | Self::CastNative => arity == 1,
         }
@@ -79,7 +84,9 @@ impl SqlBatchHostOperation {
             | Self::CastCharNative { .. }
             | Self::CastNative
             | Self::CoalesceNative
-            | Self::IfNullNative => EvalType::Bytes,
+            | Self::IfNullNative
+            | Self::IfNative
+            | Self::CaseNative => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
@@ -90,7 +97,9 @@ impl SqlBatchHostOperation {
             | Self::CastCharNative { .. }
             | Self::CastNative
             | Self::CoalesceNative
-            | Self::IfNullNative => EvalType::Bytes,
+            | Self::IfNullNative
+            | Self::IfNative
+            | Self::CaseNative => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
