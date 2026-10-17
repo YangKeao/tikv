@@ -1997,11 +1997,39 @@ flag or eligibility policy described above.
   RowHostScope caches retained child-vector bytes, and the TiDB window provider
   carries incremental source/cast payload totals and a cached suspended-left
   charge. A row callback does not rescan an ancestor's complete left vector.
-  Whole-selection frontend caller integration remains outstanding: current
-  source lowering does not select window roots. Future callers must preserve
-  actual row/bulk domain selection when vectorization is disabled and must not
-  split a whole-selection program via a window-size tuning knob. Protocol fixtures live in
+  TiDB source lowering now selects window roots for the closed native
+  plus/minus/multiply numeric operand closure. Immutable paired row/bulk
+  programs authenticate the same actual source owner/root; the native
+  vectorization getter selects the domain at its original per-output point.
+  Disabling vectorization selects the row program, rather than slicing a bulk
+  program into singleton calls. Window-size tuning cannot split a required
+  whole-selection program. Integer ABS and Decimal/JSON CAST bulk operand
+  phases are outside this promoted closure until their own policies are
+  implemented; general control wrapping is still unfinished. Protocol fixtures live in
   `local/window_host_tests.rs` and deliberately relay bytes.
+  Native Decimal priority precedes the vectorization getter, independently of
+  its eventual value. The new stage currently covers arithmetic roots;
+  standalone CAST priority and its generic bulk continuation remain open. TiDB's `batch_decimal_fast_source.rs` builds that stage
+  as another sealed program of this same SDK driver. Its immutable input
+  descriptors import columns, strict literals and the lossless integer-column
+  CAST shape; they own no expression evaluation callback. The value-only
+  `batch_decimal_fast_window.rs` provider shares the datatype crate's plain
+  checked-coefficient kernel. Complete left-operand Unsupported prevents a
+  right request; otherwise both entire operands arrive before arithmetic.
+  Unsupported is the existing typed NativeDecimalFastOutcome, separate from
+  SQL NULL and errors. The frontend store gives it a different capability
+  purpose; ordinary SQL import, kernel access and output cannot consume it.
+  Entire returned capability vectors are authenticated before a semantic
+  refusal is observed, so a late invalid purpose cannot be hidden by an early
+  Unsupported result. Only typed Unsupported (including final MyDecimal
+  representation refusal) selects the native subsequent bulk/row phase; every
+  SDK/SQL/resource error is terminal. This is original native phase selection,
+  not a failure-driven alternate expression evaluator. Successful priority
+  skips the getter and generic return coercion. Empty-input literal/shape
+  refusal is immutable factory evidence, because the driver has no row demand
+  on an empty selection. Node/metadata budgets include every prepared phase;
+  each invocation still has its own SDK step/frame/storage limits, and opaque
+  frontend retention remains separately budgeted.
   TiDB's `evaluator/batch_arithmetic_window.rs` implements the three arithmetic
   window descriptors over actual native-value capabilities. Provider tasks own
   the row map and complete converted left vector, then request the complete
