@@ -1981,10 +1981,19 @@ flag or eligibility policy described above.
   singleton owners and final compact output are metered together, and Fresh
   restarts the entire row-host operand. Row roots and any typed control
   descendant still constrain admission to one. Whole-selection caller phases
-  remain outstanding work. This protocol extension alone supplies no
-  new TiDB root lowering or SQL arithmetic implementation. Protocol fixtures
-  live in `local/window_host_tests.rs` and deliberately relay bytes rather than
-  claiming to implement arithmetic.
+  remain outstanding work. Protocol fixtures live in
+  `local/window_host_tests.rs` and deliberately relay bytes.
+  TiDB's `evaluator/batch_arithmetic_window.rs` implements the three arithmetic
+  window descriptors over actual native-value capabilities. Provider tasks own
+  the row map and complete converted left vector, then request the complete
+  right vector before computing with shared PreparedArithmetic kernels.
+  Immutable metadata distinguishes integer bulk mode from generic numeric
+  mode and records source-owner classes. Literal typed normalization occurs
+  once before broadcast; complete source normalization precedes numeric casts.
+  Both protocols share the same provider generation/task namespace. Native SQL
+  errors retain their actual object behind the existing SQL-host sentinel;
+  logical resource refusals remain terminal. Source lowering does not yet emit
+  these window descriptors, so this provider alone claims no new root coverage.
 - The driver reserves a potential task before start, even for immediate Ready.
   Pending IDs are tracked before request validation. Errors, limits and unwind
   cancel reachable tasks inner-first without replacing the primary error; cancel
