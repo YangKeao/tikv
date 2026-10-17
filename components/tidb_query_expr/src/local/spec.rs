@@ -97,6 +97,36 @@ pub enum LocalError {
     Evaluation(tidb_query_common::Error),
 }
 
+/// SQL JSON_TYPE disposition produced by the native document kernel only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeJsonTypeDisposition {
+    EmptyText,
+    InvalidText,
+    InvalidUtf8,
+}
+
+impl LocalError {
+    /// Match explicit native producer provenance, never error text or code.
+    pub fn native_json_type_disposition(&self) -> Option<NativeJsonTypeDisposition> {
+        use tidb_query_common::error::{ErrorInner, EvaluateError};
+        match self {
+            Self::Evaluation(error) => match error.0.as_ref() {
+                ErrorInner::Evaluate(EvaluateError::NativeJsonTypeEmptyText) => {
+                    Some(NativeJsonTypeDisposition::EmptyText)
+                }
+                ErrorInner::Evaluate(EvaluateError::NativeJsonTypeInvalidText) => {
+                    Some(NativeJsonTypeDisposition::InvalidText)
+                }
+                ErrorInner::Evaluate(EvaluateError::NativeJsonTypeInvalidUtf8) => {
+                    Some(NativeJsonTypeDisposition::InvalidUtf8)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
 pub type LocalResult<T> = std::result::Result<T, LocalError>;
 
 impl fmt::Display for LocalError {

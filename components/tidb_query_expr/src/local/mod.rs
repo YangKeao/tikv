@@ -202,11 +202,14 @@ pub use self::{
         LineagedBatch, LocalControlProgram, ResultMetaId,
     },
     profile::{
-        BatchFacts, OrdinaryCallSite, OrdinaryProfile, OrdinaryProfileSpec, OrdinarySourceId,
-        batch_signature, batch_signature_for_arity, BatchCallSignature,
+        BatchCallSignature, BatchFacts, OrdinaryCallSite, OrdinaryProfile, OrdinaryProfileSpec,
+        OrdinarySourceId, batch_signature, batch_signature_for_arity,
     },
     runtime::{ExecutionLimits, InputRow, LocalRuntimeServices},
-    spec::{CompileLimits, LocalCompileContext, LocalError, LocalExpr, LocalResult},
+    spec::{
+        CompileLimits, LocalCompileContext, LocalError, LocalExpr, LocalResult,
+        NativeJsonTypeDisposition,
+    },
 };
 pub(crate) use self::{
     batch::{

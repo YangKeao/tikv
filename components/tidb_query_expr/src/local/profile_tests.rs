@@ -3082,3 +3082,111 @@ fn batch_control_selected_payloads_keep_their_carrier_and_generated_null() {
         );
     }
 }
+
+#[test]
+fn batch_json_type_native_sql_values_and_dispositions_are_not_wire_reports() {
+    use crate::LocalFunctionId as Id;
+    let text = |value: Option<&[u8]>| LocalExpr::Constant {
+        value: ScalarValue::Bytes(value.map(<[u8]>::to_vec)),
+        field_type: FieldTypeTp::VarString.into(),
+        literal_kind: LiteralKind::Typed,
+    };
+    let make = |id, argument| LocalExpr::Call {
+        function: FunctionRef::Local(id),
+        args: vec![argument].into_boxed_slice(),
+        return_type: FieldTypeTp::VarString.into(),
+        metadata: CallMetadata::None,
+    };
+    for (id, input, expected) in [
+        (Id::JsonTypeTextSqlNative, None, None),
+        (
+            Id::JsonTypeTextSqlNative,
+            Some(&b"[]"[..]),
+            Some(&b"ARRAY"[..]),
+        ),
+        (
+            Id::JsonTypeTextSqlNative,
+            Some(&b"9223372036854775807"[..]),
+            Some(&b"INTEGER"[..]),
+        ),
+        (
+            Id::JsonTypeBinarySqlNative,
+            Some(&[0x04, 0][..]),
+            Some(&b"NULL"[..]),
+        ),
+        // Native policy deliberately differs from wire JSON on malformed literals.
+        (
+            Id::JsonTypeBinarySqlNative,
+            Some(&[0x04, 9][..]),
+            Some(&b"BOOLEAN"[..]),
+        ),
+        (
+            Id::JsonTypeBinarySqlNative,
+            Some(&[0x0e][..]),
+            Some(&b"DATE"[..]),
+        ),
+        (
+            Id::JsonTypeBinarySqlNative,
+            Some(&[0x0d, 0xfc, 1, b'x'][..]),
+            Some(&b"BLOB"[..]),
+        ),
+    ] {
+        let spec = make(id, text(input));
+        let mut bindings = BatchBindings::new(vec![]);
+        let result = run_batch(
+            &mut compile_batch_program(&spec, &[]),
+            &mut bindings,
+            4,
+            &[3, 1, 1],
+        )
+        .unwrap();
+        assert_eq!(result.to_bytes_vec(), vec![expected.map(<[u8]>::to_vec); 3]);
+        assert!(compile_local(&spec, &[], LocalCompileContext::default()).is_err());
+    }
+    for (id, input, expected) in [
+        (
+            Id::JsonTypeTextSqlNative,
+            &b" \t"[..],
+            NativeJsonTypeDisposition::EmptyText,
+        ),
+        (
+            Id::JsonTypeTextSqlNative,
+            &b"{"[..],
+            NativeJsonTypeDisposition::InvalidText,
+        ),
+        (
+            Id::JsonTypeTextSqlNative,
+            &[0xff][..],
+            NativeJsonTypeDisposition::InvalidUtf8,
+        ),
+        (
+            Id::JsonTypeBinarySqlNative,
+            &[0xff][..],
+            NativeJsonTypeDisposition::InvalidText,
+        ),
+        (
+            Id::JsonTypeBinarySqlNative,
+            &[0x0d, 0xfc, 1, b'x', b'y'][..],
+            NativeJsonTypeDisposition::InvalidText,
+        ),
+    ] {
+        let mut bindings = BatchBindings::new(vec![]);
+        let error = run_batch(
+            &mut compile_batch_program(&make(id, text(Some(input))), &[]),
+            &mut bindings,
+            1,
+            &[0],
+        )
+        .unwrap_err();
+        assert_eq!(error.native_json_type_disposition(), Some(expected));
+    }
+    // A numerical code and a lookalike message are not producer provenance.
+    let forged = LocalError::Evaluation(
+        tidb_query_common::error::EvaluateError::Custom {
+            code: 3140,
+            msg: "Invalid JSON text: The document is empty".into(),
+        }
+        .into(),
+    );
+    assert_eq!(forged.native_json_type_disposition(), None);
+}

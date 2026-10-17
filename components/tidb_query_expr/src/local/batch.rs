@@ -12,9 +12,7 @@ use tidb_query_datatype::{
     codec::{
         batch::LazyBatchColumnVec,
         collation::native::NativeCollation,
-        data_type::{
-            BATCH_MAX_SIZE, Bytes, ChunkedVecBytes, ScalarValue, ScalarValueRef, VectorValue,
-        },
+        data_type::{Bytes, ChunkedVecBytes, ScalarValue, ScalarValueRef, VectorValue},
         mysql::{
             DEFAULT_DIV_FRAC_INCR, Decimal, NativeVectorError, NativeVectorFloat32, Tz,
             decimal::NativeDecimalError, deserialize_native_vector_float32,

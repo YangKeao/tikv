@@ -57,6 +57,14 @@ pub(crate) fn map_local_call_to_rpn_func(
     call: &CallShape,
 ) -> Result<RpnFnMeta> {
     match id {
+        LocalFunctionId::JsonTypeTextSqlNative => {
+            validate_argument_count_eq(call.args().len(), 1)?;
+            Ok(crate::impl_json::json_type_text_sql_native_fn_meta())
+        }
+        LocalFunctionId::JsonTypeBinarySqlNative => {
+            validate_argument_count_eq(call.args().len(), 1)?;
+            Ok(crate::impl_json::json_type_binary_sql_native_fn_meta())
+        }
         LocalFunctionId::InIntSourceOrder => {
             if call.args().len() < 2 {
                 return Err(other_err!("Local IN requires at least two arguments"));

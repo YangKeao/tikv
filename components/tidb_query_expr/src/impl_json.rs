@@ -87,6 +87,48 @@ fn json_type_binary_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
     }
 }
 
+// SQL graph kernels use the same native primitives as the report workers.
+// Error identity is produced here, never inferred later from error text/code.
+fn native_json_type_sql_error(error: NativeJsonError) -> tidb_query_common::Error {
+    use tidb_query_common::error::EvaluateError;
+    match error {
+        NativeJsonError::EmptyText => EvaluateError::NativeJsonTypeEmptyText.into(),
+        NativeJsonError::InvalidText | NativeJsonError::InvalidBinary => {
+            EvaluateError::NativeJsonTypeInvalidText.into()
+        }
+    }
+}
+
+#[rpn_fn(nullable)]
+fn json_type_text_sql_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    arg.map(|bytes| {
+        // Reuse the native String/Bytes admission and UTF-8 policy before
+        // parsing. Invalid UTF-8 is not an invalid-document SQL disposition.
+        let text = crate::native_json_sql_string(
+            tidb_query_datatype::codec::native_sql_string::NativeSqlStringInput::String(bytes),
+        )
+        .map_err(|_| tidb_query_common::error::EvaluateError::NativeJsonTypeInvalidUtf8)?
+        .expect("an actual String input is admitted");
+        native_json_report_parse(text.as_bytes())
+            .map(|document| native_json_type_name(&document).to_vec())
+            .map_err(native_json_type_sql_error)
+    })
+    .transpose()
+}
+
+#[rpn_fn(nullable)]
+fn json_type_binary_sql_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
+    arg.map(|bytes| {
+        let (&tag, payload) = bytes
+            .split_first()
+            .ok_or_else(|| other_err!("Native JSON_TYPE SQL input is missing its type code"))?;
+        native_binary_json_type_name(tag, payload)
+            .map(<[u8]>::to_vec)
+            .map_err(native_json_type_sql_error)
+    })
+    .transpose()
+}
+
 #[rpn_fn(nullable)]
 fn json_depth_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
     let Some(bytes) = arg else {

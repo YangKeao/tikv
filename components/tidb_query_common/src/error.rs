@@ -21,6 +21,14 @@ pub enum EvaluateError {
     #[error("{0}")]
     Other(String),
 
+    /// Native JSON_TYPE document disposition; distinct from wire JSON errors.
+    #[error("Invalid JSON text: The document is empty")]
+    NativeJsonTypeEmptyText,
+    #[error("Invalid JSON text: The document root must not be followed by other values.")]
+    NativeJsonTypeInvalidText,
+    #[error("invalid UTF-8 string datum")]
+    NativeJsonTypeInvalidUtf8,
+
     /// Explicit provenance for the private signed-ABS checked overflow only.
     #[error("{source}")]
     AbsSignedOverflow {
@@ -76,6 +84,9 @@ impl EvaluateError {
     pub fn code(&self) -> i32 {
         match self {
             EvaluateError::InvalidCharacterString { .. } => 1300,
+            EvaluateError::NativeJsonTypeEmptyText | EvaluateError::NativeJsonTypeInvalidText => {
+                3140
+            }
             EvaluateError::DeadlineExceeded => 9007,
             EvaluateError::Custom { code, .. } => *code,
             EvaluateError::AbsSignedOverflow { source } => source.code(),
@@ -87,6 +98,7 @@ impl EvaluateError {
             | EvaluateError::UuidToBinInvalid
             | EvaluateError::UuidVersionInvalid
             | EvaluateError::UuidTimestampInvalid
+            | EvaluateError::NativeJsonTypeInvalidUtf8
             | EvaluateError::Other(_)
             | EvaluateError::Caused(_) => 10000,
         }
@@ -139,9 +151,10 @@ impl ErrorCodeExt for EvaluateError {
             EvaluateError::InvalidCharacterString { .. } => {
                 error_code::coprocessor::INVALID_CHARACTER_STRING
             }
-            EvaluateError::Custom { .. } | EvaluateError::ConvUnsignedOverflow { .. } => {
-                error_code::coprocessor::EVAL
-            }
+            EvaluateError::Custom { .. }
+            | EvaluateError::ConvUnsignedOverflow { .. }
+            | EvaluateError::NativeJsonTypeEmptyText
+            | EvaluateError::NativeJsonTypeInvalidText => error_code::coprocessor::EVAL,
             EvaluateError::AbsSignedOverflow { source } => source.error_code(),
             EvaluateError::PeriodAddIncorrectArguments
             | EvaluateError::PeriodDiffIncorrectArguments => error_code::coprocessor::EVAL,
@@ -150,6 +163,7 @@ impl ErrorCodeExt for EvaluateError {
             | EvaluateError::UuidToBinInvalid
             | EvaluateError::UuidVersionInvalid
             | EvaluateError::UuidTimestampInvalid
+            | EvaluateError::NativeJsonTypeInvalidUtf8
             | EvaluateError::Other(_)
             | EvaluateError::Caused(_) => error_code::UNKNOWN,
         }

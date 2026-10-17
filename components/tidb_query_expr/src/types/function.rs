@@ -230,6 +230,12 @@ pub enum LocalFunctionId {
     JsonValidOtherNative,
     JsonTypeTextNative,
     JsonTypeBinaryNative,
+    /// SQL string result/error over the native document model, without a report
+    /// envelope.
+    JsonTypeTextSqlNative,
+    /// Raw SQL type-code/payload transport, preserving even unknown native
+    /// tags.
+    JsonTypeBinarySqlNative,
     JsonDepthNative,
     JsonStorageFreeNative,
     JsonStorageSizeNative,

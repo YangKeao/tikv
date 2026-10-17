@@ -183,6 +183,14 @@ fn batch_signature_contract(
             ResultSignedness::Signed,
         ));
     }
+    if matches!(
+        function,
+        FunctionRef::Local(
+            LocalFunctionId::JsonTypeTextSqlNative | LocalFunctionId::JsonTypeBinarySqlNative
+        )
+    ) {
+        return Some((BYTES, EvalType::Bytes, false, ResultSignedness::Signed));
+    }
     if function == FunctionRef::Local(LocalFunctionId::NullIfIntSignedSigned) {
         return Some((INT_INT, EvalType::Int, false, ResultSignedness::Signed));
     }
