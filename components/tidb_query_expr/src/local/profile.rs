@@ -124,7 +124,7 @@ impl BatchCallSignature {
     pub fn uses_native_value_inputs(self) -> bool {
         matches!(
             self.host,
-            Some(SqlBatchHostOperation::CastCharNative { .. })
+            Some(SqlBatchHostOperation::CastCharNative { .. } | SqlBatchHostOperation::CastNative)
         )
     }
     pub fn requires_singleton(self) -> bool {

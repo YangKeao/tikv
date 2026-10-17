@@ -111,8 +111,16 @@ pub fn cast_real_unsigned_native_args_valid(value: Option<&[u8]>) -> bool {
 pub(crate) fn evaluate_cast_real_unsigned_native(
     value: Option<&[u8]>,
 ) -> Result<NativeCastRealUnsignedResult, NativeIdentityFrameError> {
-    let rounded = f64::from_bits(actual_real_bits(value)?).round_ties_even();
-    Ok(if rounded < 0.0 {
+    Ok(native_cast_real_unsigned_value(f64::from_bits(
+        actual_real_bits(value)?,
+    )))
+}
+
+/// Plain value kernel shared by native calls and the framed compatibility ABI.
+/// Preserves original Float32 f64 bits, nonfinite handling and ties-even rules.
+pub fn native_cast_real_unsigned_value(value: f64) -> NativeCastRealUnsignedResult {
+    let rounded = value.round_ties_even();
+    if rounded < 0.0 {
         NativeCastRealUnsignedResult {
             value: (rounded as i64) as u64,
             overflow_bits: Some(rounded.to_bits()),
@@ -127,7 +135,7 @@ pub(crate) fn evaluate_cast_real_unsigned_native(
             value: rounded as u64,
             overflow_bits: None,
         }
-    })
+    }
 }
 
 pub(crate) fn encode_native_cast_real_unsigned_result(
@@ -197,6 +205,13 @@ mod tests {
                 let input = encode_native_identity(original).unwrap();
                 assert!(cast_real_unsigned_native_args_valid(Some(&input)));
                 let result = evaluate_cast_real_unsigned_native(Some(&input)).unwrap();
+                assert_eq!(
+                    native_cast_real_unsigned_value(f64::from_bits(match original {
+                        NativeIdentityRef::Real(bits) | NativeIdentityRef::Float32(bits) => bits,
+                        _ => unreachable!(),
+                    })),
+                    result
+                );
                 assert_eq!(
                     result,
                     NativeCastRealUnsignedResult {

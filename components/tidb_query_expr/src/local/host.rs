@@ -42,9 +42,18 @@ pub struct HostSignature {
 pub enum SqlBatchHostOperation {
     Concat,
     ConcatWs,
-    RegexpLike { case_insensitive: bool },
-    CastCharInt { len: Option<u32> },
-    CastCharNative { len: Option<u32> },
+    RegexpLike {
+        case_insensitive: bool,
+    },
+    CastCharInt {
+        len: Option<u32>,
+    },
+    CastCharNative {
+        len: Option<u32>,
+    },
+    /// One native value argument and one native value result. Kernel target
+    /// and producer/consumer provenance are immutable source metadata.
+    CastNative,
 }
 
 impl SqlBatchHostOperation {
@@ -53,7 +62,7 @@ impl SqlBatchHostOperation {
             Self::Concat => arity >= 1,
             Self::ConcatWs => arity >= 2,
             Self::RegexpLike { .. } => matches!(arity, 2 | 3),
-            Self::CastCharInt { .. } | Self::CastCharNative { .. } => arity == 1,
+            Self::CastCharInt { .. } | Self::CastCharNative { .. } | Self::CastNative => arity == 1,
         }
     }
     pub fn argument_type(self) -> EvalType {
@@ -62,7 +71,8 @@ impl SqlBatchHostOperation {
             Self::Concat
             | Self::ConcatWs
             | Self::RegexpLike { .. }
-            | Self::CastCharNative { .. } => EvalType::Bytes,
+            | Self::CastCharNative { .. }
+            | Self::CastNative => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
@@ -70,7 +80,8 @@ impl SqlBatchHostOperation {
             Self::Concat
             | Self::ConcatWs
             | Self::CastCharInt { .. }
-            | Self::CastCharNative { .. } => EvalType::Bytes,
+            | Self::CastCharNative { .. }
+            | Self::CastNative => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
