@@ -64,18 +64,27 @@ impl LocalProgram {
 
 /// Opaque ownership facade for checked SQL batch evaluation. The
 /// binding entry uses operand-major pure kernels and the same iterative
-/// demanded-control frames. Graphs with controls expose a one-occurrence
-/// window through max_batch_size; callers must tile selections accordingly.
+/// demanded-control frames. Ordinary roots retain bounded windows; explicit
+/// window roots require the complete selection and expose their structural
+/// bound separately. Callers must not tile a whole-selection program.
 #[derive(Debug)]
 pub struct LocalBatchProgram {
     pub(super) inner: LocalProgram,
     pub(super) max_batch_size: usize,
+    pub(super) whole_selection: bool,
 }
 
 impl LocalBatchProgram {
-    /// Largest occurrence window admitted by this compiled graph.
+    /// Structural occurrence bound, before layout/resource checks. usize::MAX
+    /// means there is no fixed-width cap. A whole-selection program must not
+    /// be root-tiled even if another structural restriction is narrower.
     pub fn max_batch_size(&self) -> usize {
         self.max_batch_size
+    }
+    /// This checked window root must receive the complete selection so that
+    /// argument phases, errors and effects cannot cross root tiles.
+    pub fn requires_whole_selection(&self) -> bool {
+        self.whole_selection
     }
     pub fn return_type(&self) -> &FieldType {
         self.inner.return_type()
@@ -688,6 +697,7 @@ pub fn compile_batch(
     Ok(LocalBatchProgram {
         inner: compile(spec, schema, cx, CompileMode::Batch(facts))?,
         max_batch_size: facts.max_batch_size(),
+        whole_selection: facts.whole_selection(),
     })
 }
 

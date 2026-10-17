@@ -13,7 +13,10 @@ use tipb::FieldType;
 use super::*;
 
 fn bytes_ft() -> FieldType {
-    FieldTypeTp::VarString.into()
+    let mut field: FieldType = FieldTypeTp::VarString.into();
+    field.set_charset("utf8mb4".into());
+    field.set_collate(46);
+    field
 }
 fn bytes(values: impl IntoIterator<Item = Option<Vec<u8>>>) -> VectorValue {
     let mut output = VectorValue::with_capacity(0, tidb_query_datatype::EvalType::Bytes);
@@ -41,7 +44,7 @@ fn request(index: usize, mode: ArgMode) -> HostArgRequest {
 fn sites(node: &LocalExpr, ordinal: &mut usize, output: &mut Vec<OrdinaryCallSite>) {
     let current = *ordinal;
     *ordinal += 1;
-    if let LocalExpr::HostCall { args, .. } = node {
+    if let LocalExpr::HostCall { args, .. } | LocalExpr::Call { args, .. } = node {
         output.push(OrdinaryCallSite::sql_native_batch(
             current,
             OrdinarySourceId::new(61, current as u64),
@@ -92,6 +95,7 @@ struct Service {
     next: usize,
     requests: Vec<HostArgRequest>,
     read_failure: Option<(usize, usize)>,
+    second_read_failure: Option<(usize, usize)>,
     primary_error: Option<usize>,
     fail_after_cached: bool,
     bad_request: bool,
@@ -119,6 +123,7 @@ impl Service {
             next: 0,
             requests: vec![request(0, ArgMode::Fresh), request(1, ArgMode::Fresh)],
             read_failure: None,
+            second_read_failure: None,
             primary_error: None,
             fail_after_cached: false,
             bad_request: false,
@@ -159,7 +164,9 @@ impl LocalRuntimeServices for Service {
                 format!("read:{slot}:{}:{}", row.occurrence, row.input_row),
                 1234,
             ));
-        if self.read_failure == Some((slot, row.occurrence)) {
+        if self.read_failure == Some((slot, row.occurrence))
+            || self.second_read_failure == Some((slot, row.occurrence))
+        {
             let error = other_err!("window read primary");
             self.primary_error = Some(error.0.as_ref() as *const _ as usize);
             return Err(LocalError::Evaluation(error));
@@ -338,7 +345,8 @@ fn window_host_nested_phases_keep_duplicate_occurrences_and_primary_error_cleanu
         ],
     );
     let mut program = compile(&root, &service);
-    assert_eq!(program.max_batch_size(), crate::types::BATCH_MAX_SIZE);
+    assert!(program.requires_whole_selection());
+    assert_eq!(program.max_batch_size(), usize::MAX);
     let (result, context) = evaluate(
         &mut program,
         &mut service,
@@ -724,8 +732,9 @@ fn window_host_row_operand_keeps_full_parent_phase_and_original_occurrences() {
         ],
     );
     let mut program = compile(&root, &service);
-    assert_eq!(program.max_batch_size(), crate::types::BATCH_MAX_SIZE);
-    let selection = [2, 0, 2];
+    assert!(program.requires_whole_selection());
+    assert_eq!(program.max_batch_size(), usize::MAX);
+    let selection: Vec<_> = (0..2050).map(|position| [2, 0, 2][position % 3]).collect();
     let result = evaluate(
         &mut program,
         &mut service,
@@ -864,5 +873,203 @@ fn window_host_row_operand_fresh_restarts_each_row_and_limits_still_cancel() {
     )
     .0;
     assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+    assert!(service.events.is_empty());
+}
+
+fn unary_bytes(signature: tipb::ScalarFuncSig, value: LocalExpr) -> LocalExpr {
+    LocalExpr::Call {
+        function: crate::FunctionRef::TiPb(signature),
+        args: vec![value].into_boxed_slice(),
+        return_type: bytes_ft(),
+        metadata: crate::CallMetadata::None,
+    }
+}
+#[test]
+fn window_host_whole_selection_preserves_late_left_error_before_early_right() {
+    let mut service = Service::new();
+    let root = host(
+        &service.catalog,
+        0,
+        vec![
+            host(&service.catalog, 1, vec![input(0), input(1)]),
+            input(2),
+        ],
+    );
+    let mut program = compile(&root, &service);
+    assert!(program.requires_whole_selection());
+    assert_eq!(program.max_batch_size(), usize::MAX);
+    let selection: Vec<_> = (0..2050).map(|position| [2, 0, 2][position % 3]).collect();
+    service.read_failure = Some((0, 2049));
+    service.second_read_failure = Some((2, 0));
+    let (result, context) = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    );
+    let Err(LocalError::Evaluation(error)) = result else {
+        panic!("late left error lost: {result:?}");
+    };
+    assert_eq!(
+        Some(error.0.as_ref() as *const _ as usize),
+        service.primary_error
+    );
+    assert_eq!(service.reads(), rows(0, &selection));
+    assert_eq!(context.warnings.warning_cnt, 2050);
+    assert_eq!(
+        service
+            .events
+            .iter()
+            .filter(|event| matches!(event, Event::Cancel(_)))
+            .count(),
+        2
+    );
+    assert!(service.live.is_empty());
+    service.events.clear();
+    service.read_failure = None;
+    service.second_read_failure = None;
+    let result = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0
+    .unwrap();
+    assert_eq!(result.len(), selection.len());
+    assert_eq!(
+        service.reads(),
+        [
+            rows(0, &selection),
+            rows(1, &selection),
+            rows(2, &selection)
+        ]
+        .concat()
+    );
+    for (position, &physical) in selection.iter().enumerate() {
+        let ScalarValueRef::Bytes(Some(value)) = result.get_scalar_ref(position) else {
+            panic!("output");
+        };
+        assert_eq!(value, format!("2/{position}:{physical}").as_bytes());
+    }
+    assert!(service.live.is_empty());
+}
+#[test]
+fn window_host_whole_selection_runs_generated_kernels_and_scalar_broadcast_without_identity_slice()
+{
+    let selection: Vec<_> = (0..2050).map(|position| [2, 0, 2][position % 3]).collect();
+    let mut service = Service::new();
+    service.requests = vec![request(0, ArgMode::Fresh)];
+    let root = host(
+        &service.catalog,
+        0,
+        vec![
+            unary_bytes(tipb::ScalarFuncSig::UpperUtf8, input(0)),
+            input(1),
+        ],
+    );
+    let mut program = compile(&root, &service);
+    let output = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0
+    .unwrap();
+    assert_eq!(service.reads(), rows(0, &selection));
+    for (position, &physical) in selection.iter().enumerate() {
+        let ScalarValueRef::Bytes(Some(value)) = output.get_scalar_ref(position) else {
+            panic!("output");
+        };
+        assert_eq!(value, format!("0/{position}:{physical}").as_bytes());
+    }
+    assert!(service.live.is_empty());
+    let scalar = LocalExpr::Constant {
+        value: ScalarValue::Bytes(Some(b"MiXeD".to_vec())),
+        field_type: bytes_ft(),
+        literal_kind: LiteralKind::Typed,
+    };
+    let root = host(
+        &service.catalog,
+        0,
+        vec![
+            unary_bytes(tipb::ScalarFuncSig::UpperUtf8, scalar),
+            input(1),
+        ],
+    );
+    let mut program = compile(&root, &service);
+    service.events.clear();
+    let output = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0
+    .unwrap();
+    assert!(service.reads().is_empty());
+    for position in 0..selection.len() {
+        assert!(
+            matches!(output.get_scalar_ref(position), ScalarValueRef::Bytes(Some(value)) if value == b"MIXED")
+        );
+    }
+    service.events.clear();
+    let result = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits {
+            max_steps: 100,
+            ..ExecutionLimits::default()
+        },
+    )
+    .0;
+    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+    assert!(service.reads().is_empty());
+    assert!(service.live.is_empty());
+    service.events.clear();
+    let result = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits {
+            max_retained_bytes: 0,
+            ..ExecutionLimits::default()
+        },
+    )
+    .0;
+    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+    assert!(service.events.is_empty());
+}
+#[test]
+fn window_host_whole_selection_does_not_widen_a_legacy_ordinary_root() {
+    let mut service = Service::new();
+    let root = unary_bytes(tipb::ScalarFuncSig::UpperUtf8, input(0));
+    let mut program = compile(&root, &service);
+    assert!(!program.requires_whole_selection());
+    assert_eq!(program.max_batch_size(), crate::types::BATCH_MAX_SIZE);
+    let selection = vec![2; 2050];
+    let result = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0;
+    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+    assert!(service.events.is_empty());
+    // Even a corrupted private facade cannot label an ordinary graph as a
+    // whole-selection host root. Public callers cannot mutate these fields.
+    program.whole_selection = true;
+    program.max_batch_size = usize::MAX;
+    let result = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0;
+    assert!(matches!(result, Err(LocalError::InvalidSpec(_))));
     assert!(service.events.is_empty());
 }

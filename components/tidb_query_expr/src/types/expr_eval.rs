@@ -103,9 +103,17 @@ impl RpnStackNodeVectorValue<'_> {
     /// Gets a reference to the logical rows.
     pub fn logical_rows_struct(&self) -> LogicalRows<'_> {
         match self {
-            RpnStackNodeVectorValue::Generated { physical_value } => LogicalRows::Ref {
-                logical_rows: &IDENTICAL_LOGICAL_ROWS[0..physical_value.len()],
-            },
+            RpnStackNodeVectorValue::Generated { physical_value } => {
+                if physical_value.len() <= BATCH_MAX_SIZE {
+                    LogicalRows::Ref {
+                        logical_rows: &IDENTICAL_LOGICAL_ROWS[..physical_value.len()],
+                    }
+                } else {
+                    LogicalRows::Identical {
+                        size: physical_value.len(),
+                    }
+                }
+            }
 
             RpnStackNodeVectorValue::Ref { logical_rows, .. } => LogicalRows::Ref { logical_rows },
         }
@@ -1677,11 +1685,22 @@ enum EvalExecution {
     Unannotated,
     SqlControlLineage,
     SqlBatch,
+    SqlWindowBatch,
     EvaluatedAscii,
     EvaluatedBytes(EvaluatedBytesOp),
 }
 
 impl EvalExecution {
+    fn is_batch(self) -> bool {
+        matches!(self, Self::SqlBatch | Self::SqlWindowBatch)
+    }
+    fn max_batch_rows(self) -> usize {
+        if self == Self::SqlWindowBatch {
+            usize::MAX
+        } else {
+            BATCH_MAX_SIZE
+        }
+    }
     fn batch_signature(function: crate::FunctionRef) -> Option<(usize, EvalType)> {
         crate::local::batch_signature(function).map(|(inputs, output)| (inputs.len(), output))
     }
@@ -1699,6 +1718,7 @@ impl EvalExecution {
             Self::Unannotated => budget.mode() == StorageMode::ConservativeInt,
             Self::SqlControlLineage
             | Self::SqlBatch
+            | Self::SqlWindowBatch
             | Self::EvaluatedAscii
             | Self::EvaluatedBytes(_) => {
                 budget.is_checked() && budget.mode() == StorageMode::ExactRetained
@@ -1747,8 +1767,10 @@ impl EvalExecution {
             (Self::Unannotated, OrdinaryProfile::PbRow, Some(signature)) => {
                 rows == 1 && signature == tipb::ScalarFuncSig::PlusInt as i32
             }
-            (Self::SqlBatch, OrdinaryProfile::NativeBatch, None) => {
-                rows > 0 && rows <= BATCH_MAX_SIZE && Self::batch_signature(function).is_some()
+            (Self::SqlBatch | Self::SqlWindowBatch, OrdinaryProfile::NativeBatch, None) => {
+                rows > 0
+                    && rows <= self.max_batch_rows()
+                    && Self::batch_signature(function).is_some()
             }
             _ => false,
         };
@@ -2318,11 +2340,11 @@ impl<'a> ProgramFrame<'a> {
                     && self.rows.physical() == [0]
                     && evaluated_bytes_shape(operation, self.nodes, schema)
             }
-            EvalExecution::SqlBatch => {
+            EvalExecution::SqlBatch | EvalExecution::SqlWindowBatch => {
                 if self.flow.is_some()
                     || self.nodes.len() != 1
                     || self.rows.len() == 0
-                    || self.rows.len() > BATCH_MAX_SIZE
+                    || self.rows.len() > execution.max_batch_rows()
                     || self.rows.physical().len() != self.rows.len()
                 {
                     return Err(LocalError::InvalidSpec(
@@ -2405,7 +2427,7 @@ impl<'a> ProgramFrame<'a> {
             int_storage_bytes(self.rows.len())
         } else if matches!(node, RpnExpressionNode::Constant { .. }) {
             0 // borrowed compiled scalar; do not materialize an unneeded value.
-        } else if execution == EvalExecution::SqlBatch {
+        } else if execution.is_batch() {
             node_batch_eval_type(node, schema)
                 .and_then(|eval_type| batch_min_storage_bytes(eval_type, self.rows.len()))
                 .unwrap_or(usize::MAX)
@@ -3065,9 +3087,10 @@ impl<'a> HostFrame<'a> {
         prepared: &'a PreparedHostCall,
         args: &'a [RpnExpression],
         rows: FrameRows<'a>,
+        execution: EvalExecution,
     ) -> LocalResult<Self> {
         if rows.len() == 0
-            || rows.len() > BATCH_MAX_SIZE
+            || rows.len() > execution.max_batch_rows()
             || rows.physical().len() != rows.len()
             || (!prepared.is_windowed() && rows.len() != 1)
             || args.len() != prepared.arg_types().len()
@@ -3218,6 +3241,7 @@ struct OrdinaryFrame<'a> {
     awaiting: Option<usize>,
     stopped: bool,
     values: Vec<RpnStackNode<'a>>,
+    execution: EvalExecution,
 }
 
 impl<'a> OrdinaryFrame<'a> {
@@ -3233,7 +3257,7 @@ impl<'a> OrdinaryFrame<'a> {
         execution: EvalExecution,
     ) -> LocalResult<Self> {
         execution.check_ordinary(prepared, rows.len())?;
-        let expected_arity = if execution == EvalExecution::SqlBatch {
+        let expected_arity = if execution.is_batch() {
             EvalExecution::batch_signature(prepared.function()).map(|(arity, _)| arity)
         } else {
             Some(2)
@@ -3253,6 +3277,7 @@ impl<'a> OrdinaryFrame<'a> {
             awaiting: None,
             stopped: false,
             values,
+            execution,
         })
     }
 
@@ -3285,7 +3310,7 @@ impl<'a> OrdinaryFrame<'a> {
             ));
         }
         let child_ref = child.get_logical_scalar_ref(0);
-        if execution == EvalExecution::SqlBatch {
+        if execution.is_batch() {
             let expected = batch_eval_type(self.args[index].ret_field_type(schema));
             if expected != Some(child_ref.eval_type()) {
                 return Err(LocalError::InvalidSpec(
@@ -3314,7 +3339,8 @@ impl<'a> OrdinaryFrame<'a> {
         budget: &mut EvalBudget,
         other_live_bytes: usize,
     ) -> LocalResult<RpnStackNode<'a>> {
-        EvalExecution::SqlBatch.check_ordinary(self.prepared, self.rows.len())?;
+        self.execution
+            .check_ordinary(self.prepared, self.rows.len())?;
         if self.stopped || self.values.len() != self.args.len() || self.next != self.args.len() {
             return Err(LocalError::InvalidSpec(
                 "batch kernel phase requires every complete operand".into(),
@@ -3396,9 +3422,10 @@ fn read_batch_binding_phase(
     field_type: &FieldType,
     budget: &mut EvalBudget,
     other_live_bytes: usize,
+    execution: EvalExecution,
 ) -> LocalResult<VectorValue> {
     let count = rows.len();
-    if count == 0 || count > BATCH_MAX_SIZE || rows.physical().len() != count {
+    if count == 0 || count > execution.max_batch_rows() || rows.physical().len() != count {
         return Err(LocalError::InvalidSpec(
             "batch binding phase has an invalid occurrence map".into(),
         ));
@@ -3527,17 +3554,18 @@ struct RowHostScope<'a> {
     rows: FrameRows<'a>,
     field_type: &'a FieldType,
     values: Vec<VectorValue>,
+    values_bytes: usize,
 }
 impl RowHostScope<'_> {
-    fn storage(&self, mode: StorageMode) -> usize {
-        self.values.iter().fold(
-            self.rows.storage().saturating_add(
+    fn storage(&self, _mode: StorageMode) -> usize {
+        self.rows
+            .storage()
+            .saturating_add(
                 self.values
                     .capacity()
                     .saturating_mul(std::mem::size_of::<VectorValue>()),
-            ),
-            |bytes, value| bytes.saturating_add(vector_storage_bytes(value, mode)),
-        )
+            )
+            .saturating_add(self.values_bytes)
     }
     fn finish(&self, budget: &mut EvalBudget, retained: usize) -> LocalResult<VectorValue> {
         let count = self.values.len();
@@ -3782,7 +3810,7 @@ fn eval_frames<'a, 'data: 'a>(
         match frames.pop().unwrap() {
             EvalFrame::Program(mut frame) => {
                 frame.check_execution(execution, schema)?;
-                if execution == EvalExecution::SqlBatch && frame.rows.len() > 1 {
+                if execution.is_batch() && frame.rows.len() > 1 {
                     if let [RpnExpressionNode::HostCall { prepared, .. }] = frame.nodes {
                         if !prepared.is_windowed() {
                             let count = frame.rows.len();
@@ -3797,6 +3825,7 @@ fn eval_frames<'a, 'data: 'a>(
                                 rows: frame.rows,
                                 field_type: prepared.return_type(),
                                 values,
+                                values_bytes: 0,
                             };
                             push_frame(
                                 &mut frames,
@@ -3852,7 +3881,7 @@ fn eval_frames<'a, 'data: 'a>(
                         frame.rows.clone(),
                         frame.flow,
                     )?;
-                    control.batch_selection = execution == EvalExecution::SqlBatch;
+                    control.batch_selection = execution.is_batch();
                     push_frame(
                         &mut frames,
                         EvalFrame::Program(frame),
@@ -3875,7 +3904,7 @@ fn eval_frames<'a, 'data: 'a>(
                         retained
                             .saturating_add(HostFrame::initial_storage(args.len(), &frame.rows)),
                     )?;
-                    let host = HostFrame::new(prepared, args, frame.rows.clone())?;
+                    let host = HostFrame::new(prepared, args, frame.rows.clone(), execution)?;
                     push_frame(
                         &mut frames,
                         EvalFrame::Program(frame),
@@ -4010,9 +4039,7 @@ fn eval_frames<'a, 'data: 'a>(
                         .saturating_add(tasks.storage());
                     budget.storage(retained)?;
                 }
-                if (execution == EvalExecution::SqlBatch || !frame.stopped)
-                    && frame.next < frame.args.len()
-                {
+                if (execution.is_batch() || !frame.stopped) && frame.next < frame.args.len() {
                     budget.charge()?;
                     let index = frame.next;
                     frame.awaiting = Some(index);
@@ -4031,7 +4058,7 @@ fn eval_frames<'a, 'data: 'a>(
                         budget,
                         tasks.storage(),
                     )?;
-                } else if execution == EvalExecution::SqlBatch {
+                } else if execution.is_batch() {
                     let value = frame.finish_batch(ctx, budget, retained)?;
                     budget.storage(retained.saturating_add(node_storage(&value, budget.mode())))?;
                     returned = Some(FrameResult::unannotated(value));
@@ -4073,7 +4100,14 @@ fn eval_frames<'a, 'data: 'a>(
                         ));
                     }
                     budget.storage(retained.saturating_add(host_node_copy_precharge(&node, 1)?))?;
-                    frame.values.push(copy_host_rows(&node, 1)?);
+                    let value = copy_host_rows(&node, 1)?;
+                    frame.values_bytes = frame
+                        .values_bytes
+                        .checked_add(vector_storage_bytes(&value, budget.mode()))
+                        .ok_or_else(|| {
+                            LocalError::ResourceLimit("row scope retained ledger overflow".into())
+                        })?;
+                    frame.values.push(value);
                     retained = frames_storage(&frames, frames.capacity(), budget.mode())
                         .saturating_add(frame.storage(budget.mode()))
                         .saturating_add(tasks.storage());
@@ -4434,11 +4468,24 @@ impl RpnExpression {
         input_logical_rows: &'a [usize],
         budget: &mut EvalBudget,
         host_catalog: Option<HostCatalogKey>,
+        whole_selection: bool,
     ) -> LocalResult<RpnStackNode<'a>> {
         let output_rows = input_logical_rows.len();
+        let execution = if whole_selection {
+            EvalExecution::SqlWindowBatch
+        } else {
+            EvalExecution::SqlBatch
+        };
+        if whole_selection
+            && !matches!(self.as_ref(), [RpnExpressionNode::HostCall { prepared, .. }] if prepared.is_sql_batch() && prepared.is_windowed())
+        {
+            return Err(LocalError::InvalidSpec(
+                "whole selection requires its checked window root".into(),
+            ));
+        }
         if self.checked_result_flow().is_some()
             || output_rows == 0
-            || output_rows > BATCH_MAX_SIZE
+            || output_rows > execution.max_batch_rows()
             || !matches!(input, EvalInput::Bindings(_))
         {
             return Err(LocalError::InvalidSpec(
@@ -4456,7 +4503,7 @@ impl RpnExpression {
             0,
             host_catalog,
             budget,
-            EvalExecution::SqlBatch,
+            execution,
         )
         .and_then(FrameResult::into_unannotated)
     }
@@ -4667,7 +4714,7 @@ impl RpnExpression {
                             }
                         }
                     }
-                    EvalInput::Bindings(services) if execution == EvalExecution::SqlBatch => {
+                    EvalInput::Bindings(services) if execution.is_batch() => {
                         let physical_value = read_batch_binding_phase(
                             *services,
                             ctx,
@@ -4676,6 +4723,7 @@ impl RpnExpression {
                             field_type,
                             budget,
                             other_live_bytes,
+                            execution,
                         )?;
                         RpnStackNodeVectorValue::Generated { physical_value }
                     }
@@ -5817,6 +5865,7 @@ mod tests {
                 &field_type,
                 &mut budget,
                 base,
+                EvalExecution::SqlBatch,
             )
             .unwrap_err();
             assert!(matches!(error, LocalError::ResourceLimit(_)));
@@ -5836,6 +5885,7 @@ mod tests {
             &field_type,
             &mut budget,
             base,
+            EvalExecution::SqlBatch,
         )
         .unwrap();
         let mut expected = ChunkedVecSized::<Int>::with_capacity(3);

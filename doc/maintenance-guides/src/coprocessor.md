@@ -1969,8 +1969,11 @@ flag or eligibility policy described above.
   window methods return HostContract; they do not call row methods or retry an
   expression. Current window carriers are checked Int/Bytes at the shared
   copy seam; these three catalog operations register Bytes inputs/results.
-  Pure and nested window-host graphs permit up to1024 selected occurrences.
-  An explicit window root can also contain row-host operands. RowHostScope
+  An explicit window root records a whole-selection contract. Its separate
+  checked execution profile admits the complete occurrence map under normal
+  layout, step, frame, task and retained-storage limits; it does not use the
+  legacy1024 structural cap or a second root loop. Ordinary roots retain1024
+  and row roots retain one. An explicit window root can contain row-host operands. RowHostScope
   schedules each complete row-host subtree in original occurrence order inside
   the same frame loop, then returns its compact full argument vector before
   the parent demands its next argument. It never invokes another evaluator.
@@ -1979,9 +1982,25 @@ flag or eligibility policy described above.
   physical rows are distinct. The column-only read_input_batch hook is bypassed
   for a scoped row because it cannot carry occurrence identity. Successful
   singleton owners and final compact output are metered together, and Fresh
-  restarts the entire row-host operand. Row roots and any typed control
-  descendant still constrain admission to one. Whole-selection caller phases
-  remain outstanding work. Protocol fixtures live in
+  restarts the entire row-host operand. Any typed control descendant still
+  constrains structural admission to one; it does not authorize root tiling of
+  a window program. General control wrapping remains unfinished.
+  Generated vectors above1024 use the existing LogicalRows::Identical form,
+  avoiding the fixed identity slice. Legacy generated vectors keep their
+  previous slice representation, including at exactly1024. New checked paths
+  use logical_rows_struct/get_idx; logical_rows() remains a legacy bounded
+  slice accessor. Generated kernel wrappers iterate usize row counts and
+  VectorArg uses the logical-row abstraction. Row/PB/decoded entry limits stay
+  unchanged. The opaque whole-selection entry additionally checks its actual
+  prepared window root before effects; an ordinary graph cannot gain this
+  profile through a caller label.
+  RowHostScope caches retained child-vector bytes, and the TiDB window provider
+  carries incremental source/cast payload totals and a cached suspended-left
+  charge. A row callback does not rescan an ancestor's complete left vector.
+  Whole-selection frontend caller integration remains outstanding: current
+  source lowering does not select window roots. Future callers must preserve
+  actual row/bulk domain selection when vectorization is disabled and must not
+  split a whole-selection program via a window-size tuning knob. Protocol fixtures live in
   `local/window_host_tests.rs` and deliberately relay bytes.
   TiDB's `evaluator/batch_arithmetic_window.rs` implements the three arithmetic
   window descriptors over actual native-value capabilities. Provider tasks own

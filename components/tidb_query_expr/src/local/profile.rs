@@ -708,22 +708,21 @@ impl BatchFacts {
         &self.sites
     }
 
-    pub(super) fn max_batch_size(&self) -> usize {
-        let window_root = self.snapshot.nodes.first().is_some_and(|node| {
+    pub(super) fn whole_selection(&self) -> bool {
+        self.snapshot.nodes.first().is_some_and(|node| {
             matches!(node.kind, NodeKind::BatchHost { operation, .. } if operation.is_windowed())
-        });
-        let singleton = self.snapshot.nodes.iter().any(|node| {
-            matches!(node.kind,
-                NodeKind::BatchCall { signature, .. } if batch_control(signature).is_some())
-                || (!window_root
-                    && matches!(node.kind,
-                    NodeKind::BatchHost { operation, .. } if !operation.is_windowed()))
-        });
-        if singleton {
-            1
-        } else {
-            crate::types::BATCH_MAX_SIZE
+        })
+    }
+    pub(super) fn max_batch_size(&self) -> usize {
+        if self.snapshot.nodes.iter().any(|node| {
+            matches!(node.kind, NodeKind::BatchCall { signature, .. } if batch_control(signature).is_some())
+        }) { return 1; }
+        if self.whole_selection() {
+            return usize::MAX;
         }
+        if self.snapshot.nodes.iter().any(|node| {
+            matches!(node.kind, NodeKind::BatchHost { operation, .. } if !operation.is_windowed())
+        }) { 1 } else { crate::types::BATCH_MAX_SIZE }
     }
 
     pub(super) fn hosts(&self) -> Option<&HostCatalog> {

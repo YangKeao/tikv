@@ -991,6 +991,7 @@ impl LocalBatchProgram {
             selection,
             &mut budget,
             self.inner.host_catalog,
+            self.whole_selection,
         )?;
         let output = match result {
             RpnStackNode::Scalar { value, .. } => {
