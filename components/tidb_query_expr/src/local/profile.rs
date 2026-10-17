@@ -14,7 +14,9 @@ use tidb_query_datatype::{
 use tipb::{FieldType, ScalarFuncSig};
 
 use super::{CompileLimits, LocalError, LocalExpr, LocalResult, registry};
-use crate::{CallMetadata, FunctionRef, LiteralKind, LocalFunctionId};
+use crate::{
+    CallMetadata, FunctionRef, LiteralKind, LocalFunctionId, types::function::ControlKind,
+};
 
 const INT: &[EvalType] = &[EvalType::Int];
 const INT_INT: &[EvalType] = &[EvalType::Int, EvalType::Int];
@@ -58,6 +60,113 @@ pub fn batch_signature(function: FunctionRef) -> Option<(&'static [EvalType], Ev
     batch_signature_contract(function).map(|(inputs, output, ..)| (inputs, output))
 }
 
+/// Complete call contract, including variable-arity demanded controls.
+/// A singleton control stays in the same compiled frame driver; it does not
+/// grant an alternate evaluator or demand a skipped argument.
+#[derive(Clone, Copy, Debug)]
+pub struct BatchCallSignature {
+    fixed: &'static [EvalType],
+    output: EvalType,
+    arity: usize,
+    control: Option<ControlKind>,
+}
+
+impl BatchCallSignature {
+    pub fn arity(self) -> usize {
+        self.arity
+    }
+    pub fn output_type(self) -> EvalType {
+        self.output
+    }
+    pub fn requires_singleton(self) -> bool {
+        self.control.is_some()
+    }
+    pub fn argument_type(self, index: usize) -> Option<EvalType> {
+        if index >= self.arity {
+            return None;
+        }
+        Some(match self.control {
+            Some(ControlKind::If) if index == 0 => EvalType::Int,
+            Some(ControlKind::CaseWhen) if index % 2 == 0 && index + 1 < self.arity => {
+                EvalType::Int
+            }
+            Some(ControlKind::And | ControlKind::Or) => EvalType::Int,
+            Some(_) => self.output,
+            None => self.fixed[index],
+        })
+    }
+}
+
+pub(super) fn batch_control(function: FunctionRef) -> Option<(ControlKind, EvalType)> {
+    use tipb::ScalarFuncSig::*;
+    let FunctionRef::TiPb(sig) = function else {
+        return None;
+    };
+    let (kind, output) = match sig {
+        LogicalAnd => (ControlKind::And, EvalType::Int),
+        LogicalOr => (ControlKind::Or, EvalType::Int),
+        IfInt => (ControlKind::If, EvalType::Int),
+        IfReal => (ControlKind::If, EvalType::Real),
+        IfDecimal => (ControlKind::If, EvalType::Decimal),
+        IfString => (ControlKind::If, EvalType::Bytes),
+        IfTime => (ControlKind::If, EvalType::DateTime),
+        IfDuration => (ControlKind::If, EvalType::Duration),
+        IfJson => (ControlKind::If, EvalType::Json),
+        IfNullInt => (ControlKind::IfNull, EvalType::Int),
+        IfNullReal => (ControlKind::IfNull, EvalType::Real),
+        IfNullDecimal => (ControlKind::IfNull, EvalType::Decimal),
+        IfNullString => (ControlKind::IfNull, EvalType::Bytes),
+        IfNullTime => (ControlKind::IfNull, EvalType::DateTime),
+        IfNullDuration => (ControlKind::IfNull, EvalType::Duration),
+        IfNullJson => (ControlKind::IfNull, EvalType::Json),
+        CoalesceInt => (ControlKind::Coalesce, EvalType::Int),
+        CoalesceReal => (ControlKind::Coalesce, EvalType::Real),
+        CoalesceDecimal => (ControlKind::Coalesce, EvalType::Decimal),
+        CoalesceString => (ControlKind::Coalesce, EvalType::Bytes),
+        CoalesceTime => (ControlKind::Coalesce, EvalType::DateTime),
+        CoalesceDuration => (ControlKind::Coalesce, EvalType::Duration),
+        CoalesceJson => (ControlKind::Coalesce, EvalType::Json),
+        CaseWhenInt => (ControlKind::CaseWhen, EvalType::Int),
+        CaseWhenReal => (ControlKind::CaseWhen, EvalType::Real),
+        CaseWhenDecimal => (ControlKind::CaseWhen, EvalType::Decimal),
+        CaseWhenString => (ControlKind::CaseWhen, EvalType::Bytes),
+        CaseWhenTime => (ControlKind::CaseWhen, EvalType::DateTime),
+        CaseWhenDuration => (ControlKind::CaseWhen, EvalType::Duration),
+        CaseWhenJson => (ControlKind::CaseWhen, EvalType::Json),
+        _ => return None,
+    };
+    Some((kind, output))
+}
+
+/// The canonical checked signature for an actual call occurrence. The older
+/// fixed signature API intentionally continues to describe eager calls only.
+pub fn batch_signature_for_arity(
+    function: FunctionRef,
+    arity: usize,
+) -> Option<BatchCallSignature> {
+    if let Some((kind, output)) = batch_control(function) {
+        let valid = match kind {
+            ControlKind::If => arity == 3,
+            ControlKind::IfNull | ControlKind::And | ControlKind::Or => arity == 2,
+            ControlKind::Coalesce => arity >= 1,
+            ControlKind::CaseWhen => arity >= 2,
+        };
+        return valid.then_some(BatchCallSignature {
+            fixed: &[],
+            output,
+            arity,
+            control: Some(kind),
+        });
+    }
+    let (fixed, output) = batch_signature(function)?;
+    (fixed.len() == arity).then_some(BatchCallSignature {
+        fixed,
+        output,
+        arity,
+        control: None,
+    })
+}
+
 // The third fact admits unsigned Int operands. Their carrier preserves all
 // bits; the official comparison selector uses each operand's FieldType.
 // The fourth fact declares the result flag policy, including integer
@@ -73,6 +182,9 @@ fn batch_signature_contract(
             false,
             ResultSignedness::Signed,
         ));
+    }
+    if function == FunctionRef::Local(LocalFunctionId::NullIfIntSignedSigned) {
+        return Some((INT_INT, EvalType::Int, false, ResultSignedness::Signed));
     }
     let FunctionRef::TiPb(signature) = function else {
         return None;
@@ -420,7 +532,8 @@ impl OrdinaryProfileSpec {
     }
 }
 
-/// Immutable SQL batch admission facts for closed eager typed trees.
+/// Immutable SQL batch admission facts for closed typed trees with demanded
+/// controls.
 ///
 /// Every call has a batch-only site; all nodes and schema fields satisfy the
 /// strict batch type policy. Full source/schema snapshots are rechecked by the
@@ -472,6 +585,17 @@ impl BatchFacts {
 
     pub fn call_sites(&self) -> &[OrdinaryCallSite] {
         &self.sites
+    }
+
+    pub(super) fn max_batch_size(&self) -> usize {
+        if self.snapshot.nodes.iter().any(|node| {
+            matches!(node.kind,
+            NodeKind::BatchCall { signature, .. } if batch_control(signature).is_some())
+        }) {
+            1
+        } else {
+            crate::types::BATCH_MAX_SIZE
+        }
     }
 
     pub(crate) fn validate(
@@ -779,6 +903,39 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
                         "native batch comparison requires a fixed known collation policy",
                     ));
                 }
+            }
+            if matches!(policy, TypePolicy::SqlNativeBatch) && batch_control(signature).is_some() {
+                let contract = batch_signature_for_arity(signature, args.len())
+                    .ok_or_else(|| invalid("invalid batch control arity"))?;
+                if !matches!(metadata, CallMetadata::None)
+                    || EvalType::try_from(expr.field_type().as_accessor().tp()).ok() != Some(contract.output_type())
+                    || args.iter().enumerate().any(|(index, arg)| {
+                        EvalType::try_from(arg.field_type().as_accessor().tp()).ok() != contract.argument_type(index)
+                    })
+                    // Coercion and mixed unsigned branches are not implicit in
+                    // a control node. Keep this initial closure signed-only.
+                    || expr.field_type().get_flag() & (1 << 5) != 0
+                    || args.iter().any(|arg| arg.field_type().get_flag() & (1 << 5) != 0)
+                {
+                    return Err(invalid(
+                        "batch control requires exact carriers and no unsigned coercion/metadata",
+                    ));
+                }
+                return Ok(NodeKind::BatchCall {
+                    signature,
+                    arity: args.len(),
+                });
+            }
+            if signature == FunctionRef::Local(LocalFunctionId::NullIfIntSignedSigned)
+                && (args.len() != 2
+                    || args
+                        .iter()
+                        .any(|arg| arg.field_type().get_tp() != FieldTypeTp::LongLong as i32)
+                    || args.first().map(LocalExpr::field_type) != Some(expr.field_type()))
+            {
+                return Err(invalid(
+                    "NULLIF requires its exact signed LongLong first argument declaration",
+                ));
             }
             let admitted = match policy {
                 TypePolicy::RowBaseline

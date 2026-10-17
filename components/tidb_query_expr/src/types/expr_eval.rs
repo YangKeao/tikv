@@ -257,7 +257,14 @@ fn scalar_is_null(value: ScalarValueRef<'_>) -> bool {
     match value {
         ScalarValueRef::Int(value) => value.is_none(),
         ScalarValueRef::Bytes(value) => value.is_none(),
-        _ => unreachable!("lineaged carrier was checked"),
+        ScalarValueRef::Real(value) => value.is_none(),
+        ScalarValueRef::Decimal(value) => value.is_none(),
+        ScalarValueRef::DateTime(value) => value.is_none(),
+        ScalarValueRef::Duration(value) => value.is_none(),
+        ScalarValueRef::Json(value) => value.is_none(),
+        ScalarValueRef::VectorFloat32(value) => value.is_none(),
+        ScalarValueRef::Enum(value) => value.is_none(),
+        ScalarValueRef::Set(value) => value.is_none(),
     }
 }
 
@@ -2316,6 +2323,21 @@ impl<'a> ProgramFrame<'a> {
                     RpnExpressionNode::ColumnRef { offset } => {
                         schema.get(*offset).and_then(batch_eval_type).is_some()
                     }
+                    RpnExpressionNode::ShortCircuitFnCall {
+                        func_meta,
+                        args,
+                        field_type,
+                    } => {
+                        self.rows.len() == 1
+                            && crate::local::batch_signature_for_arity(
+                                crate::FunctionRef::TiPb(func_meta.sig),
+                                args.len(),
+                            )
+                            .is_some_and(|signature| {
+                                signature.requires_singleton()
+                                    && Some(signature.output_type()) == batch_eval_type(field_type)
+                            })
+                    }
                     RpnExpressionNode::OrdinaryFnCall { prepared, args } => {
                         execution.check_ordinary(prepared, self.rows.len())?;
                         EvalExecution::batch_signature(prepared.function())
@@ -2453,6 +2475,7 @@ struct ControlFrame<'a> {
     selected: Option<FrameResult<'a>>,
     logical: Option<LogicalAccumulator>,
     pending: Option<Vec<usize>>,
+    batch_selection: bool,
 }
 
 impl<'a> ControlFrame<'a> {
@@ -2495,6 +2518,7 @@ impl<'a> ControlFrame<'a> {
             selected: None,
             logical: kind.is_logical().then(|| LogicalAccumulator::new(kind)),
             pending: None,
+            batch_selection: false,
         })
     }
 
@@ -2536,6 +2560,35 @@ impl<'a> ControlFrame<'a> {
         validate_frame_result(&child.node, count)?;
         if let Some(flow) = self.flow {
             return self.accept_lineaged(child, index, schema, flow);
+        }
+        if self.batch_selection && self.logical.is_none() {
+            self.next = None;
+            let condition = (self.kind == ControlKind::If && index == 0)
+                || (self.kind == ControlKind::CaseWhen
+                    && index % 2 == 0
+                    && index + 1 < self.args.len());
+            if condition {
+                let ScalarValueRef::Int(value) = child.node.get_logical_scalar_ref(0) else {
+                    return Err(LocalError::InvalidSpec(
+                        "batch control predicate must be Int".into(),
+                    ));
+                };
+                let truth = value.is_some_and(|value| *value != 0);
+                self.next = match self.kind {
+                    ControlKind::If => Some(if truth { 1 } else { 2 }),
+                    _ if truth => Some(index + 1),
+                    _ if index + 2 < self.args.len() => Some(index + 2),
+                    _ => None,
+                };
+            } else if scalar_is_null(child.node.get_logical_scalar_ref(0))
+                && matches!(self.kind, ControlKind::IfNull | ControlKind::Coalesce)
+                && index + 1 < self.args.len()
+            {
+                self.next = Some(index + 1);
+            } else {
+                self.selected = Some(child);
+            }
+            return Ok(());
         }
         let child = child.into_unannotated()?;
         if self.logical.is_some() {
@@ -2658,6 +2711,15 @@ impl<'a> ControlFrame<'a> {
     }
 
     fn finish_precharge(&self) -> usize {
+        if self.batch_selection && self.logical.is_none() {
+            return if self.selected.is_some() {
+                0
+            } else {
+                batch_eval_type(self.field_type)
+                    .and_then(|ty| batch_min_storage_bytes(ty, 1))
+                    .unwrap_or(usize::MAX)
+            };
+        }
         match self.flow {
             None => int_storage_bytes(self.rows.len()),
             Some(_) if self.logical.is_some() || self.selected.is_some() => 0,
@@ -2676,6 +2738,36 @@ impl<'a> ControlFrame<'a> {
     }
 
     fn finish(self) -> LocalResult<FrameResult<'a>> {
+        if self.batch_selection && self.logical.is_none() {
+            if let Some(selected) = self.selected {
+                return Ok(selected.with_field_type(self.field_type));
+            }
+            let ty = batch_eval_type(self.field_type).ok_or_else(|| {
+                LocalError::InvalidSpec("batch control output has no carrier".into())
+            })?;
+            let mut value = VectorValue::with_capacity(1, ty);
+            match &mut value {
+                VectorValue::Int(v) => v.push(None),
+                VectorValue::Real(v) => v.push(None),
+                VectorValue::Decimal(v) => v.push(None),
+                VectorValue::Bytes(v) => v.push(None),
+                VectorValue::DateTime(v) => v.push(None),
+                VectorValue::Duration(v) => v.push(None),
+                VectorValue::Json(v) => v.push(None),
+                VectorValue::VectorFloat32(v) => v.push(None),
+                VectorValue::Enum(_) | VectorValue::Set(_) => {
+                    return Err(LocalError::InvalidSpec(
+                        "unsupported control null carrier".into(),
+                    ));
+                }
+            }
+            return Ok(FrameResult::unannotated(RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Generated {
+                    physical_value: value,
+                },
+                field_type: self.field_type,
+            }));
+        }
         if let Some(flow) = self.flow {
             if let Some(logical) = self.logical {
                 return Ok(FrameResult {
@@ -3484,13 +3576,14 @@ fn eval_frames<'a, 'data: 'a>(
                     field_type,
                 } = node
                 {
-                    let control = ControlFrame::new(
+                    let mut control = ControlFrame::new(
                         func_meta.kind,
                         args,
                         field_type,
                         frame.rows.clone(),
                         frame.flow,
                     )?;
+                    control.batch_selection = execution == EvalExecution::SqlBatch;
                     push_frame(
                         &mut frames,
                         EvalFrame::Program(frame),
@@ -5225,6 +5318,7 @@ mod tests {
         // empty-argument control. The moved payload includes unused capacity.
         let mut control = ControlFrame {
             kind: ControlKind::IfNull,
+            batch_selection: false,
             args: &[],
             field_type: &field_type,
             rows: FrameRows::Borrowed(&[0], 1),

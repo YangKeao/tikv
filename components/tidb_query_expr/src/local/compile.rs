@@ -63,14 +63,20 @@ impl LocalProgram {
 }
 
 /// Opaque ownership facade for checked SQL batch evaluation. The
-/// binding entry retains the operand-major execution domain and selects the
-/// official generated kernel metadata.
+/// binding entry uses operand-major pure kernels and the same iterative
+/// demanded-control frames. Graphs with controls expose a one-occurrence
+/// window through max_batch_size; callers must tile selections accordingly.
 #[derive(Debug)]
 pub struct LocalBatchProgram {
     pub(super) inner: LocalProgram,
+    pub(super) max_batch_size: usize,
 }
 
 impl LocalBatchProgram {
+    /// Largest occurrence window admitted by this compiled graph.
+    pub fn max_batch_size(&self) -> usize {
+        self.max_batch_size
+    }
     pub fn return_type(&self) -> &FieldType {
         self.inner.return_type()
     }
@@ -653,15 +659,16 @@ pub fn compile_control_with_lineage(
     })
 }
 
-/// Compiles the closed signed LongLong integer-call SQL batch domain.
+/// Compiles the checked typed SQL batch domain, including demanded controls.
 /// Every source/schema declaration and batch-only call site is revalidated with
 /// the current limits before the shared compiler clones descriptors or prepares
 /// a call. The opaque binding entry evaluates each complete operand program in
-/// source order and invokes the prepared kernel per lane.
+/// source order for eager kernels. Controls request only their selected child
+/// programs and constrain the compiled graph to singleton occurrence windows.
 ///
 /// SQL origin and fixed native source kinds remain producer assertions, not
 /// authenticated facts. This does not admit PB, AST-value consumers,
-/// parameters, controls, hosts, casts or mixed control lineage, or widen the
+/// parameters, hosts, casts or mixed control lineage, or widen the
 /// row entrypoints. CompileLimits bounds nodes/depth; source/type metadata
 /// bytes remain a caller responsibility. The evaluator separately bounds
 /// selection occurrences.
@@ -674,6 +681,7 @@ pub fn compile_batch(
     facts.validate(spec, schema, cx.limits)?;
     Ok(LocalBatchProgram {
         inner: compile(spec, schema, cx, CompileMode::Batch(facts))?,
+        max_batch_size: facts.max_batch_size(),
     })
 }
 
@@ -1022,6 +1030,16 @@ fn compile(
                             )?;
                         }
                         let retained = prepared.retained_args().to_vec();
+                        // BatchFacts has validated all calls and source sites,
+                        // including controls. Controls retain structured children
+                        // instead of becoming an eager OrdinaryFnCall.
+                        let site = if matches!(mode, CompileMode::Batch(_))
+                            && super::profile::batch_control(*function).is_some()
+                        {
+                            None
+                        } else {
+                            site
+                        };
                         if let Some(site) = site {
                             let prepared = prepared.into_ordinary(site).map_err(invalid)?;
                             let children: Vec<_> = retained

@@ -23,6 +23,11 @@
 //! collation-policy argument. It composes the existing ready-value kernel in
 //! the same batch graph; other private operations and all row entries retain
 //! their original admission. Policy tags are not supplied by row bindings.
+//! Checked SQL batch controls (IF/IFNULL/COALESCE/CASE and AND/OR) run in
+//! the same iterative frame driver with singleton occurrence windows. The
+//! caller reads LocalBatchProgram::max_batch_size and tiles its selection;
+//! oversized invocations fail before any input read. Branch result payloads
+//! retain their native carriers and receive the control's declared type.
 //! `compile_batch` is another closed entry: explicitly admitted eager
 //! Int/Real/Decimal/Bytes calls under a whole-source SQL batch assertion, with
 //! complete argument-program demand in source order before per-lane parent
@@ -198,7 +203,7 @@ pub use self::{
     },
     profile::{
         BatchFacts, OrdinaryCallSite, OrdinaryProfile, OrdinaryProfileSpec, OrdinarySourceId,
-        batch_signature,
+        batch_signature, batch_signature_for_arity, BatchCallSignature,
     },
     runtime::{ExecutionLimits, InputRow, LocalRuntimeServices},
     spec::{CompileLimits, LocalCompileContext, LocalError, LocalExpr, LocalResult},

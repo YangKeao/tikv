@@ -1646,13 +1646,7 @@ fn batch_rejects_unregistered_signatures_bad_arity_metadata_and_literals() {
         Sig::PlusIntSignedSigned,
         Sig::PlusReal,
         Sig::CastIntAsInt,
-        Sig::LogicalAnd,
-        Sig::LogicalOr,
-        Sig::IfInt,
         Sig::IfString,
-        Sig::IfNullInt,
-        Sig::CaseWhenInt,
-        Sig::CoalesceInt,
     ] {
         let args = match sig {
             Sig::IfInt | Sig::IfString | Sig::CaseWhenInt => {
@@ -2925,4 +2919,166 @@ fn batch_native_strcmp_composes_with_a_fixed_collation_policy_only() {
         *args = args[..2].to_vec().into_boxed_slice();
     }
     batch_rejected(&wrong, &[]);
+}
+
+#[test]
+fn batch_controls_demand_only_the_selected_inputs_in_the_shared_frame_driver() {
+    let overflow = plus(constant(Some(i64::MAX)), constant(Some(1)));
+    for (spec, expected, slots) in [
+        (
+            call(Sig::IfInt, vec![input(0), input(1), overflow.clone()]),
+            Some(7),
+            vec![0, 1],
+        ),
+        (
+            call(Sig::IfInt, vec![constant(None), overflow.clone(), input(1)]),
+            Some(7),
+            vec![1],
+        ),
+        (
+            call(Sig::IfNullInt, vec![input(1), overflow.clone()]),
+            Some(7),
+            vec![1],
+        ),
+        (
+            call(
+                Sig::CoalesceInt,
+                vec![constant(None), input(1), overflow.clone()],
+            ),
+            Some(7),
+            vec![1],
+        ),
+        (
+            call(
+                Sig::CaseWhenInt,
+                vec![
+                    constant(Some(0)),
+                    overflow.clone(),
+                    input(0),
+                    input(1),
+                    overflow.clone(),
+                ],
+            ),
+            Some(7),
+            vec![0, 1],
+        ),
+        (
+            call(Sig::CaseWhenInt, vec![constant(None), overflow.clone()]),
+            None,
+            vec![],
+        ),
+        (
+            call(Sig::LogicalAnd, vec![constant(Some(0)), overflow.clone()]),
+            Some(0),
+            vec![],
+        ),
+        (
+            call(Sig::LogicalOr, vec![constant(Some(1)), overflow.clone()]),
+            Some(1),
+            vec![],
+        ),
+    ] {
+        let mut program = compile_batch_program(&spec, &[ft(), ft()]);
+        assert_eq!(program.max_batch_size(), 1);
+        let mut bindings = BatchBindings::new(vec![vec![Some(1); 4], vec![Some(7); 4]]);
+        assert_eq!(
+            run_batch(&mut program, &mut bindings, 4, &[3])
+                .unwrap()
+                .to_int_vec(),
+            [expected]
+        );
+        assert_eq!(
+            bindings
+                .inner
+                .reads
+                .iter()
+                .map(|read| read.2)
+                .collect::<Vec<_>>(),
+            slots
+        );
+        let reads = bindings.inner.reads.clone();
+        assert!(run_batch(&mut program, &mut bindings, 4, &[3, 3]).is_err());
+        assert_eq!(bindings.inner.reads, reads);
+    }
+    let demanded = call(
+        Sig::IfInt,
+        vec![constant(Some(1)), overflow, constant(Some(7))],
+    );
+    let mut bindings = BatchBindings::new(vec![]);
+    assert!(matches!(
+        run_batch(
+            &mut compile_batch_program(&demanded, &[]),
+            &mut bindings,
+            1,
+            &[0]
+        ),
+        Err(LocalError::Evaluation(_))
+    ));
+    // Dead branches are still structurally checked at preparation time.
+    batch_rejected(
+        &call(
+            Sig::IfInt,
+            vec![
+                constant(Some(1)),
+                constant(Some(7)),
+                call(Sig::CastIntAsInt, vec![constant(Some(1))]),
+            ],
+        ),
+        &[],
+    );
+}
+
+#[test]
+fn batch_control_selected_payloads_keep_their_carrier_and_generated_null() {
+    let text = |value: Option<&[u8]>| LocalExpr::Constant {
+        value: ScalarValue::Bytes(value.map(<[u8]>::to_vec)),
+        field_type: FieldTypeTp::VarString.into(),
+        literal_kind: LiteralKind::Typed,
+    };
+    for (sig, args, expected) in [
+        (
+            Sig::IfString,
+            vec![constant(Some(1)), text(Some(b"A\0B")), text(Some(b"wrong"))],
+            Some(b"A\0B".to_vec()),
+        ),
+        (
+            Sig::IfNullString,
+            vec![text(None), text(Some(b"chosen"))],
+            Some(b"chosen".to_vec()),
+        ),
+        (
+            Sig::CoalesceString,
+            vec![
+                text(None),
+                text(None),
+                text(Some(b"chosen")),
+                text(Some(b"wrong")),
+            ],
+            Some(b"chosen".to_vec()),
+        ),
+        (
+            Sig::CaseWhenString,
+            vec![constant(None), text(Some(b"wrong"))],
+            None,
+        ),
+    ] {
+        let spec = LocalExpr::Call {
+            function: FunctionRef::TiPb(sig),
+            args: args.into_boxed_slice(),
+            return_type: FieldTypeTp::VarString.into(),
+            metadata: CallMetadata::None,
+        };
+        let mut bindings = BatchBindings::new(vec![]);
+        assert_eq!(
+            run_batch(
+                &mut compile_batch_program(&spec, &[]),
+                &mut bindings,
+                1,
+                &[0]
+            )
+            .unwrap()
+            .to_bytes_vec(),
+            [expected]
+        );
+    }
 }

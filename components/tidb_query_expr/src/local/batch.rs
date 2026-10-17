@@ -940,9 +940,9 @@ impl LocalBatchProgram {
         // Bound selected occurrences, not the caller's physical row universe.
         // Route validation above applies even when no values will be demanded.
         let rows = selection.len();
-        if rows > BATCH_MAX_SIZE {
+        if rows > self.max_batch_size {
             return Err(LocalError::ResourceLimit(
-                "batch selection exceeds 1024 occurrences".into(),
+                "batch selection exceeds compiled occurrence window".into(),
             ));
         }
         let mut budget = EvalBudget::exact(limits)?;
