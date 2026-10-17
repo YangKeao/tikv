@@ -439,8 +439,9 @@ fn ord_impl(bytes: BytesRef) -> Int {
 #[inline]
 pub fn concat(args: &[BytesRef], writer: BytesWriter) -> Result<BytesGuard> {
     let mut writer = writer.begin();
-    concat_join(args.iter().copied().map(Ok), None, |part| {
+    concat_join::<tidb_query_common::Error>(args.iter().copied().map(Ok), None, |part| {
         writer.partial_write(part);
+        Ok(())
     })?;
     Ok(writer.finish())
 }
@@ -450,11 +451,12 @@ pub fn concat(args: &[BytesRef], writer: BytesWriter) -> Result<BytesGuard> {
 pub fn concat_ws(args: &[Option<BytesRef>]) -> Result<Option<Bytes>> {
     if let Some(sep) = args[0] {
         let mut output = Vec::new();
-        concat_join(
+        concat_join::<tidb_query_common::Error>(
             args[1..].iter().filter_map(|arg| *arg).map(Ok),
             Some(sep),
             |part| {
                 output.extend_from_slice(part);
+                Ok(())
             },
         )?;
         Ok(Some(output))
@@ -463,20 +465,20 @@ pub fn concat_ws(args: &[Option<BytesRef>]) -> Result<Option<Bytes>> {
     }
 }
 
-fn concat_join<'a>(
-    parts: impl Iterator<Item = Result<&'a [u8]>>,
+fn concat_join<'a, E>(
+    parts: impl Iterator<Item = std::result::Result<&'a [u8], E>>,
     separator: Option<&[u8]>,
-    mut write: impl FnMut(&[u8]),
-) -> Result<()> {
+    mut write: impl FnMut(&[u8]) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
     let mut first = true;
     for part in parts {
         let part = part?;
         if !first {
             if let Some(separator) = separator {
-                write(separator);
+                write(separator)?;
             }
         }
-        write(part);
+        write(part)?;
         first = false;
     }
     Ok(())
@@ -495,6 +497,115 @@ pub enum ConcatTerminal {
     PacketExceeded { limit: u64 },
 }
 
+/// A policy request, not a context callback or an expression evaluation hook.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConcatDemandAction {
+    Continue,
+    ReadPacketLimit,
+}
+
+/// Native CONCAT/CONCAT_WS demand policy. The owner supplies the packet limit
+/// at each requested point and owns warnings/errors; this state retains no
+/// host.
+#[derive(Clone, Debug)]
+pub struct ConcatDemand {
+    kind: ConcatKind,
+    arity: usize,
+    observed: usize,
+    separator_len: u64,
+    concat_len: usize,
+    ws_budget: u64,
+    pending_limit: Option<u64>,
+    terminal: Option<ConcatTerminal>,
+}
+impl ConcatDemand {
+    pub fn new(kind: ConcatKind, arity: usize) -> LocalResult<Self> {
+        let min = match kind {
+            ConcatKind::Concat => 1,
+            ConcatKind::ConcatWs => 2,
+        };
+        if arity < min {
+            return Err(invalid_concat("native CONCAT demand has invalid SQL arity"));
+        }
+        Ok(Self {
+            kind,
+            arity,
+            observed: 0,
+            separator_len: 0,
+            concat_len: 0,
+            ws_budget: 0,
+            pending_limit: None,
+            terminal: None,
+        })
+    }
+    pub fn terminal(&self) -> Option<ConcatTerminal> {
+        self.terminal
+    }
+    pub fn next_argument(&self) -> LocalResult<Option<usize>> {
+        if self.pending_limit.is_some() {
+            return Err(invalid_concat("CONCAT packet observation is still pending"));
+        }
+        Ok((self.terminal.is_none() && self.observed < self.arity).then_some(self.observed))
+    }
+    pub fn observe(&mut self, length: Option<usize>) -> LocalResult<ConcatDemandAction> {
+        let index = self
+            .next_argument()?
+            .ok_or_else(|| invalid_concat("CONCAT demand is already complete"))?;
+        self.observed += 1;
+        let requested = match self.kind {
+            ConcatKind::Concat => {
+                let Some(length) = length else {
+                    self.terminal = Some(ConcatTerminal::InputNull);
+                    return Ok(ConcatDemandAction::Continue);
+                };
+                self.concat_len = self.concat_len.saturating_add(length);
+                self.concat_len as u64
+            }
+            ConcatKind::ConcatWs if index == 0 => {
+                match length {
+                    Some(length) => self.separator_len = length as u64,
+                    None => self.terminal = Some(ConcatTerminal::InputNull),
+                }
+                return Ok(ConcatDemandAction::Continue);
+            }
+            ConcatKind::ConcatWs => {
+                let Some(length) = length else {
+                    return Ok(ConcatDemandAction::Continue);
+                };
+                self.ws_budget = self.ws_budget.saturating_add(length as u64);
+                // Original data index includes NULL slots, as in the native builder.
+                if index > 1 {
+                    self.ws_budget = self.ws_budget.saturating_add(self.separator_len);
+                }
+                self.ws_budget
+            }
+        };
+        self.pending_limit = Some(requested);
+        Ok(ConcatDemandAction::ReadPacketLimit)
+    }
+    /// Returns true only for the actual observed overflow point.
+    pub fn accept_packet_limit(&mut self, limit: u64) -> LocalResult<bool> {
+        let requested = self
+            .pending_limit
+            .take()
+            .ok_or_else(|| invalid_concat("CONCAT did not request a packet observation"))?;
+        let exceeded = requested > limit;
+        if exceeded {
+            self.terminal = Some(ConcatTerminal::PacketExceeded { limit });
+        }
+        Ok(exceeded)
+    }
+    pub fn finish_terminal(&self) -> LocalResult<ConcatTerminal> {
+        if self.pending_limit.is_some() || (self.terminal.is_none() && self.observed != self.arity)
+        {
+            return Err(invalid_concat(
+                "CONCAT demand has not reached a terminal prefix",
+            ));
+        }
+        Ok(self.terminal.unwrap_or(ConcatTerminal::Complete))
+    }
+}
+
 /// An owned, checked encoding of only the actually demanded SQL prefix.
 #[derive(Clone, Debug)]
 pub struct PreparedConcatArgs {
@@ -503,6 +614,56 @@ pub struct PreparedConcatArgs {
 }
 
 impl PreparedConcatArgs {
+    /// Execute the same core join used by the generated RPN wrapper, without
+    /// starting another expression program. The caller bounds host/task heaps;
+    /// this cap bounds the actual result allocation and length.
+    pub fn execute(self, max_output_bytes: usize) -> LocalResult<Option<Vec<u8>>> {
+        let decoded = decode_concat_args(&self.encoded, self.kind)?;
+        if decoded.terminal != ConcatTerminal::Complete {
+            return Ok(None);
+        }
+        let (args, separator) = concat_inputs(decoded, self.kind)?;
+        let mut length = 0usize;
+        concat_join::<LocalError>(
+            args.clone().filter_map(|value| value.transpose()),
+            separator,
+            |part| {
+                length = length.checked_add(part.len()).ok_or_else(|| {
+                    LocalError::ResourceLimit("CONCAT output length overflow".into())
+                })?;
+                if length > max_output_bytes {
+                    return Err(LocalError::ResourceLimit(
+                        "CONCAT output byte cap exceeded".into(),
+                    ));
+                }
+                Ok(())
+            },
+        )?;
+        let mut output = Vec::new();
+        output.try_reserve_exact(length).map_err(|error| {
+            LocalError::ResourceLimit(format!("CONCAT output allocation: {error}"))
+        })?;
+        if output.capacity() > max_output_bytes {
+            return Err(LocalError::ResourceLimit(
+                "CONCAT retained output cap exceeded".into(),
+            ));
+        }
+        concat_join::<LocalError>(
+            args.filter_map(|value| value.transpose()),
+            separator,
+            |part| {
+                output.extend_from_slice(part);
+                Ok(())
+            },
+        )?;
+        Ok(Some(output))
+    }
+
+    /// Retained transport arena for a caller-owned host allocation ledger.
+    pub fn retained_encoded_bytes(&self) -> usize {
+        self.encoded.capacity()
+    }
+
     pub(crate) fn kind(&self) -> ConcatKind {
         self.kind
     }
@@ -725,11 +886,27 @@ fn reserve_concat_encoding(
             "CONCAT encoded byte cap exceeded".into(),
         ));
     }
-    // Amortized growth keeps a many-argument prefix linear, rather than
-    // requesting an exact reallocation for every record.
-    encoded.try_reserve(additional).map_err(|error| {
-        LocalError::ResourceLimit(format!("CONCAT encoding allocation: {}", error))
-    })
+    // Grow geometrically within the declared cap; reserve() alone may retain
+    // capacity past that cap even when the logical length fits.
+    if length > encoded.capacity() {
+        let target = encoded
+            .capacity()
+            .saturating_mul(2)
+            .max(8)
+            .max(length)
+            .min(cap);
+        encoded
+            .try_reserve_exact(target - encoded.len())
+            .map_err(|error| {
+                LocalError::ResourceLimit(format!("CONCAT encoding allocation: {error}"))
+            })?;
+        if encoded.capacity() > cap {
+            return Err(LocalError::ResourceLimit(
+                "CONCAT retained encoding cap exceeded".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -885,6 +1062,24 @@ fn concat_ws_native(encoded: BytesRef, writer: BytesWriter) -> Result<BytesGuard
     concat_native_impl(encoded, ConcatKind::ConcatWs, writer)
 }
 
+fn concat_inputs(
+    decoded: DecodedConcat<'_>,
+    kind: ConcatKind,
+) -> LocalResult<(ConcatArgIter<'_>, Option<&[u8]>)> {
+    let mut args = decoded.args;
+    let separator = if kind == ConcatKind::ConcatWs {
+        Some(
+            args.next()
+                .transpose()?
+                .flatten()
+                .ok_or_else(|| invalid_concat("missing non-NULL CONCAT_WS separator"))?,
+        )
+    } else {
+        None
+    };
+    Ok((args, separator))
+}
+
 fn concat_native_impl(
     encoded: BytesRef,
     kind: ConcatKind,
@@ -894,23 +1089,15 @@ fn concat_native_impl(
     if decoded.terminal != ConcatTerminal::Complete {
         return Ok(writer.write(None));
     }
-    let mut args = decoded.args.map(|value| value.map_err(concat_eval_error));
-    let separator = if kind == ConcatKind::ConcatWs {
-        Some(
-            args.next()
-                .transpose()?
-                .flatten()
-                .ok_or_else(|| other_err!("Missing non-NULL prepared CONCAT_WS separator"))?,
-        )
-    } else {
-        None
-    };
+    let (args, separator) = concat_inputs(decoded, kind).map_err(concat_eval_error)?;
     let mut writer = writer.begin();
-    concat_join(
-        args.filter_map(|value| value.transpose()),
+    concat_join::<tidb_query_common::Error>(
+        args.filter_map(|value| value.transpose())
+            .map(|value| value.map_err(concat_eval_error)),
         separator,
         |part| {
             writer.partial_write(part);
+            Ok(())
         },
     )?;
     Ok(writer.finish())
@@ -2144,7 +2331,10 @@ pub fn make_set(raw_args: &[ScalarValueRef]) -> Result<Option<Bytes>> {
             None
         }
     });
-    concat_join(parts, Some(b","), |part| output.extend_from_slice(part))?;
+    concat_join::<tidb_query_common::Error>(parts, Some(b","), |part| {
+        output.extend_from_slice(part);
+        Ok(())
+    })?;
     Ok(Some(output))
 }
 
@@ -2249,7 +2439,10 @@ fn make_set_native(encoded: BytesRef) -> Result<Option<Bytes>> {
         Ok(SetArg::Null | SetArg::Undemanded) => None,
         Err(error) => Some(Err(set_args_eval_error(error))),
     });
-    concat_join(parts, Some(b","), |part| output.extend_from_slice(part))?;
+    concat_join::<tidb_query_common::Error>(parts, Some(b","), |part| {
+        output.extend_from_slice(part);
+        Ok(())
+    })?;
     Ok(Some(output))
 }
 
@@ -2437,8 +2630,9 @@ fn export_set_impl(
             off
         })
     });
-    concat_join(parts, Some(separator), |part| {
-        output.extend_from_slice(part)
+    concat_join::<tidb_query_common::Error>(parts, Some(separator), |part| {
+        output.extend_from_slice(part);
+        Ok(())
     })?;
     Ok(output)
 }
@@ -7595,5 +7789,80 @@ mod tests {
                 .unwrap();
             assert_eq!(output, exp);
         }
+    }
+}
+
+#[cfg(test)]
+mod concat_sql_host_tests {
+    use super::*;
+    #[test]
+    fn demanded_concat_prefixes_keep_packet_decisions_and_direct_result_caps() {
+        let mut demand = ConcatDemand::new(ConcatKind::Concat, 3).unwrap();
+        assert_eq!(
+            demand.observe(Some(3)).unwrap(),
+            ConcatDemandAction::ReadPacketLimit
+        );
+        assert!(demand.next_argument().is_err());
+        assert!(demand.accept_packet_limit(2).unwrap());
+        assert_eq!(demand.next_argument().unwrap(), None);
+        assert_eq!(
+            demand.finish_terminal().unwrap(),
+            ConcatTerminal::PacketExceeded { limit: 2 }
+        );
+        let prepared = prepare_concat_args(
+            ConcatKind::Concat,
+            3,
+            vec![Some(b"abc".to_vec())],
+            demand.finish_terminal().unwrap(),
+            1024,
+        )
+        .unwrap();
+        assert_eq!(prepared.execute(0).unwrap(), None);
+        let mut demand = ConcatDemand::new(ConcatKind::ConcatWs, 4).unwrap();
+        assert_eq!(
+            demand.observe(Some(1)).unwrap(),
+            ConcatDemandAction::Continue
+        );
+        assert_eq!(demand.observe(None).unwrap(), ConcatDemandAction::Continue);
+        assert_eq!(
+            demand.observe(Some(1)).unwrap(),
+            ConcatDemandAction::ReadPacketLimit
+        );
+        // Native source index includes the NULL, so requested length is two.
+        assert!(demand.accept_packet_limit(1).unwrap());
+        let prefix = vec![Some(b",".to_vec()), None, Some(b"x".to_vec())];
+        assert_eq!(
+            prepare_concat_args(
+                ConcatKind::ConcatWs,
+                4,
+                prefix,
+                demand.finish_terminal().unwrap(),
+                1024
+            )
+            .unwrap()
+            .execute(0)
+            .unwrap(),
+            None
+        );
+        let prefix = vec![
+            Some(b",".to_vec()),
+            None,
+            Some(b"a".to_vec()),
+            Some(b"b".to_vec()),
+        ];
+        let prepared = prepare_concat_args(
+            ConcatKind::ConcatWs,
+            4,
+            prefix,
+            ConcatTerminal::Complete,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(prepared.clone().execute(3).unwrap(), Some(b"a,b".to_vec()));
+        assert!(matches!(
+            prepared.execute(2),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert!(ConcatDemand::new(ConcatKind::ConcatWs, 1).is_err());
     }
 }

@@ -668,10 +668,12 @@ pub fn compile_control_with_lineage(
 ///
 /// SQL origin and fixed native source kinds remain producer assertions, not
 /// authenticated facts. This does not admit PB, AST-value consumers,
-/// parameters, hosts, casts or mixed control lineage, or widen the
-/// row entrypoints. CompileLimits bounds nodes/depth; source/type metadata
-/// bytes remain a caller responsibility. The evaluator separately bounds
-/// selection occurrences.
+/// parameters, legacy row hosts, casts or mixed control lineage, or widen the
+/// row entrypoints. SQL context hosts require the explicit catalog retained by
+/// BatchFacts::sql_native_batch_with_hosts; their arguments use the same frame
+/// scheduler and singleton occurrence windows. CompileLimits bounds
+/// nodes/depth; source/type metadata bytes remain a caller responsibility. The
+/// evaluator separately bounds selection occurrences.
 pub fn compile_batch(
     spec: &LocalExpr,
     schema: &[FieldType],
@@ -888,10 +890,19 @@ fn compile(
                         args,
                         return_type,
                     } => {
-                        let CompileMode::Legacy(Some(hosts)) = mode else {
-                            return Err(LocalError::InvalidSpec(
-                                "host call requires an explicit registered catalog".into(),
-                            ));
+                        let hosts = match mode {
+                            CompileMode::Legacy(Some(hosts)) if !hosts.is_sql_batch() => hosts,
+                            CompileMode::Batch(facts) => facts.hosts().ok_or_else(|| {
+                                LocalError::InvalidSpec(
+                                    "batch host call requires its checked SQL catalog".into(),
+                                )
+                            })?,
+                            _ => {
+                                return Err(LocalError::InvalidSpec(
+                                    "host call requires its explicit registered domain/catalog"
+                                        .into(),
+                                ));
+                            }
                         };
                         let arg_types = args
                             .iter()

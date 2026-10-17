@@ -28,6 +28,11 @@
 //! caller reads LocalBatchProgram::max_batch_size and tiles its selection;
 //! oversized invocations fail before any input read. Branch result payloads
 //! retain their native carriers and receive the control's declared type.
+//! SQL batch context hosts require a separate catalog of closed operations
+//! (currently CONCAT/CONCAT_WS), full source sites and exact descriptors.
+//! Their staged value-only protocol uses the same HostFrame and task cleanup;
+//! legacy row catalogs do not grant this capability. Providers meter opaque
+//! task heaps separately; frame caches/results remain in the exact ledger.
 //! `compile_batch` is another closed entry: explicitly admitted eager
 //! Int/Real/Decimal/Bytes calls under a whole-source SQL batch assertion, with
 //! complete argument-program demand in source order before per-lane parent
@@ -195,7 +200,7 @@ pub use self::{
     host::{
         ArgMode, HostArgReply, HostArgRequest, HostCatalog, HostCatalogKey, HostInvocation,
         HostSignature, HostSlot, HostStart, HostStep, HostTaskId, LocalHostServices,
-        PreparedHostCall,
+        PreparedHostCall, SqlBatchHostOperation,
     },
     lineage::{
         ControlLineageFacts, ControlProducerFact, ControlProducerRole, LineageCarrier,
@@ -236,13 +241,13 @@ pub use crate::{
         native_go_trig::{go_atan, go_atan2, go_cos, go_sin, go_tan, trig_reduce},
     },
     impl_string::{
-        ConcatKind, ConcatTerminal, FieldIntValue, FieldTerminal, PreparedCharArgs,
-        PreparedConcatArgs, PreparedExportSetArgs, PreparedFieldArgs, PreparedFindInSetKeys,
-        PreparedMakeSetArgs, ReadyFieldIntArg, elt_selected_arg, field_bytes_equal,
-        field_int_equal, field_real_equal, legacy_substring_needs_len, make_set_selected,
-        prepare_char_args, prepare_concat_args, prepare_export_set_args, prepare_field_bytes_args,
-        prepare_field_int_args, prepare_field_real_args, prepare_find_in_set_keys,
-        prepare_make_set_args,
+        ConcatDemand, ConcatDemandAction, ConcatKind, ConcatTerminal, FieldIntValue, FieldTerminal,
+        PreparedCharArgs, PreparedConcatArgs, PreparedExportSetArgs, PreparedFieldArgs,
+        PreparedFindInSetKeys, PreparedMakeSetArgs, ReadyFieldIntArg, elt_selected_arg,
+        field_bytes_equal, field_int_equal, field_real_equal, legacy_substring_needs_len,
+        make_set_selected, prepare_char_args, prepare_concat_args, prepare_export_set_args,
+        prepare_field_bytes_args, prepare_field_int_args, prepare_field_real_args,
+        prepare_find_in_set_keys, prepare_make_set_args,
     },
     types::function::PreparedOrdinaryCall,
 };

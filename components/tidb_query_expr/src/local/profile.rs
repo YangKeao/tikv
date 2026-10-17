@@ -13,7 +13,10 @@ use tidb_query_datatype::{
 };
 use tipb::{FieldType, ScalarFuncSig};
 
-use super::{CompileLimits, LocalError, LocalExpr, LocalResult, registry};
+use super::{
+    CompileLimits, HostCatalog, HostSlot, LocalError, LocalExpr, LocalResult,
+    SqlBatchHostOperation, registry,
+};
 use crate::{
     CallMetadata, FunctionRef, LiteralKind, LocalFunctionId, types::function::ControlKind,
 };
@@ -69,9 +72,21 @@ pub struct BatchCallSignature {
     output: EvalType,
     arity: usize,
     control: Option<ControlKind>,
+    host: Option<SqlBatchHostOperation>,
 }
 
 impl BatchCallSignature {
+    /// Value-only signature of a closed context operation, not a native
+    /// callback.
+    pub fn for_host(operation: SqlBatchHostOperation, arity: usize) -> Option<Self> {
+        operation.accepts_arity(arity).then_some(Self {
+            fixed: &[],
+            output: EvalType::Bytes,
+            arity,
+            control: None,
+            host: Some(operation),
+        })
+    }
     pub fn arity(self) -> usize {
         self.arity
     }
@@ -79,7 +94,7 @@ impl BatchCallSignature {
         self.output
     }
     pub fn requires_singleton(self) -> bool {
-        self.control.is_some()
+        self.control.is_some() || self.host.is_some()
     }
     pub fn argument_type(self, index: usize) -> Option<EvalType> {
         if index >= self.arity {
@@ -92,6 +107,7 @@ impl BatchCallSignature {
             }
             Some(ControlKind::And | ControlKind::Or) => EvalType::Int,
             Some(_) => self.output,
+            None if self.host.is_some() => EvalType::Bytes,
             None => self.fixed[index],
         })
     }
@@ -156,6 +172,7 @@ pub fn batch_signature_for_arity(
             output,
             arity,
             control: Some(kind),
+            host: None,
         });
     }
     let (fixed, output) = batch_signature(function)?;
@@ -164,6 +181,7 @@ pub fn batch_signature_for_arity(
         output,
         arity,
         control: None,
+        host: None,
     })
 }
 
@@ -458,6 +476,11 @@ enum NodeKind {
         signature: FunctionRef,
         arity: usize,
     },
+    BatchHost {
+        slot: HostSlot,
+        operation: SqlBatchHostOperation,
+        arity: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -554,6 +577,7 @@ impl OrdinaryProfileSpec {
 pub struct BatchFacts {
     snapshot: ClosedSourceSnapshot,
     sites: Box<[OrdinaryCallSite]>,
+    hosts: Option<HostCatalog>,
 }
 
 impl BatchFacts {
@@ -562,6 +586,32 @@ impl BatchFacts {
         schema: &[FieldType],
         sites: Vec<OrdinaryCallSite>,
         limits: CompileLimits,
+    ) -> LocalResult<Self> {
+        Self::capture(spec, schema, sites, limits, None)
+    }
+
+    /// Explicit SQL host catalog; every host site and descriptor is rechecked.
+    pub fn sql_native_batch_with_hosts(
+        spec: &LocalExpr,
+        schema: &[FieldType],
+        sites: Vec<OrdinaryCallSite>,
+        limits: CompileLimits,
+        hosts: &HostCatalog,
+    ) -> LocalResult<Self> {
+        if !hosts.is_sql_batch() {
+            return Err(invalid(
+                "row host catalog cannot authorize SQL batch execution",
+            ));
+        }
+        Self::capture(spec, schema, sites, limits, Some(hosts))
+    }
+
+    fn capture(
+        spec: &LocalExpr,
+        schema: &[FieldType],
+        sites: Vec<OrdinaryCallSite>,
+        limits: CompileLimits,
+        hosts: Option<&HostCatalog>,
     ) -> LocalResult<Self> {
         if sites.len() > limits.max_nodes {
             return Err(resource("batch call-site count exceeds node budget"));
@@ -578,12 +628,13 @@ impl BatchFacts {
             spec,
             schema,
             limits,
-            TypePolicy::SqlNativeBatch,
+            TypePolicy::SqlNativeBatch(hosts),
             |nodes| check_batch_sites(nodes, &sites),
         )?;
         Ok(Self {
             snapshot,
             sites: sites.into_boxed_slice(),
+            hosts: hosts.cloned(),
         })
     }
 
@@ -599,11 +650,16 @@ impl BatchFacts {
         if self.snapshot.nodes.iter().any(|node| {
             matches!(node.kind,
             NodeKind::BatchCall { signature, .. } if batch_control(signature).is_some())
+                || matches!(node.kind, NodeKind::BatchHost { .. })
         }) {
             1
         } else {
             crate::types::BATCH_MAX_SIZE
         }
+    }
+
+    pub(super) fn hosts(&self) -> Option<&HostCatalog> {
+        self.hosts.as_ref()
     }
 
     pub(crate) fn validate(
@@ -612,8 +668,12 @@ impl BatchFacts {
         schema: &[FieldType],
         limits: CompileLimits,
     ) -> LocalResult<()> {
-        self.snapshot
-            .validate(spec, schema, limits, TypePolicy::SqlNativeBatch)
+        self.snapshot.validate(
+            spec,
+            schema,
+            limits,
+            TypePolicy::SqlNativeBatch(self.hosts.as_ref()),
+        )
     }
 
     pub(crate) fn site(&self, ordinal: usize) -> Option<&OrdinaryCallSite> {
@@ -624,9 +684,9 @@ impl BatchFacts {
     }
 }
 
-/// The shared representation is only an exact, flat source snapshot. Its fixed
-/// PlusInt arity makes preorder sufficient to preserve shape. Clone/Debug/Drop
-/// never recurse through a LocalExpr; neither public facade shares admission.
+/// The shared representation is an exact flat source snapshot; preorder plus
+/// snapshotted arities preserves shape. Clone/Debug/Drop never recurse through
+/// a LocalExpr. Entry factories retain their separate admission domains.
 #[derive(Clone, Debug)]
 struct ClosedSourceSnapshot {
     nodes: Box<[NodeSnapshot]>,
@@ -638,10 +698,10 @@ impl ClosedSourceSnapshot {
         spec: &LocalExpr,
         schema: &[FieldType],
         limits: CompileLimits,
-        policy: TypePolicy,
+        policy: TypePolicy<'_>,
         check_sites: impl FnOnce(&[NodeSnapshot]) -> LocalResult<()>,
     ) -> LocalResult<Self> {
-        if matches!(policy, TypePolicy::SqlNativeBatch) {
+        if matches!(policy, TypePolicy::SqlNativeBatch(_)) {
             // Reject an invalid descendant/schema or exceeded budget before
             // copying any descriptors. Row construction keeps its old policy.
             let mut preflight = Walk::new(spec, schema, limits, policy)?;
@@ -679,7 +739,7 @@ impl ClosedSourceSnapshot {
         spec: &LocalExpr,
         schema: &[FieldType],
         limits: CompileLimits,
-        policy: TypePolicy,
+        policy: TypePolicy<'_>,
     ) -> LocalResult<()> {
         if self.schema.as_ref() != schema {
             return Err(invalid(
@@ -713,7 +773,10 @@ fn check_sites(
 ) -> LocalResult<()> {
     let mut next = 0;
     for (ordinal, node) in nodes.iter().enumerate() {
-        if !matches!(node.kind, NodeKind::BatchCall { .. }) {
+        if !matches!(
+            node.kind,
+            NodeKind::BatchCall { .. } | NodeKind::BatchHost { .. }
+        ) {
             continue;
         }
         let site = sites
@@ -751,7 +814,10 @@ fn check_sites(
 fn check_batch_sites(nodes: &[NodeSnapshot], sites: &[OrdinaryCallSite]) -> LocalResult<()> {
     let mut next = 0;
     for (ordinal, node) in nodes.iter().enumerate() {
-        if !matches!(node.kind, NodeKind::BatchCall { .. }) {
+        if !matches!(
+            node.kind,
+            NodeKind::BatchCall { .. } | NodeKind::BatchHost { .. }
+        ) {
             continue;
         }
         let site = sites
@@ -784,9 +850,9 @@ fn resource(message: &str) -> LocalError {
 }
 
 #[derive(Clone, Copy)]
-enum TypePolicy {
+enum TypePolicy<'a> {
     RowBaseline,
-    SqlNativeBatch,
+    SqlNativeBatch(Option<&'a HostCatalog>),
 }
 
 // Keep raw protobuf flags: TiKV's FieldTypeFlag accessor names only a subset.
@@ -797,11 +863,15 @@ enum TypePolicy {
 const BATCH_EXCLUDED_FLAGS: u32 = (1 << 8) | (1 << 11) | (1 << 18) | (1 << 21);
 const DOCUMENTED_FLAGS: u32 = (1 << 25) - 1;
 
-fn check_type(field_type: &FieldType, policy: TypePolicy) -> LocalResult<()> {
+pub(super) fn check_batch_type(field: &FieldType) -> LocalResult<()> {
+    check_type(field, TypePolicy::SqlNativeBatch(None))
+}
+
+fn check_type(field_type: &FieldType, policy: TypePolicy<'_>) -> LocalResult<()> {
     match policy {
         TypePolicy::RowBaseline => registry::check_signed_int_type(field_type)
             .map_err(|error| LocalError::InvalidSpec(error.to_string())),
-        TypePolicy::SqlNativeBatch => {
+        TypePolicy::SqlNativeBatch(_) => {
             let eval_type = EvalType::try_from(field_type.as_accessor().tp()).ok();
             let raw_type = field_type.get_tp();
             let raw_matches = match eval_type {
@@ -847,7 +917,11 @@ fn check_type(field_type: &FieldType, policy: TypePolicy) -> LocalResult<()> {
     }
 }
 
-fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> LocalResult<NodeKind> {
+fn describe(
+    expr: &LocalExpr,
+    schema: &[FieldType],
+    policy: TypePolicy<'_>,
+) -> LocalResult<NodeKind> {
     check_type(expr.field_type(), policy)?;
     match expr {
         LocalExpr::Constant {
@@ -858,7 +932,7 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
             if matches!(policy, TypePolicy::RowBaseline) && !matches!(value, ScalarValue::Int(_)) {
                 return Err(invalid("ordinary constants require the Int carrier"));
             }
-            if matches!(policy, TypePolicy::SqlNativeBatch)
+            if matches!(policy, TypePolicy::SqlNativeBatch(_))
                 && (!matches!(
                     value,
                     ScalarValue::Int(_)
@@ -912,7 +986,8 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
                     ));
                 }
             }
-            if matches!(policy, TypePolicy::SqlNativeBatch) && batch_control(signature).is_some() {
+            if matches!(policy, TypePolicy::SqlNativeBatch(_)) && batch_control(signature).is_some()
+            {
                 let contract = batch_signature_for_arity(signature, args.len())
                     .ok_or_else(|| invalid("invalid batch control arity"))?;
                 if !matches!(metadata, CallMetadata::None)
@@ -952,7 +1027,7 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
                     Some((INT_INT, EvalType::Int, false, ResultSignedness::Signed))
                 }
                 TypePolicy::RowBaseline => None,
-                TypePolicy::SqlNativeBatch => batch_signature_contract(signature),
+                TypePolicy::SqlNativeBatch(_) => batch_signature_contract(signature),
             };
             let (input_types, output_type, unsigned_inputs, result_signedness) =
                 admitted.unwrap_or((&[], EvalType::Int, false, ResultSignedness::Signed));
@@ -995,8 +1070,33 @@ fn describe(expr: &LocalExpr, schema: &[FieldType], policy: TypePolicy) -> Local
                 arity: input_types.len(),
             })
         }
-        LocalExpr::HostCall { .. } => {
-            Err(invalid("host calls are outside the ordinary C3a profile"))
+        LocalExpr::HostCall {
+            slot,
+            args,
+            return_type,
+        } => {
+            let TypePolicy::SqlNativeBatch(Some(hosts)) = policy else {
+                return Err(invalid("host call requires an explicit SQL batch catalog"));
+            };
+            if !hosts.is_sql_batch() {
+                return Err(invalid("SQL batch cannot use a row host catalog"));
+            }
+            let signature = hosts.signature(*slot)?;
+            if &signature.return_type != return_type
+                || signature.arg_types.len() != args.len()
+                || signature
+                    .arg_types
+                    .iter()
+                    .zip(args)
+                    .any(|(field, arg)| field != arg.field_type())
+            {
+                return Err(invalid("host call descriptors differ from its SQL catalog"));
+            }
+            Ok(NodeKind::BatchHost {
+                slot: *slot,
+                operation: hosts.sql_batch_operation(*slot)?,
+                arity: args.len(),
+            })
         }
     }
 }
@@ -1008,7 +1108,7 @@ struct Walk<'a> {
     schema: &'a [FieldType],
     scheduled: usize,
     limits: CompileLimits,
-    policy: TypePolicy,
+    policy: TypePolicy<'a>,
 }
 
 impl<'a> Walk<'a> {
@@ -1016,7 +1116,7 @@ impl<'a> Walk<'a> {
         spec: &'a LocalExpr,
         schema: &'a [FieldType],
         limits: CompileLimits,
-        policy: TypePolicy,
+        policy: TypePolicy<'a>,
     ) -> LocalResult<Self> {
         if limits.max_nodes == 0 || limits.max_depth == 0 {
             return Err(resource("ordinary construction node/depth budget exceeded"));
@@ -1043,7 +1143,7 @@ impl<'a> Walk<'a> {
             return Ok(None);
         };
         let kind = describe(expr, self.schema, self.policy)?;
-        if let LocalExpr::Call { args, .. } = expr {
+        if let LocalExpr::Call { args, .. } | LocalExpr::HostCall { args, .. } = expr {
             let child_depth = depth
                 .checked_add(1)
                 .ok_or_else(|| resource("ordinary construction depth overflow"))?;

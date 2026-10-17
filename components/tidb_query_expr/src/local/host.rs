@@ -5,7 +5,9 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use tidb_query_datatype::{codec::data_type::VectorValue, expr::EvalContext};
+use tidb_query_datatype::{
+    EvalType, FieldTypeAccessor, codec::data_type::VectorValue, expr::EvalContext,
+};
 use tipb::FieldType;
 
 use super::{InputRow, LocalError, LocalResult, registry};
@@ -25,12 +27,31 @@ fn allocate_catalog_key(next: &AtomicU64) -> LocalResult<HostCatalogKey> {
     .map_err(|_| LocalError::ResourceLimit("host catalog identity space exhausted".into()))
 }
 
-/// A typed host boundary. The current admission domain is signed LongLong for
-/// every argument and the result; all FieldType details remain significant.
+/// A typed host boundary. The legacy row factory admits signed LongLong;
+/// the explicit SQL batch factory admits only its closed operation contracts.
+/// All FieldType details remain significant in both domains.
 #[derive(Clone, Debug)]
 pub struct HostSignature {
     pub arg_types: Box<[FieldType]>,
     pub return_type: FieldType,
+}
+
+/// Closed SQL batch host operations. Argument evaluation stays in the shared
+/// driver; implementations receive only demanded values and immutable metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqlBatchHostOperation {
+    Concat,
+    ConcatWs,
+}
+
+impl SqlBatchHostOperation {
+    pub fn accepts_arity(self, arity: usize) -> bool {
+        arity
+            >= match self {
+                Self::Concat => 1,
+                Self::ConcatWs => 2,
+            }
+    }
 }
 
 /// Immutable signatures shared by compiled calls. There are no callbacks or
@@ -39,6 +60,7 @@ pub struct HostSignature {
 pub struct HostCatalog {
     key: HostCatalogKey,
     signatures: Arc<[HostSignature]>,
+    sql_batch_operations: Option<Arc<[SqlBatchHostOperation]>>,
 }
 
 impl HostCatalog {
@@ -59,7 +81,74 @@ impl HostCatalog {
         Ok(Self {
             key: allocate_catalog_key(&NEXT_CATALOG_KEY)?,
             signatures: signatures.into(),
+            sql_batch_operations: None,
         })
+    }
+
+    /// A separate checked domain; this does not widen the legacy row factory.
+    pub fn for_sql_batch(
+        entries: Vec<(SqlBatchHostOperation, HostSignature)>,
+    ) -> LocalResult<Self> {
+        let mut operations = Vec::new();
+        let mut signatures = Vec::new();
+        operations
+            .try_reserve(entries.len())
+            .map_err(|_| LocalError::ResourceLimit("SQL host catalog allocation failed".into()))?;
+        signatures.try_reserve(entries.len()).map_err(|_| {
+            LocalError::ResourceLimit("SQL host signature allocation failed".into())
+        })?;
+        for (operation, signature) in entries {
+            if !operation.accepts_arity(signature.arg_types.len()) {
+                return Err(LocalError::InvalidSpec(
+                    "SQL host operation arity differs from its contract".into(),
+                ));
+            }
+            for field in signature
+                .arg_types
+                .iter()
+                .chain(std::iter::once(&signature.return_type))
+            {
+                super::profile::check_batch_type(field)?;
+                if EvalType::try_from(field.as_accessor().tp()).ok() != Some(EvalType::Bytes) {
+                    return Err(LocalError::InvalidSpec(
+                        "SQL CONCAT host requires ready Bytes arguments and result".into(),
+                    ));
+                }
+            }
+            operations.push(operation);
+            signatures.push(signature);
+        }
+        Ok(Self {
+            key: allocate_catalog_key(&NEXT_CATALOG_KEY)?,
+            signatures: signatures.into(),
+            sql_batch_operations: Some(operations.into()),
+        })
+    }
+
+    pub fn sql_batch_operation(&self, slot: HostSlot) -> LocalResult<SqlBatchHostOperation> {
+        self.signature(slot)?;
+        self.sql_batch_operations
+            .as_ref()
+            .and_then(|ops| ops.get(slot.index))
+            .copied()
+            .ok_or_else(|| {
+                LocalError::InvalidSpec("host slot is outside the SQL batch domain".into())
+            })
+    }
+
+    pub(crate) fn is_sql_batch(&self) -> bool {
+        self.sql_batch_operations.is_some()
+    }
+
+    pub fn signature(&self, slot: HostSlot) -> LocalResult<&HostSignature> {
+        if slot.key != self.key {
+            return Err(LocalError::InvalidSpec(
+                "host slot belongs to another catalog".into(),
+            ));
+        }
+        self.signatures
+            .get(slot.index)
+            .ok_or_else(|| LocalError::InvalidSpec("host slot is outside its catalog".into()))
     }
 
     pub fn key(&self) -> &HostCatalogKey {
@@ -133,6 +222,10 @@ impl PreparedHostCall {
             catalog: catalog.clone(),
             slot,
         })
+    }
+
+    pub(crate) fn is_sql_batch(&self) -> bool {
+        self.catalog.is_sql_batch()
     }
 
     pub fn slot(&self) -> HostSlot {
@@ -470,5 +563,58 @@ mod tests {
         assert!(maximum.validate_generation().is_ok());
         let identities: HashSet<_> = [invalid, valid, maximum].into_iter().collect();
         assert_eq!(identities.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod sql_batch_tests {
+    use tidb_query_datatype::FieldTypeTp;
+
+    use super::*;
+    #[test]
+    fn sql_context_operation_factory_is_closed_and_does_not_grant_row_calls() {
+        let bytes: FieldType = FieldTypeTp::VarString.into();
+        let signature = |arity| HostSignature {
+            arg_types: vec![bytes.clone(); arity].into_boxed_slice(),
+            return_type: bytes.clone(),
+        };
+        assert!(
+            HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::Concat, signature(0))])
+                .is_err()
+        );
+        assert!(
+            HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::ConcatWs, signature(1))])
+                .is_err()
+        );
+        let mut wrong = signature(2);
+        wrong.arg_types[1] = FieldTypeTp::LongLong.into();
+        assert!(HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::Concat, wrong)]).is_err());
+        assert!(HostCatalog::new(vec![signature(2)]).is_err());
+        let catalog =
+            HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::Concat, signature(2))])
+                .unwrap();
+        let foreign =
+            HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::Concat, signature(2))])
+                .unwrap();
+        assert_eq!(
+            catalog
+                .sql_batch_operation(catalog.slot(0).unwrap())
+                .unwrap(),
+            SqlBatchHostOperation::Concat
+        );
+        assert!(
+            catalog
+                .sql_batch_operation(foreign.slot(0).unwrap())
+                .is_err()
+        );
+        assert!(
+            PreparedHostCall::prepare(
+                &catalog,
+                catalog.slot(0).unwrap(),
+                &[bytes.clone(), FieldTypeTp::Blob.into()],
+                &bytes
+            )
+            .is_err()
+        );
     }
 }

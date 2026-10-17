@@ -3190,3 +3190,98 @@ fn batch_json_type_native_sql_values_and_dispositions_are_not_wire_reports() {
     );
     assert_eq!(forged.native_json_type_disposition(), None);
 }
+
+#[test]
+fn sql_batch_hosts_require_their_explicit_catalog_and_full_source_sites() {
+    let bytes: FieldType = FieldTypeTp::VarString.into();
+    let signature = || HostSignature {
+        arg_types: vec![bytes.clone(), bytes.clone()].into_boxed_slice(),
+        return_type: bytes.clone(),
+    };
+    assert!(HostCatalog::new(vec![signature()]).is_err());
+    let catalog = HostCatalog::for_sql_batch(vec![
+        (SqlBatchHostOperation::Concat, signature()),
+        (SqlBatchHostOperation::ConcatWs, signature()),
+    ])
+    .unwrap();
+    let text = |value: &[u8]| LocalExpr::Constant {
+        value: ScalarValue::Bytes(Some(value.to_vec())),
+        field_type: bytes.clone(),
+        literal_kind: LiteralKind::Typed,
+    };
+    let source = LocalExpr::HostCall {
+        slot: catalog.slot(0).unwrap(),
+        args: vec![text(b"a"), text(b"b")].into_boxed_slice(),
+        return_type: bytes.clone(),
+    };
+    let sites = vec![OrdinaryCallSite::sql_native_batch(
+        0,
+        source_id_for_host_test(),
+    )];
+    assert!(
+        BatchFacts::sql_native_batch(&source, &[], sites.clone(), CompileLimits::default())
+            .is_err()
+    );
+    assert!(
+        compile_local_with_hosts(&source, &[], LocalCompileContext::default(), &catalog).is_err()
+    );
+    assert!(
+        BatchFacts::sql_native_batch_with_hosts(
+            &source,
+            &[],
+            vec![],
+            CompileLimits::default(),
+            &catalog
+        )
+        .is_err()
+    );
+    let facts = BatchFacts::sql_native_batch_with_hosts(
+        &source,
+        &[],
+        sites.clone(),
+        CompileLimits::default(),
+        &catalog,
+    )
+    .unwrap();
+    let mut program = compile_batch(&source, &[], LocalCompileContext::default(), &facts).unwrap();
+    assert_eq!(program.max_batch_size(), 1);
+    let mut changed = source.clone();
+    if let LocalExpr::HostCall { slot, .. } = &mut changed {
+        *slot = catalog.slot(1).unwrap();
+    }
+    assert!(compile_batch(&changed, &[], LocalCompileContext::default(), &facts).is_err());
+    let foreign =
+        HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::Concat, signature())]).unwrap();
+    assert!(
+        BatchFacts::sql_native_batch_with_hosts(
+            &source,
+            &[],
+            sites,
+            CompileLimits::default(),
+            &foreign
+        )
+        .is_err()
+    );
+    struct NoHosts;
+    impl LocalRuntimeServices for NoHosts {
+        fn binding_schema(&self) -> &[FieldType] {
+            &[]
+        }
+        fn read_input(
+            &mut self,
+            _: &mut EvalContext,
+            _: usize,
+            _: InputRow,
+            _: &FieldType,
+        ) -> LocalResult<VectorValue> {
+            panic!("unexpected value demand")
+        }
+    }
+    assert!(matches!(
+        run_batch(&mut program, &mut NoHosts, 0, &[]),
+        Err(LocalError::HostContract(_))
+    ));
+}
+fn source_id_for_host_test() -> OrdinarySourceId {
+    OrdinarySourceId::new(55, 1)
+}

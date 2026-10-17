@@ -928,12 +928,22 @@ impl LocalBatchProgram {
         self.inner
             .validate_bindings_preflight(physical_rows, selection, services)?;
         self.inner.check_entry(ProgramEntry::SqlBatch)?;
-        if self.inner.host_catalog.is_some()
-            || self.inner.expression.checked_result_flow().is_some()
-        {
+        if self.inner.expression.checked_result_flow().is_some() {
             return Err(LocalError::InvalidSpec(
-                "batch program carries host or result-lineage state".into(),
+                "batch program carries result-lineage state".into(),
             ));
+        }
+        // Catalog capability is checked even for an empty selection. A pure
+        // program never consults the optional host hook.
+        if let Some(expected) = self.inner.host_catalog {
+            let provider = services.host_services().ok_or_else(|| {
+                LocalError::HostContract("compiled SQL host catalog has no runtime provider".into())
+            })?;
+            if provider.catalog_key() != &expected {
+                return Err(LocalError::HostContract(
+                    "SQL host provider differs from its compiled catalog".into(),
+                ));
+            }
         }
         // Bound selected occurrences, not the caller's physical row universe.
         // Route validation above applies even when no values will be demanded.
@@ -980,6 +990,7 @@ impl LocalBatchProgram {
             &mut input,
             selection,
             &mut budget,
+            self.inner.host_catalog,
         )?;
         let output = match result {
             RpnStackNode::Scalar { value, .. } => {

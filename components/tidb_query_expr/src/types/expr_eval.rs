@@ -2338,6 +2338,12 @@ impl<'a> ProgramFrame<'a> {
                                     && Some(signature.output_type()) == batch_eval_type(field_type)
                             })
                     }
+                    RpnExpressionNode::HostCall { prepared, args } => {
+                        self.rows.len() == 1
+                            && prepared.is_sql_batch()
+                            && args.len() == prepared.arg_types().len()
+                            && batch_eval_type(prepared.return_type()).is_some()
+                    }
                     RpnExpressionNode::OrdinaryFnCall { prepared, args } => {
                         execution.check_ordinary(prepared, self.rows.len())?;
                         EvalExecution::batch_signature(prepared.function())
@@ -2923,6 +2929,33 @@ impl Drop for TaskGuard<'_, '_, '_> {
     }
 }
 
+fn host_copy_precharge(value: ScalarValueRef<'_>) -> usize {
+    match value {
+        ScalarValueRef::Int(_) => int_storage_bytes(1),
+        ScalarValueRef::Bytes(value) => {
+            bytes_min_storage_bytes(1, value.map_or(0, <[u8]>::len)).unwrap_or(usize::MAX)
+        }
+        _ => usize::MAX,
+    }
+}
+fn copy_host_value(value: ScalarValueRef<'_>) -> LocalResult<VectorValue> {
+    match value {
+        ScalarValueRef::Int(value) => Ok(VectorValue::from_scalar(
+            &ScalarValue::Int(value.copied()),
+            1,
+        )),
+        ScalarValueRef::Bytes(value) => {
+            let mut bytes = ChunkedVecBytes::try_with_capacities(1, value.map_or(0, <[u8]>::len))
+                .map_err(|error| LocalError::ResourceLimit(error.to_string()))?;
+            bytes.push_ref(value);
+            Ok(VectorValue::Bytes(bytes))
+        }
+        _ => Err(LocalError::HostContract(
+            "host value is outside its checked carrier domain".into(),
+        )),
+    }
+}
+
 struct HostFrame<'a> {
     prepared: &'a PreparedHostCall,
     args: &'a [RpnExpression],
@@ -2966,10 +2999,10 @@ impl<'a> HostFrame<'a> {
         })
     }
 
-    fn storage(&self, _mode: StorageMode) -> usize {
+    fn storage(&self, mode: StorageMode) -> usize {
         self.cache.iter().flatten().fold(
             Self::initial_storage(self.cache.capacity(), &self.rows),
-            |total, value| total.saturating_add(int_storage_bytes(value.capacity())),
+            |total, value| total.saturating_add(vector_storage_bytes(value, mode)),
         )
     }
 
@@ -3004,11 +3037,16 @@ impl<'a> HostFrame<'a> {
             ));
         }
         let scalar = value.get_logical_scalar_ref(0);
-        if !matches!(scalar, ScalarValueRef::Int(_)) {
-            return Err(LocalError::HostContract("host argument is not Int".into()));
+        let expected = EvalType::try_from(self.prepared.arg_types()[index].as_accessor().tp()).ok();
+        if Some(scalar.eval_type()) != expected
+            || (!self.prepared.is_sql_batch() && !matches!(scalar, ScalarValueRef::Int(_)))
+        {
+            return Err(LocalError::HostContract(
+                "host argument carrier differs from its catalog".into(),
+            ));
         }
-        // Cache only successful, owned singleton results for this invocation.
-        self.cache[index] = Some(VectorValue::from_scalar(&scalar.to_owned(), 1));
+        // Cache only successful, bounded owned singleton results.
+        self.cache[index] = Some(copy_host_value(scalar)?);
         self.ready = Some(index);
         Ok(())
     }
@@ -3023,15 +3061,26 @@ impl<'a> HostFrame<'a> {
         }
     }
 
-    fn finish(self, value: VectorValue) -> LocalResult<RpnStackNode<'a>> {
-        if value.eval_type() != tidb_query_datatype::EvalType::Int || value.len() != 1 {
+    fn finish(
+        self,
+        value: VectorValue,
+        budget: &EvalBudget,
+        other_live: usize,
+    ) -> LocalResult<RpnStackNode<'a>> {
+        if Some(value.eval_type())
+            != EvalType::try_from(self.prepared.return_type().as_accessor().tp()).ok()
+            || value.len() != 1
+            || (!self.prepared.is_sql_batch() && value.eval_type() != EvalType::Int)
+        {
             return Err(LocalError::HostContract(
-                "host Ready must contain one Int value".into(),
+                "host Ready must contain one value of its registered carrier".into(),
             ));
         }
         // The provider's transient allocations are outside this retained-scratch
         // budget. Do not keep arbitrary capacity or a borrow from the callback.
-        let physical_value = VectorValue::from_scalar(&value.get_scalar_ref(0).to_owned(), 1);
+        let scalar = value.get_scalar_ref(0);
+        budget.storage(other_live.saturating_add(host_copy_precharge(scalar)))?;
+        let physical_value = copy_host_value(scalar)?;
         Ok(RpnStackNode::Vector {
             value: RpnStackNodeVectorValue::Generated { physical_value },
             field_type: self.prepared.return_type(),
@@ -3796,7 +3845,9 @@ fn eval_frames<'a, 'data: 'a>(
             EvalFrame::Host(mut frame) => {
                 if let Some(value) = returned.take() {
                     budget.charge()?;
-                    budget.storage(retained.saturating_add(int_storage_bytes(1)))?;
+                    budget.storage(retained.saturating_add(host_copy_precharge(
+                        value.node.get_logical_scalar_ref(0),
+                    )))?;
                     frame.accept(value.into_unannotated()?)?;
                     retained = frames_storage(&frames, frames.capacity(), budget.mode())
                         .saturating_add(frame.storage(budget.mode()))
@@ -3811,7 +3862,7 @@ fn eval_frames<'a, 'data: 'a>(
                     let start = tasks.host()?.start(ctx, frame.invocation(occurrence))?;
                     match start {
                         HostStart::Ready(value) => {
-                            let value = frame.finish(value)?;
+                            let value = frame.finish(value, budget, retained)?;
                             budget.storage(
                                 frames_storage(&frames, frames.capacity(), budget.mode())
                                     .saturating_add(tasks.storage())
@@ -3838,7 +3889,7 @@ fn eval_frames<'a, 'data: 'a>(
                         HostStep::Ready(value) => {
                             // Keep cleanup armed through validation/normalization,
                             // even when the provider has already completed its task.
-                            let value = frame.finish(value)?;
+                            let value = frame.finish(value, budget, retained)?;
                             budget.storage(
                                 frames_storage(&frames, frames.capacity(), budget.mode())
                                     .saturating_add(tasks.storage())
@@ -4098,6 +4149,7 @@ impl RpnExpression {
         input: &mut EvalInput<'data, '_>,
         input_logical_rows: &'a [usize],
         budget: &mut EvalBudget,
+        host_catalog: Option<HostCatalogKey>,
     ) -> LocalResult<RpnStackNode<'a>> {
         let output_rows = input_logical_rows.len();
         if self.checked_result_flow().is_some()
@@ -4118,7 +4170,7 @@ impl RpnExpression {
             schema,
             input,
             0,
-            None,
+            host_catalog,
             budget,
             EvalExecution::SqlBatch,
         )
