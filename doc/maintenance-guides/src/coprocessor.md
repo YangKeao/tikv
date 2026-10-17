@@ -1958,8 +1958,11 @@ flag or eligibility policy described above.
   children: Fresh recomputes without an old-value fallback; Reuse keeps only the
   most recent successful argument value within that invocation. Callback borrows
   cannot be retained; suspended adapter state is owned and keyed by task IDs.
-- Explicit `AddWindowNative`, `SubtractWindowNative` and `MultiplyWindowNative`
-  host descriptors use `start_window`/`resume_window` instead of the row callbacks.
+- Explicit `AddWindowNative`, `SubtractWindowNative`, `MultiplyWindowNative`,
+  `AbsIntWindowNative`, `CastDecimalWindowNative` and `CastJsonWindowNative`
+  descriptors use `start_window`/`resume_window` instead of the row callbacks.
+  Arithmetic requires exactly two arguments; these unary operations require
+  exactly one. Every descriptor independently checks its complete signature.
   `HostWindowInvocation` borrows the full physical selection map; each duplicate
   position retains its own occurrence. `HostWindowArgReply` borrows a complete
   successful argument vector in that order. Fresh/Reuse applies to the entire
@@ -1968,7 +1971,7 @@ flag or eligibility policy described above.
   and result copies, and uses the same task ledger/cancellation guard. Missing
   window methods return HostContract; they do not call row methods or retry an
   expression. Current window carriers are checked Int/Bytes at the shared
-  copy seam; these three catalog operations register Bytes inputs/results.
+  copy seam; these window catalog operations register Bytes inputs/results.
   An explicit window root records a whole-selection contract. Its separate
   checked execution profile admits the complete occurrence map under normal
   layout, step, frame, task and retained-storage limits; it does not use the
@@ -2003,13 +2006,15 @@ flag or eligibility policy described above.
   vectorization getter selects the domain at its original per-output point.
   Disabling vectorization selects the row program, rather than slicing a bulk
   program into singleton calls. Window-size tuning cannot split a required
-  whole-selection program. Integer ABS and Decimal/JSON CAST bulk operand
-  phases are outside this promoted closure until their own policies are
-  implemented; general control wrapping is still unfinished. Protocol fixtures live in
+  whole-selection program. Integer ABS and Decimal/JSON CAST now have genuine
+  whole-child phases and are included in the promoted operand closure.
+  General control wrapping is still unfinished. Protocol fixtures live in
   `local/window_host_tests.rs` and deliberately relay bytes.
   Native Decimal priority precedes the vectorization getter, independently of
-  its eventual value. The new stage currently covers arithmetic roots;
-  standalone CAST priority and its generic bulk continuation remain open. TiDB's `batch_decimal_fast_source.rs` builds that stage
+  its eventual value. The new stage covers arithmetic roots and standalone
+  Decimal CAST priority, with a genuine cast window root and its strict
+  column-padding import. An ineligible CAST shape reports typed Unsupported
+  before the getter without evaluating its child, including on empty input. TiDB's `batch_decimal_fast_source.rs` builds that stage
   as another sealed program of this same SDK driver. Its immutable input
   descriptors import columns, strict literals and the lossless integer-column
   CAST shape; they own no expression evaluation callback. The value-only
@@ -2030,6 +2035,18 @@ flag or eligibility policy described above.
   on an empty selection. Node/metadata budgets include every prepared phase;
   each invocation still has its own SDK step/frame/storage limits, and opaque
   frontend retention remains separately budgeted.
+  `batch_unary_window.rs` owns the generic whole-child callbacks. The
+  `batch_window_values.rs` source phase is shared with arithmetic: literals
+  convert once before broadcasting, column/computed Int sources normalize
+  under their native owners, and already typed integer windows retain their
+  bits. Integer ABS applies signed ABS to those bits, rather than row UInt
+  dispatch. Decimal CAST completes the Int vector before converting values,
+  preserving the source/target unsigned rule, NULL bypass and context reads.
+  JSON CAST validates the source type before demand, completes its source-
+  typed vector, then converts JSON. These are value-only functions; no ready-
+  argument program or Expr callback is introduced. Known conversion bounds
+  include Decimal visible/storage padding before formatting, not just compact
+  coefficient payload. The frame still owns all scheduling and cancellation.
   TiDB's `evaluator/batch_arithmetic_window.rs` implements the three arithmetic
   window descriptors over actual native-value capabilities. Provider tasks own
   the row map and complete converted left vector, then request the complete

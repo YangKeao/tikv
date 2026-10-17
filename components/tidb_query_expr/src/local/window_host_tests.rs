@@ -228,7 +228,10 @@ impl LocalHostServices for Service {
         _: &mut EvalContext,
         invocation: HostWindowInvocation<'_>,
     ) -> LocalResult<HostStart> {
-        assert_eq!(invocation.arg_types, &[bytes_ft(), bytes_ft()]);
+        assert_eq!(
+            invocation.arg_types,
+            self.catalog.signature(invocation.slot)?.arg_types.as_ref()
+        );
         assert_eq!(invocation.return_type, &bytes_ft());
         // Explicit bounded fixture ownership, separate from driver scratch.
         if (self.live.len() + 1)
@@ -1072,4 +1075,106 @@ fn window_host_whole_selection_does_not_widen_a_legacy_ordinary_root() {
     .0;
     assert!(matches!(result, Err(LocalError::InvalidSpec(_))));
     assert!(service.events.is_empty());
+}
+
+#[test]
+fn unary_window_descriptors_keep_full_fresh_reuse_and_terminal_cleanup() {
+    for operation in [
+        SqlBatchHostOperation::AbsIntWindowNative,
+        SqlBatchHostOperation::CastDecimalWindowNative,
+        SqlBatchHostOperation::CastJsonWindowNative,
+    ] {
+        let signature = HostSignature {
+            arg_types: vec![bytes_ft()].into_boxed_slice(),
+            return_type: bytes_ft(),
+        };
+        for arity in [0, 2, 3] {
+            assert!(
+                HostCatalog::for_sql_batch(vec![(
+                    operation,
+                    HostSignature {
+                        arg_types: vec![bytes_ft(); arity].into_boxed_slice(),
+                        return_type: bytes_ft()
+                    }
+                )])
+                .is_err()
+            );
+        }
+        let int: FieldType = FieldTypeTp::LongLong.into();
+        assert!(
+            HostCatalog::for_sql_batch(vec![(
+                operation,
+                HostSignature {
+                    arg_types: vec![int].into_boxed_slice(),
+                    return_type: bytes_ft()
+                }
+            )])
+            .is_err()
+        );
+        let mut service = Service::new();
+        service.catalog = HostCatalog::for_sql_batch(vec![(operation, signature)]).unwrap();
+        service.requests = vec![
+            request(0, ArgMode::Fresh),
+            request(0, ArgMode::Reuse),
+            request(0, ArgMode::Fresh),
+        ];
+        let root = host(&service.catalog, 0, vec![input(0)]);
+        let mut program = compile(&root, &service);
+        assert!(program.requires_whole_selection());
+        let selection: Vec<_> = (0..2050).map(|index| [2, 0, 2][index % 3]).collect();
+        let (result, context) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        );
+        let result = result.unwrap();
+        assert_eq!(result.len(), selection.len());
+        assert_eq!(
+            service.reads(),
+            [rows(0, &selection), rows(0, &selection)].concat()
+        );
+        assert_eq!(context.warnings.warning_cnt, selection.len() * 2);
+        assert!(service.live.is_empty());
+        service.events.clear();
+        service.read_failure = Some((0, 2049));
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        );
+        let Err(LocalError::Evaluation(error)) = result else {
+            panic!("unary primary cause lost")
+        };
+        assert_eq!(
+            Some(error.0.as_ref() as *const _ as usize),
+            service.primary_error
+        );
+        assert_eq!(service.reads(), rows(0, &selection));
+        assert!(service.live.is_empty());
+        service.events.clear();
+        service.read_failure = None;
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits {
+                max_retained_bytes: 0,
+                ..ExecutionLimits::default()
+            },
+        );
+        assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+        assert!(service.reads().is_empty());
+        assert!(service.live.is_empty());
+        service.events.clear();
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        );
+        assert!(result.is_ok());
+        assert!(service.live.is_empty());
+    }
 }

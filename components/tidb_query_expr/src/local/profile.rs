@@ -152,6 +152,9 @@ impl BatchCallSignature {
                     | SqlBatchHostOperation::AddWindowNative
                     | SqlBatchHostOperation::SubtractWindowNative
                     | SqlBatchHostOperation::MultiplyWindowNative
+                    | SqlBatchHostOperation::AbsIntWindowNative
+                    | SqlBatchHostOperation::CastDecimalWindowNative
+                    | SqlBatchHostOperation::CastJsonWindowNative
             )
         )
     }

@@ -92,6 +92,11 @@ pub enum SqlBatchHostOperation {
     AddWindowNative,
     SubtractWindowNative,
     MultiplyWindowNative,
+    /// Whole-child integer ABS, independent of row ABS value dispatch.
+    AbsIntWindowNative,
+    /// Whole-child native Decimal and JSON casts.
+    CastDecimalWindowNative,
+    CastJsonWindowNative,
 }
 
 impl SqlBatchHostOperation {
@@ -99,7 +104,12 @@ impl SqlBatchHostOperation {
     pub fn is_windowed(self) -> bool {
         matches!(
             self,
-            Self::AddWindowNative | Self::SubtractWindowNative | Self::MultiplyWindowNative
+            Self::AddWindowNative
+                | Self::SubtractWindowNative
+                | Self::MultiplyWindowNative
+                | Self::AbsIntWindowNative
+                | Self::CastDecimalWindowNative
+                | Self::CastJsonWindowNative
         )
     }
     pub fn accepts_arity(self, arity: usize) -> bool {
@@ -128,7 +138,10 @@ impl SqlBatchHostOperation {
             | Self::IsNotFalseNative
             | Self::IsUnknownNative
             | Self::IsNotUnknownNative
-            | Self::AbsNative => arity == 1,
+            | Self::AbsNative
+            | Self::AbsIntWindowNative
+            | Self::CastDecimalWindowNative
+            | Self::CastJsonWindowNative => arity == 1,
             Self::RegexpLike { .. } => matches!(arity, 2 | 3),
             Self::CastCharInt { .. } | Self::CastCharNative { .. } | Self::CastNative => arity == 1,
         }
@@ -165,7 +178,10 @@ impl SqlBatchHostOperation {
             | Self::MultiplyNative
             | Self::AddWindowNative
             | Self::SubtractWindowNative
-            | Self::MultiplyWindowNative => EvalType::Bytes,
+            | Self::MultiplyWindowNative
+            | Self::AbsIntWindowNative
+            | Self::CastDecimalWindowNative
+            | Self::CastJsonWindowNative => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
@@ -199,7 +215,10 @@ impl SqlBatchHostOperation {
             | Self::MultiplyNative
             | Self::AddWindowNative
             | Self::SubtractWindowNative
-            | Self::MultiplyWindowNative => EvalType::Bytes,
+            | Self::MultiplyWindowNative
+            | Self::AbsIntWindowNative
+            | Self::CastDecimalWindowNative
+            | Self::CastJsonWindowNative => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
