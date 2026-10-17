@@ -80,6 +80,8 @@ pub enum SqlBatchHostOperation {
     CompareNative(crate::ComparisonOp),
     /// Original nullable equality policy over two demanded native values.
     NullSafeEqNative,
+    /// Value-level NULLIF with its original literal comparison policy.
+    NullIfNative,
 }
 
 impl SqlBatchHostOperation {
@@ -91,7 +93,8 @@ impl SqlBatchHostOperation {
             | Self::AndNative
             | Self::OrNative
             | Self::CompareNative(_)
-            | Self::NullSafeEqNative => arity == 2,
+            | Self::NullSafeEqNative
+            | Self::NullIfNative => arity == 2,
             Self::IfNative => arity == 3,
             Self::IsTrueWithNullNative
             | Self::UnaryNotNative
@@ -130,7 +133,8 @@ impl SqlBatchHostOperation {
             | Self::IsUnknownNative
             | Self::IsNotUnknownNative
             | Self::CompareNative(_)
-            | Self::NullSafeEqNative => EvalType::Bytes,
+            | Self::NullSafeEqNative
+            | Self::NullIfNative => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
@@ -156,7 +160,8 @@ impl SqlBatchHostOperation {
             | Self::IsUnknownNative
             | Self::IsNotUnknownNative
             | Self::CompareNative(_)
-            | Self::NullSafeEqNative => EvalType::Bytes,
+            | Self::NullSafeEqNative
+            | Self::NullIfNative => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
