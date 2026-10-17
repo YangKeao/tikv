@@ -68,6 +68,14 @@ pub enum SqlBatchHostOperation {
     OrNative,
     /// Truth normalization that preserves genuine SQL NULL.
     IsTrueWithNullNative,
+    UnaryNotNative,
+    IsNullNative,
+    IsTrueNative,
+    IsFalseNative,
+    IsNotTrueNative,
+    IsNotFalseNative,
+    IsUnknownNative,
+    IsNotUnknownNative,
 }
 
 impl SqlBatchHostOperation {
@@ -77,7 +85,15 @@ impl SqlBatchHostOperation {
             Self::ConcatWs => arity >= 2,
             Self::IfNullNative | Self::AndNative | Self::OrNative => arity == 2,
             Self::IfNative => arity == 3,
-            Self::IsTrueWithNullNative => arity == 1,
+            Self::IsTrueWithNullNative
+            | Self::UnaryNotNative
+            | Self::IsNullNative
+            | Self::IsTrueNative
+            | Self::IsFalseNative
+            | Self::IsNotTrueNative
+            | Self::IsNotFalseNative
+            | Self::IsUnknownNative
+            | Self::IsNotUnknownNative => arity == 1,
             Self::RegexpLike { .. } => matches!(arity, 2 | 3),
             Self::CastCharInt { .. } | Self::CastCharNative { .. } | Self::CastNative => arity == 1,
         }
@@ -96,7 +112,15 @@ impl SqlBatchHostOperation {
             | Self::CaseNative
             | Self::AndNative
             | Self::OrNative
-            | Self::IsTrueWithNullNative => EvalType::Bytes,
+            | Self::IsTrueWithNullNative
+            | Self::UnaryNotNative
+            | Self::IsNullNative
+            | Self::IsTrueNative
+            | Self::IsFalseNative
+            | Self::IsNotTrueNative
+            | Self::IsNotFalseNative
+            | Self::IsUnknownNative
+            | Self::IsNotUnknownNative => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
@@ -112,7 +136,15 @@ impl SqlBatchHostOperation {
             | Self::CaseNative
             | Self::AndNative
             | Self::OrNative
-            | Self::IsTrueWithNullNative => EvalType::Bytes,
+            | Self::IsTrueWithNullNative
+            | Self::UnaryNotNative
+            | Self::IsNullNative
+            | Self::IsTrueNative
+            | Self::IsFalseNative
+            | Self::IsNotTrueNative
+            | Self::IsNotFalseNative
+            | Self::IsUnknownNative
+            | Self::IsNotUnknownNative => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
