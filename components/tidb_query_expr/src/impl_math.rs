@@ -1012,33 +1012,58 @@ fn native_decimal_resolved_scale(scale: &Int) -> Result<i32> {
 // Factory-only native policies. These wrappers do not change any wire signature
 // or add a PB dispatch surface. NULL still runs the RPN wrapper; no value-layer
 // answer or invented argument stands in for that invocation.
-#[rpn_fn]
-fn abs_int_native(arg: &Int) -> Result<Option<Int>> {
-    match abs_int_value(*arg) {
-        Some(value) => Ok(Some(value)),
-        None => {
-            let source: EvaluateError = Error::overflow("BIGINT", format!("abs({})", *arg)).into();
-            Err(EvaluateError::AbsSignedOverflow {
-                source: Box::new(source),
-            }
-            .into())
+/// Typed signed ABS failure from the shared value computation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeAbsSignedOverflow;
+
+/// Nullable value primitive shared by the registered native wrapper and hosts.
+pub fn native_abs_int_value(
+    arg: Option<Int>,
+) -> std::result::Result<Option<Int>, NativeAbsSignedOverflow> {
+    arg.map(|value| abs_int_value(value).ok_or(NativeAbsSignedOverflow))
+        .transpose()
+}
+
+/// Unsigned ABS retains the complete original unsigned magnitude.
+pub fn native_abs_uint_value(arg: u64) -> u64 {
+    arg
+}
+
+/// Raw IEEE ABS retains NaN payloads and the original finite policy.
+pub fn native_abs_real_value(arg: Option<f64>) -> Option<f64> {
+    arg.map(abs_f64)
+}
+
+/// Wide native decimal ABS under the caller's checked finite allowance.
+pub fn native_abs_decimal_value(arg: &Decimal, budget: &Int) -> Result<Decimal> {
+    native_decimal_math(arg, NativeDecimalOp::Abs, budget)
+}
+
+#[rpn_fn(nullable)]
+fn abs_int_native(arg: Option<&Int>) -> Result<Option<Int>> {
+    native_abs_int_value(arg.copied()).map_err(|NativeAbsSignedOverflow| {
+        let value = *arg.expect("signed ABS overflow requires an actual input");
+        let source: EvaluateError = Error::overflow("BIGINT", format!("abs({})", value)).into();
+        EvaluateError::AbsSignedOverflow {
+            source: Box::new(source),
         }
-    }
+        .into()
+    })
 }
 
 #[rpn_fn]
 fn abs_uint_native(arg: &Int) -> Result<Option<Int>> {
-    abs_uint(arg)
+    Ok(Some(native_abs_uint_value(*arg as u64) as i64))
 }
 
 #[rpn_fn(nullable)]
 fn abs_real_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
-    Ok(decode_raw_f64(arg)?.map(abs_f64).map(encode_raw_f64))
+    Ok(native_abs_real_value(decode_raw_f64(arg)?).map(encode_raw_f64))
 }
 
 #[rpn_fn]
 fn abs_decimal_native(arg: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
-    native_decimal_math(arg, NativeDecimalOp::Abs, budget).map(Some)
+    native_abs_decimal_value(arg, budget).map(Some)
 }
 
 #[rpn_fn]
@@ -1654,7 +1679,7 @@ mod tests {
         assert!(round_int128_legacy(&wide_bits[..15]).is_err());
         assert_eq!(math_null_witness_native(None).unwrap(), None);
         assert!(math_null_witness_native(Some(&0)).is_err());
-        let native_error = abs_int_native(&i64::MIN).unwrap_err();
+        let native_error = abs_int_native(Some(&i64::MIN)).unwrap_err();
         let tidb_query_common::error::ErrorInner::Evaluate(EvaluateError::AbsSignedOverflow {
             source,
         }) = native_error.0.as_ref()
@@ -3242,5 +3267,27 @@ fn rand_seed_route_preserves_all_source_classes_and_fallbacks() {
         (NativeRandSeedSource::Other, SignedFallback),
     ] {
         assert_eq!(native_rand_seed_route(source), route);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn native_abs_value_entries_keep_nullable_signed_unsigned_and_ieee_policy() {
+    assert_eq!(native_abs_int_value(None), Ok(None));
+    assert_eq!(native_abs_int_value(Some(-7)), Ok(Some(7)));
+    assert_eq!(
+        native_abs_int_value(Some(i64::MIN)),
+        Err(NativeAbsSignedOverflow)
+    );
+    assert_eq!(abs_int_native(None).unwrap(), None);
+    assert_eq!(native_abs_uint_value(u64::MAX), u64::MAX);
+    assert_eq!(native_abs_uint_value(1u64 << 63), 1u64 << 63);
+    for bits in [0x8000000000000000, 0xfff8000000000042, 0xfff0000000000000] {
+        assert_eq!(
+            native_abs_real_value(Some(f64::from_bits(bits)))
+                .unwrap()
+                .to_bits(),
+            bits & 0x7fffffffffffffff
+        );
     }
 }

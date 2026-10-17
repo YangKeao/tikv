@@ -82,6 +82,8 @@ pub enum SqlBatchHostOperation {
     NullSafeEqNative,
     /// Value-level NULLIF with its original literal comparison policy.
     NullIfNative,
+    /// Native ABS over the actual demanded value kind.
+    AbsNative,
 }
 
 impl SqlBatchHostOperation {
@@ -104,7 +106,8 @@ impl SqlBatchHostOperation {
             | Self::IsNotTrueNative
             | Self::IsNotFalseNative
             | Self::IsUnknownNative
-            | Self::IsNotUnknownNative => arity == 1,
+            | Self::IsNotUnknownNative
+            | Self::AbsNative => arity == 1,
             Self::RegexpLike { .. } => matches!(arity, 2 | 3),
             Self::CastCharInt { .. } | Self::CastCharNative { .. } | Self::CastNative => arity == 1,
         }
@@ -134,7 +137,8 @@ impl SqlBatchHostOperation {
             | Self::IsNotUnknownNative
             | Self::CompareNative(_)
             | Self::NullSafeEqNative
-            | Self::NullIfNative => EvalType::Bytes,
+            | Self::NullIfNative
+            | Self::AbsNative => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
@@ -161,7 +165,8 @@ impl SqlBatchHostOperation {
             | Self::IsNotUnknownNative
             | Self::CompareNative(_)
             | Self::NullSafeEqNative
-            | Self::NullIfNative => EvalType::Bytes,
+            | Self::NullIfNative
+            | Self::AbsNative => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
