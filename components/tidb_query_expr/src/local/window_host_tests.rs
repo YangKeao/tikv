@@ -73,12 +73,14 @@ fn compile(node: &LocalExpr, service: &Service) -> LocalBatchProgram {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Event {
     Start(usize, Vec<usize>),
+    RowStart(InputRow),
     Read(usize, InputRow),
     Resume(usize, usize, usize),
     Cancel(HostTaskId),
 }
 struct Task {
     slot: usize,
+    occurrence_start: usize,
     rows: Vec<usize>,
     phase: usize,
 }
@@ -96,6 +98,7 @@ struct Service {
     bad_token: bool,
     bad_result: bool,
     loop_reuse: bool,
+    row_enabled: bool,
 }
 impl Service {
     fn new() -> Self {
@@ -122,6 +125,7 @@ impl Service {
             bad_token: false,
             bad_result: false,
             loop_reuse: false,
+            row_enabled: false,
         }
     }
     fn reads(&self) -> Vec<(usize, InputRow)> {
@@ -172,16 +176,45 @@ impl LocalHostServices for Service {
     fn catalog_key(&self) -> &HostCatalogKey {
         self.catalog.key()
     }
-    fn start(&mut self, _: &mut EvalContext, _: HostInvocation<'_>) -> LocalResult<HostStart> {
-        panic!("window dispatch reached row start")
+    fn start(
+        &mut self,
+        ctx: &mut EvalContext,
+        invocation: HostInvocation<'_>,
+    ) -> LocalResult<HostStart> {
+        assert!(self.row_enabled, "window dispatch reached row start");
+        self.events.push(Event::RowStart(invocation.row));
+        self.start_window(
+            ctx,
+            HostWindowInvocation {
+                slot: invocation.slot,
+                occurrence_start: invocation.row.occurrence,
+                physical_rows: &[invocation.row.input_row],
+                arg_types: invocation.arg_types,
+                return_type: invocation.return_type,
+            },
+        )
     }
     fn resume(
         &mut self,
-        _: &mut EvalContext,
-        _: &HostTaskId,
-        _: HostArgReply<'_>,
+        ctx: &mut EvalContext,
+        id: &HostTaskId,
+        reply: HostArgReply<'_>,
     ) -> LocalResult<HostStep> {
-        panic!("window dispatch reached row resume")
+        assert!(self.row_enabled, "window dispatch reached row resume");
+        let task = self.live.get(id).unwrap();
+        let rows = task.rows.clone();
+        let occurrence_start = task.occurrence_start;
+        self.resume_window(
+            ctx,
+            id,
+            HostWindowArgReply {
+                index: reply.index,
+                occurrence_start,
+                field_type: reply.field_type,
+                physical_rows: &rows,
+                values: reply.values,
+            },
+        )
     }
     fn start_window(
         &mut self,
@@ -211,6 +244,7 @@ impl LocalHostServices for Service {
             id,
             Task {
                 slot: invocation.slot.index(),
+                occurrence_start: invocation.occurrence_start,
                 rows: invocation.physical_rows.to_vec(),
                 phase: 0,
             },
@@ -232,6 +266,7 @@ impl LocalHostServices for Service {
     ) -> LocalResult<HostStep> {
         let task = self.live.get_mut(id).expect("live window task");
         assert_eq!(reply.physical_rows, task.rows);
+        assert_eq!(reply.occurrence_start, task.occurrence_start);
         assert_eq!(reply.field_type, &bytes_ft());
         assert_eq!(reply.values.len(), task.rows.len());
         self.events
@@ -601,7 +636,7 @@ fn window_host_missing_callbacks_are_terminal_and_do_not_call_row_api() {
 }
 
 #[test]
-fn window_host_broadcasts_actual_nulls_and_keeps_row_descendants_bounded() {
+fn window_host_broadcasts_actual_nulls_and_keeps_row_root_admission() {
     let mut service = Service::new();
     service.requests = vec![request(0, ArgMode::Reuse), request(0, ArgMode::Fresh)];
     service.read_failure = Some((1, 0));
@@ -638,6 +673,145 @@ fn window_host_broadcasts_actual_nulls_and_keeps_row_descendants_bounded() {
         (SqlBatchHostOperation::Concat, signature()),
     ])
     .unwrap();
+    let root = host(&service.catalog, 1, vec![input(0), input(1)]);
+    let mut program = compile(&root, &service);
+    assert_eq!(program.max_batch_size(), 1);
+    service.events.clear();
+    let result = evaluate(
+        &mut program,
+        &mut service,
+        &[2, 0, 2],
+        ExecutionLimits::default(),
+    )
+    .0;
+    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+    assert!(service.events.is_empty());
+}
+
+fn row_in_window_service() -> Service {
+    let mut service = Service::new();
+    service.row_enabled = true;
+    let signature = || HostSignature {
+        arg_types: vec![bytes_ft(); 2].into_boxed_slice(),
+        return_type: bytes_ft(),
+    };
+    service.catalog = HostCatalog::for_sql_batch(vec![
+        (SqlBatchHostOperation::AddWindowNative, signature()),
+        (SqlBatchHostOperation::Concat, signature()),
+        (SqlBatchHostOperation::MultiplyWindowNative, signature()),
+    ])
+    .unwrap();
+    service
+}
+#[test]
+fn window_host_row_operand_keeps_full_parent_phase_and_original_occurrences() {
+    let mut service = row_in_window_service();
+    // Window -> row -> window. The inner window is scoped to the row's
+    // ORIGINAL occurrence, not a new zero-based occurrence namespace.
+    let root = host(
+        &service.catalog,
+        0,
+        vec![
+            host(
+                &service.catalog,
+                1,
+                vec![
+                    host(&service.catalog, 2, vec![input(0), input(1)]),
+                    input(1),
+                ],
+            ),
+            input(2),
+        ],
+    );
+    let mut program = compile(&root, &service);
+    assert_eq!(program.max_batch_size(), crate::types::BATCH_MAX_SIZE);
+    let selection = [2, 0, 2];
+    let result = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0
+    .unwrap();
+    let mut expected = Vec::new();
+    for (occurrence, &input_row) in selection.iter().enumerate() {
+        for slot in [0, 1, 1] {
+            expected.push((
+                slot,
+                InputRow {
+                    occurrence,
+                    input_row,
+                },
+            ));
+        }
+    }
+    expected.extend(rows(2, &selection));
+    assert_eq!(service.reads(), expected);
+    assert_eq!(
+        service
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                Event::RowStart(row) => Some(*row),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        rows(0, &selection)
+            .into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>()
+    );
+    for (row, &input_row) in selection.iter().enumerate() {
+        let ScalarValueRef::Bytes(Some(value)) = result.get_scalar_ref(row) else {
+            panic!("output")
+        };
+        assert_eq!(value, format!("2/{row}:{input_row}").as_bytes());
+    }
+    assert!(service.live.is_empty());
+    service.events.clear();
+    service.read_failure = Some((0, 1));
+    let Err(LocalError::Evaluation(error)) = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0
+    else {
+        panic!("lost original failure")
+    };
+    assert_eq!(
+        Some(error.0.as_ref() as *const _ as usize),
+        service.primary_error
+    );
+    assert_eq!(service.reads(), expected[..4]);
+    assert!(service.live.is_empty());
+    assert_eq!(
+        service
+            .events
+            .iter()
+            .filter(|event| matches!(event, Event::Cancel(_)))
+            .count(),
+        3
+    );
+    service.events.clear();
+    service.read_failure = None;
+    evaluate(
+        &mut program,
+        &mut service,
+        &[1, 1],
+        ExecutionLimits::default(),
+    )
+    .0
+    .unwrap();
+    assert_eq!(service.reads().len(), 8);
+    assert!(service.live.is_empty());
+}
+#[test]
+fn window_host_row_operand_fresh_restarts_each_row_and_limits_still_cancel() {
+    let mut service = row_in_window_service();
+    service.requests = vec![request(0, ArgMode::Reuse), request(0, ArgMode::Fresh)];
     let root = host(
         &service.catalog,
         0,
@@ -647,13 +821,46 @@ fn window_host_broadcasts_actual_nulls_and_keeps_row_descendants_bounded() {
         ],
     );
     let mut program = compile(&root, &service);
-    assert_eq!(program.max_batch_size(), 1);
+    let selection = [2, 0, 2];
+    evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0
+    .unwrap();
+    let mut expected = Vec::new();
+    for _ in 0..2 {
+        for row in rows(0, &selection) {
+            expected.extend([row, row]);
+        }
+    }
+    assert_eq!(service.reads(), expected);
+    assert!(service.live.is_empty());
     service.events.clear();
     let result = evaluate(
         &mut program,
         &mut service,
-        &[2, 0, 2],
-        ExecutionLimits::default(),
+        &selection,
+        ExecutionLimits {
+            max_active_tasks: 1,
+            ..ExecutionLimits::default()
+        },
+    )
+    .0;
+    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+    assert!(service.reads().is_empty());
+    assert!(service.live.is_empty());
+    service.events.clear();
+    let result = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits {
+            max_retained_bytes: 0,
+            ..ExecutionLimits::default()
+        },
     )
     .0;
     assert!(matches!(result, Err(LocalError::ResourceLimit(_))));

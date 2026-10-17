@@ -2204,18 +2204,21 @@ pub(crate) fn evaluated_bytes_shape(
 enum FrameRows<'a> {
     Borrowed(&'a [usize], usize),
     Owned(Vec<usize>, usize),
+    Scoped([usize; 1], usize),
 }
 
 impl FrameRows<'_> {
     fn len(&self) -> usize {
         match self {
             Self::Borrowed(_, len) | Self::Owned(_, len) => *len,
+            Self::Scoped(..) => 1,
         }
     }
     fn physical(&self) -> &[usize] {
         match self {
             Self::Borrowed(rows, _) => rows,
             Self::Owned(rows, _) => rows,
+            Self::Scoped(rows, _) => rows,
         }
     }
     fn storage(&self) -> usize {
@@ -2224,7 +2227,16 @@ impl FrameRows<'_> {
             _ => 0,
         }
     }
+    fn occurrence(&self, position: usize, default: usize) -> usize {
+        match self {
+            Self::Scoped(_, occurrence) => *occurrence,
+            _ => default + position,
+        }
+    }
     fn select(&self, positions: &[usize]) -> Self {
+        if matches!(self, Self::Scoped(..)) && positions == [0] {
+            return self.clone();
+        }
         // Legacy constant-only expressions can have output rows but no physical
         // row map. Do not invent physical rows for that low-level contract.
         let rows = if self.physical().is_empty() {
@@ -2340,8 +2352,7 @@ impl<'a> ProgramFrame<'a> {
                             })
                     }
                     RpnExpressionNode::HostCall { prepared, args } => {
-                        (self.rows.len() == 1 || prepared.is_windowed())
-                            && prepared.is_sql_batch()
+                        prepared.is_sql_batch()
                             && args.len() == prepared.arg_types().len()
                             && batch_eval_type(prepared.return_type()).is_some()
                     }
@@ -3091,7 +3102,7 @@ impl<'a> HostFrame<'a> {
         HostInvocation {
             slot: self.prepared.slot(),
             row: InputRow {
-                occurrence,
+                occurrence: self.rows.occurrence(0, occurrence),
                 input_row: self.rows.physical()[0],
             },
             arg_types: self.prepared.arg_types(),
@@ -3102,6 +3113,7 @@ impl<'a> HostFrame<'a> {
     fn window_invocation(&self) -> HostWindowInvocation<'_> {
         HostWindowInvocation {
             slot: self.prepared.slot(),
+            occurrence_start: self.rows.occurrence(0, 0),
             physical_rows: self.rows.physical(),
             arg_types: self.prepared.arg_types(),
             return_type: self.prepared.return_type(),
@@ -3110,6 +3122,7 @@ impl<'a> HostFrame<'a> {
     fn window_reply(&self, index: usize) -> HostWindowArgReply<'_> {
         HostWindowArgReply {
             index,
+            occurrence_start: self.rows.occurrence(0, 0),
             field_type: &self.prepared.arg_types()[index],
             physical_rows: self.rows.physical(),
             values: self.cache[index]
@@ -3393,7 +3406,13 @@ fn read_batch_binding_phase(
     let eval_type = batch_eval_type(field_type).ok_or_else(|| {
         LocalError::BindingContract("batch binding has an unsupported carrier".into())
     })?;
-    if let Some(output) = services.read_input_batch(ctx, slot, rows.physical(), field_type)? {
+    // The column-only batch hook carries no occurrence identity. A scoped row
+    // must use the occurrence-aware import instead.
+    if let Some(output) = if matches!(rows, FrameRows::Scoped(..)) {
+        None
+    } else {
+        services.read_input_batch(ctx, slot, rows.physical(), field_type)?
+    } {
         if output.eval_type() != eval_type || output.len() != count {
             return Err(LocalError::BindingContract(
                 "read_input_batch returned a different carrier or row count".into(),
@@ -3424,7 +3443,7 @@ fn read_batch_binding_phase(
             ctx,
             slot,
             InputRow {
-                occurrence,
+                occurrence: rows.occurrence(occurrence, 0),
                 input_row,
             },
             field_type,
@@ -3501,11 +3520,79 @@ fn eval_prepared_kernel<'a>(
     })
 }
 
+// A row host used as a window operand retains row demand inside its own
+// subtree. Scheduling stays in the canonical loop; no evaluator is called.
+struct RowHostScope<'a> {
+    nodes: &'a [RpnExpressionNode],
+    rows: FrameRows<'a>,
+    field_type: &'a FieldType,
+    values: Vec<VectorValue>,
+}
+impl RowHostScope<'_> {
+    fn storage(&self, mode: StorageMode) -> usize {
+        self.values.iter().fold(
+            self.rows.storage().saturating_add(
+                self.values
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<VectorValue>()),
+            ),
+            |bytes, value| bytes.saturating_add(vector_storage_bytes(value, mode)),
+        )
+    }
+    fn finish(&self, budget: &mut EvalBudget, retained: usize) -> LocalResult<VectorValue> {
+        let count = self.values.len();
+        match self.values[0].eval_type() {
+            EvalType::Int => {
+                budget.storage(
+                    retained.saturating_add(int_min_storage_bytes(count).unwrap_or(usize::MAX)),
+                )?;
+                let mut output = VectorValue::with_capacity(count, EvalType::Int);
+                for value in &self.values {
+                    let ScalarValueRef::Int(value) = value.get_scalar_ref(0) else {
+                        unreachable!("checked row carrier")
+                    };
+                    output.push_int(value.copied());
+                }
+                Ok(output)
+            }
+            EvalType::Bytes => {
+                let mut payload = 0usize;
+                for value in &self.values {
+                    let ScalarValueRef::Bytes(value) = value.get_scalar_ref(0) else {
+                        unreachable!("checked row carrier")
+                    };
+                    payload = payload
+                        .checked_add(value.map_or(0, <[u8]>::len))
+                        .ok_or_else(|| {
+                            LocalError::ResourceLimit("row scope payload overflow".into())
+                        })?;
+                }
+                budget.storage(retained.saturating_add(
+                    bytes_min_storage_bytes(count, payload).unwrap_or(usize::MAX),
+                ))?;
+                let mut output = ChunkedVecBytes::try_with_capacities(count, payload)
+                    .map_err(|error| LocalError::ResourceLimit(error.to_string()))?;
+                for value in &self.values {
+                    let ScalarValueRef::Bytes(value) = value.get_scalar_ref(0) else {
+                        unreachable!("checked row carrier")
+                    };
+                    output.push_ref(value);
+                }
+                Ok(VectorValue::Bytes(output))
+            }
+            _ => Err(LocalError::HostContract(
+                "row scope carrier is outside the host domain".into(),
+            )),
+        }
+    }
+}
+
 enum EvalFrame<'a> {
     Program(ProgramFrame<'a>),
     Control(ControlFrame<'a>),
     Host(HostFrame<'a>),
     Ordinary(OrdinaryFrame<'a>),
+    RowHostScope(RowHostScope<'a>),
 }
 
 fn node_storage(node: &RpnStackNode<'_>, mode: StorageMode) -> usize {
@@ -3533,6 +3620,7 @@ impl EvalFrame<'_> {
             Self::Control(frame) => frame.storage(mode),
             Self::Host(frame) => frame.storage(mode),
             Self::Ordinary(frame) => frame.storage(mode),
+            Self::RowHostScope(frame) => frame.storage(mode),
         }
     }
 }
@@ -3694,6 +3782,32 @@ fn eval_frames<'a, 'data: 'a>(
         match frames.pop().unwrap() {
             EvalFrame::Program(mut frame) => {
                 frame.check_execution(execution, schema)?;
+                if execution == EvalExecution::SqlBatch && frame.rows.len() > 1 {
+                    if let [RpnExpressionNode::HostCall { prepared, .. }] = frame.nodes {
+                        if !prepared.is_windowed() {
+                            let count = frame.rows.len();
+                            budget.charge()?;
+                            budget.storage(retained.saturating_add(
+                                count.saturating_mul(std::mem::size_of::<VectorValue>()),
+                            ))?;
+                            let mut values = Vec::new();
+                            reserve(&mut values, count)?;
+                            let scope = RowHostScope {
+                                nodes: frame.nodes,
+                                rows: frame.rows,
+                                field_type: prepared.return_type(),
+                                values,
+                            };
+                            push_frame(
+                                &mut frames,
+                                EvalFrame::RowHostScope(scope),
+                                budget,
+                                tasks.storage(),
+                            )?;
+                            continue;
+                        }
+                    }
+                }
                 if let Some(value) = returned.take() {
                     let needed = frame.stack.len().saturating_add(1);
                     reserve_stack(&mut frame, needed, &mut retained, budget)?;
@@ -3946,6 +4060,59 @@ fn eval_frames<'a, 'data: 'a>(
                     }
                     budget.storage(retained.saturating_add(node_storage(&value, budget.mode())))?;
                     returned = Some(FrameResult::unannotated(value));
+                }
+            }
+            EvalFrame::RowHostScope(mut frame) => {
+                if let Some(value) = returned.take() {
+                    budget.charge()?;
+                    let node = value.into_unannotated()?;
+                    validate_frame_result(&node, 1)?;
+                    if node.field_type() != frame.field_type {
+                        return Err(LocalError::HostContract(
+                            "row scope field type changed".into(),
+                        ));
+                    }
+                    budget.storage(retained.saturating_add(host_node_copy_precharge(&node, 1)?))?;
+                    frame.values.push(copy_host_rows(&node, 1)?);
+                    retained = frames_storage(&frames, frames.capacity(), budget.mode())
+                        .saturating_add(frame.storage(budget.mode()))
+                        .saturating_add(tasks.storage());
+                    budget.storage(retained)?;
+                }
+                if frame.values.len() == frame.rows.len() {
+                    let physical_value = frame.finish(budget, retained)?;
+                    let node = RpnStackNode::Vector {
+                        value: RpnStackNodeVectorValue::Generated { physical_value },
+                        field_type: frame.field_type,
+                    };
+                    budget.storage(retained.saturating_add(node_storage(&node, budget.mode())))?;
+                    returned = Some(FrameResult::unannotated(node));
+                } else {
+                    budget.charge()?;
+                    let position = frame.values.len();
+                    let child = ProgramFrame {
+                        nodes: frame.nodes,
+                        pc: 0,
+                        rows: FrameRows::Scoped(
+                            [frame.rows.physical()[position]],
+                            frame.rows.occurrence(position, 0),
+                        ),
+                        stack: Vec::new(),
+                        flow: None,
+                        result_meta: None,
+                    };
+                    push_frame(
+                        &mut frames,
+                        EvalFrame::RowHostScope(frame),
+                        budget,
+                        tasks.storage(),
+                    )?;
+                    push_frame(
+                        &mut frames,
+                        EvalFrame::Program(child),
+                        budget,
+                        tasks.storage(),
+                    )?;
                 }
             }
             EvalFrame::Host(mut frame) => {
@@ -4477,6 +4644,17 @@ impl RpnExpression {
                                 logical_rows,
                             },
                             FrameRows::Owned(logical_rows, _) => {
+                                let selected = RpnStackNodeVectorValue::Ref {
+                                    physical_value,
+                                    logical_rows,
+                                }
+                                .take_vector_value()
+                                .map_err(LocalError::Evaluation)?;
+                                RpnStackNodeVectorValue::Generated {
+                                    physical_value: selected,
+                                }
+                            }
+                            FrameRows::Scoped(logical_rows, _) => {
                                 let selected = RpnStackNodeVectorValue::Ref {
                                     physical_value,
                                     logical_rows,

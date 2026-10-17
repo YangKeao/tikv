@@ -450,6 +450,8 @@ pub struct HostArgReply<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct HostWindowInvocation<'a> {
     pub slot: HostSlot,
+    /// Original occurrence index of position zero, including a scoped row.
+    pub occurrence_start: usize,
     pub physical_rows: &'a [usize],
     pub arg_types: &'a [FieldType],
     pub return_type: &'a FieldType,
@@ -460,6 +462,8 @@ pub struct HostWindowInvocation<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct HostWindowArgReply<'a> {
     pub index: usize,
+    /// Same occurrence origin as this invocation's start callback.
+    pub occurrence_start: usize,
     pub field_type: &'a FieldType,
     pub physical_rows: &'a [usize],
     pub values: &'a VectorValue,

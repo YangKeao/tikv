@@ -672,10 +672,12 @@ pub fn compile_control_with_lineage(
 /// row entrypoints. SQL context hosts require the explicit catalog retained by
 /// BatchFacts::sql_native_batch_with_hosts. Row hosts retain singleton windows;
 /// explicitly registered window hosts use whole argument vectors through the
-/// same HostFrame. Any row-host/control descendant still constrains the graph
-/// to singleton windows. CompileLimits bounds
-/// nodes/depth; source/type metadata bytes remain a caller responsibility. The
-/// evaluator separately bounds selection occurrences.
+/// same HostFrame. Explicit window roots can contain row-host operands:
+/// the canonical frame loop completes each row subtree in occurrence order,
+/// then publishes its full argument vector. Row roots and typed-control
+/// descendants still constrain admission to singleton windows. CompileLimits
+/// bounds nodes/depth; source/type metadata bytes remain a caller
+/// responsibility. The evaluator separately bounds selection occurrences.
 pub fn compile_batch(
     spec: &LocalExpr,
     schema: &[FieldType],

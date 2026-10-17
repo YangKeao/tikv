@@ -1970,9 +1970,18 @@ flag or eligibility policy described above.
   expression. Current window carriers are checked Int/Bytes at the shared
   copy seam; these three catalog operations register Bytes inputs/results.
   Pure and nested window-host graphs permit up to1024 selected occurrences.
-  A row host or typed control descendant still constrains the graph to one;
-  row-host wrapping inside a larger window and whole-selection caller phases
-  are separate outstanding work. This protocol extension alone supplies no
+  An explicit window root can also contain row-host operands. RowHostScope
+  schedules each complete row-host subtree in original occurrence order inside
+  the same frame loop, then returns its compact full argument vector before
+  the parent demands its next argument. It never invokes another evaluator.
+  Scoped row maps preserve original occurrence identity through input imports,
+  host callbacks and nested window callbacks (`occurrence_start`); repeated
+  physical rows are distinct. The column-only read_input_batch hook is bypassed
+  for a scoped row because it cannot carry occurrence identity. Successful
+  singleton owners and final compact output are metered together, and Fresh
+  restarts the entire row-host operand. Row roots and any typed control
+  descendant still constrain admission to one. Whole-selection caller phases
+  remain outstanding work. This protocol extension alone supplies no
   new TiDB root lowering or SQL arithmetic implementation. Protocol fixtures
   live in `local/window_host_tests.rs` and deliberately relay bytes rather than
   claiming to implement arithmetic.
