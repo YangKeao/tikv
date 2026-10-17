@@ -29,7 +29,11 @@
 //! oversized invocations fail before any input read. Branch result payloads
 //! retain their native carriers and receive the control's declared type.
 //! SQL batch context hosts require a separate catalog of closed operations
-//! (currently CONCAT/CONCAT_WS), full source sites and exact descriptors.
+//! (including CONCAT/CONCAT_WS), full source sites and exact descriptors.
+//! Explicit window-host operations receive complete argument vectors through
+//! start_window/resume_window in the same HostFrame; row hosts retain their
+//! existing callback shape and singleton limit. Unsupported window callbacks
+//! are terminal contracts, never a row-evaluator fallback.
 //! Their staged value-only protocol uses the same HostFrame and task cleanup;
 //! legacy row catalogs do not grant this capability. Providers meter opaque
 //! task heaps separately; frame caches/results remain in the exact ledger.
@@ -199,8 +203,8 @@ pub use self::{
     },
     host::{
         ArgMode, HostArgReply, HostArgRequest, HostCatalog, HostCatalogKey, HostInvocation,
-        HostSignature, HostSlot, HostStart, HostStep, HostTaskId, LocalHostServices,
-        PreparedHostCall, SqlBatchHostOperation,
+        HostSignature, HostSlot, HostStart, HostStep, HostTaskId, HostWindowArgReply,
+        HostWindowInvocation, LocalHostServices, PreparedHostCall, SqlBatchHostOperation,
     },
     lineage::{
         ControlLineageFacts, ControlProducerFact, ControlProducerRole, LineageCarrier,
@@ -5868,3 +5872,6 @@ mod in_worker_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod window_host_tests;

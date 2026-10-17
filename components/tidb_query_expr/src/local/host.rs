@@ -88,9 +88,20 @@ pub enum SqlBatchHostOperation {
     AddNative,
     SubtractNative,
     MultiplyNative,
+    /// Additive arithmetic with complete operand-window demand.
+    AddWindowNative,
+    SubtractWindowNative,
+    MultiplyWindowNative,
 }
 
 impl SqlBatchHostOperation {
+    /// Only explicit window operations use the vector callback protocol.
+    pub fn is_windowed(self) -> bool {
+        matches!(
+            self,
+            Self::AddWindowNative | Self::SubtractWindowNative | Self::MultiplyWindowNative
+        )
+    }
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
             Self::Concat | Self::CoalesceNative | Self::CaseNative => arity >= 1,
@@ -103,7 +114,10 @@ impl SqlBatchHostOperation {
             | Self::NullIfNative
             | Self::AddNative
             | Self::SubtractNative
-            | Self::MultiplyNative => arity == 2,
+            | Self::MultiplyNative
+            | Self::AddWindowNative
+            | Self::SubtractWindowNative
+            | Self::MultiplyWindowNative => arity == 2,
             Self::IfNative => arity == 3,
             Self::IsTrueWithNullNative
             | Self::UnaryNotNative
@@ -148,7 +162,10 @@ impl SqlBatchHostOperation {
             | Self::AbsNative
             | Self::AddNative
             | Self::SubtractNative
-            | Self::MultiplyNative => EvalType::Bytes,
+            | Self::MultiplyNative
+            | Self::AddWindowNative
+            | Self::SubtractWindowNative
+            | Self::MultiplyWindowNative => EvalType::Bytes,
         }
     }
     pub fn output_type(self) -> EvalType {
@@ -179,7 +196,10 @@ impl SqlBatchHostOperation {
             | Self::AbsNative
             | Self::AddNative
             | Self::SubtractNative
-            | Self::MultiplyNative => EvalType::Bytes,
+            | Self::MultiplyNative
+            | Self::AddWindowNative
+            | Self::SubtractWindowNative
+            | Self::MultiplyWindowNative => EvalType::Bytes,
             Self::RegexpLike { .. } => EvalType::Int,
         }
     }
@@ -369,6 +389,12 @@ impl PreparedHostCall {
         self.catalog.is_sql_batch()
     }
 
+    pub(crate) fn is_windowed(&self) -> bool {
+        self.catalog
+            .sql_batch_operations
+            .as_ref()
+            .is_some_and(|operations| operations[self.slot.index].is_windowed())
+    }
     pub fn slot(&self) -> HostSlot {
         self.slot
     }
@@ -419,6 +445,26 @@ pub struct HostArgReply<'a> {
     pub values: &'a VectorValue,
 }
 
+/// The caller's complete checked occurrence window. Physical rows may repeat;
+/// each position has its own occurrence identity. Borrowed only during start.
+#[derive(Clone, Copy, Debug)]
+pub struct HostWindowInvocation<'a> {
+    pub slot: HostSlot,
+    pub physical_rows: &'a [usize],
+    pub arg_types: &'a [FieldType],
+    pub return_type: &'a FieldType,
+}
+
+/// One complete argument phase, in the unchanged selection order. The vector
+/// is owned by the driver and borrowed only for this resume call.
+#[derive(Clone, Copy, Debug)]
+pub struct HostWindowArgReply<'a> {
+    pub index: usize,
+    pub field_type: &'a FieldType,
+    pub physical_rows: &'a [usize],
+    pub values: &'a VectorValue,
+}
+
 /// Adapter task identity. Generations distinguish reuse of a task slot and must
 /// never be zero. A driver receiving generation zero must reject it and attempt
 /// cancellation, rather than treating it as a ready or absent task.
@@ -463,11 +509,11 @@ pub enum HostStep {
 /// Implementations must keep their catalog identity and task namespace stable
 /// across service reborrows. Invocation/reply references and EvalContext may
 /// not be retained across calls; suspended tasks contain only owned state.
-/// `start` must release partial state before returning Err or immediate Ready.
-/// `resume` must finish its task before Ready; the driver retains the token
-/// until that result is validated and may still issue idempotent cancellation.
-/// Start/resume bodies must be bounded, and adapters must meter their own
-/// opaque task allocations: RPN limits are not a total host-heap or
+/// `start`/`start_window` release partial state before Err or immediate Ready.
+/// `resume`/`resume_window` finish tasks before Ready; the driver retains the
+/// token until that result is validated and may still issue idempotent
+/// cancellation. Start/resume bodies must be bounded, and adapters must meter
+/// their own opaque task allocations: RPN limits are not a total host-heap or
 /// external-stop hook. Cleanup guarantees require a stable, contract-compliant
 /// provider; they cannot recover resources after the provider disappears,
 /// changes identity or panics.
@@ -486,6 +532,32 @@ pub trait LocalHostServices {
         task: &HostTaskId,
         reply: HostArgReply<'_>,
     ) -> LocalResult<HostStep>;
+
+    /// Whole-window counterpart of start, only for registered window
+    /// operations. An unimplemented protocol is a contract error, never a
+    /// row-loop fallback.
+    fn start_window(
+        &mut self,
+        _ctx: &mut EvalContext,
+        _invocation: HostWindowInvocation<'_>,
+    ) -> LocalResult<HostStart> {
+        Err(LocalError::HostContract(
+            "host does not implement window start".into(),
+        ))
+    }
+
+    /// A request evaluates the complete child window before this callback.
+    /// Fresh/Reuse applies to that entire successful vector and invocation.
+    fn resume_window(
+        &mut self,
+        _ctx: &mut EvalContext,
+        _task: &HostTaskId,
+        _reply: HostWindowArgReply<'_>,
+    ) -> LocalResult<HostStep> {
+        Err(LocalError::HostContract(
+            "host does not implement window resume".into(),
+        ))
+    }
 
     /// Infallible, nonpanicking, idempotent cleanup, including malformed,
     /// stale, or already completed IDs. Do not evaluate expressions, append

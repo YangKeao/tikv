@@ -245,11 +245,12 @@ flag or eligibility policy described above.
   without input columns. This is not blanket zero-argument admission; RAND and
   other stateful/contextual calls remain outside this registry. Empty selection,
   row-window order and execution/storage budgets retain their normal contracts.
-  Lazy/effectful calls remain outside this domain. The former
+  Lazy/effectful calls remain outside the ordinary signature registry; checked
+  host/control profiles retain their separate explicit contracts. The former
   numeric-vector program, compile mode and decoded/raw entry have been removed.
   Row/ControlLineage/SqlBatch/EvaluatedAscii identities remain separate and are
   checked even for empty and leaf programs.
-- One program invocation evaluates children before parent lanes in selected
+- An ordinary eager batch invocation evaluates children before parent lanes in selected
   occurrence order, with no left-NULL stop or per-row tree replay. The bound is
   1024 selected occurrences per invocation; the TiDB adapter streams larger
   selections through consecutive windows. Repeats/reordering remain distinct.
@@ -1957,6 +1958,24 @@ flag or eligibility policy described above.
   children: Fresh recomputes without an old-value fallback; Reuse keeps only the
   most recent successful argument value within that invocation. Callback borrows
   cannot be retained; suspended adapter state is owned and keyed by task IDs.
+- Explicit `AddWindowNative`, `SubtractWindowNative` and `MultiplyWindowNative`
+  host descriptors use `start_window`/`resume_window` instead of the row callbacks.
+  `HostWindowInvocation` borrows the full physical selection map; each duplicate
+  position retains its own occurrence. `HostWindowArgReply` borrows a complete
+  successful argument vector in that order. Fresh/Reuse applies to the entire
+  vector within one invocation. The same HostFrame evaluates child programs,
+  validates complete declarations/counts/carriers, meters compact owned cache
+  and result copies, and uses the same task ledger/cancellation guard. Missing
+  window methods return HostContract; they do not call row methods or retry an
+  expression. Current window carriers are checked Int/Bytes at the shared
+  copy seam; these three catalog operations register Bytes inputs/results.
+  Pure and nested window-host graphs permit up to1024 selected occurrences.
+  A row host or typed control descendant still constrains the graph to one;
+  row-host wrapping inside a larger window and whole-selection caller phases
+  are separate outstanding work. This protocol extension alone supplies no
+  new TiDB root lowering or SQL arithmetic implementation. Protocol fixtures
+  live in `local/window_host_tests.rs` and deliberately relay bytes rather than
+  claiming to implement arithmetic.
 - The driver reserves a potential task before start, even for immediate Ready.
   Pending IDs are tracked before request validation. Errors, limits and unwind
   cancel reachable tasks inner-first without replacing the primary error; cancel

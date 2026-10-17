@@ -149,11 +149,14 @@ impl BatchCallSignature {
                     | SqlBatchHostOperation::AddNative
                     | SqlBatchHostOperation::SubtractNative
                     | SqlBatchHostOperation::MultiplyNative
+                    | SqlBatchHostOperation::AddWindowNative
+                    | SqlBatchHostOperation::SubtractWindowNative
+                    | SqlBatchHostOperation::MultiplyWindowNative
             )
         )
     }
     pub fn requires_singleton(self) -> bool {
-        self.control.is_some() || self.host.is_some()
+        self.control.is_some() || self.host.is_some_and(|operation| !operation.is_windowed())
     }
     pub fn argument_type(self, index: usize) -> Option<EvalType> {
         if index >= self.arity {
@@ -709,7 +712,7 @@ impl BatchFacts {
         if self.snapshot.nodes.iter().any(|node| {
             matches!(node.kind,
             NodeKind::BatchCall { signature, .. } if batch_control(signature).is_some())
-                || matches!(node.kind, NodeKind::BatchHost { .. })
+                || matches!(node.kind, NodeKind::BatchHost { operation, .. } if !operation.is_windowed())
         }) {
             1
         } else {

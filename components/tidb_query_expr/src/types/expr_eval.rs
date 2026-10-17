@@ -20,9 +20,10 @@ use crate::{
     impl_op::LogicalAccumulator,
     local::{
         ArgMode, CheckedResultFlow, EvaluatedArgsRole, EvaluatedBytesOp, HostArgReply,
-        HostArgRequest, HostCatalogKey, HostInvocation, HostStart, HostStep, HostTaskId, InputRow,
-        LineageCarrier, LocalError, LocalHostServices, LocalResult, LocalRuntimeServices,
-        OrdinaryProfile, PreparedHostCall, PreparedOrdinaryCall, ResultMetaId,
+        HostArgRequest, HostCatalogKey, HostInvocation, HostStart, HostStep, HostTaskId,
+        HostWindowArgReply, HostWindowInvocation, InputRow, LineageCarrier, LocalError,
+        LocalHostServices, LocalResult, LocalRuntimeServices, OrdinaryProfile, PreparedHostCall,
+        PreparedOrdinaryCall, ResultMetaId,
         runtime::{
             EvalBudget, StorageMode, bytes_min_storage_bytes, compact_min_storage_bytes,
             datetime_min_storage_bytes, decimal_min_storage_bytes, duration_min_storage_bytes,
@@ -2339,7 +2340,7 @@ impl<'a> ProgramFrame<'a> {
                             })
                     }
                     RpnExpressionNode::HostCall { prepared, args } => {
-                        self.rows.len() == 1
+                        (self.rows.len() == 1 || prepared.is_windowed())
                             && prepared.is_sql_batch()
                             && args.len() == prepared.arg_types().len()
                             && batch_eval_type(prepared.return_type()).is_some()
@@ -2956,6 +2957,82 @@ fn copy_host_value(value: ScalarValueRef<'_>) -> LocalResult<VectorValue> {
     }
 }
 
+// Copy only the compact checked Int/Bytes window, not the provider's capacity.
+fn host_node_copy_precharge(node: &RpnStackNode<'_>, rows: usize) -> LocalResult<usize> {
+    validate_frame_result(node, rows)?;
+    if rows == 1 {
+        return Ok(host_copy_precharge(node.get_logical_scalar_ref(0)));
+    }
+    match node.get_logical_scalar_ref(0).eval_type() {
+        EvalType::Int => Ok(int_min_storage_bytes(rows).unwrap_or(usize::MAX)),
+        EvalType::Bytes => {
+            let mut payload = 0usize;
+            for row in 0..rows {
+                let ScalarValueRef::Bytes(value) = node.get_logical_scalar_ref(row) else {
+                    return Err(LocalError::HostContract(
+                        "host argument carrier changed inside window".into(),
+                    ));
+                };
+                payload = payload
+                    .checked_add(value.map_or(0, <[u8]>::len))
+                    .ok_or_else(|| {
+                        LocalError::ResourceLimit("host window payload size overflow".into())
+                    })?;
+            }
+            Ok(bytes_min_storage_bytes(rows, payload).unwrap_or(usize::MAX))
+        }
+        _ => Err(LocalError::HostContract(
+            "host value is outside its checked carrier domain".into(),
+        )),
+    }
+}
+fn copy_host_rows(node: &RpnStackNode<'_>, rows: usize) -> LocalResult<VectorValue> {
+    if rows == 1 {
+        return copy_host_value(node.get_logical_scalar_ref(0));
+    }
+    match node.get_logical_scalar_ref(0).eval_type() {
+        EvalType::Int => {
+            let mut output = VectorValue::with_capacity(rows, EvalType::Int);
+            for row in 0..rows {
+                let ScalarValueRef::Int(value) = node.get_logical_scalar_ref(row) else {
+                    return Err(LocalError::HostContract(
+                        "host argument carrier changed inside window".into(),
+                    ));
+                };
+                output.push_int(value.copied());
+            }
+            Ok(output)
+        }
+        EvalType::Bytes => {
+            let mut payload = 0usize;
+            for row in 0..rows {
+                let ScalarValueRef::Bytes(value) = node.get_logical_scalar_ref(row) else {
+                    return Err(LocalError::HostContract(
+                        "host argument carrier changed inside window".into(),
+                    ));
+                };
+                payload = payload
+                    .checked_add(value.map_or(0, <[u8]>::len))
+                    .ok_or_else(|| {
+                        LocalError::ResourceLimit("host window payload size overflow".into())
+                    })?;
+            }
+            let mut output = ChunkedVecBytes::try_with_capacities(rows, payload)
+                .map_err(|error| LocalError::ResourceLimit(error.to_string()))?;
+            for row in 0..rows {
+                let ScalarValueRef::Bytes(value) = node.get_logical_scalar_ref(row) else {
+                    unreachable!("checked window carrier");
+                };
+                output.push_ref(value);
+            }
+            Ok(VectorValue::Bytes(output))
+        }
+        _ => Err(LocalError::HostContract(
+            "host value is outside its checked carrier domain".into(),
+        )),
+    }
+}
+
 struct HostFrame<'a> {
     prepared: &'a PreparedHostCall,
     args: &'a [RpnExpression],
@@ -2978,10 +3055,14 @@ impl<'a> HostFrame<'a> {
         args: &'a [RpnExpression],
         rows: FrameRows<'a>,
     ) -> LocalResult<Self> {
-        if rows.len() != 1 || rows.physical().len() != 1 || args.len() != prepared.arg_types().len()
+        if rows.len() == 0
+            || rows.len() > BATCH_MAX_SIZE
+            || rows.physical().len() != rows.len()
+            || (!prepared.is_windowed() && rows.len() != 1)
+            || args.len() != prepared.arg_types().len()
         {
             return Err(LocalError::HostContract(
-                "host call requires its checked singleton shape".into(),
+                "host call requires its checked occurrence shape".into(),
             ));
         }
         let mut cache = Vec::new();
@@ -3018,6 +3099,24 @@ impl<'a> HostFrame<'a> {
         }
     }
 
+    fn window_invocation(&self) -> HostWindowInvocation<'_> {
+        HostWindowInvocation {
+            slot: self.prepared.slot(),
+            physical_rows: self.rows.physical(),
+            arg_types: self.prepared.arg_types(),
+            return_type: self.prepared.return_type(),
+        }
+    }
+    fn window_reply(&self, index: usize) -> HostWindowArgReply<'_> {
+        HostWindowArgReply {
+            index,
+            field_type: &self.prepared.arg_types()[index],
+            physical_rows: self.rows.physical(),
+            values: self.cache[index]
+                .as_ref()
+                .expect("successful cached window argument"),
+        }
+    }
     fn request(&mut self, request: HostArgRequest) -> LocalResult<()> {
         if request.index >= self.args.len() {
             return Err(LocalError::HostContract(
@@ -3030,7 +3129,7 @@ impl<'a> HostFrame<'a> {
 
     fn accept(&mut self, value: RpnStackNode<'a>) -> LocalResult<()> {
         let index = self.awaiting.take().expect("host awaited an argument");
-        validate_frame_result(&value, 1)?;
+        validate_frame_result(&value, self.rows.len())?;
         if value.field_type() != &self.prepared.arg_types()[index] {
             return Err(LocalError::HostContract(
                 "argument complete field type differs from registration".into(),
@@ -3045,8 +3144,8 @@ impl<'a> HostFrame<'a> {
                 "host argument carrier differs from its catalog".into(),
             ));
         }
-        // Cache only successful, bounded owned singleton results.
-        self.cache[index] = Some(copy_host_value(scalar)?);
+        // Cache only successful, bounded compact results for this invocation.
+        self.cache[index] = Some(copy_host_rows(&value, self.rows.len())?);
         self.ready = Some(index);
         Ok(())
     }
@@ -3069,18 +3168,25 @@ impl<'a> HostFrame<'a> {
     ) -> LocalResult<RpnStackNode<'a>> {
         if Some(value.eval_type())
             != EvalType::try_from(self.prepared.return_type().as_accessor().tp()).ok()
-            || value.len() != 1
+            || value.len() != self.rows.len()
             || (!self.prepared.is_sql_batch() && value.eval_type() != EvalType::Int)
         {
             return Err(LocalError::HostContract(
-                "host Ready must contain one value of its registered carrier".into(),
+                "host Ready must match its registered carrier and occurrence count".into(),
             ));
         }
         // The provider's transient allocations are outside this retained-scratch
         // budget. Do not keep arbitrary capacity or a borrow from the callback.
-        let scalar = value.get_scalar_ref(0);
-        budget.storage(other_live.saturating_add(host_copy_precharge(scalar)))?;
-        let physical_value = copy_host_value(scalar)?;
+        let node = RpnStackNode::Vector {
+            value: RpnStackNodeVectorValue::Generated {
+                physical_value: value,
+            },
+            field_type: self.prepared.return_type(),
+        };
+        budget.storage(
+            other_live.saturating_add(host_node_copy_precharge(&node, self.rows.len())?),
+        )?;
+        let physical_value = copy_host_rows(&node, self.rows.len())?;
         Ok(RpnStackNode::Vector {
             value: RpnStackNodeVectorValue::Generated { physical_value },
             field_type: self.prepared.return_type(),
@@ -3845,9 +3951,10 @@ fn eval_frames<'a, 'data: 'a>(
             EvalFrame::Host(mut frame) => {
                 if let Some(value) = returned.take() {
                     budget.charge()?;
-                    budget.storage(retained.saturating_add(host_copy_precharge(
-                        value.node.get_logical_scalar_ref(0),
-                    )))?;
+                    budget.storage(retained.saturating_add(host_node_copy_precharge(
+                        &value.node,
+                        frame.rows.len(),
+                    )?))?;
                     frame.accept(value.into_unannotated()?)?;
                     retained = frames_storage(&frames, frames.capacity(), budget.mode())
                         .saturating_add(frame.storage(budget.mode()))
@@ -3859,7 +3966,11 @@ fn eval_frames<'a, 'data: 'a>(
                     budget.charge()?;
                     tasks.reserve_start(budget, &mut retained)?;
                     budget.storage(retained.saturating_add(int_storage_bytes(1)))?;
-                    let start = tasks.host()?.start(ctx, frame.invocation(occurrence))?;
+                    let start = if frame.prepared.is_windowed() {
+                        tasks.host()?.start_window(ctx, frame.window_invocation())?
+                    } else {
+                        tasks.host()?.start(ctx, frame.invocation(occurrence))?
+                    };
                     match start {
                         HostStart::Ready(value) => {
                             let value = frame.finish(value, budget, retained)?;
@@ -3883,7 +3994,13 @@ fn eval_frames<'a, 'data: 'a>(
                     budget.charge()?;
                     budget.storage(retained.saturating_add(int_storage_bytes(1)))?;
                     let task = frame.task.expect("resuming a registered task");
-                    let step = tasks.host()?.resume(ctx, &task, frame.reply(index))?;
+                    let step = if frame.prepared.is_windowed() {
+                        tasks
+                            .host()?
+                            .resume_window(ctx, &task, frame.window_reply(index))?
+                    } else {
+                        tasks.host()?.resume(ctx, &task, frame.reply(index))?
+                    };
                     match step {
                         HostStep::NeedArg(request) => frame.request(request)?,
                         HostStep::Ready(value) => {
