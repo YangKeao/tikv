@@ -12,11 +12,9 @@ use tidb_query_datatype::codec::{
     collation::native::NativeCollation,
     data_type::{Bytes, BytesRef, ChunkedVec, EvaluableRef, EvaluableRet, Int},
     mysql::{
-        Decimal, Time, TimeType,
+        Decimal, TimeType,
         decimal::NativeDecimalError,
-        time::{
-            NativeSessionTimeZone, NativeTemporalValue, native_get_time_fsp, native_parse_time,
-        },
+        time::{NativeSessionTimeZone, NativeTemporalValue},
     },
 };
 
@@ -834,7 +832,7 @@ pub(crate) fn evaluate_extremum_time_native(
     let s = state(bytes.unwrap()).ok_or(Error::Invalid)?;
     let candidate = time_value(value).ok_or(Error::Invalid)?;
     let wins = s.best.as_deref().is_none_or(|best| {
-        Time::native_core_compare(candidate.raw, time_value(best).unwrap().raw) == s.want
+        crate::native_extremum_value::time_wins(s.want, candidate, time_value(best).unwrap())
     });
     finish_sequence(s, value, wins, limit)
 }
@@ -849,10 +847,9 @@ pub(crate) fn evaluate_extremum_vector_native(
     let value = value.unwrap();
     let s = state(bytes.unwrap()).ok_or(Error::Invalid)?;
     let candidate = vector_value(value).ok_or(Error::Invalid)?;
-    let wins = s
-        .best
-        .as_deref()
-        .is_none_or(|best| candidate.compare(&vector_value(best).unwrap()) == s.want);
+    let wins = s.best.as_deref().is_none_or(|best| {
+        crate::native_extremum_value::vector_wins(s.want, &candidate, &vector_value(best).unwrap())
+    });
     finish_sequence(s, value, wins, limit)
 }
 pub(crate) fn evaluate_extremum_string_native(
@@ -867,13 +864,12 @@ pub(crate) fn evaluate_extremum_string_native(
     let s = state(bytes.unwrap()).ok_or(Error::Invalid)?;
     let wins = match &s.best {
         None => true,
-        Some(best) => {
-            NativeCollation::from_tag(s.collation)
-                .ok_or(Error::Invalid)?
-                .compare(value, best)
-                .expect("raw supported collation comparison cannot fail")
-                == s.want
-        }
+        Some(best) => crate::native_extremum_value::string_wins(
+            s.want,
+            NativeCollation::from_tag(s.collation).ok_or(Error::Invalid)?,
+            value,
+            best,
+        ),
     };
     finish_sequence(s, value, wins, limit)
 }
@@ -907,34 +903,13 @@ pub(crate) fn evaluate_extremum_time_context_native(
     };
     let input = std::str::from_utf8(s.text.as_deref().ok_or(Error::Invalid)?)
         .map_err(|_| Error::Invalid)?;
-    let kind = if as_date {
-        TimeType::Date
-    } else {
-        TimeType::DateTime
-    };
-    let fsp = if as_date {
-        0
-    } else {
-        i64::from(native_get_time_fsp(input))
-    };
-    let value = match native_parse_time(input, kind, fsp, false, true, modes == Some(1), true, zone)
-    {
-        Ok(parsed) => {
-            let mut out = String::new();
-            Time::write_native_core_display(parsed.time.raw, as_date, parsed.time.fsp, &mut out)
-                .expect("formatting Time into String cannot fail");
-            out.into_bytes()
-        }
-        Err(_) => input.as_bytes().to_vec(),
-    };
+    let value =
+        crate::native_extremum_value::time_text_value(input, as_date, modes == Some(1), zone);
     // Parse failures preserve original text, with NO warning in this native policy.
-    let wins = s.best.as_deref().is_none_or(|best| {
-        if s.want == Ordering::Greater {
-            value.as_slice() > best
-        } else {
-            value.as_slice() < best
-        }
-    });
+    let wins = s
+        .best
+        .as_deref()
+        .is_none_or(|best| crate::native_extremum_value::time_text_wins(s.want, &value, best));
     finish_sequence(s, &value, wins, limit)
 }
 fn decimal_result<T: std::fmt::Debug>(

@@ -59,6 +59,8 @@ pub enum SqlBatchHostOperation {
     InNative,
     /// Metadata-selected linear/binary INTERVAL probes over real source values.
     IntervalNative,
+    /// Eager GREATEST/LEAST sources followed by genuine typed value reducers.
+    ExtremumNative,
     /// Native nullable selection over actual value handles.
     CoalesceNative,
     /// Exactly two native nullable arguments.
@@ -136,7 +138,9 @@ impl SqlBatchHostOperation {
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
             Self::BitwiseNative(op) => arity == op.arity(),
-            Self::Concat | Self::CoalesceNative | Self::CaseNative => arity >= 1,
+            Self::Concat | Self::CoalesceNative | Self::CaseNative | Self::ExtremumNative => {
+                arity >= 1
+            }
             Self::ConcatWs | Self::InNative | Self::IntervalNative => arity >= 2,
             Self::IfNullNative
             | Self::AndNative
@@ -186,6 +190,7 @@ impl SqlBatchHostOperation {
             | Self::CastNative
             | Self::InNative
             | Self::IntervalNative
+            | Self::ExtremumNative
             | Self::CoalesceNative
             | Self::IfNullNative
             | Self::IfNative
@@ -234,6 +239,7 @@ impl SqlBatchHostOperation {
             | Self::CastNative
             | Self::InNative
             | Self::IntervalNative
+            | Self::ExtremumNative
             | Self::CoalesceNative
             | Self::IfNullNative
             | Self::IfNative

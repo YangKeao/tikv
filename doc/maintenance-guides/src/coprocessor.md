@@ -645,22 +645,32 @@ flag or eligibility policy described above.
   before formatting. This is not whole-process allocation recovery. Native
   eligibility and compiled source closure remain separate; global fallback
   retirement is incomplete.
-- Query_expr `native_extremum.rs` adds eight native GREATEST/LEAST profiles
-  over `native_extremum_policy.rs`: head, numeric/time/vector/string steps,
-  text preparation, temporal context and final identity/precision conversion.
-  SDK requests own domain, winner, parse fallback and promotion decisions;
-  complete actual identity frames preserve the global NULL prepass and raw
-  representations. Native code only actuates original requested preparation
-  and comparisons. Numeric NoColumns semantics bind the selected execution
-  authority, rather than opening another standalone owner.
-  Seven profiles use Values; TimeContext retains TemporalText and existing
-  NativeTemporalCallMetadata/TemporalBindingGuard zone accounting and cleanup.
-  Role/compile gates and report subsets stay profile-specific. The checked
-  reply bound includes actual input lengths, fixed framing overhead and the
-  SDK-selected Decimal precision expansion; actual capacities are checked
-  separately. It is not a physical heap or temporary-allocation guarantee.
-  Existing literal profiles, planner metadata, PB/legacy admission and
-  specialized vector kernels are unchanged.
+- Query_expr `native_extremum_value.rs` owns actual time/vector/bytes sequence
+  reducers and temporal-text parsing; `native_extremum_policy.rs` owns full NULL
+  prepass, actual signature/domain choice and numeric cursor/promotion. Native
+  GREATEST/LEAST caller identity heads, step reports and scoped Ready authority
+  are retired after independent original comparisons. Numeric preparation uses
+  genuine PreparedComparison with NoColumns and the actual finite remaining
+  allowance. Complete original GlSignature, per-argument decimal0 for integer
+  declarations and STRICT constantness remain independent of runtime value kinds.
+  Signed/unsigned, NaN/raw Float32, first-winner/tie policies, datetime kind/fsp,
+  vector comparison and actual collation bytes preserve their original behavior.
+  Temporal text reads per-item modes/zone after coercion, retains original text
+  on parse failure and never invents a warning. The original Real Display vs
+  Float32 Datum::to_bytes boundary is unchanged. Explicit ordinary eight wire
+  profiles keep complete validation/protocol and share pure comparison/parsing
+  primitives after proof; no new value budget is imposed on their decoder owners.
+  `SqlBatchHostOperation::ExtremumNative` collects every actual source in order
+  before NULL/domain/cast work, even after an actual NULL. Detached producer
+  ordinals authenticate role/node/row occurrence, all source borrows end before
+  context work, and original SF RT/outer ENUM_SET_AS_INT publication remains.
+  Finite logical metadata/source-clone/state/conversion bounds reject oversized
+  demanded Decimal text or actual storage-word packing before allocation/format,
+  retaining distinct terminal local/native resource provenance. NULL and original
+  sentinel refusal skip unperformed Decimal work. Actual owned candidate/best
+  capacities are checked by the SDK reducer. This is not whole-process allocation
+  recovery. Native eligibility and compiled source closure remain separate;
+  other families and final global fallback retirement remain incomplete.
   The existing native JSON_SUM_CRC32 scalar-array domain uses query_expr's
   `native_json_sum_crc32.rs`: one nullable Bytes/OwnBytes worker owns ordered
   classification, numeric spelling, IEEE CRC and wrapping accumulation.

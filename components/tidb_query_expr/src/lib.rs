@@ -226,6 +226,11 @@ pub use native_extremum::{
     extremum_vector_native_args_valid, extremum_vector_native_fn_meta,
 };
 
+mod native_extremum_value;
+pub use native_extremum_value::{
+    NativeExtremumSequence, NativeExtremumSequenceValue, NativeExtremumValueError,
+    native_extremum_time_text_value,
+};
 mod native_extremum_policy;
 pub use native_extremum_policy::{
     NativeExtremumComparisonOp, NativeExtremumComparisonRequest, NativeExtremumComparisonValue,
