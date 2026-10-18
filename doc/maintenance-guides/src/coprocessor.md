@@ -2575,3 +2575,17 @@ Decimal result restoration remain checked. Fixed witnesses were captured from
 truncate policies. Explicit SDK recipes and other purpose-specific frontend
 ready-value consumers remain compatible and need their own migration; their
 existence is not a fallback used by these arithmetic callers.
+
+
+Generic, typed-integer/Decimal, actual-NULL and NULL-safe frontend comparison
+callers now compute the same genuine PreparedComparison values as canonical
+providers. Descriptor conversion into evaluated arguments and the comparison
+result unpacker were removed from these callers. NULL-safe presence and the
+original duration-column/constant-text normalization use the shared value
+kernels; datetime conversion NULL stays NULL. Original operator validation
+precedes Decimal bridging or context access. Computed predicates are published
+directly, and LocalError remains the original resource/evaluation discriminator
+with its actual cause and no invented worker phase. Old fixed result/context
+witnesses were captured in185,274 independent recipe comparisons before this
+switch. Explicit legacy recipe APIs and other ready-value families remain;
+this does not certify global fallback removal or complete SQL coverage.
