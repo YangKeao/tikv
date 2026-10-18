@@ -30,6 +30,8 @@ pub enum NativeDurationConstructionOperation {
     GetFormat,
     /// Native DATEDIFF policy.
     DateDiff,
+    /// Native CONVERT_TZ policy.
+    ConvertTz,
 }
 impl NativeDurationConstructionOperation {
     /// Original function spelling.
@@ -48,12 +50,13 @@ impl NativeDurationConstructionOperation {
             Self::PeriodDiff => "period_diff",
             Self::GetFormat => "get_format",
             Self::DateDiff => "datediff",
+            Self::ConvertTz => "convert_tz",
         }
     }
     /// Original fixed argument count.
     pub fn arity(self) -> usize {
         match self {
-            Self::MakeTime => 3,
+            Self::MakeTime | Self::ConvertTz => 3,
             Self::TimeDiff
             | Self::TimeFormat
             | Self::MakeDate
@@ -68,7 +71,12 @@ impl NativeDurationConstructionOperation {
     pub fn temporal_result(self) -> bool {
         matches!(
             self,
-            Self::TimeDiff | Self::SecToTime | Self::MakeDate | Self::MakeTime | Self::FromDays
+            Self::TimeDiff
+                | Self::SecToTime
+                | Self::MakeDate
+                | Self::MakeTime
+                | Self::FromDays
+                | Self::ConvertTz
         )
     }
 }

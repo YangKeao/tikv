@@ -90,6 +90,31 @@ fn parse_datetime(s: &str) -> Option<(NaiveDateTime, String)> {
     Some((date.and_hms_micro_opt(h, mi, sec, micros)?, frac))
 }
 
+/// Actual nullable SQL text operands. All text coercions belong to the caller;
+/// SQL NULL suppresses parsing, but never authorizes suppressing a coercion.
+/// The finite allowance covers the original parser, zone lookup and rendering.
+pub fn native_convert_tz_value(
+    datetime: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+    maximum: usize,
+) -> Result<Option<String>, crate::NativeDurationConstructionError> {
+    use crate::{
+        NativeDurationConstructionError as E,
+        native_duration_construction::{duration_text_work, duration_work},
+    };
+    duration_work(maximum, 0)?;
+    let (Some(datetime), Some(from), Some(to)) = (datetime, from, to) else {
+        return Ok(None);
+    };
+    let mut remaining = maximum;
+    for text in [datetime, from, to] {
+        duration_text_work(Some(text), remaining)?;
+        remaining = remaining.checked_sub(text.len()).ok_or(E::Resource)?;
+    }
+    Ok(evaluate_native_convert_tz(datetime, from, to))
+}
+
 pub(crate) fn evaluate_native_convert_tz(dt: &str, from_s: &str, to_s: &str) -> Option<String> {
     let (naive, frac) = parse_datetime(dt)?;
     // Both zone parsers run before testing either Option, even when from is absent.
@@ -326,6 +351,77 @@ mod tests {
                 &NaiveDateTime::MIN
             ))
             .is_err()
+        );
+    }
+    #[test]
+    fn actual_convert_tz_values_keep_null_parser_order_and_work_errors() {
+        use crate::NativeDurationConstructionError as E;
+        assert_eq!(
+            native_convert_tz_value(None, None, None, usize::MAX),
+            Err(E::Resource)
+        );
+        assert_eq!(
+            native_convert_tz_value(None, Some("+1:٢"), None, 0),
+            Ok(None)
+        );
+        let huge = "x".repeat(1 << 20);
+        assert_eq!(
+            native_convert_tz_value(None, Some(&huge), Some("UTC"), 0),
+            Ok(None)
+        );
+        assert_eq!(
+            native_convert_tz_value(Some("2004-01-01"), Some("UTC"), Some("UTC"), 16),
+            Err(E::Resource)
+        );
+        for (dt, from, to, expected) in [
+            (
+                "2004-01-01 12:00:00.123456789",
+                "-00:00",
+                "+12:34",
+                Some("2004-01-02 00:34:00.123456"),
+            ),
+            (
+                "2007-11-04 01:30:00",
+                "US/Eastern",
+                "UTC",
+                Some("2007-11-04 05:30:00"),
+            ),
+            (
+                "2025-10-26 02:30:00.5",
+                "Europe/Paris",
+                "UTC",
+                Some("2025-10-26 01:30:00.5"),
+            ),
+            (
+                "2025-03-30 02:30:00",
+                "Europe/Paris",
+                "UTC",
+                Some("2025-03-30 01:00:00"),
+            ),
+            ("2011-12-30 12:00:00", "Pacific/Apia", "UTC", None),
+            ("20000-01-01", "UTC", "+00:00", Some("20000-01-01 00:00:00")),
+            ("bad", "", "+1:٢", None),
+        ] {
+            assert_eq!(
+                native_convert_tz_value(Some(dt), Some(from), Some(to), 8192)
+                    .unwrap()
+                    .as_deref(),
+                expected
+            );
+        }
+        assert!(
+            std::panic::catch_unwind(|| native_convert_tz_value(
+                Some("2004-01-01"),
+                Some(""),
+                Some("+1:٢"),
+                8192
+            ))
+            .is_err()
+        );
+        assert!(
+            native_convert_tz_value(Some("2004-01-01"), Some("UTC"), Some("UTC"), 8192)
+                .unwrap()
+                .is_some()
         );
     }
 }

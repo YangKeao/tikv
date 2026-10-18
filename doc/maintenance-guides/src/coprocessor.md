@@ -3075,3 +3075,36 @@ rust/docs/evidence/no-fallback-n7n.md records captures, tests and final validati
 Generic fallback, remaining time/format families, old unistore traversal and
 unsupported/malformed shapes, inherited failures, semantic audits and full-server
 SQL gates remain open; this remains a local checkpoint, not a Go-package port.
+
+
+### N7o: CONVERT_TZ actual operands
+
+CONVERT_TZ now joins DurationConstructionNative as a three-argument policy through
+one existing SDK frame. The direct native entry no longer constructs Ready.
+`native_convert_tz_value` accepts actual nullable text and a finite work allowance;
+the explicit wire worker and this entry share the unchanged original pure
+`evaluate_native_convert_tz` parser/zone/conversion/rendering owner. No native value
+is encoded for a second expression program and no wire contract changes.
+
+Preserve two distinct boundaries. Canonical sources authenticate all three eager
+capabilities before any callback, then cast the first argument as ETDatetime with
+its complete original source FieldType (including YEAR). They release the store
+borrow before that cast's callbacks. Consuming frontend stages retain actual
+datetime text and then from-zone text, always demanding all three strict text
+coercions even after NULL; an earlier conversion error still stops later work.
+Only after those coercions does NULL suppress parsing. The original datetime
+parser precedes the two zone parsers, and both zone parsers run before testing
+either Option. The original Unicode-digit offset panic is retained, but the host
+closes all argument demand before body work so a caught panic cannot replay; a
+subsequent invocation recovers without the retired Ready cache. Temporal result
+finishing and ordinary return-family conversion each retain their original point.
+
+Named-zone overlap/gap rules, wide-year/fraction text and SYSTEM's distinct local
+zone behavior are unchanged. Original capture and all697356 independent pairs
+ran before direct retirement, in fresh isolated children pinning TZ to UTC,
+Asia/Shanghai and America/New_York. Each232452 sample checksum is immutable:
+BD5985171C035C25, 522632888DE0D4F5 and B1E585671A6BACCD respectively. Never change
+parent-process TZ in parallel tests, or regenerate these witnesses from new code.
+See frontend rust/docs/evidence/no-fallback-n7o.md for commands and local gates.
+Remaining time families, generic fallback, old unistore traversal, malformed and
+unsupported sources, inherited failures and semantic/full-server gates stay open.

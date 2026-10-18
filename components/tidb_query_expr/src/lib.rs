@@ -87,7 +87,9 @@ pub use native_convert_charset::{
 };
 
 mod native_convert_tz;
-pub use native_convert_tz::{convert_tz_native_args_valid, native_legacy_local_to_instant};
+pub use native_convert_tz::{
+    convert_tz_native_args_valid, native_convert_tz_value, native_legacy_local_to_instant,
+};
 
 mod native_date_arithmetic_value;
 pub use native_date_arithmetic_value::{
