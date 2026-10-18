@@ -513,6 +513,18 @@ impl Duration {
         Ok(Duration { nanos, fsp })
     }
 
+    /// Imports an already evaluated native Go duration without SQL rounding.
+    /// FSP metadata is validated exactly as for the SQL constructors, but the
+    /// complete signed nanosecond carrier is retained, including sub-FSP bits.
+    /// This is a value-transport seam, not a text/SQL conversion or range
+    /// check.
+    pub fn from_native_raw_parts(nanos: i64, fsp: i8) -> Result<Duration> {
+        Ok(Duration {
+            nanos,
+            fsp: check_fsp(fsp)?,
+        })
+    }
+
     pub fn from_nanos(nanos: i64, fsp: i8) -> Result<Duration> {
         let fsp = check_fsp(fsp)?;
         let nanos = checked_round(nanos, fsp)?;
@@ -794,6 +806,34 @@ mod tests {
         codec::{data_type::DateTime, mysql::UNSPECIFIED_FSP},
         expr::{EvalConfig, EvalContext, Flag},
     };
+
+    #[test]
+    fn native_duration_transport_preserves_nanoseconds_without_changing_sql_rounding() {
+        for nanos in [
+            i64::MIN,
+            -123_456_789_012,
+            -12,
+            0,
+            12,
+            123_456_789_012,
+            i64::MAX,
+        ] {
+            for fsp in [-1, 0, 3, 6] {
+                let value = Duration::from_native_raw_parts(nanos, fsp).unwrap();
+                assert_eq!(value.to_nanos(), nanos);
+                assert_eq!(value.fsp(), check_fsp(fsp).unwrap());
+            }
+        }
+        for fsp in [-2, 7, i8::MAX] {
+            assert!(Duration::from_native_raw_parts(12, fsp).is_err());
+        }
+        assert_eq!(
+            Duration::from_nanos(-123_456_789_012, 6)
+                .unwrap()
+                .to_nanos(),
+            -123_456_789_000
+        );
+    }
 
     #[test]
     fn test_native_duration_display_raw_nanos_and_fsp() {

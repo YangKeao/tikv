@@ -1958,6 +1958,12 @@ flag or eligibility policy described above.
   children: Fresh recomputes without an old-value fallback; Reuse keeps only the
   most recent successful argument value within that invocation. Callback borrows
   cannot be retained; suspended adapter state is owned and keyed by task IDs.
+- Native Go Duration bindings use `Duration::from_native_raw_parts`: it checks
+  FSP metadata while preserving the complete signed nanosecond carrier. Import
+  is not SQL conversion: `from_nanos` and the existing SQL constructors still
+  round to FSP. Identity and presence kernels must not silently round values
+  already evaluated by a native owner. This import is separate from parsing,
+  arithmetic range policy and output-field conversion.
 - Explicit `AddWindowNative`, `SubtractWindowNative`, `MultiplyWindowNative`,
   `AbsIntWindowNative`, `CastDecimalWindowNative` and `CastJsonWindowNative`
   descriptors use `start_window`/`resume_window` instead of the row callbacks.
