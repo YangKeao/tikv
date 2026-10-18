@@ -409,9 +409,9 @@ pub use native_regexp::{
 
 mod native_time_add;
 pub use native_time_add::{
-    NativeTimeAddKind, NativeTimeAddMetadata, NativeTimeAddResult, NativeTimeAddWarning,
-    decode_native_time_add_result, native_time_add_args_valid, native_time_add_null_metadata_valid,
-    native_time_add_result_valid,
+    NativeTimeAddKind, NativeTimeAddMetadata, NativeTimeAddResult, NativeTimeAddValue,
+    NativeTimeAddWarning, decode_native_time_add_result, native_time_add_args_valid,
+    native_time_add_null_metadata_valid, native_time_add_result_valid, native_time_add_value,
 };
 
 mod native_str_to_date_value;
@@ -444,14 +444,16 @@ pub use native_time_parse::{NativeDurationDateTime, parse_native_duration_dateti
 
 mod native_timestamp;
 pub use native_timestamp::{
-    NativeTimestampResult, decode_native_timestamp_result, timestamp_add_native_args_valid,
+    NativeTimestampBaseValue, NativeTimestampHeadValue, NativeTimestampResult,
+    decode_native_timestamp_result, native_timestamp_head_value, timestamp_add_native_args_valid,
     timestamp_null_native_args_valid, timestamp_parse_native_args_valid,
 };
 
 mod native_timestamp_add;
 pub use native_timestamp_add::{
-    NativeTimestampAddResult, decode_native_timestamp_add_result, native_timestamp_add_args_valid,
-    native_timestamp_add_prefix_null_args_valid, native_timestamp_add_result_valid,
+    NativeTimestampAddResult, NativeTimestampAddValue, decode_native_timestamp_add_result,
+    native_timestamp_add_args_valid, native_timestamp_add_prefix_null_args_valid,
+    native_timestamp_add_result_valid, native_timestamp_add_value,
 };
 
 mod native_typed_clock;

@@ -78,39 +78,85 @@ pub(crate) fn evaluate_native_timestamp_add(
     date: Option<&str>,
     amount: f64,
 ) -> Option<Vec<u8>> {
-    let text = date?;
+    // Preserve the existing explicit wire planner; native callers use finite work.
+    timestamp_add_value_inner(unit, date, amount, None)
+        .expect("wire timestamp-add work is owned by its transport planner")
+        .map(|value| match value {
+            NativeTimestampAddValue::Value(value) => text_packet(0, value),
+            NativeTimestampAddValue::UnknownUnit => vec![1],
+            NativeTimestampAddValue::IncorrectDateTimeInput => vec![2],
+            NativeTimestampAddValue::IncorrectTimeResult(message) => text_packet(3, message),
+        })
+}
+
+/// Actual TIMESTAMPADD output, preserving SQL diagnostics independently of
+/// work.
+#[derive(Debug, Eq, PartialEq)]
+pub enum NativeTimestampAddValue {
+    /// Original formatted timestamp text.
+    Value(String),
+    /// Original unsupported-unit disposition, after validating the input date.
+    UnknownUnit,
+    /// The actual input date could not be parsed or was outside the original
+    /// range.
+    IncorrectDateTimeInput,
+    /// Original complete diagnostic from the computed out-of-range fields.
+    IncorrectTimeResult(String),
+}
+/// Actual unit, date and IEEE754 amount; date validation precedes unit demand.
+pub fn native_timestamp_add_value(
+    unit: &str,
+    date: Option<&str>,
+    amount: f64,
+    maximum: usize,
+) -> Result<Option<NativeTimestampAddValue>, crate::NativeDurationConstructionError> {
+    timestamp_add_value_inner(unit, date, amount, Some(maximum))
+}
+fn timestamp_add_value_inner(
+    unit: &str,
+    date: Option<&str>,
+    amount: f64,
+    maximum: Option<usize>,
+) -> Result<Option<NativeTimestampAddValue>, crate::NativeDurationConstructionError> {
+    use crate::native_duration_construction::{duration_text_work, duration_work};
+    if let Some(maximum) = maximum {
+        duration_work(maximum, 0)?;
+        duration_text_work(date, maximum)?;
+    }
+    let Some(text) = date else { return Ok(None) };
     let Some(base) = parse_native_duration_datetime(text) else {
-        return Some(vec![2]);
+        return Ok(Some(NativeTimestampAddValue::IncorrectDateTimeInput));
     };
     if !base.in_range() {
-        return Some(vec![2]);
+        return Ok(Some(NativeTimestampAddValue::IncorrectDateTimeInput));
     }
     // Invalid source dates warn before even classifying an unknown unit.
+    if let Some(maximum) = maximum {
+        duration_text_work(Some(unit), maximum)?;
+    }
     let unit = unit.to_ascii_uppercase();
     let Some(result) = add_unit_to_time(&unit, base, amount) else {
-        return Some(vec![1]);
+        return Ok(Some(NativeTimestampAddValue::UnknownUnit));
     };
-    let result = result?;
+    let Some(result) = result else {
+        return Ok(None);
+    };
     if !result.in_range() {
-        return Some(text_packet(
-            3,
-            format!(
-                "Incorrect time value: '{{{} {} {} {} {} {} {}}}'",
-                result.year,
-                result.month,
-                result.day,
-                result.hour,
-                result.minute,
-                result.second,
-                result.micros,
-            ),
-        ));
+        return Ok(Some(NativeTimestampAddValue::IncorrectTimeResult(format!(
+            "Incorrect time value: '{{{} {} {} {} {} {} {}}}'",
+            result.year,
+            result.month,
+            result.day,
+            result.hour,
+            result.minute,
+            result.second,
+            result.micros,
+        ))));
     }
     let fsp = if result.micros == 0 { 0 } else { 6 };
-    Some(text_packet(
-        0,
+    Ok(Some(NativeTimestampAddValue::Value(
         NativeDurationDateTime { fsp, ..result }.format(),
-    ))
+    )))
 }
 
 /// Outer None is an unknown unit, inner None is the original overflow/NULL.
@@ -339,6 +385,37 @@ mod tests {
         assert_eq!(
             decode_native_timestamp_add_result(&[2]),
             Some(NativeTimestampAddResult::IncorrectDateTimeInput)
+        );
+    }
+    #[test]
+    fn actual_timestamp_add_values_keep_date_before_unit_work_and_original_reports() {
+        use crate::NativeDurationConstructionError as E;
+        let huge = "x".repeat(1 << 20);
+        assert_eq!(
+            native_timestamp_add_value(&huge, Some("bad"), 1.0, 8192),
+            Ok(Some(NativeTimestampAddValue::IncorrectDateTimeInput))
+        );
+        assert_eq!(
+            native_timestamp_add_value(&huge, None, f64::NAN, 0),
+            Ok(None)
+        );
+        assert_eq!(
+            native_timestamp_add_value(&huge, Some("2020-01-01"), 1.0, 8192),
+            Err(E::Resource)
+        );
+        assert_eq!(
+            native_timestamp_add_value("bad", Some("2020-01-01"), f64::NAN, 8192),
+            Ok(Some(NativeTimestampAddValue::UnknownUnit))
+        );
+        assert_eq!(
+            native_timestamp_add_value("SECOND", Some("2020-01-01"), f64::INFINITY, 8192),
+            Ok(None)
+        );
+        assert_eq!(
+            native_timestamp_add_value("MONTH", Some("2020-01-31"), 1.0, 8192),
+            Ok(Some(NativeTimestampAddValue::Value(
+                "2020-02-29 00:00:00".into()
+            )))
         );
     }
 }

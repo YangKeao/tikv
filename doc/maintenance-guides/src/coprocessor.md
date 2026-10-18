@@ -3108,3 +3108,72 @@ parent-process TZ in parallel tests, or regenerate these witnesses from new code
 See frontend rust/docs/evidence/no-fallback-n7o.md for commands and local gates.
 Remaining time families, generic fallback, old unistore traversal, malformed and
 unsupported sources, inherited failures and semantic/full-server gates stay open.
+
+
+### N7p: remaining native time arithmetic
+
+ADDTIME/SUBTIME, one/two-argument TIMESTAMP and TIMESTAMPADD now use actual values
+through the existing DurationConstructionNative host. All remaining Ready
+controllers in frontend time_fn/add_sub.rs are retired. Explicit wire workers
+retain their original validators, planners, packets and error causes while
+encoding the actual owned reports from native_time_add.rs/native_timestamp.rs/
+native_timestamp_add.rs. The native path never serializes a time identity for
+another argument program. Original temporal parsers, duration/base arithmetic,
+month addition and formatting primitives remain the sole authorities.
+
+ADDTIME/SUBTIME carry original static kind pairs and literal-only row-path facts,
+then read the actual RHS binary-literal/Bit kind. A static DATETIME RHS suppresses
+both text conversions after all source expressions/capabilities were demanded.
+Other signatures coerce both texts even after NULL. Parser order remains specific
+to each signature: datetime/date parse RHS first, duration parses LHS first, and
+the default arm keeps its row-only ADDTIME date-dash guard before LHS parsing.
+Finite parser work is charged at these demanded points. Actual warning reports
+select original source text;1292 appends unconditionally even in strict mode,
+with capped truncation subjects and full original time/date diagnostics distinct.
+Canonical lowering shares the extracted original FieldType classifier, including
+Timestamp and NewDate aliases. Row-path selection is based on the original
+Expression::Constant variants, independently of the vectorization flag.
+
+TIMESTAMP coerces non-NULL first text before reading the session zone; actual
+runtime numeric kind chooses the original float-string parser and first-dot FSP.
+The two-argument head retains an opaque actual parsed base that finishing consumes,
+including after errors. A zero year still demands frontend RHS text conversion;
+after that conversion it rejects before scanning/parsing that RHS. A real budget
+regression initially charged an already-coerced ignored1MiB RHS at0 work; it now
+runs the original zero-year gate first. Original RHS conversion/UTF8 errors still
+win at the caller. Parsing warnings append1292 and suppress RHS conversion.
+
+TIMESTAMPADD unit and full-float amount conversions both run even after NULL unit;
+this amount parser is not the numeric-prefix warning controller. Prefix NULL
+suppresses the direct signature's date-text coercion. Canonical sources first
+perform the original third-argument ETDatetime cast with complete FieldType/YEAR
+metadata before converting either prefix, including with NULL prefix. Only that
+third operand is copied before its cast, so its terminal error precedes an unused
+huge unit allocation. Date validation precedes unit classification/uppercase work;
+IEEE754 rounding, month-only clamping, overflow NULLs and full computed-field
+warning text remain original.
+
+All eager capabilities authenticate before any callback, and the existing demand
+counter closes before body work. Store borrows never span warnings or
+zone/date/truncation callbacks. Original callback panic cannot replay, and a later
+invocation succeeds. ADDTIME/SUBTIME retain their exact declared Datetime/Duration
+return transforms; TIMESTAMP always parses DateTime with no supplied result FSP,
+independently of result declaration. TIMESTAMPADD does not acquire a generic
+return-time parse. Ordinary return-family conversion follows each original body
+boundary once.
+
+Before retirement1345032 independent old/candidate observations passed with
+original hash D12EB9991F65CDD5, including every static kind pair, both row paths,
+normalized sign inputs, real native kinds, numeric parsing, warnings, late demand
+and context/error dispositions. Original calls used fresh caches in an isolated UTC
+child; no obsolete poisoned-cache history digest is claimed. The later finite-work
+fix retains the frozen SQL witness. Complete source checks retain NewDate values
+as computed/literal sources because existing Chunk has no fixed-time physical
+column for that code; physical NewDate storage is not certified here. Provider
+comparisons use the original typed value helper for false-row paths: adding an
+IF solely to simulate row classification would impose IF's own DATE normalization
+before the provider's actual-value boundary. Full source matrices separately test
+real computed expressions and both row/column classifications. See frontend
+rust/docs/evidence/no-fallback-n7p.md for independent proof, commands and gates.
+Remaining format-source families, generic fallback, unistore traversal, malformed/
+unsupported shapes, inherited failures and semantic/full-server gates remain open.

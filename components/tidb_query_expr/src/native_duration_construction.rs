@@ -32,6 +32,26 @@ pub enum NativeDurationConstructionOperation {
     DateDiff,
     /// Native CONVERT_TZ policy.
     ConvertTz,
+    /// Native ADDTIME policy with original static signature facts.
+    AddTime {
+        /// Original argument type categories.
+        kinds: [crate::NativeTimeAddKind; 2],
+        /// Both original arguments are literal constants.
+        row_path: bool,
+    },
+    /// Native SUBTIME policy with original static signature facts.
+    SubTime {
+        /// Original argument type categories.
+        kinds: [crate::NativeTimeAddKind; 2],
+        /// Both original arguments are literal constants.
+        row_path: bool,
+    },
+    /// Native one-argument TIMESTAMP policy.
+    Timestamp1,
+    /// Native two-argument TIMESTAMP policy.
+    Timestamp2,
+    /// Native TIMESTAMPADD policy.
+    TimestampAdd,
 }
 impl NativeDurationConstructionOperation {
     /// Original function spelling.
@@ -51,12 +71,17 @@ impl NativeDurationConstructionOperation {
             Self::GetFormat => "get_format",
             Self::DateDiff => "datediff",
             Self::ConvertTz => "convert_tz",
+            Self::AddTime { .. } => "addtime",
+            Self::SubTime { .. } => "subtime",
+            Self::Timestamp1 | Self::Timestamp2 => "timestamp",
+            Self::TimestampAdd => "timestampadd",
         }
     }
     /// Original fixed argument count.
     pub fn arity(self) -> usize {
         match self {
-            Self::MakeTime | Self::ConvertTz => 3,
+            Self::MakeTime | Self::ConvertTz | Self::TimestampAdd => 3,
+            Self::AddTime { .. } | Self::SubTime { .. } | Self::Timestamp2 => 2,
             Self::TimeDiff
             | Self::TimeFormat
             | Self::MakeDate

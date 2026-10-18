@@ -152,48 +152,6 @@ fn second_as_duration(
         .map_err(|_| NativeTimeAddWarning::TruncatedRight)
 }
 
-fn datetime_result(text: &str, delta: NativeGoDuration, sign: i64) -> Option<Vec<u8>> {
-    let first = parse_native_duration_datetime(text)?;
-    if first.is_zero() {
-        return None;
-    }
-    let signed = NativeGoDuration {
-        micros: delta.micros * sign,
-        ..delta
-    };
-    let result = first.add(signed)?;
-    result.in_range().then(|| value_packet(result.format()))
-}
-
-fn string_datetime_result(text: &str, delta: NativeGoDuration, sign: i64) -> Option<Vec<u8>> {
-    let Some(first) = parse_native_duration_datetime(text) else {
-        let trimmed = text.trim();
-        let warning = if !trimmed.is_empty()
-            && trimmed.bytes().all(|byte| byte.is_ascii_digit())
-            && trimmed
-                .parse::<i64>()
-                .map_or(true, |value| value > 99_991_231)
-        {
-            NativeTimeAddWarning::IncorrectTimeLeft
-        } else {
-            NativeTimeAddWarning::IncorrectDateTimeLeft
-        };
-        return Some(warning_packet(warning));
-    };
-    let first = NativeDurationDateTime { fsp: 6, ..first };
-    let result = first.add(NativeGoDuration {
-        micros: delta.micros * sign,
-        ..delta
-    })?;
-    if !result.in_range() {
-        return None;
-    }
-    let fsp = if result.micros == 0 { 0 } else { 6 };
-    Some(value_packet(
-        NativeDurationDateTime { fsp, ..result }.format(),
-    ))
-}
-
 fn trailing_dash_group(text: &str) -> bool {
     let trimmed = text.trim_start_matches(|c: char| c.is_ascii_whitespace());
     let digits = trimmed
@@ -213,20 +171,119 @@ pub(crate) fn evaluate_native_time_add(
     metadata: NativeTimeAddMetadata,
     sign: i64,
 ) -> Option<Vec<u8>> {
-    use NativeTimeAddKind::*;
-    if metadata.right == Datetime {
+    // The explicit compatibility planner already owns transport work admission.
+    time_add_value_inner(left, right, metadata, sign, None)
+        .expect("wire time-add work is owned by its transport planner")
+        .map(|value| match value {
+            NativeTimeAddValue::Value(value) => value_packet(value),
+            NativeTimeAddValue::Warning(warning) => warning_packet(warning),
+        })
+}
+
+/// Actual ADDTIME/SUBTIME output; warning source selection belongs to the
+/// caller.
+#[derive(Debug, Eq, PartialEq)]
+pub enum NativeTimeAddValue {
+    /// Original formatted nonempty text.
+    Value(String),
+    /// Original warning disposition, never a resource failure.
+    Warning(NativeTimeAddWarning),
+}
+/// Typed signature facts and real text, with work admitted only for demanded
+/// parsers.
+pub fn native_time_add_value(
+    left: Option<&str>,
+    right: Option<&str>,
+    metadata: NativeTimeAddMetadata,
+    subtract: bool,
+    maximum: usize,
+) -> Result<Option<NativeTimeAddValue>, crate::NativeDurationConstructionError> {
+    time_add_value_inner(
+        left,
+        right,
+        metadata,
+        if subtract { -1 } else { 1 },
+        Some(maximum),
+    )
+}
+fn datetime_value(text: &str, delta: NativeGoDuration, sign: i64) -> Option<NativeTimeAddValue> {
+    let first = parse_native_duration_datetime(text)?;
+    if first.is_zero() {
         return None;
     }
-    let (Some(left), Some(right)) = (left, right) else {
-        return None;
+    let signed = NativeGoDuration {
+        micros: delta.micros * sign,
+        ..delta
     };
-    match metadata.left {
+    let result = first.add(signed)?;
+    result
+        .in_range()
+        .then(|| NativeTimeAddValue::Value(result.format()))
+}
+
+fn string_datetime_value(
+    text: &str,
+    delta: NativeGoDuration,
+    sign: i64,
+) -> Option<NativeTimeAddValue> {
+    let Some(first) = parse_native_duration_datetime(text) else {
+        let trimmed = text.trim();
+        let warning = if !trimmed.is_empty()
+            && trimmed.bytes().all(|byte| byte.is_ascii_digit())
+            && trimmed
+                .parse::<i64>()
+                .map_or(true, |value| value > 99_991_231)
+        {
+            NativeTimeAddWarning::IncorrectTimeLeft
+        } else {
+            NativeTimeAddWarning::IncorrectDateTimeLeft
+        };
+        return Some(NativeTimeAddValue::Warning(warning));
+    };
+    let first = NativeDurationDateTime { fsp: 6, ..first };
+    let result = first.add(NativeGoDuration {
+        micros: delta.micros * sign,
+        ..delta
+    })?;
+    if !result.in_range() {
+        return None;
+    }
+    let fsp = if result.micros == 0 { 0 } else { 6 };
+    Some(NativeTimeAddValue::Value(
+        NativeDurationDateTime { fsp, ..result }.format(),
+    ))
+}
+
+fn time_add_value_inner(
+    left: Option<&str>,
+    right: Option<&str>,
+    metadata: NativeTimeAddMetadata,
+    sign: i64,
+    maximum: Option<usize>,
+) -> Result<Option<NativeTimeAddValue>, crate::NativeDurationConstructionError> {
+    use crate::native_duration_construction::{duration_text_work, duration_work};
+    if let Some(maximum) = maximum {
+        duration_work(maximum, 0)?;
+    }
+    let check = |text: &str| match maximum {
+        Some(maximum) => duration_text_work(Some(text), maximum),
+        None => Ok(()),
+    };
+    use NativeTimeAddKind::*;
+    if metadata.right == Datetime {
+        return Ok(None);
+    }
+    let (Some(left), Some(right)) = (left, right) else {
+        return Ok(None);
+    };
+    Ok(match metadata.left {
         Datetime | Date => {
+            check(right)?;
             // These signatures demand the RHS parser before looking at lhs.
             let delta = match second_as_duration(right, metadata.right, metadata.left == Date) {
                 Ok(Some(delta)) => delta,
-                Ok(None) => return None,
-                Err(warning) => return Some(warning_packet(warning)),
+                Ok(None) => return Ok(None),
+                Err(warning) => return Ok(Some(NativeTimeAddValue::Warning(warning))),
             };
             let delta =
                 if metadata.left == Datetime && !metadata.row_path && metadata.right == Duration {
@@ -234,20 +291,28 @@ pub(crate) fn evaluate_native_time_add(
                 } else {
                     delta
                 };
-            datetime_result(left, delta, sign)
+            check(left)?;
+            datetime_value(left, delta, sign)
         }
         Duration => {
+            check(left)?;
             let Ok(first) = parse_native_duration(left, native_duration_fsp(left)) else {
-                return Some(warning_packet(NativeTimeAddWarning::TruncatedLeft));
+                return Ok(Some(NativeTimeAddValue::Warning(
+                    NativeTimeAddWarning::TruncatedLeft,
+                )));
             };
+            check(right)?;
             let delta = match second_as_duration(right, metadata.right, false) {
                 Ok(Some(delta)) => delta,
-                Ok(None) => return None,
-                Err(warning) => return Some(warning_packet(warning)),
+                Ok(None) => return Ok(None),
+                Err(warning) => return Ok(Some(NativeTimeAddValue::Warning(warning))),
             };
-            Some(value_packet(first.combine(delta, sign).format()))
+            Some(NativeTimeAddValue::Value(
+                first.combine(delta, sign).format(),
+            ))
         }
         Other => {
+            check(right)?;
             let fsp = if metadata.right == Duration {
                 6
             } else {
@@ -255,27 +320,36 @@ pub(crate) fn evaluate_native_time_add(
             };
             let delta = match parse_native_duration(right, fsp) {
                 Ok(delta) => delta,
-                Err(_) if metadata.right != Duration && metadata.right_binary => return None,
-                Err(_) => return Some(warning_packet(NativeTimeAddWarning::TruncatedRight)),
+                Err(_) if metadata.right != Duration && metadata.right_binary => return Ok(None),
+                Err(_) => {
+                    return Ok(Some(NativeTimeAddValue::Warning(
+                        NativeTimeAddWarning::TruncatedRight,
+                    )));
+                }
             };
             if metadata.row_path
                 && sign > 0
                 && metadata.right != Duration
                 && trailing_dash_group(right)
             {
-                return None;
+                return Ok(None);
             }
+            check(left)?;
             if NativeGoDuration::is_duration(left) {
                 let Ok(first) = parse_native_duration(left, 6) else {
-                    return Some(warning_packet(NativeTimeAddWarning::TruncatedLeft));
+                    return Ok(Some(NativeTimeAddValue::Warning(
+                        NativeTimeAddWarning::TruncatedLeft,
+                    )));
                 };
                 let sum = first.combine(delta, sign);
                 let fsp = if sum.micro_second() == 0 { 0 } else { 6 };
-                return Some(value_packet(NativeGoDuration { fsp, ..sum }.format()));
+                return Ok(Some(NativeTimeAddValue::Value(
+                    NativeGoDuration { fsp, ..sum }.format(),
+                )));
             }
-            string_datetime_result(left, delta, sign)
+            string_datetime_value(left, delta, sign)
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -463,5 +537,66 @@ mod tests {
             assert!(native_time_add_result_valid(&[tag]));
         }
         assert!(native_time_add_result_valid(&[0, b'x']));
+    }
+    #[test]
+    fn actual_time_add_values_keep_parser_order_null_signatures_and_finite_work() {
+        use NativeTimeAddKind::*;
+
+        use crate::NativeDurationConstructionError as E;
+        let meta = |left, right, row_path| NativeTimeAddMetadata {
+            left,
+            right,
+            row_path,
+            right_binary: false,
+        };
+        let huge = "x".repeat(1 << 20);
+        assert_eq!(
+            native_time_add_value(
+                Some(&huge),
+                Some(&huge),
+                meta(Other, Datetime, true),
+                false,
+                0
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            native_time_add_value(
+                Some(&huge),
+                Some("bad"),
+                meta(Datetime, Duration, true),
+                false,
+                8192
+            ),
+            Ok(Some(NativeTimeAddValue::Warning(
+                NativeTimeAddWarning::TruncatedRight
+            )))
+        );
+        assert_eq!(
+            native_time_add_value(
+                Some("bad"),
+                Some(&huge),
+                meta(Duration, Duration, true),
+                false,
+                8192
+            ),
+            Ok(Some(NativeTimeAddValue::Warning(
+                NativeTimeAddWarning::TruncatedLeft
+            )))
+        );
+        assert_eq!(
+            native_time_add_value(None, None, meta(Other, Other, true), false, usize::MAX),
+            Err(E::Resource)
+        );
+        assert_eq!(
+            native_time_add_value(
+                Some("10:00:00"),
+                Some("00:00:01"),
+                meta(Duration, Duration, true),
+                true,
+                8192
+            ),
+            Ok(Some(NativeTimeAddValue::Value("09:59:59".into())))
+        );
     }
 }

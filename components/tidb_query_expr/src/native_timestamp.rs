@@ -127,9 +127,12 @@ pub(crate) fn evaluate_timestamp1_native(
     is_float: bool,
     zone: &NativeSessionTimeZone,
 ) -> Result<Vec<u8>, NativeIdentityFrameError> {
-    match parse_base(text, is_float, zone) {
-        Ok(base) => encode_text(16, &[], &duration_datetime(base).format()),
-        Err(message) => encode_text(17, &1292u16.to_le_bytes(), &message),
+    match timestamp_head_value_inner(text, is_float, zone, false) {
+        NativeTimestampHeadValue::Value(value) => encode_text(16, &[], &value),
+        NativeTimestampHeadValue::Warning(message) => {
+            encode_text(17, &1292u16.to_le_bytes(), &message)
+        }
+        NativeTimestampHeadValue::NeedRhs(_) => unreachable!("one-argument timestamp head"),
     }
 }
 
@@ -138,17 +141,23 @@ pub(crate) fn evaluate_timestamp2_base_native(
     is_float: bool,
     zone: &NativeSessionTimeZone,
 ) -> Result<Vec<u8>, NativeIdentityFrameError> {
-    match parse_base(text, is_float, zone) {
-        Ok(base) => encode_native_identity(NativeIdentityRef::Time {
-            core: base.raw,
-            kind: match base.kind {
-                TimeType::Date => 0,
-                TimeType::DateTime => 1,
-                TimeType::Timestamp => 2,
-            },
-            fsp: base.fsp,
-        }),
-        Err(message) => encode_text(17, &1292u16.to_le_bytes(), &message),
+    match timestamp_head_value_inner(text, is_float, zone, true) {
+        NativeTimestampHeadValue::NeedRhs(value) => {
+            let base = value.base;
+            encode_native_identity(NativeIdentityRef::Time {
+                core: base.raw,
+                kind: match base.kind {
+                    TimeType::Date => 0,
+                    TimeType::DateTime => 1,
+                    TimeType::Timestamp => 2,
+                },
+                fsp: base.fsp,
+            })
+        }
+        NativeTimestampHeadValue::Warning(message) => {
+            encode_text(17, &1292u16.to_le_bytes(), &message)
+        }
+        NativeTimestampHeadValue::Value(_) => unreachable!("two-argument timestamp head"),
     }
 }
 
@@ -174,6 +183,65 @@ pub(crate) fn evaluate_timestamp2_add_native(
         ),
         _ => None,
     }
+}
+
+/// A real parsed timestamp base. Finishing consumes it, including on RHS
+/// errors.
+#[derive(Debug, Eq, PartialEq)]
+pub struct NativeTimestampBaseValue {
+    base: NativeTemporalValue,
+}
+impl NativeTimestampBaseValue {
+    /// The caller has performed the original demanded RHS text coercion.
+    pub fn finish(
+        self,
+        rhs: Option<&str>,
+        maximum: usize,
+    ) -> Result<Option<String>, crate::NativeDurationConstructionError> {
+        crate::native_duration_construction::duration_work(maximum, 0)?;
+        // RHS coercion has already happened at the caller. The original body
+        // rejects a zero year before scanning that actual RHS text.
+        if rhs.is_none() || Time::native_core_fields(self.base.raw)[0] == 0 {
+            return Ok(None);
+        }
+        crate::native_duration_construction::duration_text_work(rhs, maximum)?;
+        Ok(evaluate_timestamp2_add_native(self.base, rhs))
+    }
+}
+/// Actual first-stage output, without an encoded native-time identity.
+#[derive(Debug, Eq, PartialEq)]
+pub enum NativeTimestampHeadValue {
+    /// The one-argument formatted timestamp.
+    Value(String),
+    /// The actual parsed base requires original RHS coercion, even in year
+    /// zero.
+    NeedRhs(NativeTimestampBaseValue),
+    /// Original warning1292 text; the caller appends it unconditionally.
+    Warning(String),
+}
+fn timestamp_head_value_inner(
+    text: &str,
+    is_float: bool,
+    zone: &NativeSessionTimeZone,
+    has_rhs: bool,
+) -> NativeTimestampHeadValue {
+    match parse_base(text, is_float, zone) {
+        Ok(base) if has_rhs => NativeTimestampHeadValue::NeedRhs(NativeTimestampBaseValue { base }),
+        Ok(base) => NativeTimestampHeadValue::Value(duration_datetime(base).format()),
+        Err(message) => NativeTimestampHeadValue::Warning(message),
+    }
+}
+/// Parse actual non-NULL first text using its real numeric-kind and session
+/// zone.
+pub fn native_timestamp_head_value(
+    text: &str,
+    is_float: bool,
+    zone: &NativeSessionTimeZone,
+    has_rhs: bool,
+    maximum: usize,
+) -> Result<NativeTimestampHeadValue, crate::NativeDurationConstructionError> {
+    crate::native_duration_construction::duration_text_work(Some(text), maximum)?;
+    Ok(timestamp_head_value_inner(text, is_float, zone, has_rhs))
 }
 
 #[cfg(test)]
@@ -305,5 +373,42 @@ mod tests {
         assert!(!timestamp_parse_native_args_valid(Some(b"x"), Some(2)));
         assert!(timestamp_null_native_args_valid(None));
         assert!(!timestamp_null_native_args_valid(Some(b"")));
+    }
+    #[test]
+    fn actual_timestamp_values_keep_real_numeric_kind_consuming_base_and_work() {
+        use crate::NativeDurationConstructionError as E;
+        let zone = NativeSessionTimeZone::utc();
+        assert_eq!(
+            native_timestamp_head_value("20240315.5", true, &zone, false, 8192),
+            Ok(NativeTimestampHeadValue::Value(
+                "2024-03-15 00:00:00.0".into()
+            ))
+        );
+        assert_eq!(
+            native_timestamp_head_value("bad", false, &zone, true, 8192),
+            Ok(NativeTimestampHeadValue::Warning(
+                "Incorrect datetime value: 'bad'".into()
+            ))
+        );
+        assert_eq!(
+            native_timestamp_head_value("2024-01-01", false, &zone, false, 16),
+            Err(E::Resource)
+        );
+        let NativeTimestampHeadValue::NeedRhs(base) =
+            native_timestamp_head_value("2024-01-01 23:59:59.123", false, &zone, true, 8192)
+                .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            base.finish(Some("00:00:00.456789"), 8192),
+            Ok(Some("2024-01-01 23:59:59.579789".into()))
+        );
+        let NativeTimestampHeadValue::NeedRhs(base) =
+            native_timestamp_head_value("0000-01-01", false, &zone, true, 8192).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(base.finish(Some(&"x".repeat(1 << 20)), 0), Ok(None));
     }
 }
