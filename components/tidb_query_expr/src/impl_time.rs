@@ -1263,13 +1263,7 @@ fn time_diff_text_native(left: Option<BytesRef>, right: Option<BytesRef>) -> Res
 
 #[rpn_fn(nullable)]
 fn tso_logical_native(arg: Option<&Int>) -> Result<Option<Int>> {
-    Ok(arg.and_then(|tso| {
-        if *tso <= 0 {
-            None
-        } else {
-            Some(*tso & ((1_i64 << 18) - 1))
-        }
-    }))
+    Ok(crate::native_tso_logical(arg.copied()))
 }
 
 #[rpn_fn(nullable)]

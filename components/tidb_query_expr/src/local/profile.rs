@@ -125,7 +125,8 @@ impl BatchCallSignature {
         matches!(
             self.host,
             Some(
-                SqlBatchHostOperation::EpochNative { .. }
+                SqlBatchHostOperation::TsoNative(_)
+                    | SqlBatchHostOperation::EpochNative { .. }
                     | SqlBatchHostOperation::ExtractNative { .. }
                     | SqlBatchHostOperation::TimestampDiffNative { .. }
                     | SqlBatchHostOperation::DateArithmeticNative { .. }

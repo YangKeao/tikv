@@ -15,6 +15,36 @@
 use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
 use tidb_query_datatype::codec::mysql::Time;
 
+/// Closed transaction timestamp operations. These identities select SQL
+/// policies, never prepared answers or a second expression evaluator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTsoOperation {
+    /// The transaction's original start timestamp.
+    Current,
+    /// Physical milliseconds rendered in the actual session zone.
+    Physical,
+    /// Positive timestamp's low 18 bits.
+    Logical,
+}
+impl NativeTsoOperation {
+    /// Original SQL argument count.
+    pub fn arity(self) -> usize {
+        usize::from(self != Self::Current)
+    }
+    /// Original function identity for the ordinary return-family policy.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Current => "tidb_current_tso",
+            Self::Physical => "tidb_parse_tso",
+            Self::Logical => "tidb_parse_tso_logical",
+        }
+    }
+}
+/// The original logical RPN value kernel, shared without transport.
+pub fn native_tso_logical(tso: Option<i64>) -> Option<i64> {
+    tso.filter(|v| *v > 0).map(|v| v & ((1_i64 << 18) - 1))
+}
+
 /// Validates the actual statement-clock instant, without demanding a zone.
 /// Neither the clock tuple's offset nor GetTimeValue's explicit parse zone is
 /// used by this SDK path.
@@ -161,5 +191,42 @@ mod tests {
         // This helper intentionally retains the oversized field for the
         // unchanged native Time codec to reject. Its rejection, and the
         // getter ordering around it, belong to the caller's integration tests.
+    }
+}
+
+#[cfg(test)]
+mod tso_value_tests {
+    use super::*;
+    use crate::local::{BatchCallSignature, SqlBatchHostOperation};
+    #[test]
+    fn tso_values_and_catalog_keep_closed_arities_and_native_capabilities() {
+        for op in [
+            NativeTsoOperation::Current,
+            NativeTsoOperation::Physical,
+            NativeTsoOperation::Logical,
+        ] {
+            let host = SqlBatchHostOperation::TsoNative(op);
+            for arity in 0..4 {
+                assert_eq!(host.accepts_arity(arity), arity == op.arity());
+                if arity == op.arity() {
+                    assert!(
+                        BatchCallSignature::for_host(host, arity)
+                            .unwrap()
+                            .uses_native_value_inputs()
+                    );
+                }
+            }
+        }
+        for (source, expected) in [
+            (None, None),
+            (Some(i64::MIN), None),
+            (Some(-1), None),
+            (Some(0), None),
+            (Some(1), Some(1)),
+            (Some(1 << 18), Some(0)),
+            (Some(i64::MAX), Some((1 << 18) - 1)),
+        ] {
+            assert_eq!(native_tso_logical(source), expected);
+        }
     }
 }

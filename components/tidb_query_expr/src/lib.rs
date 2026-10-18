@@ -454,8 +454,8 @@ pub use native_timestamp_add::{
 
 mod native_typed_clock;
 pub use native_typed_clock::{
-    native_tso_core, native_tso_utc, native_typed_clock_fields, native_typed_clock_utc,
-    native_typed_date_fields,
+    NativeTsoOperation, native_tso_core, native_tso_logical, native_tso_utc,
+    native_typed_clock_fields, native_typed_clock_utc, native_typed_date_fields,
 };
 
 mod native_unix_timestamp;

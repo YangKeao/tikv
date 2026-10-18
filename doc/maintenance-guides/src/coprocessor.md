@@ -581,7 +581,7 @@ flag or eligibility policy described above.
   runtime cause type is introduced by these Decimal profiles.
   Codec diagnostic string allocation is not claimed allocation-equivalent to
   the old native error structure.
-  Native TIDB_PARSE_TSO uses a fixed nullable Int2 profile: original TSO plus
+  The compatibility TIDB_PARSE_TSO recipe retains its fixed nullable Int2 profile: original TSO plus
   actual offset, with offset absent only for NULL/nonpositive input. Positive
   inputs demand the native zone once; named/local offset lookup uses the shared
   TSO-to-UTC helper without sending a ready clock/Time answer. Fixed offsets
@@ -589,6 +589,23 @@ flag or eligibility policy described above.
   The worker recomputes the local core and emits the existing Time identity
   frame (DateTime/FSP6). Native CoreTime::from_date also delegates to its unique
   shared const field packer. TSO SQL metadata FSP0 is deliberately not changed.
+  Since N7k, native physical/logical TSO callers bypass Ready construction and
+  use these actual value primitives directly. Logical masking has one owner in
+  native_typed_clock.rs, also used by its original RPN worker. The closed
+  TsoNative(Current/Physical/Logical) catalog operations carry authenticated
+  source capabilities, not encoded scalar answers. Current is genuinely zero
+  argument and reads the transaction timestamp; it never reads statement now.
+  The physical value kernel alone reads the session zone after positive integer
+  admission. Both physical and logical sources first retain ScalarFunction's
+  ETInt argument cast, which can independently warn/truncate/read a zone using
+  the original source unsigned flag. The direct time_fn signature instead keeps
+  its original int_arg conversion; the two entry contracts are not merged.
+  Sources retain original argument conversion and ordinary result-family policy,
+  including raw DateTime/FSP6 under FSP0 metadata. Retained source/copy/result
+  work is bounded; no value-store borrow crosses either context getter.
+  Original8586 observations/digest05FEB3EE0578F58D were paired while the old
+  frontend callers and workers were still independent. This is a local value
+  migration, not complete temporal/package transcreation or full PB admission.
   TIMEDIFF uses fixed nullable Bytes2, with original UTF8 text and conditional
   right presence checked by the same shared parser at both boundaries. NULL or
   invalid left makes absent right explicitly undemanded; valid left permits a
@@ -2910,3 +2927,20 @@ capture identity, no replay, warnings and later reuse. The canonical driver's
 existing source/copy budgets remain independent and unchanged. Other families'
 explicit compatibility recipes/codecs and global fallback dispatch still need
 retirement.
+
+N7k local validation closes the TSO value/source checkpoint: frontend1685 passes
+with the exact3 inherited failures, all244 batch tests green, SDK1112 passes with
+its exact1 inherited failure, and26 Projection tests including the new mixed TSO
+outputs/CHAR parents under both flags and workers0/2. All171 clippy warning titles
+(89 expression) match N7j. Original8586/05FEB3EE0578F58D comparisons passed before
+caller/worker retirement. Source tests first exposed an omitted original ETInt
+argument cast; it is now restored with full source metadata. Review additionally
+proved a one-byte Decimal with unused million-digit visible precision was wrongly
+rejected at16KiB: only genuinely demanded signed-overflow/unsigned-negative
+warning display now charges that scale. Quiet signed/unsigned/negative-zero
+paths retain storage-only reads. Finite-budget, capability, cancellation/reuse
+and exclusive transaction/zone/truncate/warning callback tests pass. Both pinned
+formatters, immutable calendar fixtures and root lint pass. The frontend receipt
+rust/docs/evidence/no-fallback-n7k.md records commands and exact inherited failures.
+This remains local-only and does not close clock/calendar callers, generic
+fallback, unistore's old walker, semantic audits or full-server validation.
