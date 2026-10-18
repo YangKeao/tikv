@@ -205,6 +205,7 @@ pub use self::{
         ArgMode, HostArgReply, HostArgRequest, HostCatalog, HostCatalogKey, HostInvocation,
         HostSignature, HostSlot, HostStart, HostStep, HostTaskId, HostWindowArgReply,
         HostWindowInvocation, LocalHostServices, PreparedHostCall, SqlBatchHostOperation,
+        SqlTemporalOutput,
     },
     lineage::{
         ControlLineageFacts, ControlProducerFact, ControlProducerRole, LineageCarrier,

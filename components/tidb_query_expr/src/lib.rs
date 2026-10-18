@@ -373,6 +373,12 @@ pub use native_time_add::{
     native_time_add_result_valid,
 };
 
+mod native_str_to_date_value;
+pub use native_str_to_date_value::{
+    NativeStrToDateClock, NativeStrToDateDate, NativeStrToDatePrepared, NativeStrToDateStep,
+    NativeStrToDateValue, NativeStrToDateValueError, native_prepare_str_to_date,
+    native_str_to_date_null_value,
+};
 mod native_str_to_date;
 pub use native_str_to_date::{
     NativeStrToDateResult, decode_native_str_to_date_result, str_to_date_finish_native_args_valid,

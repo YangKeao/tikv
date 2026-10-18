@@ -125,7 +125,8 @@ impl BatchCallSignature {
         matches!(
             self.host,
             Some(
-                SqlBatchHostOperation::CastCharNative { .. }
+                SqlBatchHostOperation::StrToDateNative { .. }
+                    | SqlBatchHostOperation::CastCharNative { .. }
                     | SqlBatchHostOperation::CastNative
                     | SqlBatchHostOperation::CoalesceNative
                     | SqlBatchHostOperation::IfNullNative
@@ -290,6 +291,9 @@ fn batch_signature_contract(
         return None;
     };
     match signature {
+        // Actual already-typed calendar values: no source coercion, mode read
+        // or diagnostic callback occurs in the existing pure month kernel.
+        ScalarFuncSig::Month => Some((DATETIME, EvalType::Int, false, ResultSignedness::Signed)),
         ScalarFuncSig::Pi => Some((&[], EvalType::Real, false, ResultSignedness::Signed)),
         ScalarFuncSig::UnaryNotInt => Some((INT, EvalType::Int, true, ResultSignedness::Signed)),
         ScalarFuncSig::Asin | ScalarFuncSig::Acos => {

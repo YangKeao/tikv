@@ -693,15 +693,31 @@ flag or eligibility policy described above.
   Decimal `native_format_json_sum_float` keeps Rust Display digits with Go-g
   layout; CRC uses the existing file_system service. SQL ARRAY-target conversion
   and new wire admission are not implied by this native-source integration.
-  Ordinary STR_TO_DATE expression policy lives separately in query_expr's
-  `native_str_to_date.rs`: three one-call Values/OwnBytes profiles parse, finish
-  date-mode validation and finish typed DATETIME's late zero-date-prefix policy.
-  Reports preserve wide parsed fields and original input for warning rendering;
-  mode facts are read only on the corresponding continuation. A narrow
-  BytesIntInt carrier keeps both actual booleans separate; no generic compile or
-  wire admission is widened. Declared-type metadata preserves named versus
-  Unknown variants, and checked input-length-plus64 bounds retained replies,
-  without claiming parser temporary/physical allocation peaks.
+  Ordinary native STR_TO_DATE computes actual states in
+  `native_str_to_date_value.rs`, sharing the original scanner/rendering helpers.
+  Actual owned input/format preparation observes BOTH sources before NULL
+  suppression, then coerces input before format. The scanner produces terminal
+  text/warnings, an opaque parsed calendar state or an actual typed-clock state;
+  only those states demand the original later date_modes reads. Named Datetime
+  stays distinct from Unknown(12). Native calls bound demanded copies, Decimal
+  visible padding, f64/JSON/vector formatting, two Vec<char> scanner buffers,
+  warning/text capacity and publication overlap. Empty scanning adds no retired
+  frame charge. These are finite logical allowances, not process-OOM recovery.
+  The frontend Ready/report/scoped-rebinding stages are removed. Canonical
+  StrToDateNative sources authenticate both producer/occurrence capabilities
+  before owned preparation and release store borrows before mode/warning/time
+  callbacks. The original special temporal result conversion precedes generic
+  return coercion and Enum/Set presentation. SqlTemporalOutput records native
+  value, typed bytes, DateTime or Duration publication for existing parents.
+  Host result copies meter and copy actual DateTime/Duration buffers under the
+  unchanged limits; these fixed carriers must not use an unsupported-size
+  sentinel. Pure typed MONTH's actual stored-field kernel composes in the eager
+  source graph, separately from the older native eligibility contract.
+  Explicit `native_str_to_date.rs` ordinary wire head/date/typed-finish profiles
+  keep complete validators, whole-state report protocol and original checked
+  input-length-plus64 reply bounds. They share actual head/date/clock policy
+  under their original ordinary owner, without imposing native finite work
+  allowances or adding another typed-clock input copy. No PB admission expands.
   The native public datatype STR_TO_DATE parser now lives in
   `codec/mysql/time/native_str_to_date.rs`, alongside its format classifier and
   Go-compatible punctuation predicate. It preserves the original raw packing and

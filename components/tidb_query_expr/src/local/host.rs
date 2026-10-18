@@ -14,6 +14,29 @@ use super::{InputRow, LocalError, LocalResult, registry};
 
 static NEXT_CATALOG_KEY: AtomicU64 = AtomicU64::new(1);
 
+/// Publication carrier for actual temporal source results.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqlTemporalOutput {
+    /// Authenticated native value capability.
+    Value,
+    /// Existing typed ETString parent.
+    Bytes,
+    /// Existing typed Date/Datetime parent.
+    DateTime,
+    /// Existing typed Duration parent.
+    Duration,
+}
+impl SqlTemporalOutput {
+    /// Exact SDK carrier published by the temporal source.
+    pub fn eval_type(self) -> EvalType {
+        match self {
+            Self::Value | Self::Bytes => EvalType::Bytes,
+            Self::DateTime => EvalType::DateTime,
+            Self::Duration => EvalType::Duration,
+        }
+    }
+}
+
 /// Process-local catalog identity, not a digest of its signatures.
 /// Cloning a catalog preserves this identity; constructing another does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -63,6 +86,11 @@ pub enum SqlBatchHostOperation {
     ExtremumNative,
     /// Exact-metadata charset conversion with actual NULL/target source demand.
     CharsetNative(crate::NativeCharsetOperation),
+    /// Eager actual date-text sources, with explicit result publication
+    /// carrier.
+    StrToDateNative {
+        output: SqlTemporalOutput,
+    },
     /// Actual JSON document checksum, with native capability or typed Int
     /// output.
     JsonSumCrc32Native {
@@ -144,6 +172,7 @@ impl SqlBatchHostOperation {
     }
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
+            Self::StrToDateNative { .. } => arity == 2,
             Self::JsonSumCrc32Native { .. } => arity == 1,
             Self::BitwiseNative(op) => arity == op.arity(),
             Self::CharsetNative(op) => arity == op.arity(),
@@ -192,7 +221,8 @@ impl SqlBatchHostOperation {
     pub fn argument_type(self) -> EvalType {
         match self {
             Self::CastCharInt { .. } => EvalType::Int,
-            Self::JsonSumCrc32Native { .. }
+            Self::StrToDateNative { .. }
+            | Self::JsonSumCrc32Native { .. }
             | Self::Concat
             | Self::ConcatWs
             | Self::RegexpLike { .. }
@@ -243,6 +273,7 @@ impl SqlBatchHostOperation {
     }
     pub fn output_type(self) -> EvalType {
         match self {
+            Self::StrToDateNative { output } => output.eval_type(),
             Self::JsonSumCrc32Native { typed: true } => EvalType::Int,
             Self::JsonSumCrc32Native { typed: false }
             | Self::Concat

@@ -2966,6 +2966,8 @@ impl Drop for TaskGuard<'_, '_, '_> {
 fn host_copy_precharge(value: ScalarValueRef<'_>) -> usize {
     match value {
         ScalarValueRef::Int(_) => int_storage_bytes(1),
+        ScalarValueRef::DateTime(_) => datetime_min_storage_bytes(1).unwrap_or(usize::MAX),
+        ScalarValueRef::Duration(_) => duration_min_storage_bytes(1).unwrap_or(usize::MAX),
         ScalarValueRef::Bytes(value) => {
             bytes_min_storage_bytes(1, value.map_or(0, <[u8]>::len)).unwrap_or(usize::MAX)
         }
@@ -2976,6 +2978,14 @@ fn copy_host_value(value: ScalarValueRef<'_>) -> LocalResult<VectorValue> {
     match value {
         ScalarValueRef::Int(value) => Ok(VectorValue::from_scalar(
             &ScalarValue::Int(value.copied()),
+            1,
+        )),
+        ScalarValueRef::DateTime(value) => Ok(VectorValue::from_scalar(
+            &ScalarValue::DateTime(value.copied()),
+            1,
+        )),
+        ScalarValueRef::Duration(value) => Ok(VectorValue::from_scalar(
+            &ScalarValue::Duration(value.copied()),
             1,
         )),
         ScalarValueRef::Bytes(value) => {
@@ -2990,7 +3000,7 @@ fn copy_host_value(value: ScalarValueRef<'_>) -> LocalResult<VectorValue> {
     }
 }
 
-// Copy only the compact checked Int/Bytes window, not the provider's capacity.
+// Copy only the compact checked host window, not the provider's capacity.
 fn host_node_copy_precharge(node: &RpnStackNode<'_>, rows: usize) -> LocalResult<usize> {
     validate_frame_result(node, rows)?;
     if rows == 1 {
@@ -2998,6 +3008,8 @@ fn host_node_copy_precharge(node: &RpnStackNode<'_>, rows: usize) -> LocalResult
     }
     match node.get_logical_scalar_ref(0).eval_type() {
         EvalType::Int => Ok(int_min_storage_bytes(rows).unwrap_or(usize::MAX)),
+        EvalType::DateTime => Ok(datetime_min_storage_bytes(rows).unwrap_or(usize::MAX)),
+        EvalType::Duration => Ok(duration_min_storage_bytes(rows).unwrap_or(usize::MAX)),
         EvalType::Bytes => {
             let mut payload = 0usize;
             for row in 0..rows {
@@ -3033,6 +3045,30 @@ fn copy_host_rows(node: &RpnStackNode<'_>, rows: usize) -> LocalResult<VectorVal
                     ));
                 };
                 output.push_int(value.copied());
+            }
+            Ok(output)
+        }
+        EvalType::DateTime => {
+            let mut output = VectorValue::with_capacity(rows, EvalType::DateTime);
+            for row in 0..rows {
+                let ScalarValueRef::DateTime(value) = node.get_logical_scalar_ref(row) else {
+                    return Err(LocalError::HostContract(
+                        "host calendar carrier changed inside window".into(),
+                    ));
+                };
+                output.push_date_time(value.copied());
+            }
+            Ok(output)
+        }
+        EvalType::Duration => {
+            let mut output = VectorValue::with_capacity(rows, EvalType::Duration);
+            for row in 0..rows {
+                let ScalarValueRef::Duration(value) = node.get_logical_scalar_ref(row) else {
+                    return Err(LocalError::HostContract(
+                        "host duration carrier changed inside window".into(),
+                    ));
+                };
+                output.push_duration(value.copied());
             }
             Ok(output)
         }
@@ -4904,6 +4940,51 @@ mod tests {
         RpnExpressionBuilder, RpnFnMeta, impl_arithmetic::*, impl_compare::*,
         local::runtime::int_vector_storage_bytes,
     };
+
+    #[test]
+    fn host_temporal_copies_keep_null_raw_fields_fsp_and_compact_capacity() {
+        let mut ctx = EvalContext::default();
+        let time =
+            DateTime::parse_datetime(&mut ctx, "2020-02-29 12:34:56.123456", 6, false).unwrap();
+        let duration = Duration::from_nanos(-45_296_123_456_000, 6).unwrap();
+        for value in [
+            ScalarValue::DateTime(Some(time)),
+            ScalarValue::DateTime(None),
+            ScalarValue::Duration(Some(duration)),
+            ScalarValue::Duration(None),
+        ] {
+            let field_type: FieldType = match value {
+                ScalarValue::DateTime(_) => FieldTypeTp::DateTime.into(),
+                _ => FieldTypeTp::Duration.into(),
+            };
+            let node = RpnStackNode::Scalar {
+                value: &value,
+                field_type: &field_type,
+            };
+            for rows in [1, 3] {
+                let charge = host_node_copy_precharge(&node, rows).unwrap();
+                assert_ne!(charge, usize::MAX);
+                let copy = copy_host_rows(&node, rows).unwrap();
+                assert_eq!(copy.len(), rows);
+                assert!(vector_storage_bytes(&copy, StorageMode::ExactRetained) >= charge);
+                for row in 0..rows {
+                    let original = value.as_scalar_value_ref();
+                    let copied = copy.get_scalar_ref(row);
+                    assert_eq!(original, copied);
+                    match (original, copied) {
+                        (ScalarValueRef::DateTime(Some(a)), ScalarValueRef::DateTime(Some(b))) => {
+                            assert_eq!(a.go_raw(), b.go_raw())
+                        }
+                        (ScalarValueRef::Duration(Some(a)), ScalarValueRef::Duration(Some(b))) => {
+                            assert_eq!(a.to_nanos(), b.to_nanos());
+                            assert_eq!(a.fsp(), b.fsp());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 
     fn evaluated_ascii_test_recipe() -> (RpnExpression, Vec<FieldType>) {
         (

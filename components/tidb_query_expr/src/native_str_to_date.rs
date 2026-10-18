@@ -6,12 +6,9 @@
 
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
-use tidb_query_datatype::{
-    FieldTypeTp,
-    codec::{
-        data_type::{Bytes, BytesRef, ChunkedVec, EvaluableRef, EvaluableRet, Int},
-        mysql::{Time, time::native_is_go_punctuation},
-    },
+use tidb_query_datatype::codec::{
+    data_type::{Bytes, BytesRef, ChunkedVec, EvaluableRef, EvaluableRet, Int},
+    mysql::{Time, time::native_is_go_punctuation},
 };
 
 use crate::NativeIdentityFrameError;
@@ -37,21 +34,21 @@ pub enum NativeStrToDateResult<'a> {
     NeedTypedDateMode(&'a str),
 }
 
-#[derive(Default)]
-struct ParsedDateTime {
-    year: i64,
-    month: u32,
-    day: u32,
-    hour: u32,
-    minute: u32,
-    second: u32,
-    microsecond: u32,
-    saw_date: bool,
-    saw_time: bool,
-    saw_fraction: bool,
-    saw_24_hour: bool,
-    saw_12_hour: bool,
-    am_pm: Option<bool>,
+#[derive(Debug, Default)]
+pub(crate) struct ParsedDateTime {
+    pub(crate) year: i64,
+    pub(crate) month: u32,
+    pub(crate) day: u32,
+    pub(crate) hour: u32,
+    pub(crate) minute: u32,
+    pub(crate) second: u32,
+    pub(crate) microsecond: u32,
+    pub(crate) saw_date: bool,
+    pub(crate) saw_time: bool,
+    pub(crate) saw_fraction: bool,
+    pub(crate) saw_24_hour: bool,
+    pub(crate) saw_12_hour: bool,
+    pub(crate) am_pm: Option<bool>,
 }
 
 fn read_state(report: &[u8]) -> Option<(ParsedDateTime, &str)> {
@@ -100,7 +97,7 @@ fn read_state(report: &[u8]) -> Option<(ParsedDateTime, &str)> {
     ))
 }
 
-fn clock_needs_prefix(text: &str) -> bool {
+pub(crate) fn clock_needs_prefix(text: &str) -> bool {
     text.contains(':') && !text.contains('-')
 }
 
@@ -208,36 +205,6 @@ fn text_report(tag: u8, text: &str, bound: usize) -> FrameResult<Option<Vec<u8>>
     Ok(Some(output))
 }
 
-fn warning_report(month_zero: bool, input: &str, bound: usize) -> FrameResult<Option<Vec<u8>>> {
-    if month_zero {
-        text_report(
-            2,
-            &format!("{INPUT_WARNING_PREFIX}{input}{INPUT_WARNING_SUFFIX}"),
-            bound,
-        )
-    } else {
-        text_report(1, ZERO_WARNING, bound)
-    }
-}
-
-fn invalid_date_warning_report(
-    value: &ParsedDateTime,
-    bound: usize,
-) -> FrameResult<Option<Vec<u8>>> {
-    let rendered = format!(
-        "{:04}-{:02}-{:02} {}",
-        value.year,
-        value.month,
-        value.day,
-        render_clock(value)
-    );
-    text_report(
-        5,
-        &format!("{INPUT_WARNING_PREFIX}{rendered}{INVALID_DATE_WARNING_SUFFIX}"),
-        bound,
-    )
-}
-
 fn date_state(value: &ParsedDateTime, input: &str, bound: usize) -> FrameResult<Option<Vec<u8>>> {
     let length = STATE_HEADER
         .checked_add(input.len())
@@ -260,7 +227,7 @@ fn date_state(value: &ParsedDateTime, input: &str, bound: usize) -> FrameResult<
     Ok(Some(output))
 }
 
-fn render_clock(value: &ParsedDateTime) -> String {
+pub(crate) fn render_clock(value: &ParsedDateTime) -> String {
     if value.saw_fraction {
         format!(
             "{:02}:{:02}:{:02}.{:06}",
@@ -271,6 +238,31 @@ fn render_clock(value: &ParsedDateTime) -> String {
     }
 }
 
+fn actual_value_report(
+    value: crate::NativeStrToDateValue,
+    bound: usize,
+) -> FrameResult<Option<Vec<u8>>> {
+    use crate::NativeStrToDateValue as V;
+    match value {
+        V::Null => Ok(None),
+        V::Text(text) => text_report(0, &text, bound),
+        V::Warning {
+            code: 1411,
+            message,
+        } => text_report(2, &message, bound),
+        V::Warning {
+            code: 1292,
+            message,
+        } => text_report(if message == ZERO_WARNING { 1 } else { 5 }, &message, bound),
+        _ => Err(NativeIdentityFrameError::Invalid),
+    }
+}
+fn actual_error(error: crate::NativeStrToDateValueError) -> NativeIdentityFrameError {
+    match error {
+        crate::NativeStrToDateValueError::Unsupported(_) => NativeIdentityFrameError::Invalid,
+        crate::NativeStrToDateValueError::ResourceLimit(_) => NativeIdentityFrameError::Capacity,
+    }
+}
 pub(crate) fn evaluate_str_to_date_head_native(
     input: Option<&[u8]>,
     format: Option<&[u8]>,
@@ -285,25 +277,25 @@ pub(crate) fn evaluate_str_to_date_head_native(
     };
     let input = std::str::from_utf8(input).expect("validated input");
     let format = std::str::from_utf8(format).expect("validated format");
-    let value = match scan(input, format) {
-        Ok(value) => value,
-        Err(month_zero) => return warning_report(month_zero, input, bound),
-    };
-    if value.saw_date {
-        return date_state(&value, input, bound);
-    }
-    if value.saw_time {
-        let text = render_clock(&value);
-        let tag = if target == Some(FieldTypeTp::DateTime as i64) && clock_needs_prefix(&text) {
-            4
+    use tidb_query_datatype::codec::native_type_name::NativeTypeNameCode as T;
+    let target = target.map(|raw| {
+        if raw >= 0 {
+            T::Known(raw as u8)
         } else {
-            0
-        };
-        return text_report(tag, &text, bound);
+            T::Unknown((-1 - raw) as u8)
+        }
+    });
+    match crate::native_str_to_date_value::begin_actual(input, format, target, None)
+        .map_err(actual_error)?
+    {
+        crate::NativeStrToDateStep::Ready(value) => actual_value_report(value, bound),
+        crate::NativeStrToDateStep::Date(date) => {
+            let (value, input) = date.wire_parts();
+            date_state(value, input, bound)
+        }
+        crate::NativeStrToDateStep::TypedClock(clock) => text_report(4, clock.text(), bound),
     }
-    warning_report(false, input, bound)
 }
-
 pub(crate) fn evaluate_str_to_date_finish_native(
     state: Option<&[u8]>,
     no_zero_date: Option<i64>,
@@ -314,38 +306,18 @@ pub(crate) fn evaluate_str_to_date_finish_native(
     }
     let bound = native_str_to_date_output_bound(state).ok_or(NativeIdentityFrameError::Capacity)?;
     let (value, input) = read_state(state.expect("validated state")).expect("validated date state");
-    // The caller has now performed the original date_modes getter, including
-    // the month-zero case where the flags themselves cannot affect the answer.
-    if value.month == 0 {
-        return warning_report(true, input, bound);
-    }
-    let max_day = if allow_invalid_dates == Some(1) || value.month == 0 {
-        31
-    } else {
-        Time::native_days_in_month(value.year, value.month)
-    };
-    if value.month > 12 || value.day > max_day {
-        return if value.month == 0 {
-            warning_report(true, input, bound)
-        } else {
-            invalid_date_warning_report(&value, bound)
-        };
-    }
-    if no_zero_date == Some(1) && (value.year == 0 || value.month == 0 || value.day == 0) {
-        return warning_report(value.saw_date && value.month == 0, input, bound);
-    }
-    if value.year == 0 && value.month == 0 && value.day == 0 {
-        return warning_report(true, input, bound);
-    }
-    let date = format!("{:04}-{:02}-{:02}", value.year, value.month, value.day);
-    let result = if value.saw_time || value.saw_fraction {
-        format!("{date} {}", render_clock(&value))
-    } else {
-        date
-    };
-    text_report(0, &result, bound)
+    actual_value_report(
+        crate::native_str_to_date_value::finish_date(
+            &value,
+            input,
+            no_zero_date == Some(1),
+            allow_invalid_dates == Some(1),
+            None,
+        )
+        .map_err(actual_error)?,
+        bound,
+    )
 }
-
 pub(crate) fn evaluate_str_to_date_typed_finish_native(
     report: Option<&[u8]>,
     no_zero_date: Option<i64>,
@@ -355,20 +327,21 @@ pub(crate) fn evaluate_str_to_date_typed_finish_native(
     }
     let bound =
         native_str_to_date_output_bound(report).ok_or(NativeIdentityFrameError::Capacity)?;
-    if no_zero_date == Some(1) {
-        return Ok(None);
-    }
     let Some(NativeStrToDateResult::NeedTypedDateMode(text)) =
         report.and_then(decode_native_str_to_date_result)
     else {
         unreachable!()
     };
-    text_report(0, &format!("0000-00-00 {text}"), bound)
+    actual_value_report(
+        crate::native_str_to_date_value::finish_clock(text, no_zero_date == Some(1), None)
+            .map_err(actual_error)?,
+        bound,
+    )
 }
 
 // Err(true) is the original empty-Bytes month-zero sentinel; Err(false) is
 // zero-time failure. This classifier stays in the SDK, never in the adapter.
-fn scan(input: &str, format: &str) -> std::result::Result<ParsedDateTime, bool> {
+pub(crate) fn scan(input: &str, format: &str) -> std::result::Result<ParsedDateTime, bool> {
     let date: Vec<char> = input.chars().collect();
     let format: Vec<char> = format.chars().collect();
     let mut value = ParsedDateTime::default();
