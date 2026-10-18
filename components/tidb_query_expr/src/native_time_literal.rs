@@ -170,6 +170,59 @@ fn timestamp_value(
     .map_err(|_| wrong_value(1292, "datetime", text))
 }
 
+/// Actual literal modes already captured by the expression builder.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NativeTemporalLiteralModes {
+    /// Retain the original invalid-calendar policy.
+    pub allow_invalid_dates: bool,
+    /// Reject all-zero DATE after parsing.
+    pub no_zero_date: bool,
+    /// Reject partial-zero DATE after the all-zero check.
+    pub no_zero_in_date: bool,
+}
+/// Finite work and the original hard SQL literal errors stay distinct.
+#[derive(Debug, Eq, PartialEq)]
+pub enum NativeTemporalLiteralValueError {
+    /// Work refused before regex/parsing/error materialization.
+    Resource,
+    /// Original construction-time SQL failure, never warning plus NULL.
+    WrongValue {
+        /// Original 1292 or 1525 code.
+        code: u16,
+        /// Original complete diagnostic.
+        message: String,
+    },
+}
+/// Return the actual parsed temporal value over the same original policy used
+/// by explicit wire workers. Zone and modes are borrowed/captured facts, never
+/// fetched again from a caller context or encoded as native SQL values.
+pub fn native_temporal_literal_value(
+    timestamp: bool,
+    text: &str,
+    zone: &NativeSessionTimeZone,
+    modes: NativeTemporalLiteralModes,
+    maximum: usize,
+) -> Result<NativeTemporalValue, NativeTemporalLiteralValueError> {
+    use NativeTemporalLiteralValueError as E;
+    let cost = text
+        .len()
+        .checked_mul(64)
+        .and_then(|n| n.checked_add(4096))
+        .ok_or(E::Resource)?;
+    if maximum == usize::MAX || cost > maximum {
+        return Err(E::Resource);
+    }
+    let bits = i64::from(modes.allow_invalid_dates)
+        | (i64::from(modes.no_zero_date) << 1)
+        | (i64::from(modes.no_zero_in_date) << 2);
+    (if timestamp {
+        timestamp_value(text, zone, bits)
+    } else {
+        date_value(text, zone, bits)
+    })
+    .map_err(|(code, message)| E::WrongValue { code, message })
+}
+
 fn encode_result(
     result: Result<NativeTemporalValue, (u16, String)>,
 ) -> Result<Vec<u8>, NativeIdentityFrameError> {
@@ -338,5 +391,59 @@ mod tests {
             ),
             Some(NativeTemporalLiteralResult::WrongValue { code: 1525, .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod actual_value_tests {
+    use super::*;
+    #[test]
+    fn actual_literal_values_keep_hard_errors_precision_carry_and_finite_work() {
+        use NativeTemporalLiteralValueError as E;
+        let utc = NativeSessionTimeZone::utc();
+        let modes = NativeTemporalLiteralModes::default();
+        let Err(E::WrongValue { code, message }) =
+            native_temporal_literal_value(true, "2024-01-01", &utc, modes, 8192)
+        else {
+            panic!()
+        };
+        assert_eq!(code, 1525);
+        assert_eq!(message, "Incorrect datetime value: '2024-01-01'");
+        let Err(E::WrongValue { code, .. }) =
+            native_temporal_literal_value(false, "2024-01-01 01:02:03", &utc, modes, 8192)
+        else {
+            panic!()
+        };
+        assert_eq!(code, 1292);
+        let value =
+            native_temporal_literal_value(true, "2024-01-01 01:02:03.010", &utc, modes, 8192)
+                .unwrap();
+        assert_eq!(value.kind, TimeType::DateTime);
+        assert_eq!(value.fsp, 3);
+        let zero = native_temporal_literal_value(false, "0000-00-00", &utc, modes, 8192).unwrap();
+        assert_eq!(zero.raw, 0);
+        assert_eq!(zero.kind, TimeType::Date);
+        let strict = NativeTemporalLiteralModes {
+            no_zero_date: true,
+            ..modes
+        };
+        assert!(matches!(
+            native_temporal_literal_value(false, "0000-00-00", &utc, strict, 8192),
+            Err(E::WrongValue { code: 1292, .. })
+        ));
+        assert_eq!(
+            native_temporal_literal_value(false, "", &utc, modes, usize::MAX),
+            Err(E::Resource)
+        );
+        assert_eq!(
+            native_temporal_literal_value(false, &"x".repeat(1 << 20), &utc, modes, 8192),
+            Err(E::Resource)
+        );
+        let la = NativeSessionTimeZone::Named("America/Los_Angeles".parse().unwrap());
+        let value =
+            native_temporal_literal_value(true, "2011-03-13 01:59:59.9999999", &la, modes, 8192)
+                .unwrap();
+        assert_eq!(value.fsp, 6);
+        assert_ne!(value.raw, 0);
     }
 }

@@ -3267,3 +3267,61 @@ n7r-*. The permanent fixed checksum is a guard, not renewed independent proof.
 See frontend rust/docs/evidence/no-fallback-n7r.md for final validation and limits.
 This is no complete Go-package port; generic fallback, unsupported/malformed
 sources, old unistore traversal, inherited failures and full-server gates remain.
+
+
+### N7s: actual GROUPING metadata and typed temporal literals
+
+`native_grouping_value.rs` borrows an optional actual grouping id and validated
+GroupingMetadata, returning optional UInt bits. Its NULL gate precedes metadata
+and mark demand; non-NULL absent metadata retains the original uninitialized
+failure. GroupingMetadata::eval in impl_miscellaneous.rs remains the sole
+algorithm for BitAnd/NumericCmp/NumericSet, including arbitrary group counts,
+empty sets and wrapping result bits. Explicit wire workers and their packet
+validators/builders are unchanged. Native calls no longer serialize mark sets;
+the frontend's unused grouping packet forwarder is removed.
+
+The dedicated GroupingNative descriptor uses the existing HostFrame and native
+capability ABI. ScalarFunction holds immutable Arc metadata; validated replacement
+creates a new Arc, and failed replacement still clears metadata and hash caches.
+The public getter still returns &GroupingMetadata. Source preparation shares the
+existing metadata header without scanning/copying unused marks and defers absent
+metadata errors until a non-NULL strict id. Runtime capability authentication
+precedes strict Int/UInt reading and metadata work. Consumed calls cannot replay.
+All grouping stages are pure, with no Columns callback under a store borrow.
+
+Preserve the distinct public hashing contracts: HashCode includes GROUPING mode
+and marks; Equals and Hash64 intentionally ignore planner metadata. Arc sharing
+does not change those contracts or mutation isolation. Source host slots retain
+their own immutable metadata even when ordinary structural hashes are equal.
+The signature returns UInt bits, then the outer ScalarFunction::eval ordinary
+return-family conversion still runs once. A source matrix exposed an initially
+missing outer boundary under Varchar declarations; native sources now preserve
+that boundary as well as raw integer bits. No generic temporal parse is added.
+
+Finite grouping work admits a bounded header pass before reading individual set
+lengths. NumericSet alone adds a bound from the actual set length before invoking
+the original lookup algorithm. Empty sets and validated one-key modes do not pay
+for maximum tree height. A real3000-empty-set/500000-work Resource regression
+exposed the initial uniform overcharge and passed after this correction. Budget
+failures remain terminal without evaluator fallback; a later NULL selection on
+the same compiled source recovers and skips the large metadata work.
+
+`native_time_literal.rs::native_temporal_literal_value` returns an actual
+NativeTemporalValue or owned original hard error, with three captured boolean
+modes and a borrowed explicit zone. The original private date_value/timestamp_value
+owners remain shared with unchanged wire workers; native construction uses no
+identity frame or Ready call. Preserve regex-before-parser order, DATE zero-mode
+checks, distinct1292/1525 codes and full diagnostics, explicit offsets, named-zone
+DST rounding, raw precision and the literal's own Date/Datetime FieldType. The
+rewriter captures zone/modes once and does not refetch them through execution
+Columns; these literals remain construction-time constants, not ordinary casts.
+
+Before retirement all10416 grouping pairs (A5CDD369E6A88378) and12960 literal
+pairs (80D479F72878FD19) matched old callers, including exact temporal bits,
+FieldTypes and context. The later work correction leaves both witnesses unchanged.
+Original bodies and executed pair logs/sources are archived as n7s-*; permanent
+checksums are guards, not renewed independent proof. See frontend receipt
+rust/docs/evidence/no-fallback-n7s.md for source/metadata/resource/Projection gates
+and limits. Logical copied ownership/work budgets do not certify whole-statement
+peak memory. Generic fallback, remaining Ready families, unistore, unsupported/
+malformed sources, inherited failures and semantic/full-server gates remain open.

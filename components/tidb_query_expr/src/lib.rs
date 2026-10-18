@@ -436,7 +436,8 @@ pub use native_time_diff::{
 
 mod native_time_literal;
 pub use native_time_literal::{
-    NativeTemporalLiteralResult, decode_native_temporal_literal_result,
+    NativeTemporalLiteralModes, NativeTemporalLiteralResult, NativeTemporalLiteralValueError,
+    decode_native_temporal_literal_result, native_temporal_literal_value,
     temporal_literal_native_args_valid,
 };
 
@@ -1537,3 +1538,6 @@ pub use native_vector_value::{
     NativeVectorOperation, NativeVectorValue, NativeVectorValueError,
     native_vector_from_text_value, native_vector_value, native_vector_work,
 };
+
+mod native_grouping_value;
+pub use native_grouping_value::{NativeGroupingValueError, native_grouping_value};
