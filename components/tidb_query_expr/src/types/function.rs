@@ -72,6 +72,27 @@ impl From<RpnFnMeta> for SelectedCall {
     }
 }
 
+type RpnValidator = fn(&CallShape) -> Result<()>;
+type RpnMetadataBuilder = fn(&mut CallBuild) -> Result<Box<dyn Any + Send>>;
+type RpnEvaluator = fn(
+    &mut EvalContext,
+    usize,
+    &[RpnStackNode<'_>],
+    &mut RpnFnCallExtra<'_>,
+    &(dyn Any + Send),
+) -> Result<VectorValue>;
+
+/// The exact pointers returned by this instance of a generated factory. This
+/// is deliberately private: changing a public dispatch field cannot bless the
+/// new value as the original factory result.
+#[derive(Clone, Copy)]
+struct RpnFnDispatch {
+    name: &'static str,
+    validator: RpnValidator,
+    metadata: RpnMetadataBuilder,
+    evaluate: RpnEvaluator,
+}
+
 /// Metadata of an RPN function.
 #[derive(Clone, Copy)]
 pub struct RpnFnMeta {
@@ -81,25 +102,53 @@ pub struct RpnFnMeta {
     /// Validator shared by wire and typed local construction. Public only for
     /// generated `rpn_fn` metadata outside this crate.
     #[doc(hidden)]
-    pub validator_ptr: fn(call: &CallShape) -> Result<()>,
+    pub validator_ptr: RpnValidator,
 
     /// The sole metadata constructor, operating on original argument
     /// identities. Public only for generated `rpn_fn` metadata outside this
     /// crate.
     #[doc(hidden)]
-    pub metadata_ptr: fn(call: &mut CallBuild) -> Result<Box<dyn Any + Send>>,
+    pub metadata_ptr: RpnMetadataBuilder,
 
-    #[allow(clippy::type_complexity)]
     /// The RPN function.
-    pub fn_ptr: fn(
-        // Common arguments
-        ctx: &mut EvalContext,
-        output_rows: usize,
-        args: &[RpnStackNode<'_>],
-        // Uncommon arguments are grouped together
-        extra: &mut RpnFnCallExtra<'_>,
-        metadata: &(dyn Any + Send),
-    ) -> Result<VectorValue>,
+    pub fn_ptr: RpnEvaluator,
+
+    original_dispatch: RpnFnDispatch,
+}
+
+impl RpnFnMeta {
+    /// Construct metadata for a generated `rpn_fn` factory. The checked
+    /// compiler remains responsible for selecting the function from its
+    /// FunctionRef.
+    #[doc(hidden)]
+    pub const fn new(
+        name: &'static str,
+        metadata_ptr: RpnMetadataBuilder,
+        validator_ptr: RpnValidator,
+        fn_ptr: RpnEvaluator,
+    ) -> Self {
+        Self {
+            name,
+            validator_ptr,
+            metadata_ptr,
+            fn_ptr,
+            original_dispatch: RpnFnDispatch {
+                name,
+                validator: validator_ptr,
+                metadata: metadata_ptr,
+                evaluate: fn_ptr,
+            },
+        }
+    }
+
+    pub(crate) fn has_original_dispatch(&self) -> bool {
+        // Compare with this instance's saved pointers, never a second factory
+        // invocation: Rust may duplicate the same function across codegen units.
+        self.name == self.original_dispatch.name
+            && std::ptr::fn_addr_eq(self.validator_ptr, self.original_dispatch.validator)
+            && std::ptr::fn_addr_eq(self.metadata_ptr, self.original_dispatch.metadata)
+            && std::ptr::fn_addr_eq(self.fn_ptr, self.original_dispatch.evaluate)
+    }
 }
 
 impl std::fmt::Debug for RpnFnMeta {

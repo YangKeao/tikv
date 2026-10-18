@@ -1176,12 +1176,12 @@ impl VargsRpnFn {
 
                 #validator_fn
 
-                crate::RpnFnMeta {
-                    name: #fn_name,
-                    metadata_ptr: init_metadata #ty_generics_turbofish,
-                    validator_ptr: validate #ty_generics_turbofish,
-                    fn_ptr: run #ty_generics_turbofish,
-                }
+                crate::RpnFnMeta::new(
+                    #fn_name,
+                    init_metadata #ty_generics_turbofish,
+                    validate #ty_generics_turbofish,
+                    run #ty_generics_turbofish,
+                )
             }
         }
     }
@@ -1317,12 +1317,12 @@ impl RawVargsRpnFn {
 
                 #validator_fn
 
-                crate::RpnFnMeta {
-                    name: #fn_name,
-                    metadata_ptr: init_metadata #ty_generics_turbofish,
-                    validator_ptr: validate #ty_generics_turbofish,
-                    fn_ptr: run #ty_generics_turbofish,
-                }
+                crate::RpnFnMeta::new(
+                    #fn_name,
+                    init_metadata #ty_generics_turbofish,
+                    validate #ty_generics_turbofish,
+                    run #ty_generics_turbofish,
+                )
             }
         }
     }
@@ -1738,12 +1738,12 @@ impl NormalRpnFn {
 
                 #validator_fn
 
-                crate::RpnFnMeta {
-                    name: #fn_name,
-                    metadata_ptr: init_metadata #ty_generics_turbofish,
-                    validator_ptr: validate #ty_generics_turbofish,
-                    fn_ptr: run #ty_generics_turbofish,
-                }
+                crate::RpnFnMeta::new(
+                    #fn_name,
+                    init_metadata #ty_generics_turbofish,
+                    validate #ty_generics_turbofish,
+                    run #ty_generics_turbofish,
+                )
             }
         }
     }
@@ -1930,12 +1930,12 @@ mod tests_normal {
                     )?;
                     Ok(())
                 }
-                crate::RpnFnMeta {
-                    name: "foo",
-                    metadata_ptr: init_metadata,
-                    validator_ptr: validate,
-                    fn_ptr: run,
-                }
+                crate::RpnFnMeta::new(
+                    "foo",
+                    init_metadata,
+                    validate,
+                    run,
+                )
             }
         };
         assert_eq!(expected.to_string(), gen.generate_constructor().to_string());
@@ -2106,12 +2106,12 @@ mod tests_normal {
                     )?;
                     Ok(())
                 }
-                crate::RpnFnMeta {
-                    name: "foo",
-                    metadata_ptr: init_metadata::<A, B>,
-                    validator_ptr: validate::<A, B>,
-                    fn_ptr: run::<A, B>,
-                }
+                crate::RpnFnMeta::new(
+                    "foo",
+                    init_metadata::<A, B>,
+                    validate::<A, B>,
+                    run::<A, B>,
+                )
             }
         };
         assert_eq!(expected.to_string(), gen.generate_constructor().to_string());

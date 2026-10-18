@@ -144,7 +144,7 @@ flag or eligibility policy described above.
 - The wire tree builder and `local::compile_local` share shallow typed
   `CallShape` / `CallBuild` descriptors, one function selector, and opaque
   `PreparedCall` metadata. `CallShape`, `CallArg`, `CallBuild`, the validator
-  helpers, and the two `RpnFnMeta` construction fields are `doc(hidden)` public
+  helpers, `RpnFnMeta::new`, and its construction fields are `doc(hidden)` public
   solely because `rpn_fn` expands in downstream crates; they are macro ABI, not
   a second consumer-facing construction API. Local construction must not fabricate protobuf
   expressions or maintain a second signature dispatch table. Prepared calls
@@ -158,8 +158,19 @@ flag or eligibility policy described above.
 - `compile_local` admission remains exact signed LongLong: constants/slots, the initial
   arithmetic/NULLIF kernels, and explicit AND/OR/IF/IFNULL/searched CASE/COALESCE
   controls. A private selected-call descriptor attaches control identity in the
-  canonical selector; public `RpnFnMeta` layout and macro construction are
-  unchanged. Wire and local paths share one iterative
+  canonical selector. Generated metadata now retains a private copy of its
+  construction-time name and three dispatch pointers. The closed evaluated
+  recipe checks this copy before invocation, alongside canonical name, types,
+  arity and typed metadata; changing the public run pointer or copying a
+  different factory then renaming it is rejected before dispatch. Compare each
+  pointer with its own saved value, never with an independent factory instance,
+  since Rust may duplicate function addresses across codegen units. This guards
+  mutation of generated metadata; it does not authenticate arbitrary Rust code
+  calling the macro constructor. The checked FunctionRef selector remains the
+  construction authority. Generic const factories remain supported, and ordinary
+  unannotated raw/wire execution keeps its original admission. Metadata and node
+  storage accounting uses their actual sizes, with no larger resource limits.
+  Wire and local paths share one iterative
   Program/Control/Host/Ordinary frame driver and one prepared-kernel invocation
   helper, not another interpreter or native fallback.
 - `LocalBatch` requires decoded columns, an explicit physical row universe and

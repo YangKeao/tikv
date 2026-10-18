@@ -2204,13 +2204,11 @@ pub(crate) fn evaluated_bytes_shape(
                 metadata,
             } => {
                 let official = primitive.fn_meta();
-                // The common compiler selected this kernel from the checked
-                // FunctionRef before constructing the private program. Rust
-                // function addresses are not stable identities across codegen
-                // units, so an optimized build may give the same function two
-                // addresses. The closed operation, canonical name/types/arity
-                // and typed metadata are the stable recipe identity here.
+                // Checked compilation selects the function; this additional
+                // guard rejects subsequent field mutation without comparing
+                // addresses from independent factory/codegen instances.
                 input_types_match
+                    && func_meta.has_original_dispatch()
                     && *args_len == expected_arity
                     && func_meta.name == official.name
                     && *field_type == primitive.return_type()
@@ -5307,6 +5305,24 @@ mod tests {
             func_meta.fn_ptr = EvaluatedBytesOp::IsNull.fn_meta().fn_ptr;
         }
         assert!(!evaluated_bytes_shape(operation, &nodes, &schema));
+        // Copying a whole different factory then forging its display name must
+        // not turn its saved origin into the selected operation either.
+        if let RpnExpressionNode::FnCall { func_meta, .. } = &mut nodes[2] {
+            *func_meta = EvaluatedBytesOp::IsNull.fn_meta();
+            func_meta.name = EvaluatedBytesOp::UnaryNot.fn_meta().name;
+        }
+        assert!(!evaluated_bytes_shape(operation, &nodes, &schema));
+        for change_validator in [false, true] {
+            if let RpnExpressionNode::FnCall { func_meta, .. } = &mut nodes[2] {
+                *func_meta = EvaluatedBytesOp::UnaryNot.fn_meta();
+                if change_validator {
+                    func_meta.validator_ptr = |_| panic!("changed validator entered");
+                } else {
+                    func_meta.metadata_ptr = |_| panic!("changed metadata builder entered");
+                }
+            }
+            assert!(!evaluated_bytes_shape(operation, &nodes, &schema));
+        }
     }
 
     #[test]
