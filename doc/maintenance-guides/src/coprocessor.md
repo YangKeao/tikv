@@ -2981,3 +2981,47 @@ pinned15-file formatters and immutable calendar fixture guards pass. The fronten
 receipt rust/docs/evidence/no-fallback-n7l.md records commands and scope. No new
 Go package transcreation, broad PB-source coverage, unistore/datatype validation,
 full server/SQL gate or performance claim follows from this local checkpoint.
+
+
+N7m calendar values replace native DATE, YEAR/MONTH/DAY/QUARTER, HMS,
+weekday/day-of-year/name/week, LAST_DAY and day/second-count Ready invocations.
+`NativeCalendarOperation` keeps SQL text separate from raw-core legacy MONTH/
+WEEK and signed-nanosecond HMS. `native_calendar_week` retains actual parsed YMD
+in a consuming private-field state before the optional actual mode is converted;
+NULL mode retains mode zero. Invalid dates suppress conversion, while original
+WEEK's session default read and eager source children remain demanded. YEARWEEK
+uses zero without reading a session default. DATE retains captured mode flags,
+original truncate/warning behavior, full raw midnight projection and Date/FSP0;
+ample work preserves original raw-FSP panic boundaries.
+
+CalendarNative host entries carry original argument nodes, first-source and
+result FieldTypes, output node and role. Both eager capabilities authenticate
+before callbacks; only the first operand is copied for the original ETDatetime
+cast (HMS retains text). Late mode conversion borrows actual storage without
+copying ignored huge data or rendering unused Decimal display precision. No
+store borrow crosses a context callback. LAST_DAY alone retains generic temporal
+result finishing; all entries retain ordinary return-family coercion. Wire
+compatibility adapters retain original decoding/errors and delegate actual SDK
+kernels, with a checked parser extent derived from already-materialized text.
+Native calls supply their own finite work allowance. These are logical work and
+ownership bounds, not whole-statement heap limits.
+
+Independent old/candidate proof passed246096 comparisons plus24 raw-FSP255 DATE
+panic/context comparisons before callers/workers were retired. Frozen old
+observations remain246096/E72FB95D39CD0172; original implementations and paired
+tests/logs are archived, so historical filters selecting zero tests are not new
+proof. Final validation is recorded in the frontend receipt
+rust/docs/evidence/no-fallback-n7m.md. Generic admission fallback, remaining time
+families, the unistore old walker, inherited failures, Go semantic audits and
+full server/SQL gates remain open; this is no complete Go package port claim.
+
+N7m final local checks: frontend1698/exact3 inherited/95ignored/0filtered with
+all251 batch tests green; SDK1115/exact1 inherited/1ignored/0filtered. Projection26
+includes a new41-root group of all20 calendar names and20 CHAR parents plus an
+older arithmetic output, under both flags/workers0/2; previous groups and their
+contexts stay intact. Clippy89expression/171all warning-title multiset exactly
+matches N7l; frontend warning titles are unchanged too. Lint, both pinned15-file
+formatters, immutable fixture length/SHA guards and both diff checks pass. Only
+a misplaced clock documentation comment was moved after these runtime checks;
+no production behavior changed afterward. No datatype/unistore production edit
+or rerun is included, and inherited/global work remains explicitly open.

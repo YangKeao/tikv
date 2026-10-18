@@ -683,12 +683,14 @@ fn date_core_native(core: BytesRef, modes: &Int) -> Result<Option<Int>> {
             "Native DATE requires an actual 8-byte core and mode flags 0 through 7"
         ));
     }
-    let raw = decode_time_core_native(core)?;
-    if Time::native_date_rejects_zero(raw, *modes & 1 != 0, *modes & 2 != 0) {
-        return Ok(None);
-    }
-    // Preserve the full unsigned computed core in the existing signed owner.
-    Ok(Some(Time::native_date_core(raw) as Int))
+    crate::native_calendar_date(
+        decode_time_core_native(core)?,
+        *modes & 1 != 0,
+        *modes & 2 != 0,
+        0,
+    )
+    .map(|v| v.map(|v| v as i64))
+    .map_err(|e| other_err!("Native calendar DATE contract: {:?}", e))
 }
 
 #[rpn_fn(nullable)]
@@ -701,38 +703,42 @@ fn date_core_predicate_legacy(core: Option<BytesRef>) -> Result<Option<Int>> {
 
 #[rpn_fn(nullable)]
 fn year_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(Some(
-            Time::year_from_core_bits(decode_time_core_native(bytes)?) as Int,
-        ))
-    })
+    crate::native_calendar_core(
+        crate::NativeCalendarOperation::Year,
+        arg.map(decode_time_core_native).transpose()?,
+        0,
+    )
+    .map_err(|e| other_err!("Native calendar core contract: {:?}", e))
 }
 
 #[rpn_fn(nullable)]
 fn month_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(Some(
-            Time::month_from_core_bits(decode_time_core_native(bytes)?) as Int,
-        ))
-    })
+    crate::native_calendar_core(
+        crate::NativeCalendarOperation::Month,
+        arg.map(decode_time_core_native).transpose()?,
+        0,
+    )
+    .map_err(|e| other_err!("Native calendar core contract: {:?}", e))
 }
 
 #[rpn_fn(nullable)]
 fn day_of_month_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(Some(
-            Time::day_from_core_bits(decode_time_core_native(bytes)?) as Int,
-        ))
-    })
+    crate::native_calendar_core(
+        crate::NativeCalendarOperation::Day,
+        arg.map(decode_time_core_native).transpose()?,
+        0,
+    )
+    .map_err(|e| other_err!("Native calendar core contract: {:?}", e))
 }
 
 #[rpn_fn(nullable)]
 fn quarter_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(Some(
-            Time::quarter_from_core_bits(decode_time_core_native(bytes)?) as Int,
-        ))
-    })
+    crate::native_calendar_core(
+        crate::NativeCalendarOperation::Quarter,
+        arg.map(decode_time_core_native).transpose()?,
+        0,
+    )
+    .map_err(|e| other_err!("Native calendar core contract: {:?}", e))
 }
 
 // Keep the existing HMS transport diagnostic while sharing strict UTF-8
@@ -898,54 +904,79 @@ fn timestamp_add_prefix_null_native(
     Ok(None)
 }
 
-// SQL's Display-derived text policy is distinct from legacy signed nanos.
-// Invalid UTF-8 is a transport error; a valid string may parse to SQL NULL.
-fn parse_native_hms_text(bytes: BytesRef) -> Result<Option<(u32, u32, u32)>> {
-    Ok(Time::parse_native_hms(decode_native_time_text(bytes)?))
+// Compatibility wire inputs are already materialized. Bound their exact
+// parser extent with checked arithmetic; native callers supply their own limit.
+fn calendar_wire_work(text: Option<&str>) -> Result<usize> {
+    text.map_or(Some(0), |v| {
+        v.len().checked_mul(16).and_then(|n| n.checked_add(1024))
+    })
+    .ok_or_else(|| other_err!("Native calendar work extent overflow"))
+}
+fn calendar_wire_text(
+    operation: crate::NativeCalendarOperation,
+    arg: Option<BytesRef<'_>>,
+) -> Result<crate::NativeCalendarValue> {
+    let text = arg.map(decode_native_time_text).transpose()?;
+    crate::native_calendar_text(operation, text, calendar_wire_work(text)?)
+        .map_err(|e| other_err!("Native calendar value contract: {:?}", e))
+}
+fn calendar_wire_int(
+    operation: crate::NativeCalendarOperation,
+    arg: Option<BytesRef<'_>>,
+) -> Result<Option<Int>> {
+    match calendar_wire_text(operation, arg)? {
+        crate::NativeCalendarValue::Null => Ok(None),
+        crate::NativeCalendarValue::Int(v) => Ok(Some(v)),
+        _ => Err(other_err!("Native calendar integer output differs")),
+    }
+}
+fn calendar_wire_bytes(
+    operation: crate::NativeCalendarOperation,
+    arg: Option<BytesRef<'_>>,
+) -> Result<Option<Bytes>> {
+    match calendar_wire_text(operation, arg)? {
+        crate::NativeCalendarValue::Null => Ok(None),
+        crate::NativeCalendarValue::Text(v) => Ok(Some(v.into_bytes())),
+        _ => Err(other_err!("Native calendar text output differs")),
+    }
 }
 
 #[rpn_fn(nullable)]
 fn hour_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(parse_native_hms_text(bytes)?.map(|(hour, ..)| hour as Int))
-    })
+    calendar_wire_int(crate::NativeCalendarOperation::Hour, arg)
 }
 
 #[rpn_fn(nullable)]
 fn minute_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(parse_native_hms_text(bytes)?.map(|(_, minute, _)| minute as Int))
-    })
+    calendar_wire_int(crate::NativeCalendarOperation::Minute, arg)
 }
 
 #[rpn_fn(nullable)]
 fn second_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(parse_native_hms_text(bytes)?.map(|(_, _, second)| second as Int))
-    })
+    calendar_wire_int(crate::NativeCalendarOperation::Second, arg)
 }
 
 #[rpn_fn(nullable)]
 fn hour_nanos_native(arg: Option<&Int>) -> Result<Option<Int>> {
-    Ok(arg.map(|nanos| Duration::hours_from_nanos(*nanos) as Int))
+    crate::native_calendar_nanos(crate::NativeCalendarOperation::Hour, arg.copied(), 0)
+        .map_err(|e| other_err!("Native calendar nanos contract: {:?}", e))
 }
 
 #[rpn_fn(nullable)]
 fn minute_nanos_native(arg: Option<&Int>) -> Result<Option<Int>> {
-    Ok(arg.map(|nanos| Duration::minutes_from_nanos(*nanos) as Int))
+    crate::native_calendar_nanos(crate::NativeCalendarOperation::Minute, arg.copied(), 0)
+        .map_err(|e| other_err!("Native calendar nanos contract: {:?}", e))
 }
 
 #[rpn_fn(nullable)]
 fn second_nanos_native(arg: Option<&Int>) -> Result<Option<Int>> {
-    Ok(arg.map(|nanos| Duration::secs_from_nanos(*nanos) as Int))
+    crate::native_calendar_nanos(crate::NativeCalendarOperation::Second, arg.copied(), 0)
+        .map_err(|e| other_err!("Native calendar nanos contract: {:?}", e))
 }
 
 #[rpn_fn(nullable)]
 fn month_name_text_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(Time::parse_native_date_ymd(decode_native_time_text(bytes)?)
-            .map(|(_, month, _)| Time::month_name_from_month(month).to_string().into_bytes()))
-    })
+    calendar_wire_bytes(crate::NativeCalendarOperation::MonthName, arg)
 }
 
 #[rpn_fn(nullable)]
@@ -1005,53 +1036,22 @@ fn get_format_null_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
 
 #[rpn_fn(nullable)]
 fn day_of_week_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(
-            Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(
-                |(year, month, day)| {
-                    (Time::native_weekday_sunday_index(year, month, day) + 1) as Int
-                },
-            ),
-        )
-    })
+    calendar_wire_int(crate::NativeCalendarOperation::DayOfWeek, arg)
 }
 
 #[rpn_fn(nullable)]
 fn weekday_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(
-            Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(
-                |(year, month, day)| {
-                    ((Time::native_weekday_sunday_index(year, month, day) + 6) % 7) as Int
-                },
-            ),
-        )
-    })
+    calendar_wire_int(crate::NativeCalendarOperation::Weekday, arg)
 }
 
 #[rpn_fn(nullable)]
 fn day_of_year_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(Time::parse_native_date_ymd(decode_native_time_text(bytes)?)
-            .map(|(year, month, day)| Time::native_day_of_year(year, month, day)))
-    })
+    calendar_wire_int(crate::NativeCalendarOperation::DayOfYear, arg)
 }
 
 #[rpn_fn(nullable)]
 fn day_name_text_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(
-            Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(
-                |(year, month, day)| {
-                    Time::weekday_name_from_sunday_index(Time::native_weekday_sunday_index(
-                        year, month, day,
-                    ))
-                    .to_string()
-                    .into_bytes()
-                },
-            ),
-        )
-    })
+    calendar_wire_bytes(crate::NativeCalendarOperation::DayName, arg)
 }
 
 #[rpn_fn(nullable)]
@@ -1097,56 +1097,31 @@ fn date_diff_core_native(left: Option<BytesRef>, right: Option<BytesRef>) -> Res
 // marker.
 #[rpn_fn(nullable)]
 fn week_date_text_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(|_| bytes.to_vec()))
-    })
+    let text = arg.map(decode_native_time_text).transpose()?;
+    let parsed = crate::native_calendar_week(text, false, calendar_wire_work(text)?)
+        .map_err(|e| other_err!("Native calendar week contract: {:?}", e))?;
+    Ok(parsed.and(arg).map(|b| b.to_vec()))
 }
 
 #[rpn_fn(nullable)]
 fn week_text_native(arg: Option<BytesRef>, mode: Option<&Int>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(
-            Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(
-                |(year, month, day)| {
-                    // Native explicit NULL mode is zero; wire WEEK keeps its own policy.
-                    Time::native_week_of_year(year, month, day, mode.copied().unwrap_or(0), false).1
-                },
-            ),
-        )
-    })
+    let text = arg.map(decode_native_time_text).transpose()?;
+    crate::native_calendar_week(text, false, calendar_wire_work(text)?)
+        .and_then(|v| v.map(|v| v.finish(mode.copied(), 0)).transpose())
+        .map_err(|e| other_err!("Native calendar week contract: {:?}", e))
 }
 
 #[rpn_fn(nullable)]
 fn year_week_text_native(arg: Option<BytesRef>, mode: Option<&Int>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(
-            Time::parse_native_date_ymd(decode_native_time_text(bytes)?).map(
-                |(year, month, day)| {
-                    let (year, number) = Time::native_week_of_year(
-                        year,
-                        month,
-                        day,
-                        mode.copied().unwrap_or(0),
-                        true,
-                    );
-                    let result = year * 100 + number;
-                    if result < 0 {
-                        i64::from(u32::MAX)
-                    } else {
-                        result
-                    }
-                },
-            ),
-        )
-    })
+    let text = arg.map(decode_native_time_text).transpose()?;
+    crate::native_calendar_week(text, true, calendar_wire_work(text)?)
+        .and_then(|v| v.map(|v| v.finish(mode.copied(), 0)).transpose())
+        .map_err(|e| other_err!("Native calendar week contract: {:?}", e))
 }
 
 #[rpn_fn(nullable)]
 fn week_of_year_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(Time::parse_native_date_ymd(decode_native_time_text(bytes)?)
-            .map(|(year, month, day)| Time::native_week_of_year(year, month, day, 3, false).1))
-    })
+    calendar_wire_int(crate::NativeCalendarOperation::WeekOfYear, arg)
 }
 
 #[rpn_fn(nullable)]
@@ -1161,37 +1136,22 @@ fn week_null_native(arg: Option<&Int>) -> Result<Option<Int>> {
 
 #[rpn_fn(nullable)]
 fn week_core_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(Some(
-            Time::native_core_week(decode_time_core_native(bytes)?, 0) as Int,
-        ))
-    })
+    crate::native_calendar_core(
+        crate::NativeCalendarOperation::Week,
+        arg.map(decode_time_core_native).transpose()?,
+        0,
+    )
+    .map_err(|e| other_err!("Native calendar core contract: {:?}", e))
 }
 
 #[rpn_fn(nullable)]
 fn to_days_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(
-            Time::parse_native_datetime_components(decode_native_time_text(bytes)?)
-                .map(|(year, month, day, ..)| Time::native_time_diff_daynr(year, month, day)),
-        )
-    })
+    calendar_wire_int(crate::NativeCalendarOperation::ToDays, arg)
 }
 
 #[rpn_fn(nullable)]
 fn to_seconds_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(
-            Time::parse_native_datetime_components(decode_native_time_text(bytes)?).map(
-                |(year, month, day, hour, minute, second, _)| {
-                    Time::native_time_diff_daynr(year, month, day) * 86_400
-                        + i64::from(hour) * 3_600
-                        + i64::from(minute) * 60
-                        + i64::from(second)
-                },
-            ),
-        )
-    })
+    calendar_wire_int(crate::NativeCalendarOperation::ToSeconds, arg)
 }
 
 /// A positive actual TSO demands the caller's actual timezone offset. NULL and
@@ -1345,27 +1305,7 @@ fn time_format_text_native(
 
 #[rpn_fn(nullable)]
 fn last_day_text_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
-    arg.map_or(Ok(None), |bytes| {
-        let value = decode_native_time_text(bytes)?.trim();
-        let (date, time) = value
-            .split_once(char::is_whitespace)
-            .map_or((value, None), |(date, time)| (date, Some(time.trim())));
-        let Some((y, m, _)) = Time::parse_native_date_ymd(date) else {
-            return Ok(None);
-        };
-        if let Some(time) = time {
-            if Time::parse_native_clock_with_fraction(time).is_none() {
-                return Ok(None);
-            }
-        }
-        let next_month = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-        let (last_y, last_m, last_d) = Time::native_civil_from_days(
-            Time::native_days_from_civil(next_month.0, next_month.1, 1) - 1,
-        );
-        Ok(Some(
-            format!("{last_y:04}-{last_m:02}-{last_d:02}").into_bytes(),
-        ))
-    })
+    calendar_wire_bytes(crate::NativeCalendarOperation::LastDay, arg)
 }
 
 #[rpn_fn(nullable, capture = [ctx])]

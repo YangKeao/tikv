@@ -1508,3 +1508,10 @@ fn select_tipb_call(value: ScalarFuncSig, call: &CallShape) -> Result<SelectedCa
     };
     Ok(SelectedCall { func_meta, control })
 }
+
+mod native_calendar;
+pub use native_calendar::{
+    NativeCalendarError, NativeCalendarOperation, NativeCalendarValue, NativeCalendarWeek,
+    native_calendar_core, native_calendar_date, native_calendar_nanos, native_calendar_text,
+    native_calendar_week,
+};

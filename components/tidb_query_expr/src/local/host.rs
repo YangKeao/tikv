@@ -94,6 +94,13 @@ pub enum SqlBatchHostOperation {
     /// Timestamp conversion over original native source capabilities. Both
     /// polymorphic numeric and temporal results retain their actual Datum view.
     TsoNative(crate::NativeTsoOperation),
+    /// Calendar over actual native capabilities.
+    CalendarNative {
+        /// Original calendar policy.
+        operation: crate::NativeCalendarOperation,
+        /// Original eager argument count.
+        arity: u8,
+    },
     /// Actual statement/live clock policy, with original zero/one-arg shape.
     ClockNative {
         operation: crate::NativeClockOperation,
@@ -201,6 +208,10 @@ impl SqlBatchHostOperation {
     }
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
+            Self::CalendarNative {
+                operation,
+                arity: expected,
+            } => arity == usize::from(expected) && operation.accepts_arity(arity),
             Self::ClockNative {
                 operation,
                 arity: expected,
@@ -270,7 +281,8 @@ impl SqlBatchHostOperation {
     pub fn argument_type(self) -> EvalType {
         match self {
             Self::CastCharInt { .. } => EvalType::Int,
-            Self::ClockNative { .. }
+            Self::CalendarNative { .. }
+            | Self::ClockNative { .. }
             | Self::TsoNative(_)
             | Self::EpochNative { .. }
             | Self::ExtractNative { .. }
@@ -333,9 +345,10 @@ impl SqlBatchHostOperation {
                 output.eval_type()
             }
             Self::BoundedStalenessNative { typed: true } => EvalType::DateTime,
-            Self::ClockNative { .. } | Self::TsoNative(_) | Self::EpochNative { .. } => {
-                EvalType::Bytes
-            }
+            Self::CalendarNative { .. }
+            | Self::ClockNative { .. }
+            | Self::TsoNative(_)
+            | Self::EpochNative { .. } => EvalType::Bytes,
             Self::ExtractNative { typed: true, .. } => EvalType::Int,
             Self::ExtractNative { typed: false, .. } => EvalType::Bytes,
             Self::TimestampDiffNative { typed: true, .. }
