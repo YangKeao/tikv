@@ -1453,9 +1453,13 @@ fn window_host_typed_control_scope_copies_fixed_and_spilled_carriers() {
 }
 
 #[test]
-fn window_bitwise_operands_keep_raw_row_domain_inside_whole_parent() {
+fn window_raw_value_operands_keep_row_domain_inside_whole_parent() {
     use crate::impl_op::NativeBitwiseOp as B;
-    for operation in [B::And, B::Or, B::Xor, B::LeftShift, B::RightShift] {
+    for operation in [B::And, B::Or, B::Xor, B::LeftShift, B::RightShift]
+        .into_iter()
+        .map(SqlBatchHostOperation::BitwiseNative)
+        .chain(std::iter::once(SqlBatchHostOperation::XorNative))
+    {
         let mut service = row_in_window_service();
         let signature = || HostSignature {
             arg_types: vec![bytes_ft(); 2].into_boxed_slice(),
@@ -1463,7 +1467,7 @@ fn window_bitwise_operands_keep_raw_row_domain_inside_whole_parent() {
         };
         service.catalog = HostCatalog::for_sql_batch(vec![
             (SqlBatchHostOperation::AddWindowNative, signature()),
-            (SqlBatchHostOperation::BitwiseNative(operation), signature()),
+            (operation, signature()),
         ])
         .unwrap();
         let operand = host(&service.catalog, 1, vec![input(0), input(1)]);
@@ -1509,4 +1513,31 @@ fn window_bitwise_operands_keep_raw_row_domain_inside_whole_parent() {
         assert!(service.reads().is_empty());
         assert!(service.live.is_empty());
     }
+}
+
+#[test]
+fn logical_xor_catalog_keeps_two_raw_handles_and_row_operation_identity() {
+    let signature = |arity| HostSignature {
+        arg_types: vec![bytes_ft(); arity].into_boxed_slice(),
+        return_type: bytes_ft(),
+    };
+    for arity in [0, 1, 3] {
+        assert!(
+            HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::XorNative, signature(arity))])
+                .is_err()
+        );
+    }
+    let mut wrong = signature(2);
+    wrong.arg_types[1] = FieldTypeTp::LongLong.into();
+    assert!(HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::XorNative, wrong)]).is_err());
+    let mut wrong = signature(2);
+    wrong.return_type = FieldTypeTp::LongLong.into();
+    assert!(HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::XorNative, wrong)]).is_err());
+    let catalog =
+        HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::XorNative, signature(2))]).unwrap();
+    let operation = catalog
+        .sql_batch_operation(catalog.slot(0).unwrap())
+        .unwrap();
+    assert_eq!(operation, SqlBatchHostOperation::XorNative);
+    assert!(!operation.is_windowed());
 }

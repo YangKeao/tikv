@@ -2013,6 +2013,21 @@ flag or eligibility policy described above.
   tree or ready-child expression enters the provider. Decimal padding and JSON
   expansion are bounded before copies/conversion/effects. Conversion/resource
   errors are terminal and task cancellation permits a clean later invocation.
+  `XorNative` is a distinct two-handle row operation with eager raw operands,
+  followed by the original binary div-precision observation, range-sentinel
+  check, both string numeric-warning probes, and left/right truth conversion.
+  Warning-probe conversion errors are discarded by the existing caller;
+  actual input and truth-conversion errors remain terminal. It uses
+  `impl_op::native_logical_xor_value`, also shared by the original RPN XOR.
+  TiDB's `batch_raw_values.rs` shares only capability transport, demand and
+  ownership checks between logical XOR and bitwise operations; their closed
+  semantic variants and SQL catalog identities remain distinct. XOR charges
+  actual Decimal coefficient owners, not unperformed scale rendering, and
+  does not stringify JSON as a bitwise cast would. Existing native static
+  batch eligibility is unchanged: admitting a unified XOR row root does not
+  make the old native caller eligible for vectorization or introduce new
+  configuration reads. The protocol supports explicit whole parents with row
+  operands independently of the frontend's original eligibility contract.
   `impl_op::native_bitwise_value` owns final nullable bit computation and is
   shared by the existing RPN functions and TiDB value-only callers. The latter
   no longer execute ready-argument programs for this family. This closes native

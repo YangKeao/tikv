@@ -132,6 +132,7 @@ impl BatchCallSignature {
                     | SqlBatchHostOperation::IfNative
                     | SqlBatchHostOperation::CaseNative
                     | SqlBatchHostOperation::AndNative
+                    | SqlBatchHostOperation::XorNative
                     | SqlBatchHostOperation::OrNative
                     | SqlBatchHostOperation::IsTrueWithNullNative
                     | SqlBatchHostOperation::UnaryNotNative

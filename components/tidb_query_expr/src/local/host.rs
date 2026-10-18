@@ -86,6 +86,8 @@ pub enum SqlBatchHostOperation {
     AbsNative,
     /// Row demand over raw native operands, followed by shared bit computation.
     BitwiseNative(crate::impl_op::NativeBitwiseOp),
+    /// Both raw operands precede warning probes and nullable truth conversion.
+    XorNative,
     /// Native additive arithmetic with signature-specific argument demand.
     AddNative,
     SubtractNative,
@@ -121,6 +123,7 @@ impl SqlBatchHostOperation {
             Self::ConcatWs => arity >= 2,
             Self::IfNullNative
             | Self::AndNative
+            | Self::XorNative
             | Self::OrNative
             | Self::CompareNative(_)
             | Self::NullSafeEqNative
@@ -162,6 +165,7 @@ impl SqlBatchHostOperation {
             | Self::IfNative
             | Self::CaseNative
             | Self::AndNative
+            | Self::XorNative
             | Self::OrNative
             | Self::IsTrueWithNullNative
             | Self::UnaryNotNative
@@ -200,6 +204,7 @@ impl SqlBatchHostOperation {
             | Self::IfNative
             | Self::CaseNative
             | Self::AndNative
+            | Self::XorNative
             | Self::OrNative
             | Self::IsTrueWithNullNative
             | Self::UnaryNotNative
