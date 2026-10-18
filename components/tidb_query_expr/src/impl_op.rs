@@ -589,37 +589,89 @@ pub fn is_null_vector_float32(arg: Option<VectorFloat32Ref>) -> Result<Option<i6
     is_null_ref(arg)
 }
 
+/// Already-coerced bit patterns. No argument evaluation or context reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeBitwiseOp {
+    And,
+    Or,
+    Xor,
+    LeftShift,
+    RightShift,
+    Neg,
+}
+impl NativeBitwiseOp {
+    pub fn arity(self) -> usize {
+        if self == Self::Neg { 1 } else { 2 }
+    }
+}
+
+pub fn native_bitwise_value(
+    op: NativeBitwiseOp,
+    left: Option<Int>,
+    right: Option<Int>,
+) -> Option<Int> {
+    let left = left?;
+    if op == NativeBitwiseOp::Neg {
+        return Some(!left);
+    }
+    let right = right?;
+    Some(match op {
+        NativeBitwiseOp::And => left & right,
+        NativeBitwiseOp::Or => left | right,
+        NativeBitwiseOp::Xor => left ^ right,
+        NativeBitwiseOp::LeftShift => {
+            if right as u64 >= 64 {
+                0
+            } else {
+                (left as u64).wrapping_shl(right as u32) as i64
+            }
+        }
+        NativeBitwiseOp::RightShift => {
+            if right as u64 >= 64 {
+                0
+            } else {
+                (left as u64).wrapping_shr(right as u32) as i64
+            }
+        }
+        NativeBitwiseOp::Neg => unreachable!("unary operation returned above"),
+    })
+}
+
 #[rpn_fn(nullable)]
 #[inline]
 pub fn bit_and(lhs: Option<&Int>, rhs: Option<&Int>) -> Result<Option<Int>> {
-    Ok(match (lhs, rhs) {
-        (Some(lhs), Some(rhs)) => Some(lhs & rhs),
-        _ => None,
-    })
+    Ok(native_bitwise_value(
+        NativeBitwiseOp::And,
+        lhs.copied(),
+        rhs.copied(),
+    ))
 }
-
 #[rpn_fn(nullable)]
 #[inline]
 pub fn bit_or(lhs: Option<&Int>, rhs: Option<&Int>) -> Result<Option<Int>> {
-    Ok(match (lhs, rhs) {
-        (Some(lhs), Some(rhs)) => Some(lhs | rhs),
-        _ => None,
-    })
+    Ok(native_bitwise_value(
+        NativeBitwiseOp::Or,
+        lhs.copied(),
+        rhs.copied(),
+    ))
 }
-
 #[rpn_fn(nullable)]
 #[inline]
 pub fn bit_xor(lhs: Option<&Int>, rhs: Option<&Int>) -> Result<Option<Int>> {
-    Ok(match (lhs, rhs) {
-        (Some(lhs), Some(rhs)) => Some(lhs ^ rhs),
-        _ => None,
-    })
+    Ok(native_bitwise_value(
+        NativeBitwiseOp::Xor,
+        lhs.copied(),
+        rhs.copied(),
+    ))
 }
-
 #[rpn_fn(nullable)]
 #[inline]
 pub fn bit_neg(arg: Option<&Int>) -> Result<Option<Int>> {
-    Ok(arg.map(|arg| !arg))
+    Ok(native_bitwise_value(
+        NativeBitwiseOp::Neg,
+        arg.copied(),
+        None,
+    ))
 }
 
 pub trait KeepNull {
@@ -699,31 +751,20 @@ fn decimal_is_false<K: KeepNull>(arg: Option<&Decimal>) -> Result<Option<i64>> {
 #[rpn_fn(nullable)]
 #[inline]
 fn left_shift(lhs: Option<&Int>, rhs: Option<&Int>) -> Result<Option<Int>> {
-    Ok(match (lhs, rhs) {
-        (Some(lhs), Some(rhs)) => {
-            if *rhs as u64 >= 64 {
-                Some(0)
-            } else {
-                Some((*lhs as u64).wrapping_shl(*rhs as u32) as i64)
-            }
-        }
-        _ => None,
-    })
+    Ok(native_bitwise_value(
+        NativeBitwiseOp::LeftShift,
+        lhs.copied(),
+        rhs.copied(),
+    ))
 }
-
 #[rpn_fn(nullable)]
 #[inline]
 fn right_shift(lhs: Option<&Int>, rhs: Option<&Int>) -> Result<Option<Int>> {
-    Ok(match (lhs, rhs) {
-        (Some(lhs), Some(rhs)) => {
-            if *rhs as u64 >= 64 {
-                Some(0)
-            } else {
-                Some((*lhs as u64).wrapping_shr(*rhs as u32) as i64)
-            }
-        }
-        _ => None,
-    })
+    Ok(native_bitwise_value(
+        NativeBitwiseOp::RightShift,
+        lhs.copied(),
+        rhs.copied(),
+    ))
 }
 
 #[cfg(test)]

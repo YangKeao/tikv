@@ -84,6 +84,8 @@ pub enum SqlBatchHostOperation {
     NullIfNative,
     /// Native ABS over the actual demanded value kind.
     AbsNative,
+    /// Row demand over raw native operands, followed by shared bit computation.
+    BitwiseNative(crate::impl_op::NativeBitwiseOp),
     /// Native additive arithmetic with signature-specific argument demand.
     AddNative,
     SubtractNative,
@@ -114,6 +116,7 @@ impl SqlBatchHostOperation {
     }
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
+            Self::BitwiseNative(op) => arity == op.arity(),
             Self::Concat | Self::CoalesceNative | Self::CaseNative => arity >= 1,
             Self::ConcatWs => arity >= 2,
             Self::IfNullNative
@@ -173,6 +176,7 @@ impl SqlBatchHostOperation {
             | Self::NullSafeEqNative
             | Self::NullIfNative
             | Self::AbsNative
+            | Self::BitwiseNative(_)
             | Self::AddNative
             | Self::SubtractNative
             | Self::MultiplyNative
@@ -210,6 +214,7 @@ impl SqlBatchHostOperation {
             | Self::NullSafeEqNative
             | Self::NullIfNative
             | Self::AbsNative
+            | Self::BitwiseNative(_)
             | Self::AddNative
             | Self::SubtractNative
             | Self::MultiplyNative

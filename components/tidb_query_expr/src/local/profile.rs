@@ -146,6 +146,7 @@ impl BatchCallSignature {
                     | SqlBatchHostOperation::NullSafeEqNative
                     | SqlBatchHostOperation::NullIfNative
                     | SqlBatchHostOperation::AbsNative
+                    | SqlBatchHostOperation::BitwiseNative(_)
                     | SqlBatchHostOperation::AddNative
                     | SqlBatchHostOperation::SubtractNative
                     | SqlBatchHostOperation::MultiplyNative

@@ -2002,6 +2002,21 @@ flag or eligibility policy described above.
   allowance before final allocation. Retained owners are measured afterward;
   this is not a hard allocator-peak bound. Host copies remain restricted to
   their checked Int/Bytes domain.
+  `BitwiseNative(NativeBitwiseOp)` adds the six closed raw-value operations
+  AND/OR/XOR/left-shift/right-shift/NOT. The catalog requires two Bytes handles
+  for binary operations and one for NOT; output is a Bytes capability with the
+  actual native SQL result stored separately. These are row hosts, including
+  beneath a whole-selection parent. TiDB validates each original producer/row
+  capability and demands both binary raw values even after a left NULL, then
+  reads div_precision_increment and enters the existing conversion ladder.
+  Only actual unsigned declaration flags accompany those values; no source
+  tree or ready-child expression enters the provider. Decimal padding and JSON
+  expansion are bounded before copies/conversion/effects. Conversion/resource
+  errors are terminal and task cancellation permits a clean later invocation.
+  `impl_op::native_bitwise_value` owns final nullable bit computation and is
+  shared by the existing RPN functions and TiDB value-only callers. The latter
+  no longer execute ready-argument programs for this family. This closes native
+  value subtrees, not all remaining ordinary typed callers or source families.
   Generated vectors above1024 use the existing LogicalRows::Identical form,
   avoiding the fixed identity slice. Legacy generated vectors keep their
   previous slice representation, including at exactly1024. New checked paths

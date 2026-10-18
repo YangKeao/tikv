@@ -1451,3 +1451,62 @@ fn window_host_typed_control_scope_copies_fixed_and_spilled_carriers() {
         assert!(service.live.is_empty());
     }
 }
+
+#[test]
+fn window_bitwise_operands_keep_raw_row_domain_inside_whole_parent() {
+    use crate::impl_op::NativeBitwiseOp as B;
+    for operation in [B::And, B::Or, B::Xor, B::LeftShift, B::RightShift] {
+        let mut service = row_in_window_service();
+        let signature = || HostSignature {
+            arg_types: vec![bytes_ft(); 2].into_boxed_slice(),
+            return_type: bytes_ft(),
+        };
+        service.catalog = HostCatalog::for_sql_batch(vec![
+            (SqlBatchHostOperation::AddWindowNative, signature()),
+            (SqlBatchHostOperation::BitwiseNative(operation), signature()),
+        ])
+        .unwrap();
+        let operand = host(&service.catalog, 1, vec![input(0), input(1)]);
+        assert_eq!(compile(&operand, &service).max_batch_size(), 1);
+        let root = host(&service.catalog, 0, vec![operand, input(2)]);
+        let mut program = compile(&root, &service);
+        assert!(program.requires_whole_selection());
+        assert_eq!(program.max_batch_size(), usize::MAX);
+        let selection: Vec<_> = (0..2050).map(|row| [2, 0, 2][row % 3]).collect();
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        );
+        assert_eq!(result.unwrap().len(), selection.len());
+        let mut expected = Vec::new();
+        for (occurrence, &input_row) in selection.iter().enumerate() {
+            for slot in [0, 1] {
+                expected.push((
+                    slot,
+                    InputRow {
+                        occurrence,
+                        input_row,
+                    },
+                ));
+            }
+        }
+        expected.extend(rows(2, &selection));
+        assert_eq!(service.reads(), expected);
+        assert!(service.live.is_empty());
+        service.events.clear();
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits {
+                max_retained_bytes: 0,
+                ..ExecutionLimits::default()
+            },
+        );
+        assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+        assert!(service.reads().is_empty());
+        assert!(service.live.is_empty());
+    }
+}
