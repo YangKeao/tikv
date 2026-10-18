@@ -673,7 +673,7 @@ pub fn compile_control_with_lineage(
 /// the current limits before the shared compiler clones descriptors or prepares
 /// a call. The opaque binding entry evaluates each complete operand program in
 /// source order for eager kernels. Controls request only their selected child
-/// programs and constrain the compiled graph to singleton occurrence windows.
+/// programs and retain singleton demand inside their scoped row subtrees.
 ///
 /// SQL origin and fixed native source kinds remain producer assertions, not
 /// authenticated facts. This does not admit PB, AST-value consumers,
@@ -683,9 +683,10 @@ pub fn compile_control_with_lineage(
 /// explicitly registered window hosts use whole argument vectors through the
 /// same HostFrame. Explicit window roots can contain row-host operands:
 /// the canonical frame loop completes each row subtree in occurrence order,
-/// then publishes its full argument vector. Row roots and typed-control
-/// descendants still constrain admission to singleton windows. CompileLimits
-/// bounds nodes/depth; source/type metadata bytes remain a caller
+/// then publishes its full argument vector. Typed control operands use that
+/// same per-occurrence scope; ControlFrame itself remains singleton. Ordinary
+/// graphs with controls and row-host roots retain singleton admission.
+/// CompileLimits bounds nodes/depth; source/type metadata bytes remain a caller
 /// responsibility. The evaluator separately bounds selection occurrences.
 pub fn compile_batch(
     spec: &LocalExpr,

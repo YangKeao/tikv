@@ -1985,9 +1985,17 @@ flag or eligibility policy described above.
   physical rows are distinct. The column-only read_input_batch hook is bypassed
   for a scoped row because it cannot carry occurrence identity. Successful
   singleton owners and final compact output are metered together, and Fresh
-  restarts the entire row-host operand. Any typed control descendant still
-  constrains structural admission to one; it does not authorize root tiling of
-  a window program. General control wrapping remains unfinished.
+  restarts the entire row-host operand. The same scope also wraps typed
+  selection/logical control operands of explicit window roots. It completes
+  each row's demanded branches before the next row and only then returns the
+  complete argument vector. A typed ControlFrame itself remains singleton;
+  ordinary/control roots keep their original structural limits. This does not
+  authorize root tiling or broaden legacy entrypoints. Scoped typed results
+  use the same scalar-copy dispatch as batch imports, with a borrowed payload
+  precharge before singleton copies and a conservative complete compact-output
+  allowance before final allocation. Retained owners are measured afterward;
+  this is not a hard allocator-peak bound. Host copies remain restricted to
+  their checked Int/Bytes domain.
   Generated vectors above1024 use the existing LogicalRows::Identical form,
   avoiding the fixed identity slice. Legacy generated vectors keep their
   previous slice representation, including at exactly1024. New checked paths

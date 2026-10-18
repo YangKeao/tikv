@@ -717,12 +717,12 @@ impl BatchFacts {
         })
     }
     pub(super) fn max_batch_size(&self) -> usize {
-        if self.snapshot.nodes.iter().any(|node| {
-            matches!(node.kind, NodeKind::BatchCall { signature, .. } if batch_control(signature).is_some())
-        }) { return 1; }
         if self.whole_selection() {
             return usize::MAX;
         }
+        if self.snapshot.nodes.iter().any(|node| {
+            matches!(node.kind, NodeKind::BatchCall { signature, .. } if batch_control(signature).is_some())
+        }) { return 1; }
         if self.snapshot.nodes.iter().any(|node| {
             matches!(node.kind, NodeKind::BatchHost { operation, .. } if !operation.is_windowed())
         }) { 1 } else { crate::types::BATCH_MAX_SIZE }

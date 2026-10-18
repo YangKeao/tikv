@@ -1178,3 +1178,276 @@ fn unary_window_descriptors_keep_full_fresh_reuse_and_terminal_cleanup() {
         assert!(service.live.is_empty());
     }
 }
+
+fn control_call(sig: tipb::ScalarFuncSig, args: Vec<LocalExpr>, field: FieldType) -> LocalExpr {
+    LocalExpr::Call {
+        function: crate::FunctionRef::TiPb(sig),
+        args: args.into_boxed_slice(),
+        return_type: field,
+        metadata: crate::CallMetadata::None,
+    }
+}
+fn control_int(value: i64) -> LocalExpr {
+    LocalExpr::Constant {
+        value: ScalarValue::Int(Some(value)),
+        field_type: FieldTypeTp::LongLong.into(),
+        literal_kind: LiteralKind::Typed,
+    }
+}
+fn window_control_operand(service: &Service, sig: tipb::ScalarFuncSig) -> LocalExpr {
+    use tipb::ScalarFuncSig::*;
+    let selected = host(&service.catalog, 1, vec![input(0), input(1)]);
+    let null = || LocalExpr::Constant {
+        value: ScalarValue::Bytes(None),
+        field_type: bytes_ft(),
+        literal_kind: LiteralKind::Typed,
+    };
+    let args = match sig {
+        IfString => vec![
+            control_call(
+                LogicalOr,
+                vec![control_int(0), control_int(1)],
+                FieldTypeTp::LongLong.into(),
+            ),
+            selected,
+            input(2),
+        ],
+        IfNullString => vec![null(), selected],
+        CoalesceString => vec![null(), selected, input(2)],
+        CaseWhenString => vec![control_int(0), input(2), control_int(1), selected, input(2)],
+        _ => unreachable!(),
+    };
+    control_call(sig, args, bytes_ft())
+}
+#[test]
+fn window_host_typed_controls_complete_each_row_before_next_parent_argument() {
+    use tipb::ScalarFuncSig::*;
+    for sig in [IfString, IfNullString, CoalesceString, CaseWhenString] {
+        let mut service = Service::new();
+        let root = host(
+            &service.catalog,
+            0,
+            vec![window_control_operand(&service, sig), input(2)],
+        );
+        let mut program = compile(&root, &service);
+        assert!(program.requires_whole_selection());
+        assert_eq!(program.max_batch_size(), usize::MAX);
+        let selection: Vec<_> = (0..2050).map(|row| [2, 0, 2][row % 3]).collect();
+        let result = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        )
+        .0
+        .unwrap();
+        let mut expected = Vec::new();
+        for (occurrence, &input_row) in selection.iter().enumerate() {
+            for slot in [0, 1] {
+                expected.push((
+                    slot,
+                    InputRow {
+                        occurrence,
+                        input_row,
+                    },
+                ));
+            }
+        }
+        expected.extend(rows(2, &selection));
+        assert_eq!(service.reads(), expected, "{sig:?}");
+        assert_eq!(result.len(), selection.len());
+        assert!(service.live.is_empty());
+        // A typed control root still owns a row domain, not a window domain.
+        let row_root = window_control_operand(&service, sig);
+        assert_eq!(compile(&row_root, &service).max_batch_size(), 1);
+    }
+}
+#[test]
+fn window_host_typed_control_fresh_failure_and_resource_limits_are_terminal() {
+    let mut service = Service::new();
+    service.requests = vec![
+        request(0, ArgMode::Reuse),
+        request(0, ArgMode::Reuse),
+        request(0, ArgMode::Fresh),
+    ];
+    let root = host(
+        &service.catalog,
+        0,
+        vec![
+            window_control_operand(&service, tipb::ScalarFuncSig::CoalesceString),
+            input(2),
+        ],
+    );
+    let mut program = compile(&root, &service);
+    let selection = [2, 0, 2];
+    evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0
+    .unwrap();
+    // The nested window uses this same request schedule. Reuse skips reads;
+    // Fresh restarts each complete control operand and each inner argument.
+    let mut expected = Vec::new();
+    for _ in 0..2 {
+        for (occurrence, &input_row) in selection.iter().enumerate() {
+            expected.extend(
+                [(
+                    0,
+                    InputRow {
+                        occurrence,
+                        input_row,
+                    },
+                ); 2],
+            );
+        }
+    }
+    assert_eq!(service.reads(), expected);
+    assert!(service.live.is_empty());
+    service.events.clear();
+    service.read_failure = Some((0, 1));
+    let Err(LocalError::Evaluation(error)) = evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0
+    else {
+        panic!("lost primary failure")
+    };
+    assert_eq!(
+        Some(error.0.as_ref() as *const _ as usize),
+        service.primary_error
+    );
+    assert_eq!(service.reads(), expected[..3]);
+    assert!(service.live.is_empty());
+    for limits in [
+        ExecutionLimits {
+            max_active_tasks: 1,
+            ..ExecutionLimits::default()
+        },
+        ExecutionLimits {
+            max_retained_bytes: 0,
+            ..ExecutionLimits::default()
+        },
+        ExecutionLimits {
+            max_frame_depth: 2,
+            ..ExecutionLimits::default()
+        },
+        ExecutionLimits {
+            max_steps: 8,
+            ..ExecutionLimits::default()
+        },
+    ] {
+        service.events.clear();
+        service.read_failure = None;
+        assert!(matches!(
+            evaluate(&mut program, &mut service, &selection, limits).0,
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert!(service.live.is_empty());
+        assert!(service.reads().iter().all(|(slot, _)| *slot != 2));
+    }
+    service.events.clear();
+    evaluate(
+        &mut program,
+        &mut service,
+        &selection,
+        ExecutionLimits::default(),
+    )
+    .0
+    .unwrap();
+    assert_eq!(service.reads(), expected);
+}
+
+#[test]
+fn window_host_typed_control_scope_copies_fixed_and_spilled_carriers() {
+    use tidb_query_datatype::codec::mysql::{Decimal, Duration, Time};
+    use tipb::ScalarFuncSig::*;
+    // The control's output is consumed by a genuine pure predicate, then used
+    // as a substring index. Thus the complete typed vector crosses real
+    // ordinary frames before returning to the Bytes window host.
+    let values = [
+        (
+            CoalesceInt,
+            IntIsNull,
+            FieldTypeTp::LongLong,
+            ScalarValue::Int(Some(4)),
+        ),
+        (
+            CoalesceReal,
+            RealIsNull,
+            FieldTypeTp::Double,
+            ScalarValue::Real(Some(
+                tidb_query_datatype::codec::data_type::Real::new(4.0).unwrap(),
+            )),
+        ),
+        (
+            CoalesceDecimal,
+            DecimalIsNull,
+            FieldTypeTp::NewDecimal,
+            ScalarValue::Decimal(Some(
+                "12345678901234567890123456789012345678901234567890.1"
+                    .parse::<Decimal>()
+                    .unwrap(),
+            )),
+        ),
+        (
+            CoalesceTime,
+            TimeIsNull,
+            FieldTypeTp::DateTime,
+            ScalarValue::DateTime(Some(
+                Time::parse_datetime(&mut EvalContext::default(), "2020-01-02 03:04:05", 0, false)
+                    .unwrap(),
+            )),
+        ),
+        (
+            CoalesceDuration,
+            DurationIsNull,
+            FieldTypeTp::Duration,
+            ScalarValue::Duration(Some(Duration::from_nanos(4, 0).unwrap())),
+        ),
+    ];
+    for (coalesce, is_null, tp, scalar) in values {
+        let mut service = Service::new();
+        let field: FieldType = tp.into();
+        let null_scalar = match &scalar {
+            ScalarValue::Int(_) => ScalarValue::Int(None),
+            ScalarValue::Real(_) => ScalarValue::Real(None),
+            ScalarValue::Decimal(_) => ScalarValue::Decimal(None),
+            ScalarValue::DateTime(_) => ScalarValue::DateTime(None),
+            ScalarValue::Duration(_) => ScalarValue::Duration(None),
+            _ => unreachable!(),
+        };
+        let literal = |value| LocalExpr::Constant {
+            value,
+            field_type: field.clone(),
+            literal_kind: LiteralKind::Typed,
+        };
+        let chosen = control_call(
+            coalesce,
+            vec![literal(null_scalar), literal(scalar)],
+            field.clone(),
+        );
+        let index = control_call(is_null, vec![chosen], FieldTypeTp::LongLong.into());
+        let operand = control_call(Substring2ArgsUtf8, vec![input(0), index], bytes_ft());
+        let root = host(&service.catalog, 0, vec![operand, input(2)]);
+        let mut program = compile(&root, &service);
+        let selection = [2, 0, 2];
+        evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        )
+        .0
+        .unwrap();
+        let mut expected = rows(0, &selection);
+        expected.extend(rows(2, &selection));
+        assert_eq!(service.reads(), expected, "{coalesce:?}");
+        assert!(service.live.is_empty());
+    }
+}

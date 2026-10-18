@@ -2363,7 +2363,7 @@ impl<'a> ProgramFrame<'a> {
                         args,
                         field_type,
                     } => {
-                        self.rows.len() == 1
+                        (self.rows.len() == 1 || matches!(execution, EvalExecution::SqlWindowBatch))
                             && crate::local::batch_signature_for_arity(
                                 crate::FunctionRef::TiPb(func_meta.sig),
                                 args.len(),
@@ -3486,31 +3486,7 @@ fn read_batch_binding_phase(
                 .saturating_add(output_bytes)
                 .saturating_add(incoming),
         )?;
-        match (&mut output, value.get_scalar_ref(0)) {
-            (VectorValue::Int(output), ScalarValueRef::Int(item)) => {
-                output.push(item.copied());
-            }
-            (VectorValue::Bytes(output), ScalarValueRef::Bytes(item)) => {
-                output.push_ref(item);
-            }
-            (VectorValue::Real(output), ScalarValueRef::Real(item)) => output.push(item.copied()),
-            (VectorValue::Decimal(output), ScalarValueRef::Decimal(item)) => {
-                output.push(item.cloned());
-            }
-            (VectorValue::DateTime(output), ScalarValueRef::DateTime(item)) => {
-                output.push(item.copied());
-            }
-            (VectorValue::Duration(output), ScalarValueRef::Duration(item)) => {
-                output.push(item.copied());
-            }
-            (VectorValue::Json(output), ScalarValueRef::Json(item)) => {
-                output.push(item.map(|item| item.to_owned()));
-            }
-            (VectorValue::VectorFloat32(output), ScalarValueRef::VectorFloat32(item)) => {
-                output.push(item.map(|item| item.to_owned()));
-            }
-            _ => unreachable!("checked batch input carrier"),
-        }
+        push_batch_scalar(&mut output, value.get_scalar_ref(0))?;
         output_bytes = vector_storage_bytes(&output, budget.mode());
         budget.storage(
             other_live_bytes
@@ -3520,6 +3496,56 @@ fn read_batch_binding_phase(
         drop(value);
     }
     Ok(output)
+}
+
+// Copy one checked scalar into a compact result owner, without SQL conversion.
+fn push_batch_scalar(output: &mut VectorValue, value: ScalarValueRef<'_>) -> LocalResult<()> {
+    match (output, value) {
+        (VectorValue::Int(output), ScalarValueRef::Int(item)) => {
+            output.push(item.copied());
+        }
+        (VectorValue::Bytes(output), ScalarValueRef::Bytes(item)) => {
+            output.push_ref(item);
+        }
+        (VectorValue::Real(output), ScalarValueRef::Real(item)) => output.push(item.copied()),
+        (VectorValue::Decimal(output), ScalarValueRef::Decimal(item)) => {
+            output.push(item.cloned());
+        }
+        (VectorValue::DateTime(output), ScalarValueRef::DateTime(item)) => {
+            output.push(item.copied());
+        }
+        (VectorValue::Duration(output), ScalarValueRef::Duration(item)) => {
+            output.push(item.copied());
+        }
+        (VectorValue::Json(output), ScalarValueRef::Json(item)) => {
+            output.push(item.map(|item| item.to_owned()));
+        }
+        (VectorValue::VectorFloat32(output), ScalarValueRef::VectorFloat32(item)) => {
+            output.push(item.map(|item| item.to_owned()));
+        }
+        _ => {
+            return Err(LocalError::InvalidSpec(
+                "scoped batch carrier changed".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn batch_scalar_copy_precharge(value: ScalarValueRef<'_>) -> usize {
+    let payload = match value {
+        ScalarValueRef::Bytes(value) => value.map_or(0, <[u8]>::len),
+        ScalarValueRef::Decimal(value) => value.map_or(0, |value| value.spill_capacity_bytes()),
+        ScalarValueRef::Json(value) => {
+            value.map_or(0, |value| value.value().len().saturating_add(1))
+        }
+        ScalarValueRef::VectorFloat32(value) => value.map_or(0, |value| value.encoded_len()),
+        ScalarValueRef::Enum(_) | ScalarValueRef::Set(_) => return usize::MAX,
+        _ => 0,
+    };
+    batch_min_storage_bytes(value.eval_type(), 1)
+        .unwrap_or(usize::MAX)
+        .saturating_add(payload)
 }
 
 /// Both eager FnCall and staged ordinary demand enter this one prepared kernel
@@ -3547,14 +3573,16 @@ fn eval_prepared_kernel<'a>(
     })
 }
 
-// A row host used as a window operand retains row demand inside its own
-// subtree. Scheduling stays in the canonical loop; no evaluator is called.
+// A row host or typed control used as a window operand retains row demand
+// inside its own subtree. Scheduling stays in the canonical loop; no evaluator
+// is called. Host and typed result-copy contracts remain distinct.
 struct RowHostScope<'a> {
     nodes: &'a [RpnExpressionNode],
     rows: FrameRows<'a>,
     field_type: &'a FieldType,
     values: Vec<VectorValue>,
     values_bytes: usize,
+    typed_control: bool,
 }
 impl RowHostScope<'_> {
     fn storage(&self, _mode: StorageMode) -> usize {
@@ -3569,6 +3597,25 @@ impl RowHostScope<'_> {
     }
     fn finish(&self, budget: &mut EvalBudget, retained: usize) -> LocalResult<VectorValue> {
         let count = self.values.len();
+        if self.typed_control {
+            let eval_type = self.values[0].eval_type();
+            // Singleton owners include every live spill/payload. Their sum is
+            // a conservative payload allowance for the final compact vector.
+            budget.storage(
+                retained.saturating_add(
+                    batch_min_storage_bytes(eval_type, count)
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(self.values_bytes),
+                ),
+            )?;
+            let mut output = VectorValue::with_capacity(count, eval_type);
+            for value in &self.values {
+                push_batch_scalar(&mut output, value.get_scalar_ref(0))?;
+            }
+            budget
+                .storage(retained.saturating_add(vector_storage_bytes(&output, budget.mode())))?;
+            return Ok(output);
+        }
         match self.values[0].eval_type() {
             EvalType::Int => {
                 budget.storage(
@@ -3811,30 +3858,42 @@ fn eval_frames<'a, 'data: 'a>(
             EvalFrame::Program(mut frame) => {
                 frame.check_execution(execution, schema)?;
                 if execution.is_batch() && frame.rows.len() > 1 {
-                    if let [RpnExpressionNode::HostCall { prepared, .. }] = frame.nodes {
-                        if !prepared.is_windowed() {
-                            let count = frame.rows.len();
-                            budget.charge()?;
-                            budget.storage(retained.saturating_add(
-                                count.saturating_mul(std::mem::size_of::<VectorValue>()),
-                            ))?;
-                            let mut values = Vec::new();
-                            reserve(&mut values, count)?;
-                            let scope = RowHostScope {
-                                nodes: frame.nodes,
-                                rows: frame.rows,
-                                field_type: prepared.return_type(),
-                                values,
-                                values_bytes: 0,
-                            };
-                            push_frame(
-                                &mut frames,
-                                EvalFrame::RowHostScope(scope),
-                                budget,
-                                tasks.storage(),
-                            )?;
-                            continue;
+                    let scoped = match frame.nodes {
+                        [RpnExpressionNode::HostCall { prepared, .. }]
+                            if !prepared.is_windowed() =>
+                        {
+                            Some((prepared.return_type(), false))
                         }
+                        [RpnExpressionNode::ShortCircuitFnCall { field_type, .. }]
+                            if matches!(execution, EvalExecution::SqlWindowBatch) =>
+                        {
+                            Some((field_type, true))
+                        }
+                        _ => None,
+                    };
+                    if let Some((field_type, typed_control)) = scoped {
+                        let count = frame.rows.len();
+                        budget.charge()?;
+                        budget.storage(retained.saturating_add(
+                            count.saturating_mul(std::mem::size_of::<VectorValue>()),
+                        ))?;
+                        let mut values = Vec::new();
+                        reserve(&mut values, count)?;
+                        let scope = RowHostScope {
+                            nodes: frame.nodes,
+                            rows: frame.rows,
+                            field_type,
+                            values,
+                            values_bytes: 0,
+                            typed_control,
+                        };
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::RowHostScope(scope),
+                            budget,
+                            tasks.storage(),
+                        )?;
+                        continue;
                     }
                 }
                 if let Some(value) = returned.take() {
@@ -4099,8 +4158,22 @@ fn eval_frames<'a, 'data: 'a>(
                             "row scope field type changed".into(),
                         ));
                     }
-                    budget.storage(retained.saturating_add(host_node_copy_precharge(&node, 1)?))?;
-                    let value = copy_host_rows(&node, 1)?;
+                    let value = if frame.typed_control {
+                        let value = node.get_logical_scalar_ref(0);
+                        budget
+                            .storage(retained.saturating_add(batch_scalar_copy_precharge(value)))?;
+                        let mut output = VectorValue::with_capacity(1, value.eval_type());
+                        push_batch_scalar(&mut output, value)?;
+                        budget.storage(
+                            retained.saturating_add(vector_storage_bytes(&output, budget.mode())),
+                        )?;
+                        output
+                    } else {
+                        budget.storage(
+                            retained.saturating_add(host_node_copy_precharge(&node, 1)?),
+                        )?;
+                        copy_host_rows(&node, 1)?
+                    };
                     frame.values_bytes = frame
                         .values_bytes
                         .checked_add(vector_storage_bytes(&value, budget.mode()))
