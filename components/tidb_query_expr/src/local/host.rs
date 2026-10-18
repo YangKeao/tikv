@@ -94,6 +94,11 @@ pub enum SqlBatchHostOperation {
     /// Timestamp conversion over original native source capabilities. Both
     /// polymorphic numeric and temporal results retain their actual Datum view.
     TsoNative(crate::NativeTsoOperation),
+    /// Actual statement/live clock policy, with original zero/one-arg shape.
+    ClockNative {
+        operation: crate::NativeClockOperation,
+        arity: u8,
+    },
     EpochNative {
         from: bool,
         arity: u8,
@@ -196,6 +201,10 @@ impl SqlBatchHostOperation {
     }
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
+            Self::ClockNative {
+                operation,
+                arity: expected,
+            } => arity == usize::from(expected) && operation.accepts_arity(arity),
             Self::TsoNative(op) => arity == op.arity(),
             Self::EpochNative {
                 from,
@@ -261,7 +270,8 @@ impl SqlBatchHostOperation {
     pub fn argument_type(self) -> EvalType {
         match self {
             Self::CastCharInt { .. } => EvalType::Int,
-            Self::TsoNative(_)
+            Self::ClockNative { .. }
+            | Self::TsoNative(_)
             | Self::EpochNative { .. }
             | Self::ExtractNative { .. }
             | Self::TimestampDiffNative { .. }
@@ -323,7 +333,9 @@ impl SqlBatchHostOperation {
                 output.eval_type()
             }
             Self::BoundedStalenessNative { typed: true } => EvalType::DateTime,
-            Self::TsoNative(_) | Self::EpochNative { .. } => EvalType::Bytes,
+            Self::ClockNative { .. } | Self::TsoNative(_) | Self::EpochNative { .. } => {
+                EvalType::Bytes
+            }
             Self::ExtractNative { typed: true, .. } => EvalType::Int,
             Self::ExtractNative { typed: false, .. } => EvalType::Bytes,
             Self::TimestampDiffNative { typed: true, .. }

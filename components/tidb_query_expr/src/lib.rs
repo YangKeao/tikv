@@ -67,10 +67,10 @@ pub use native_cast::{
 
 mod native_clock;
 pub use native_clock::{
-    NativeClockInput, native_current_date, native_current_time_with_fsp,
-    native_current_time_without_fsp, native_format_clock_date, native_format_clock_datetime,
-    native_now, native_sysdate, native_utc_date, native_utc_time_with_fsp,
-    native_utc_time_without_fsp, native_utc_timestamp,
+    NativeClockInput, NativeClockOperation, NativeClockValueError, native_clock_values,
+    native_current_date, native_current_time_with_fsp, native_current_time_without_fsp,
+    native_format_clock_date, native_format_clock_datetime, native_now, native_sysdate,
+    native_utc_date, native_utc_time_with_fsp, native_utc_time_without_fsp, native_utc_timestamp,
 };
 
 mod native_convert_charset_value;

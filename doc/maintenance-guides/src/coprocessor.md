@@ -1528,8 +1528,8 @@ flag or eligibility policy described above.
   eval_expr/folded_int admission is unchanged; no temporal-value DATE channel is
   added. Both closed boundaries validate the new native frame/flags; nullable
   legacy width checks reuse the original TimeCoreBits role. Wire DATE is unchanged.
-  Native CURTIME/CURRENT_TIME, UTC_TIME, UTC_DATE and UTC_TIMESTAMP use seven
-  fixed byte-result workers in `impl_time.rs`. Inputs are the actual 16-byte
+  Compatibility CURTIME/CURRENT_TIME, UTC_TIME, UTC_DATE and UTC_TIMESTAMP retain
+  seven fixed byte-result workers in `impl_time.rs`. Inputs are the actual 16-byte
   clock tuple plus a separate precision operand where required; a genuine
   UTC_TIME NULL value-entry uses its own NULL witness without a clock read.
   SQL still admits only integer-literal precision, not UTC_TIME(NULL).
@@ -1540,11 +1540,29 @@ flag or eligibility policy described above.
   nanoseconds directly. Both closed boundaries share width/FSP validators;
   arbitrary raw clock integers are not normalized or rejected early. Existing
   arithmetic panic behavior remains, with no new catch or SQL-NULL substitute.
-  NOW/CURDATE/SYSDATE now use three additional fixed clock workers. NOW truncates;
+  Compatibility NOW/CURDATE/SYSDATE retain three fixed clock workers. NOW truncates;
   live SYSDATE rounds original nanoseconds and combines its actual SystemTime
   capture with the frozen statement offset. Its true `sysdate_is_now` branch
-  selects NOW using a nonexecuting shared preparation helper, not nested guards.
-  Source flag/FSP/clock demand remains native preparation. The distinct public
+  selects NOW with its original precision labels and truncation policy.
+  Since N7l all12 native clock names bypass Ready construction, using the same
+  unchanged pure clock kernels through native_clock_values. The closed
+  ClockNative{operation,arity} sources authenticate actual native capabilities;
+  their zero-argument calls have no dummy child. SYSDATE resolves its alias flag
+  before precision checks, with no store borrow. Only precision preparation
+  borrows actual inputs, with no Columns callbacks or payload clone; ordinary
+  unsupported tags fail without copying even huge values. Live precision uses
+  original Datum.ToInt64 and only actual conversion work, ignoring unused Decimal
+  visible precision. After releasing the borrow, the source reads statement time
+  or captures the actual live SystemTime after the frozen offset. Generic temporal
+  result parsing and ordinary return-family coercion remain; SYSDATE's distinct
+  unconditional DateTime parse (even string declarations) is preserved. NULL
+  UTC_TIME suppresses clock demand but retains any result-cast context demand.
+  Raw clock fields and valid source arities retain existing semantics. Native
+  clock encoding/prepare_now_args helpers and the temporary wire observer are
+  removed; original wire workers and SQL precision-constructor gates are unchanged.
+  All134784 old/new observations matched before caller retirement, including2376
+  replays of the same actual old live samples; deterministic132408 retain digest
+  0CD20F17C50A8D2B. Live values are not hashed as deterministic timestamps. The distinct public
   GetTimeValue raw-sentinel SDK uses `native_typed_clock.rs`: UTC validation
   precedes its second zone getter, then the actual generic session zone drives
   shared calendar projection/truncation. Date-only projection follows a complete
@@ -2944,3 +2962,22 @@ formatters, immutable calendar fixtures and root lint pass. The frontend receipt
 rust/docs/evidence/no-fallback-n7k.md records commands and exact inherited failures.
 This remains local-only and does not close clock/calendar callers, generic
 fallback, unistore's old walker, semantic audits or full-server validation.
+
+
+N7l local clock checkpoint validation: frontend1692 passes/exact3 inherited
+failures/95ignored/0filtered, all248 batch tests green; SDK1114 passes/exact1
+inherited failure/1ignored/0filtered. Projection26 includes a new25-root clock
+mixed group (all12names and12CHARparents plus an older arithmetic root) under
+bothflags/workers0/2; only this group supplies its frozen statement clock and
+SYSDATE-is-now, leaving previous group contexts intact. Separate live-source
+checks bound results with actual before/after samples, eight matching declared
+precision input types, five duplicate occurrences and exact flag/clock counts.
+Provider tests cover bothroles, all8operations/valid0/1 arities, corrupt/wireNULL/
+stale/role/node/occurrence/inputrow capabilities, huge unsupported no-copy,
+actual numeric work, unused display precision, immediate cleanup/cancel/reuse,
+and exclusive flag/clock/mode/zone/truncate/warning callbacks. Clippy89expression/
+171all warning-title multiset and frontend warning titles match N7k; lint, both
+pinned15-file formatters and immutable calendar fixture guards pass. The frontend
+receipt rust/docs/evidence/no-fallback-n7l.md records commands and scope. No new
+Go package transcreation, broad PB-source coverage, unistore/datatype validation,
+full server/SQL gate or performance claim follows from this local checkpoint.

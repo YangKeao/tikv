@@ -5,6 +5,94 @@
 
 use tidb_query_datatype::codec::mysql::Time;
 
+/// Native SQL clock policies. Alias spellings with distinct precision errors
+/// retain distinct identities; the statement/live clock is always actual data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeClockOperation {
+    /// Local truncating NOW and its timestamp aliases.
+    Now,
+    /// UTC timestamp, half-up at every arity.
+    UtcTimestamp,
+    /// Local date without arguments.
+    CurrentDate,
+    /// UTC date without arguments.
+    UtcDate,
+    /// CURTIME's precision label and local time policy.
+    Curtime,
+    /// CURRENT_TIME's precision label and local time policy.
+    CurrentTime,
+    /// UTC time, with frontend-owned NULL suppression.
+    UtcTime,
+    /// Live SYSDATE; its NOW alias is resolved before calling the renderer.
+    Sysdate,
+}
+impl NativeClockOperation {
+    /// Original SQL argument count policy.
+    pub fn accepts_arity(self, arity: usize) -> bool {
+        match self {
+            Self::CurrentDate | Self::UtcDate => arity == 0,
+            _ => arity <= 1,
+        }
+    }
+    /// Original precision/error identity (NOW aliases share NOW).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Now => "now",
+            Self::UtcTimestamp => "utc_timestamp",
+            Self::CurrentDate => "curdate",
+            Self::UtcDate => "utc_date",
+            Self::Curtime => "curtime",
+            Self::CurrentTime => "current_time",
+            Self::UtcTime => "utc_time",
+            Self::Sysdate => "sysdate",
+        }
+    }
+}
+/// Failure of the actual finite renderer, never SQL NULL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeClockValueError {
+    /// Original raw tuple/FSP cannot be replaced with contradictory metadata.
+    InvalidPrecision,
+    /// Finite formatter work was refused before materialization.
+    Resource,
+}
+/// Render original clock fields using the existing unique policy kernels.
+/// Raw nanoseconds, wide dates and ordinary arithmetic are not normalized.
+pub fn native_clock_values(
+    operation: NativeClockOperation,
+    clock: NativeClockInput,
+    fsp: Option<u32>,
+    maximum: usize,
+) -> Result<String, NativeClockValueError> {
+    use NativeClockOperation as Op;
+    if maximum == usize::MAX || maximum < 1024 {
+        return Err(NativeClockValueError::Resource);
+    }
+    let valid = match operation {
+        Op::CurrentDate | Op::UtcDate => fsp.is_none(),
+        Op::Now | Op::UtcTimestamp | Op::Sysdate => fsp.is_some_and(|v| v <= 6),
+        _ => fsp.is_none_or(|v| v <= 6),
+    };
+    if !valid {
+        return Err(NativeClockValueError::InvalidPrecision);
+    }
+    Ok(match operation {
+        Op::Now => native_now(clock, fsp.unwrap()),
+        Op::UtcTimestamp => native_utc_timestamp(clock, fsp.unwrap()),
+        Op::CurrentDate => native_current_date(clock),
+        Op::UtcDate => native_utc_date(clock),
+        Op::Curtime | Op::CurrentTime => match fsp {
+            Some(fsp) => native_current_time_with_fsp(clock, fsp),
+            None => native_current_time_without_fsp(clock),
+        },
+        Op::UtcTime => match fsp {
+            Some(fsp) => native_utc_time_with_fsp(clock, fsp),
+            None => native_utc_time_without_fsp(clock),
+        },
+        Op::Sysdate => native_sysdate(clock, fsp.unwrap()),
+    })
+}
+
 /// The actual statement clock fields, without validation or normalization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeClockInput {
@@ -260,5 +348,83 @@ mod tests {
         );
         assert_eq!(native_format_clock_date(-62_167_219_200), "0000-01-01");
         assert_eq!(native_format_clock_date(253_402_300_800), "10000-01-01");
+    }
+}
+
+#[cfg(test)]
+mod actual_value_tests {
+    use super::*;
+    #[test]
+    fn actual_clock_renderer_keeps_raw_fields_and_finite_precision_contracts() {
+        let c = NativeClockInput {
+            utc_secs: -1,
+            nanos: 999999500,
+            tz_offset: 1,
+        };
+        assert_eq!(
+            native_clock_values(NativeClockOperation::Now, c, Some(6), 4096).unwrap(),
+            "1970-01-01 00:00:00.999999"
+        );
+        assert_eq!(
+            native_clock_values(NativeClockOperation::UtcTimestamp, c, Some(6), 4096).unwrap(),
+            "1970-01-01 00:00:00.000000"
+        );
+        assert_eq!(
+            native_clock_values(NativeClockOperation::Curtime, c, None, 4096).unwrap(),
+            "00:00:00"
+        );
+        assert_eq!(
+            native_clock_values(NativeClockOperation::CurrentTime, c, Some(0), 4096).unwrap(),
+            "00:00:01"
+        );
+        assert_eq!(
+            native_clock_values(NativeClockOperation::UtcTime, c, Some(6), 4096).unwrap(),
+            "23:59:59.999999"
+        );
+        for max in [0, usize::MAX] {
+            assert_eq!(
+                native_clock_values(NativeClockOperation::Now, c, Some(0), max),
+                Err(NativeClockValueError::Resource)
+            );
+        }
+        for (op, fsp) in [
+            (NativeClockOperation::Now, None),
+            (NativeClockOperation::Sysdate, Some(7)),
+            (NativeClockOperation::CurrentDate, Some(0)),
+        ] {
+            assert_eq!(
+                native_clock_values(op, c, fsp, 4096),
+                Err(NativeClockValueError::InvalidPrecision)
+            );
+        }
+    }
+    #[test]
+    fn actual_clock_catalog_uses_capabilities_at_only_original_arities() {
+        use crate::local::{BatchCallSignature, SqlBatchHostOperation};
+        for op in [
+            NativeClockOperation::Now,
+            NativeClockOperation::UtcTimestamp,
+            NativeClockOperation::CurrentDate,
+            NativeClockOperation::UtcDate,
+            NativeClockOperation::Curtime,
+            NativeClockOperation::CurrentTime,
+            NativeClockOperation::UtcTime,
+            NativeClockOperation::Sysdate,
+        ] {
+            for arity in 0..3 {
+                let host = SqlBatchHostOperation::ClockNative {
+                    operation: op,
+                    arity: arity as u8,
+                };
+                assert_eq!(host.accepts_arity(arity), op.accepts_arity(arity));
+                if op.accepts_arity(arity) {
+                    assert!(
+                        BatchCallSignature::for_host(host, arity)
+                            .unwrap()
+                            .uses_native_value_inputs()
+                    );
+                }
+            }
+        }
     }
 }
