@@ -2605,3 +2605,25 @@ worker route is gone. These helpers operate on stack-sized truth markers;
 existing canonical source ownership/resource checks remain before them. Other
 ready-value compatibility families and global alternate dispatch still need
 retirement.
+
+
+Frontend IF/CASE/IFNULL/COALESCE/NULLIF control wrappers now use native branch
+and nullable selectors directly, without identity-frame encoding or a Ready
+argument program. Source callbacks retain original context properties, warning
+and conversion sites; CASE still initializes its base once even with zero
+pairs, and NULLIF still evaluates its real comparison eagerly and validates
+only NULL/signed0/1. Invalid comparison causes retain their exact opaque
+Scope/Contract boundary. Empty remaining lists call the same public
+coalesce_bytes(&[]) policy as the original exhaustion recipe.
+
+Selected owned values move after a logical retained-payload check; borrowed
+selections admit source-plus-copy payload before clone. These checks use the
+existing finite default execution allowance. Actual coefficients/raw bytes and
+vector elements are counted, without Decimal display padding or retired frame
+buffers. This is conservative logical ownership, not a whole-statement heap
+peak or allocation-failure recovery guarantee. OLD proof covers7680 actual
+representations/demand traces and78 source SQL/resource failures with original
+capture identity, no replay, warnings and later reuse. The canonical driver's
+existing source/copy budgets remain independent and unchanged. Other families'
+explicit compatibility recipes/codecs and global fallback dispatch still need
+retirement.
