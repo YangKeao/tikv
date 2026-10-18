@@ -63,18 +63,7 @@ pub(crate) fn evaluate_bounded_staleness_head_native(
 ) -> FrameResult<NativeBoundedStalenessHeadResult> {
     let left = actual_time(left)?;
     let right = actual_time(right)?;
-    use NativeBoundedStalenessHeadResult::*;
-    // Both existing zero flags together are exactly month==0 || day==0:
-    // raw==0 already has both fields zero. Year and other fields stay unchecked.
-    Ok(if Time::native_date_rejects_zero(left.raw, true, true) {
-        InvalidLeft
-    } else if Time::native_date_rejects_zero(right.raw, true, true) {
-        InvalidRight
-    } else if Time::native_core_compare(left.raw, right.raw).is_gt() {
-        RangeNull
-    } else {
-        NeedSafe
-    })
+    Ok(native_bounded_staleness_head_values(left, right))
 }
 
 pub fn bounded_staleness_finish_native_args_valid(
@@ -99,7 +88,53 @@ pub(crate) fn evaluate_bounded_staleness_finish_native(
     }
     let left = actual_time(left)?;
     let right = actual_time(right)?;
-    let mut selected = match safe.map(|safe| actual_time(Some(safe))).transpose()? {
+    let selected = native_bounded_staleness_finish_values(
+        left,
+        right,
+        safe.map(|v| actual_time(Some(v))).transpose()?,
+    )
+    .ok_or(NativeIdentityFrameError::Invalid)?;
+    Ok(NativeIdentityRef::Time {
+        core: selected.raw,
+        kind: 1,
+        fsp: selected.fsp,
+    })
+}
+
+/// Classify actual endpoint cores without transport, rendering or context
+/// calls.
+pub fn native_bounded_staleness_head_values(
+    left: NativeTemporalValue,
+    right: NativeTemporalValue,
+) -> NativeBoundedStalenessHeadResult {
+    use NativeBoundedStalenessHeadResult::*;
+    // Both zero flags mean month==0 || day==0, including raw==0. Year and
+    // other calendar fields remain unchecked, exactly as in the original head.
+    if Time::native_date_rejects_zero(left.raw, true, true) {
+        InvalidLeft
+    } else if Time::native_date_rejects_zero(right.raw, true, true) {
+        InvalidRight
+    } else if Time::native_core_compare(left.raw, right.raw).is_gt() {
+        RangeNull
+    } else {
+        NeedSafe
+    }
+}
+
+/// Clamp the original statement's SafeTS. None means an invalid call sequence,
+/// not a SQL NULL; only NeedSafe endpoints admit finishing. No SafeTS calendar
+/// validation, timezone conversion or precision rounding is added.
+pub fn native_bounded_staleness_finish_values(
+    left: NativeTemporalValue,
+    right: NativeTemporalValue,
+    safe: Option<NativeTemporalValue>,
+) -> Option<NativeTemporalValue> {
+    if native_bounded_staleness_head_values(left, right)
+        != NativeBoundedStalenessHeadResult::NeedSafe
+    {
+        return None;
+    }
+    let mut selected = match safe {
         Some(safe) if Time::native_core_compare(safe.raw, left.raw).is_lt() => left,
         Some(safe) if Time::native_core_compare(safe.raw, right.raw).is_gt() => right,
         Some(safe) => safe,
@@ -109,11 +144,7 @@ pub(crate) fn evaluate_bounded_staleness_finish_native(
     selected
         .set_fsp(3)
         .expect("bounded-staleness precision three is valid");
-    Ok(NativeIdentityRef::Time {
-        core: selected.raw,
-        kind: 1,
-        fsp: selected.fsp,
-    })
+    Some(selected)
 }
 
 #[cfg(test)]
@@ -153,6 +184,22 @@ mod tests {
             Some(&left),
             None
         ));
+        assert!(
+            native_bounded_staleness_finish_values(
+                actual_time(Some(&right)).unwrap(),
+                actual_time(Some(&left)).unwrap(),
+                None
+            )
+            .is_none()
+        );
+        assert!(
+            native_bounded_staleness_finish_values(
+                actual_time(Some(&invalid)).unwrap(),
+                actual_time(Some(&right)).unwrap(),
+                None
+            )
+            .is_none()
+        );
         assert!(!bounded_staleness_finish_native_args_valid(
             Some(&invalid),
             Some(&right),

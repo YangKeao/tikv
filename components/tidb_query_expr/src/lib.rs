@@ -53,6 +53,7 @@ mod native_bounded_staleness;
 pub use native_bounded_staleness::{
     NativeBoundedStalenessHeadResult, bounded_staleness_finish_native_args_valid,
     bounded_staleness_head_native_args_valid, decode_native_bounded_staleness_head,
+    native_bounded_staleness_finish_values, native_bounded_staleness_head_values,
 };
 
 mod native_cast;

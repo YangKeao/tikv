@@ -150,6 +150,20 @@ flag or eligibility policy described above.
   expressions or maintain a second signature dispatch table. Prepared calls
   retain the original argument-index mapping: IN's legacy constant extraction
   can leave dynamic children in swap-remove order, not source order.
+- Native bounded-staleness consumers use actual `NativeTemporalValue` endpoints
+  through `native_bounded_staleness_head_values` and
+  `native_bounded_staleness_finish_values`. The legacy explicit wire APIs delegate
+  to these same functions. Left zero components precede right zero components,
+  then reversed-range NULL; only NeedSafe permits the original statement SafeTS
+  callback. Clamp raw cores without validating SafeTS or rounding the chosen
+  microseconds, then set DATETIME/FSP3 metadata. The generic canonical source
+  host demands both actual operands before NULL, retains their original declared
+  types for the existing datetime argument casts, and drops store borrows before
+  all cast/warning/SafeTS services. Byte capabilities authenticate both argument
+  origins and occurrences; publication uses a native capability or typed time.
+  Clone, formatting and result work stay under the existing finite allowances;
+  no cache/session-default SafeTS or second ready-value program is permitted.
+  This generic source integration does not claim all PB or parser coverage.
 - A compiled `LocalProgram` is worker-owned. Its existing `Any + Send` function
   metadata is not `Sync`; share immutable input specifications, not one mutable
   compiled program between workers. General local routes borrow the caller's

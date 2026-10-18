@@ -91,6 +91,10 @@ pub enum SqlBatchHostOperation {
         typed: bool,
         stop_on_null: bool,
     },
+    /// Eager typed endpoints followed by statement-owned SafeTS.
+    BoundedStalenessNative {
+        typed: bool,
+    },
     /// Eager actual date-text sources, with explicit result carrier.
     StrToDateNative {
         output: SqlTemporalOutput,
@@ -177,7 +181,7 @@ impl SqlBatchHostOperation {
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
             Self::TimestampDiffNative { .. } => arity == 3,
-            Self::StrToDateNative { .. } => arity == 2,
+            Self::StrToDateNative { .. } | Self::BoundedStalenessNative { .. } => arity == 2,
             Self::JsonSumCrc32Native { .. } => arity == 1,
             Self::BitwiseNative(op) => arity == op.arity(),
             Self::CharsetNative(op) => arity == op.arity(),
@@ -227,6 +231,7 @@ impl SqlBatchHostOperation {
         match self {
             Self::CastCharInt { .. } => EvalType::Int,
             Self::TimestampDiffNative { .. }
+            | Self::BoundedStalenessNative { .. }
             | Self::StrToDateNative { .. }
             | Self::JsonSumCrc32Native { .. }
             | Self::Concat
@@ -280,9 +285,11 @@ impl SqlBatchHostOperation {
     pub fn output_type(self) -> EvalType {
         match self {
             Self::StrToDateNative { output } => output.eval_type(),
+            Self::BoundedStalenessNative { typed: true } => EvalType::DateTime,
             Self::TimestampDiffNative { typed: true, .. }
             | Self::JsonSumCrc32Native { typed: true } => EvalType::Int,
             Self::TimestampDiffNative { typed: false, .. }
+            | Self::BoundedStalenessNative { typed: false }
             | Self::JsonSumCrc32Native { typed: false }
             | Self::Concat
             | Self::ConcatWs
