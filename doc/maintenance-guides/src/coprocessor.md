@@ -2503,3 +2503,23 @@ ordinal after leaf evaluation or scalar return normalization. Constants borrow
 the original datum until the copy-budget gate; function results reuse their
 existing host-slot result declaration. This is shared with the original public
 expression rule and does not admit a tree callback or a second SDK evaluator.
+
+The quotient families expose actual value kernels before native source
+admission. `native_integer_divide_value` and `native_integer_modulo_value`
+retain both source signedness flags; their callers own result signedness and
+zero-divisor warning policy. `native_real_quotient_value` keeps the full f64
+payload and a typed overflow cause for native division/modulo.
+`native_decimal_division_value` returns the computed Decimal and its genuine
+Ok/Truncated/Overflow/ZeroDivisor disposition, with the caller's effective
+precision read and finite allowance. `native_decimal_modulo_value` shares the
+same bounded Decimal remainder as the original RPN recipe.
+
+`native_decimal_integer_division_value` accepts borrowed native Decimal
+identities and exactly the probe/fallback reads requested by the existing
+classifiers. It returns `NativeIntDivValue`, an owned computed warning plus
+integer outcome. RHS zero still precedes lhs coefficient validation and any
+precision reads. The RPN wrapper alone decodes frames and encodes the computed
+report, so direct value users need no frame allocation and cannot fabricate a
+host answer. These entries share the old arithmetic implementation; they do
+not by themselves add source closure or retire the remaining frontend
+quotient adapters.

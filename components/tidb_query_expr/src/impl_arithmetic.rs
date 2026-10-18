@@ -632,15 +632,24 @@ legacy_integer_binary_recipe!(sub_int128_reject_right_legacy, Subtract, true, Ri
 legacy_integer_binary_recipe!(mul_int128_signed_legacy, Multiply, false, Neither);
 legacy_integer_binary_recipe!(mul_int128_unsigned_legacy, Multiply, true, Neither);
 
-// Closed native DIV recipes retain original operand signedness. Zero is an
-// actual computed NULL; shared nonzero failures retain the existing typed
-// cause.
-#[rpn_fn]
-fn int_div_int_ss_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-    if *rhs == 0 {
+/// Integer DIV over original int64 bits and immutable source signedness.
+/// A zero divisor is computed NULL; nonzero failures retain the typed cause.
+pub fn native_integer_divide_value(
+    lhs: Int,
+    rhs: Int,
+    left_unsigned: bool,
+    right_unsigned: bool,
+) -> Result<Option<Int>> {
+    if rhs == 0 {
         return Ok(None);
     }
-    div_i64(*lhs, *rhs).map(Some).map_err(|_| {
+    let result = match (left_unsigned, right_unsigned) {
+        (false, false) => div_i64(lhs, rhs),
+        (true, false) => div_u64_with_i64(lhs as u64, rhs).map(|value| value as Int),
+        (false, true) => div_i64_with_u64(lhs, rhs as u64).map(|value| value as Int),
+        (true, true) => return Ok(Some(((lhs as u64) / (rhs as u64)) as Int)),
+    };
+    result.map(Some).map_err(|_| {
         native_binary_arithmetic_error(
             BinaryArithmeticOperation::IntDivide,
             BinaryArithmeticErrorKind::IntOverflow,
@@ -649,41 +658,23 @@ fn int_div_int_ss_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
 }
 
 #[rpn_fn]
+fn int_div_int_ss_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    native_integer_divide_value(*lhs, *rhs, false, false)
+}
+
+#[rpn_fn]
 fn int_div_int_us_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-    if *rhs == 0 {
-        return Ok(None);
-    }
-    div_u64_with_i64(*lhs as u64, *rhs)
-        .map(|value| Some(value as Int))
-        .map_err(|_| {
-            native_binary_arithmetic_error(
-                BinaryArithmeticOperation::IntDivide,
-                BinaryArithmeticErrorKind::IntOverflow,
-            )
-        })
+    native_integer_divide_value(*lhs, *rhs, true, false)
 }
 
 #[rpn_fn]
 fn int_div_int_su_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-    if *rhs == 0 {
-        return Ok(None);
-    }
-    div_i64_with_u64(*lhs, *rhs as u64)
-        .map(|value| Some(value as Int))
-        .map_err(|_| {
-            native_binary_arithmetic_error(
-                BinaryArithmeticOperation::IntDivide,
-                BinaryArithmeticErrorKind::IntOverflow,
-            )
-        })
+    native_integer_divide_value(*lhs, *rhs, false, true)
 }
 
 #[rpn_fn]
 fn int_div_int_uu_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-    if *rhs == 0 {
-        return Ok(None);
-    }
-    Ok(Some(((*lhs as u64) / (*rhs as u64)) as Int))
+    native_integer_divide_value(*lhs, *rhs, true, true)
 }
 
 #[rpn_fn]
@@ -749,44 +740,48 @@ fn int_div_decimal_legacy(lhs: BytesRef, rhs: BytesRef, budget: &Int) -> Result<
     )
 }
 
-// Closed MOD value recipes accept non-NULL operands. The frontend owns NULL
-// witnesses, result signedness, and warnings after a successful zero divisor.
-#[rpn_fn]
-fn mod_int_ss_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-    if *rhs == 0 {
+/// Integer MOD preserves the dividend's result signedness in the caller.
+/// No conversion, warning or expression evaluation occurs at this value leaf.
+pub fn native_integer_modulo_value(
+    lhs: Int,
+    rhs: Int,
+    left_unsigned: bool,
+    right_unsigned: bool,
+) -> Result<Option<Int>> {
+    if rhs == 0 {
         return Ok(None);
     }
-    Ok(Some(lhs.wrapping_rem(*rhs)))
-}
-
-#[rpn_fn]
-fn mod_int_su_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-    if *rhs == 0 {
-        return Ok(None);
-    }
-    let value = if *lhs < 0 {
-        // Preserve the original native negation, including its overflow quirk.
-        -((lhs.unsigned_abs() % (*rhs as u64)) as i64)
-    } else {
-        ((*lhs as u64) % (*rhs as u64)) as i64
+    let value = match (left_unsigned, right_unsigned) {
+        (false, false) => lhs.wrapping_rem(rhs),
+        (false, true) if lhs < 0 => {
+            // Preserve the original native negation, including its overflow quirk.
+            -((lhs.unsigned_abs() % (rhs as u64)) as i64)
+        }
+        (false, true) => ((lhs as u64) % (rhs as u64)) as i64,
+        (true, false) => ((lhs as u64) % rhs.unsigned_abs()) as i64,
+        (true, true) => ((lhs as u64) % (rhs as u64)) as i64,
     };
     Ok(Some(value))
 }
 
 #[rpn_fn]
+fn mod_int_ss_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    native_integer_modulo_value(*lhs, *rhs, false, false)
+}
+
+#[rpn_fn]
+fn mod_int_su_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    native_integer_modulo_value(*lhs, *rhs, false, true)
+}
+
+#[rpn_fn]
 fn mod_int_us_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-    if *rhs == 0 {
-        return Ok(None);
-    }
-    Ok(Some(((*lhs as u64) % rhs.unsigned_abs()) as i64))
+    native_integer_modulo_value(*lhs, *rhs, true, false)
 }
 
 #[rpn_fn]
 fn mod_int_uu_native(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
-    if *rhs == 0 {
-        return Ok(None);
-    }
-    Ok(Some(((*lhs as u64) % (*rhs as u64)) as i64))
+    native_integer_modulo_value(*lhs, *rhs, true, true)
 }
 
 #[rpn_fn]
@@ -800,36 +795,88 @@ fn mod_int128_legacy(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
     Ok(Some((lhs % rhs).to_le_bytes().to_vec()))
 }
 
-fn real_modulo(lhs: BytesRef, rhs: BytesRef, native: bool) -> Result<Option<Bytes>> {
-    let lhs = binary_raw_f64(Some(lhs))?.expect("non-NULL MOD operand");
-    let rhs = binary_raw_f64(Some(rhs))?.expect("non-NULL MOD operand");
+/// The two native real quotient operations, separate from additive kernels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeRealQuotientOperation {
+    Divide,
+    Modulo,
+}
+
+fn real_quotient_value(lhs: f64, rhs: f64, operation: NativeRealQuotientOperation) -> Option<f64> {
     if rhs == 0.0 {
-        return Ok(None);
+        return None;
     }
-    let value = lhs % rhs;
-    if native && !value.is_finite() {
-        return Err(native_binary_arithmetic_error(
-            BinaryArithmeticOperation::Modulo,
-            BinaryArithmeticErrorKind::FloatOverflow,
-        ));
-    }
-    Ok(Some(value.to_bits().to_le_bytes().to_vec()))
+    Some(match operation {
+        NativeRealQuotientOperation::Divide => lhs / rhs,
+        NativeRealQuotientOperation::Modulo => lhs % rhs,
+    })
+}
+
+/// Full-f64 native arithmetic. SQL input NULL is owned by the caller; None is
+/// the actual zero-divisor outcome, including negative floating zero.
+pub fn native_real_quotient_value(
+    lhs: f64,
+    rhs: f64,
+    operation: NativeRealQuotientOperation,
+) -> Result<Option<f64>> {
+    real_quotient_value(lhs, rhs, operation)
+        .map(|value| {
+            if value.is_finite() {
+                Ok(value)
+            } else {
+                Err(native_binary_arithmetic_error(
+                    match operation {
+                        NativeRealQuotientOperation::Divide => BinaryArithmeticOperation::Divide,
+                        NativeRealQuotientOperation::Modulo => BinaryArithmeticOperation::Modulo,
+                    },
+                    BinaryArithmeticErrorKind::FloatOverflow,
+                ))
+            }
+        })
+        .transpose()
+}
+
+fn real_quotient(
+    lhs: BytesRef,
+    rhs: BytesRef,
+    native: bool,
+    operation: NativeRealQuotientOperation,
+) -> Result<Option<Bytes>> {
+    let lhs = binary_raw_f64(Some(lhs))?.expect("non-NULL quotient operand");
+    let rhs = binary_raw_f64(Some(rhs))?.expect("non-NULL quotient operand");
+    let value = if native {
+        native_real_quotient_value(lhs, rhs, operation)?
+    } else {
+        real_quotient_value(lhs, rhs, operation)
+    };
+    Ok(value.map(|value| value.to_bits().to_le_bytes().to_vec()))
 }
 
 #[rpn_fn]
 fn mod_real_native(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
-    real_modulo(lhs, rhs, true)
+    real_quotient(lhs, rhs, true, NativeRealQuotientOperation::Modulo)
 }
 
 #[rpn_fn]
 fn mod_real_legacy(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
-    real_modulo(lhs, rhs, false)
+    real_quotient(lhs, rhs, false, NativeRealQuotientOperation::Modulo)
+}
+
+/// Decimal MOD with a finite, caller-admitted per-buffer allowance.
+pub fn native_decimal_modulo_value(
+    lhs: &Decimal,
+    rhs: &Decimal,
+    budget: usize,
+) -> Result<Option<Decimal>> {
+    // Share the original budget validation, including the usize::MAX sentinel.
+    let budget = native_decimal_budget(&(budget as u64 as Int))?;
+    lhs.try_native_rem(rhs, budget)
+        .map_err(native_decimal_failure)
 }
 
 #[rpn_fn]
 fn mod_decimal_native(lhs: &Decimal, rhs: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
-    lhs.try_native_rem(rhs, native_decimal_budget(budget)?)
-        .map_err(native_decimal_failure)
+    native_decimal_modulo_value(lhs, rhs, native_decimal_budget(budget)?)
 }
 
 /// Per-call decimal division disposition; the value itself remains the official
@@ -842,30 +889,14 @@ pub enum NativeDecimalDivisionDisposition {
     ZeroDivisor,
 }
 
-fn real_division(lhs: BytesRef, rhs: BytesRef, native: bool) -> Result<Option<Bytes>> {
-    let lhs = binary_raw_f64(Some(lhs))?.expect("non-NULL division operand");
-    let rhs = binary_raw_f64(Some(rhs))?.expect("non-NULL division operand");
-    if rhs == 0.0 {
-        return Ok(None);
-    }
-    let value = lhs / rhs;
-    if native && !value.is_finite() {
-        return Err(native_binary_arithmetic_error(
-            BinaryArithmeticOperation::Divide,
-            BinaryArithmeticErrorKind::FloatOverflow,
-        ));
-    }
-    Ok(Some(value.to_bits().to_le_bytes().to_vec()))
-}
-
 #[rpn_fn]
 fn div_real_native(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
-    real_division(lhs, rhs, true)
+    real_quotient(lhs, rhs, true, NativeRealQuotientOperation::Divide)
 }
 
 #[rpn_fn]
 fn div_real_legacy(lhs: BytesRef, rhs: BytesRef) -> Result<Option<Bytes>> {
-    real_division(lhs, rhs, false)
+    real_quotient(lhs, rhs, false, NativeRealQuotientOperation::Divide)
 }
 
 fn division_infrastructure_error(error: LocalError) -> tidb_query_common::Error {
@@ -888,14 +919,14 @@ fn init_div_decimal_legacy_data(
     ))
 }
 
-fn decimal_division_result(
+fn decimal_division_value(
     lhs: &Decimal,
     rhs: &Decimal,
-    budget: &Int,
+    budget: usize,
     kind: NativeDecimalDivisionKind,
     increment: u32,
 ) -> Result<(Option<Decimal>, NativeDecimalDivisionDisposition)> {
-    let budget = native_decimal_budget(budget)?;
+    let budget = native_decimal_budget(&(budget as u64 as Int))?;
     let increment = match kind {
         NativeDecimalDivisionKind::Native if !rhs.is_zero() => {
             // The frontend supplied the effective increment (including 0 -> 4).
@@ -914,6 +945,41 @@ fn decimal_division_result(
         Some(Res::Truncated(value)) => (Some(value), NativeDecimalDivisionDisposition::Truncated),
         Some(Res::Overflow(value)) => (Some(value), NativeDecimalDivisionDisposition::Overflow),
     })
+}
+
+/// Native '/' computed value and disposition. The caller supplies the actual
+/// effective precision read and owns SQL warnings after the returned outcome.
+pub fn native_decimal_division_value(
+    lhs: &Decimal,
+    rhs: &Decimal,
+    increment: u32,
+    budget: usize,
+) -> Result<(Option<Decimal>, NativeDecimalDivisionDisposition)> {
+    decimal_division_value(
+        lhs,
+        rhs,
+        budget,
+        NativeDecimalDivisionKind::Native,
+        increment,
+    )
+}
+
+fn decimal_division_result(
+    lhs: &Decimal,
+    rhs: &Decimal,
+    budget: &Int,
+    kind: NativeDecimalDivisionKind,
+    increment: u32,
+) -> Result<(Option<Decimal>, NativeDecimalDivisionDisposition)> {
+    let budget = native_decimal_budget(budget)?;
+    match kind {
+        NativeDecimalDivisionKind::Native => {
+            native_decimal_division_value(lhs, rhs, increment, budget)
+        }
+        NativeDecimalDivisionKind::Legacy => {
+            decimal_division_value(lhs, rhs, budget, kind, increment)
+        }
+    }
 }
 
 fn evaluate_decimal_division(
@@ -3004,6 +3070,151 @@ mod tests {
                     assert!(ctx.take_warnings().warnings.is_empty());
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod quotient_value_tests {
+    use tidb_query_common::error::ErrorInner;
+
+    use super::*;
+
+    fn overflow(
+        error: tidb_query_common::Error,
+        operation: BinaryArithmeticOperation,
+        kind: BinaryArithmeticErrorKind,
+    ) {
+        match error.0.as_ref() {
+            ErrorInner::Evaluate(EvaluateError::Caused(cause)) => assert_eq!(
+                cause.downcast_ref::<NativeBinaryArithmeticError>(),
+                Some(&NativeBinaryArithmeticError { operation, kind }),
+            ),
+            _ => panic!("lost quotient cause: {error:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_integer_quotients_keep_unsigned_zero_and_overflow_domains() {
+        // Expected source arithmetic results, including mixed signedness whose
+        // quotient is zero despite a negative signed argument.
+        for (left, right, lu, ru, quotient, remainder) in [
+            (-13, 5, false, false, Some(-2), -3),
+            (13, -5, false, false, Some(-2), 3),
+            (i64::MIN, -1, false, false, None, 0),
+            (-1, 1, true, true, Some(-1), 0),
+            (-2, -1, true, true, Some(0), -2),
+            (-1, 2, false, true, Some(0), -1),
+            (1, -2, true, false, Some(0), 1),
+            (-13, 5, false, true, None, -3),
+            (-1, i64::MIN, true, false, None, i64::MAX),
+        ] {
+            let result = native_integer_divide_value(left, right, lu, ru);
+            match quotient {
+                Some(expected) => assert_eq!(result.unwrap(), Some(expected)),
+                None => overflow(
+                    result.unwrap_err(),
+                    BinaryArithmeticOperation::IntDivide,
+                    BinaryArithmeticErrorKind::IntOverflow,
+                ),
+            }
+            assert_eq!(
+                native_integer_modulo_value(left, right, lu, ru).unwrap(),
+                Some(remainder)
+            );
+        }
+        for lu in [false, true] {
+            for ru in [false, true] {
+                assert_eq!(
+                    native_integer_divide_value(i64::MIN, 0, lu, ru).unwrap(),
+                    None
+                );
+                assert_eq!(
+                    native_integer_modulo_value(i64::MIN, 0, lu, ru).unwrap(),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direct_real_quotients_keep_full_bits_and_typed_nonfinite_errors() {
+        use NativeRealQuotientOperation::{Divide, Modulo};
+        for operation in [Divide, Modulo] {
+            for zero in [0.0, -0.0] {
+                assert_eq!(
+                    native_real_quotient_value(f64::NAN, zero, operation).unwrap(),
+                    None
+                );
+            }
+            for left in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                overflow(
+                    native_real_quotient_value(left, 2.0, operation).unwrap_err(),
+                    if operation == Divide {
+                        BinaryArithmeticOperation::Divide
+                    } else {
+                        BinaryArithmeticOperation::Modulo
+                    },
+                    BinaryArithmeticErrorKind::FloatOverflow,
+                );
+            }
+        }
+        for (left, right, operation, expected) in [
+            (-0.0, 2.0, Divide, -0.0),
+            (-0.0, 2.0, Modulo, -0.0),
+            (-13.0, 5.0, Divide, -2.6),
+            (-13.0, 5.0, Modulo, -3.0),
+            (-2.0, f64::INFINITY, Divide, -0.0),
+            (-2.0, f64::INFINITY, Modulo, -2.0),
+            (f64::from_bits(1), 1.0, Divide, f64::from_bits(1)),
+        ] {
+            assert_eq!(
+                native_real_quotient_value(left, right, operation)
+                    .unwrap()
+                    .unwrap()
+                    .to_bits(),
+                expected.to_bits()
+            );
+        }
+        overflow(
+            native_real_quotient_value(f64::MAX, 0.5, Divide).unwrap_err(),
+            BinaryArithmeticOperation::Divide,
+            BinaryArithmeticErrorKind::FloatOverflow,
+        );
+    }
+
+    #[test]
+    fn direct_decimal_quotients_return_disposition_and_bound_actual_work() {
+        use NativeDecimalDivisionDisposition::{Ok as Exact, Truncated, ZeroDivisor};
+        let seven: Decimal = "7.0".parse().unwrap();
+        let two = Decimal::from(2_i64);
+        let three = Decimal::from(3_i64);
+        let zero = Decimal::from(0_i64);
+        let (value, status) = native_decimal_division_value(&seven, &two, 4, 4096).unwrap();
+        assert_eq!(status, Exact);
+        let value = value.unwrap();
+        assert_eq!(value.to_string(), "3.50000");
+        assert_eq!(value.result_scale(), 5);
+        let (_, status) = native_decimal_division_value(&seven, &three, 100, 4096).unwrap();
+        assert_eq!(status, Truncated);
+        assert_eq!(
+            native_decimal_division_value(&seven, &zero, u32::MAX, 4096).unwrap(),
+            (None, ZeroDivisor)
+        );
+        assert_eq!(
+            native_decimal_modulo_value(&seven, &two, 4096)
+                .unwrap()
+                .unwrap()
+                .to_string(),
+            "1.0"
+        );
+        assert_eq!(
+            native_decimal_modulo_value(&seven, &zero, 4096).unwrap(),
+            None
+        );
+        for budget in [0, usize::MAX] {
+            assert!(native_decimal_division_value(&seven, &three, 4, budget).is_err());
+            assert!(native_decimal_modulo_value(&seven, &two, budget).is_err());
         }
     }
 }

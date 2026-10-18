@@ -309,18 +309,28 @@ fn report(outcome: NativeIntDivOutcome, warning: Option<&str>, budget: usize) ->
     Ok(bytes)
 }
 
-pub(crate) fn evaluate_native_intdiv(
-    left: Option<&[u8]>,
+/// Owned output of the Decimal DIV value core. It contains only the computed
+/// warning and integer outcome; no transport frame or host answer is retained.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NativeIntDivValue {
+    pub warning: Option<String>,
+    pub outcome: NativeIntDivOutcome,
+}
+
+/// Evaluate borrowed actual Decimal identities with precisely the precision
+/// reads requested by native_intdiv_needs_probe/native_intdiv_needs_fallback.
+pub fn native_decimal_integer_division_value(
+    left: NativeIdentityRef<'_>,
+    right: NativeIdentityRef<'_>,
     probe: Option<i64>,
     fallback: Option<i64>,
-    right: Option<&[u8]>,
     unsigned: bool,
     budget: usize,
-) -> Result<Vec<u8>> {
+) -> Result<NativeIntDivValue> {
     finite_budget(budget)?;
-    let (Some(left), Some(right)) = (framed_decimal(left), framed_decimal(right)) else {
+    let (Some(left), Some(right)) = (raw_decimal(left), raw_decimal(right)) else {
         return Err(invalid(
-            "native Decimal DIV requires two actual Decimal frames",
+            "native Decimal DIV requires two actual Decimal values",
         ));
     };
     let phase = phase(left, right, probe)
@@ -334,7 +344,10 @@ pub(crate) fn evaluate_native_intdiv(
         _ => {}
     }
     match phase {
-        Phase::Zero => report(NativeIntDivOutcome::ZeroDivisor, None, budget),
+        Phase::Zero => Ok(NativeIntDivValue {
+            outcome: NativeIntDivOutcome::ZeroDivisor,
+            warning: None,
+        }),
         Phase::Fast(left, right) => {
             let quotient = left.checked_div(right);
             let bits = if unsigned {
@@ -344,11 +357,10 @@ pub(crate) fn evaluate_native_intdiv(
             } else {
                 quotient.and_then(|value| i64::try_from(value).ok())
             };
-            report(
-                bits.map_or(NativeIntDivOutcome::IntOverflow, NativeIntDivOutcome::Value),
-                None,
-                budget,
-            )
+            Ok(NativeIntDivValue {
+                outcome: bits.map_or(NativeIntDivOutcome::IntOverflow, NativeIntDivOutcome::Value),
+                warning: None,
+            })
         }
         Phase::Fallback => {
             let increment = fallback.and_then(increment).ok_or_else(|| {
@@ -397,9 +409,34 @@ pub(crate) fn evaluate_native_intdiv(
                     Res::Overflow(_) => NativeIntDivOutcome::IntOverflow,
                 }
             };
-            report(outcome, warning.as_deref(), budget)
+            Ok(NativeIntDivValue { outcome, warning })
         }
     }
+}
+
+pub(crate) fn evaluate_native_intdiv(
+    left: Option<&[u8]>,
+    probe: Option<i64>,
+    fallback: Option<i64>,
+    right: Option<&[u8]>,
+    unsigned: bool,
+    budget: usize,
+) -> Result<Vec<u8>> {
+    finite_budget(budget)?;
+    let (Some(left), Some(right)) = (
+        left.and_then(|bytes| decode_native_identity(bytes).ok())
+            .filter(|value| raw_decimal(*value).is_some()),
+        right
+            .and_then(|bytes| decode_native_identity(bytes).ok())
+            .filter(|value| raw_decimal(*value).is_some()),
+    ) else {
+        return Err(invalid(
+            "native Decimal DIV requires two actual Decimal frames",
+        ));
+    };
+    let value =
+        native_decimal_integer_division_value(left, right, probe, fallback, unsigned, budget)?;
+    report(value.outcome, value.warning.as_deref(), budget)
 }
 
 // Empty raw lhs with a nonzero rhs is outside shared math's coefficient
@@ -739,5 +776,95 @@ mod tests {
         assert!(!native_intdiv_legacy_args_valid(None, Some(&one)));
         assert!(evaluate_legacy_decimal_intdiv(&one, &three, 0).is_err());
         assert!(evaluate_legacy_decimal_intdiv(&legacy_zero, &one, 4096).is_err());
+    }
+}
+
+#[cfg(test)]
+mod direct_value_tests {
+    use super::*;
+
+    fn decimal(
+        digits: &[u8],
+        negative: bool,
+        scale: u32,
+        storage_scale: u32,
+    ) -> NativeIdentityRef<'_> {
+        NativeIdentityRef::Decimal {
+            negative,
+            scale,
+            storage_scale,
+            declared_shape: None,
+            coefficient: digits,
+        }
+    }
+
+    #[test]
+    fn borrowed_decimal_div_keeps_demand_and_computed_warning_outcomes() {
+        let seven = decimal(b"7", true, 0, 0);
+        let two = decimal(b"2", false, 0, 0);
+        assert_eq!(native_intdiv_needs_probe(seven, two), Some(true));
+        assert_eq!(
+            native_intdiv_needs_fallback(seven, two, Some(4)),
+            Some(false)
+        );
+        assert_eq!(
+            native_decimal_integer_division_value(seven, two, Some(4), None, false, 4096).unwrap(),
+            NativeIntDivValue {
+                outcome: NativeIntDivOutcome::Value(-3),
+                warning: None
+            }
+        );
+        assert_eq!(
+            native_decimal_integer_division_value(seven, two, Some(4), None, true, 4096)
+                .unwrap()
+                .outcome,
+            NativeIntDivOutcome::IntOverflow
+        );
+        // Zero precedes lhs coefficient validation and demands no precision
+        // reads or report-frame allocation in this value-only interface.
+        let invalid = decimal(&[255], true, u32::MAX, u32::MAX);
+        let zero = decimal(b"", false, 0, 0);
+        assert_eq!(
+            native_decimal_integer_division_value(invalid, zero, None, None, false, 0).unwrap(),
+            NativeIntDivValue {
+                outcome: NativeIntDivOutcome::ZeroDivisor,
+                warning: None
+            }
+        );
+        assert!(
+            native_decimal_integer_division_value(invalid, zero, Some(4), None, false, 4096)
+                .is_err()
+        );
+        assert!(
+            native_decimal_integer_division_value(seven, two, Some(4), Some(4), false, 4096)
+                .is_err()
+        );
+        assert!(
+            native_decimal_integer_division_value(seven, two, None, None, false, 4096).is_err()
+        );
+        assert!(
+            native_decimal_integer_division_value(seven, two, Some(4), None, false, usize::MAX)
+                .is_err()
+        );
+        let one = decimal(b"10000", false, 4, 4);
+        let three = decimal(b"30000", false, 4, 4);
+        assert_eq!(native_intdiv_needs_probe(one, three), Some(false));
+        assert_eq!(native_intdiv_needs_fallback(one, three, None), Some(true));
+        let result =
+            native_decimal_integer_division_value(one, three, None, Some(100), false, 4096)
+                .unwrap();
+        assert_eq!(result.outcome, NativeIntDivOutcome::Value(0));
+        assert!(
+            result
+                .warning
+                .as_deref()
+                .is_some_and(|text| text.starts_with("Truncated incorrect DECIMAL value: '0.333"))
+        );
+        assert!(
+            native_decimal_integer_division_value(one, three, None, None, false, 4096).is_err()
+        );
+        assert!(
+            native_decimal_integer_division_value(one, three, None, Some(100), false, 0).is_err()
+        );
     }
 }

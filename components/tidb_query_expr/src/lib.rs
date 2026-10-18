@@ -191,7 +191,8 @@ pub use native_legacy_date_arithmetic::{
 
 mod native_decimal_int_div;
 pub use native_decimal_int_div::{
-    NativeIntDivOutcome, NativeIntDivReport, decode_native_intdiv_report, native_intdiv_args_valid,
+    NativeIntDivOutcome, NativeIntDivReport, NativeIntDivValue, decode_native_intdiv_report,
+    native_decimal_integer_division_value, native_intdiv_args_valid,
     native_intdiv_legacy_args_valid, native_intdiv_needs_fallback, native_intdiv_needs_probe,
     native_intdiv_result_valid,
 };
