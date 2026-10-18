@@ -3025,3 +3025,53 @@ formatters, immutable fixture length/SHA guards and both diff checks pass. Only
 a misplaced clock documentation comment was moved after these runtime checks;
 no production behavior changed afterward. No datatype/unistore production edit
 or rerun is included, and inherited/global work remains explicitly open.
+
+
+N7n extends actual-value execution to MICROSECOND/TIME, TIMEDIFF, TIME_TO_SEC,
+SEC_TO_TIME, TIME_FORMAT, MAKEDATE/MAKETIME, FROM_DAYS, PERIOD_ADD/PERIOD_DIFF,
+GET_FORMAT and DATEDIFF, plus three raw legacy date/nanosecond entries and the
+GET_FORMAT grammar adapter. These17 entries no longer construct Ready calls.
+DurationConstructionNative exposes the13 ordinary policies through the existing
+SDK frame with original1..3 argument nodes/types and output provenance. All eager
+arguments authenticate before callbacks. Consuming actual-value stages close on
+error/panic; later calls recover, without a new argument interpreter or encoded
+native values. Wire compatibility workers preserve their validators and typed
+period causes while sharing the actual kernels and original datatype primitives.
+
+Keep the parser and demand boundaries distinct. TIME owns its actual truncation
+report/zero fallback; MICROSECOND suppresses that parser error. The separate
+TIME_TO_SEC/TIME_FORMAT parser treats nonnumeric text as zero and rejects invalid
+colon fields/hours above838. TIMEDIFF consumes matching parsed calendar/duration
+values. MAKETIME computes actual signed seconds, retaining unsigned-hour data,
+before precision demand; every original part conversion still happens, including
+second's numeric warning after NULL hour. Decimal float conversion renders visible
+precision, while integer projection reads storage. Raw FSP is bounded before
+actual output work rather than silently clamped. FROM_DAYS preserves typed zero,
+its narrow NULL band and original conversion panic. Period validation keeps
+original1210 causes after both conversions.
+
+DATEDIFF preserves both original ETDatetime casts before signature text coercion,
+including source YEAR metadata. GET_FORMAT source preserves both ETString casts
+even with first NULL; its direct values reader and strict grammar adapter retain
+their separate contracts. Actual identity byte views need no copy, and fixed
+literal table comparisons do not scan a longer unmatched input. A real8KiB/1MiB
+resource counterexample exposed a spurious length-proportional lookup allowance;
+the lookup now charges fixed bounded work/output, while demanded casts still
+charge their real formatting and owned buffers. Source authentication never skips
+an eager operand, even when its later coercion/lookup is suppressed.
+
+Only TIMEDIFF/SEC_TO_TIME/MAKEDATE/MAKETIME/FROM_DAYS run the original generic
+temporal-result boundary; TIME deliberately does not. All ordinary sources retain
+return-family conversion afterward. Store borrows never span context callbacks.
+The host closes its argument counter before conversions, so caught panic cannot
+replay into NULL. Independent proof compared5839272 actual candidates with
+unpoisoned old SQL calls before retiring callers/workers: clean-old hash
+E07682675B3A9EFD. Historical reused-cache hash AA540CDA49D3B88D remains immutable.
+Exactly1282080 historical differences were separately proved to be the original
+ScopePoisoned/Scope cause after an earlier raw conversion panic. That retired
+Ready-cache poisoning is explicitly removed; the original panic remains. This is
+not a silent historical hash rewrite. The frontend receipt
+rust/docs/evidence/no-fallback-n7n.md records captures, tests and final validation.
+Generic fallback, remaining time/format families, old unistore traversal and
+unsupported/malformed shapes, inherited failures, semantic audits and full-server
+SQL gates remain open; this remains a local checkpoint, not a Go-package port.

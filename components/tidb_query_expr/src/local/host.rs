@@ -94,6 +94,8 @@ pub enum SqlBatchHostOperation {
     /// Timestamp conversion over original native source capabilities. Both
     /// polymorphic numeric and temporal results retain their actual Datum view.
     TsoNative(crate::NativeTsoOperation),
+    /// Actual duration/construction policy with its original fixed arity.
+    DurationConstructionNative(crate::NativeDurationConstructionOperation),
     /// Calendar over actual native capabilities.
     CalendarNative {
         /// Original calendar policy.
@@ -217,6 +219,7 @@ impl SqlBatchHostOperation {
                 arity: expected,
             } => arity == usize::from(expected) && operation.accepts_arity(arity),
             Self::TsoNative(op) => arity == op.arity(),
+            Self::DurationConstructionNative(op) => arity == op.arity(),
             Self::EpochNative {
                 from,
                 arity: expected,
@@ -283,6 +286,7 @@ impl SqlBatchHostOperation {
             Self::CastCharInt { .. } => EvalType::Int,
             Self::CalendarNative { .. }
             | Self::ClockNative { .. }
+            | Self::DurationConstructionNative(_)
             | Self::TsoNative(_)
             | Self::EpochNative { .. }
             | Self::ExtractNative { .. }
@@ -347,6 +351,7 @@ impl SqlBatchHostOperation {
             Self::BoundedStalenessNative { typed: true } => EvalType::DateTime,
             Self::CalendarNative { .. }
             | Self::ClockNative { .. }
+            | Self::DurationConstructionNative(_)
             | Self::TsoNative(_)
             | Self::EpochNative { .. } => EvalType::Bytes,
             Self::ExtractNative { typed: true, .. } => EvalType::Int,

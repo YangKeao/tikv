@@ -1515,3 +1515,14 @@ pub use native_calendar::{
     native_calendar_core, native_calendar_date, native_calendar_nanos, native_calendar_text,
     native_calendar_week,
 };
+
+mod native_duration_construction;
+pub use native_duration_construction::{
+    NativeDurationConstructionError, NativeDurationConstructionOperation, NativeTimeFormatValue,
+    NativeTimeValue, native_date_diff_core_value, native_date_diff_value,
+    native_date_predicate_core_value, native_from_days_value, native_get_format_value,
+    native_make_date_value, native_make_time_parts_value, native_microsecond_nanos_value,
+    native_microsecond_value, native_period_value, native_seconds_to_time_value,
+    native_time_format_value, native_time_to_sec_value, native_time_value,
+};
+pub use native_time_diff::{NativeTimeDiffValue, native_time_diff_value};

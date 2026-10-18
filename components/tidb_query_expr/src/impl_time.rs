@@ -695,10 +695,8 @@ fn date_core_native(core: BytesRef, modes: &Int) -> Result<Option<Int>> {
 
 #[rpn_fn(nullable)]
 fn date_core_predicate_legacy(core: Option<BytesRef>) -> Result<Option<Int>> {
-    core.map_or(Ok(None), |bytes| {
-        let raw = decode_time_core_native(bytes)?;
-        Ok(Some(Int::from(Time::native_date_core(raw) != 0)))
-    })
+    crate::native_date_predicate_core_value(core.map(decode_time_core_native).transpose()?, 0)
+        .map_err(duration_wire_error)
 }
 
 #[rpn_fn(nullable)]
@@ -776,33 +774,25 @@ pub fn native_time_result_valid(bytes: &[u8]) -> bool {
 #[rpn_fn]
 fn time_native(arg: BytesRef) -> Result<Option<Bytes>> {
     let text = decode_native_time_text(arg)?;
-    let (status, value) = match crate::parse_native_duration(text, crate::native_duration_fsp(text))
-    {
-        Ok(duration) => (
-            0,
-            crate::native_format_time_diff(duration.micros, duration.fsp.max(0) as usize),
-        ),
-        Err(_) => (1, "00:00:00".to_owned()),
-    };
-    let mut result = Vec::with_capacity(1 + value.len());
-    result.push(status);
-    result.extend_from_slice(value.as_bytes());
+    let report = crate::native_time_value(Some(text), duration_wire_work(Some(text))?)
+        .map_err(duration_wire_error)?
+        .expect("present TIME input produces a report");
+    let mut result = Vec::with_capacity(1 + report.value.len());
+    result.push(u8::from(report.truncated));
+    result.extend_from_slice(report.value.as_bytes());
     Ok(Some(result))
 }
 
 #[rpn_fn]
 fn microsecond_native(arg: BytesRef) -> Result<Option<Int>> {
     let text = decode_native_time_text(arg)?;
-    Ok(
-        crate::parse_native_duration(text, crate::native_duration_fsp(text))
-            .ok()
-            .map(|duration| duration.micro_second()),
-    )
+    crate::native_microsecond_value(Some(text), duration_wire_work(Some(text))?)
+        .map_err(duration_wire_error)
 }
 
 #[rpn_fn]
 fn microsecond_legacy(nanos: &Int) -> Result<Option<Int>> {
-    Ok(Some(Duration::micro_secs_from_nanos(*nanos) as Int))
+    crate::native_microsecond_nanos_value(Some(*nanos), 0).map_err(duration_wire_error)
 }
 
 fn decode_native_time_add_args<'a>(
@@ -906,6 +896,15 @@ fn timestamp_add_prefix_null_native(
 
 // Compatibility wire inputs are already materialized. Bound their exact
 // parser extent with checked arithmetic; native callers supply their own limit.
+fn duration_wire_work(text: Option<&str>) -> Result<usize> {
+    text.map_or(Some(0), |s| {
+        s.len().checked_mul(32).and_then(|n| n.checked_add(2048))
+    })
+    .ok_or_else(|| other_err!("Native duration work extent overflow"))
+}
+fn duration_wire_error(e: crate::NativeDurationConstructionError) -> tidb_query_common::Error {
+    other_err!("Native duration/construction value contract: {:?}", e)
+}
 fn calendar_wire_work(text: Option<&str>) -> Result<usize> {
     text.map_or(Some(0), |v| {
         v.len().checked_mul(16).and_then(|n| n.checked_add(1024))
@@ -981,47 +980,45 @@ fn month_name_text_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
 
 #[rpn_fn(nullable)]
 fn time_to_sec_text_native(arg: Option<BytesRef>) -> Result<Option<Int>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(
-            Time::parse_native_duration_text(decode_native_time_text(bytes)?)
-                .map(|(seconds, _)| seconds),
-        )
-    })
+    let text = arg.map(decode_native_time_text).transpose()?;
+    crate::native_time_to_sec_value(text, duration_wire_work(text)?).map_err(duration_wire_error)
 }
 
 #[rpn_fn(nullable)]
 fn period_add_native(period: Option<&Int>, months: Option<&Int>) -> Result<Option<Int>> {
-    let (Some(period), Some(months)) = (period, months) else {
-        return Ok(None);
-    };
-    if !Time::is_valid_native_period(*period) {
-        return Err(EvaluateError::PeriodAddIncorrectArguments.into());
-    }
-    let sum = (Time::period_to_month_wrapping(*period as u64) as i64).wrapping_add(*months);
-    Ok(Some(Time::month_to_period_wrapping(sum as u64) as Int))
+    crate::native_period_value(true, period.copied(), months.copied(), 0).map_err(|e| match e {
+        crate::NativeDurationConstructionError::PeriodAdd
+        | crate::NativeDurationConstructionError::PeriodDiff => {
+            EvaluateError::PeriodAddIncorrectArguments.into()
+        }
+        e => duration_wire_error(e),
+    })
 }
 
 #[rpn_fn(nullable)]
 fn period_diff_native(left: Option<&Int>, right: Option<&Int>) -> Result<Option<Int>> {
-    let (Some(left), Some(right)) = (left, right) else {
-        return Ok(None);
-    };
-    if !Time::is_valid_native_period(*left) || !Time::is_valid_native_period(*right) {
-        return Err(EvaluateError::PeriodDiffIncorrectArguments.into());
-    }
-    Ok(Some(
-        Time::period_to_month_wrapping(*left as u64)
-            .wrapping_sub(Time::period_to_month_wrapping(*right as u64)) as Int,
-    ))
+    crate::native_period_value(false, left.copied(), right.copied(), 0).map_err(|e| match e {
+        crate::NativeDurationConstructionError::PeriodAdd
+        | crate::NativeDurationConstructionError::PeriodDiff => {
+            EvaluateError::PeriodDiffIncorrectArguments.into()
+        }
+        e => duration_wire_error(e),
+    })
 }
 
 #[rpn_fn(nullable)]
 fn get_format_native(kind: Option<BytesRef>, locale: Option<BytesRef>) -> Result<Option<Bytes>> {
-    Ok(kind.zip(locale).map(|(kind, locale)| {
-        Time::get_format_native(kind, locale)
-            .to_string()
-            .into_bytes()
-    }))
+    let work = kind
+        .zip(locale)
+        .map_or(Some(0), |(a, b)| {
+            a.len()
+                .checked_add(b.len())
+                .and_then(|n| n.checked_add(1024))
+        })
+        .ok_or_else(|| other_err!("Native GET_FORMAT work extent overflow"))?;
+    crate::native_get_format_value(kind, locale, work)
+        .map(|v| v.map(String::into_bytes))
+        .map_err(duration_wire_error)
 }
 
 #[rpn_fn(nullable)]
@@ -1061,15 +1058,12 @@ fn date_diff_text_native(left: Option<BytesRef>, right: Option<BytesRef>) -> Res
     };
     let left = decode_native_time_text(left)?;
     let right = decode_native_time_text(right)?;
-    let (Some((ly, lm, ld)), Some((ry, rm, rd))) = (
-        Time::parse_native_date_ymd(left),
-        Time::parse_native_date_ymd(right),
-    ) else {
-        return Ok(None);
-    };
-    Ok(Some(
-        Time::native_days_from_civil(ly, lm, ld) - Time::native_days_from_civil(ry, rm, rd),
-    ))
+    crate::native_date_diff_value(
+        Some(left),
+        Some(right),
+        duration_wire_work(Some(left))?.max(duration_wire_work(Some(right))?),
+    )
+    .map_err(duration_wire_error)
 }
 
 #[rpn_fn(nullable)]
@@ -1087,10 +1081,12 @@ fn date_diff_core_native(left: Option<BytesRef>, right: Option<BytesRef>) -> Res
     let (Some(left), Some(right)) = (left, right) else {
         return Ok(None);
     };
-    Ok(Some(Time::native_core_date_diff(
-        decode_time_core_native(left)?,
-        decode_time_core_native(right)?,
-    ) as Int))
+    crate::native_date_diff_core_value(
+        Some(decode_time_core_native(left)?),
+        Some(decode_time_core_native(right)?),
+        0,
+    )
+    .map_err(duration_wire_error)
 }
 
 // This demand probe returns the original owned text, not a date/validity
@@ -1280,12 +1276,10 @@ fn date_format_missing_native() -> Result<Option<Int>> {
 
 #[rpn_fn(nullable)]
 fn duration_text_probe_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
-    arg.map_or(Ok(None), |bytes| {
-        Ok(
-            Time::parse_native_duration_text(decode_native_time_text(bytes)?)
-                .map(|_| bytes.to_vec()),
-        )
-    })
+    let text = arg.map(decode_native_time_text).transpose()?;
+    crate::native_time_format_value(text.map(str::to_owned), duration_wire_work(text)?)
+        .map(|v| v.map(|v| v.into_text().into_bytes()))
+        .map_err(duration_wire_error)
 }
 
 #[rpn_fn(nullable)]
@@ -1296,11 +1290,22 @@ fn time_format_text_native(
     let (Some(time), Some(layout)) = (time, layout) else {
         return Ok(None);
     };
-    Ok(Time::native_time_format(
-        decode_native_time_text(time)?,
-        decode_native_time_text(layout)?,
-    )
-    .map(String::into_bytes))
+    let time = decode_native_time_text(time)?;
+    let layout = decode_native_time_text(layout)?;
+    let work = time
+        .len()
+        .checked_add(layout.len())
+        .and_then(|n| n.checked_mul(32))
+        .and_then(|n| n.checked_add(2048))
+        .ok_or_else(|| other_err!("Native TIME_FORMAT work extent overflow"))?;
+    crate::native_time_format_value(Some(time.to_owned()), work)
+        .and_then(|v| {
+            v.map(|v| v.finish(Some(layout), work))
+                .transpose()
+                .map(Option::flatten)
+        })
+        .map(|v| v.map(String::into_bytes))
+        .map_err(duration_wire_error)
 }
 
 #[rpn_fn(nullable)]
@@ -1798,44 +1803,16 @@ pub fn sub_duration_and_string(
 
 #[rpn_fn(nullable)]
 fn make_date_native(year: Option<&Int>, day: Option<&Int>) -> Result<Option<Bytes>> {
-    let (Some(year), Some(day)) = (year, day) else {
-        return Ok(None);
-    };
-    let mut year = *year;
-    let day = *day;
-    if day <= 0 || !(0..=9999).contains(&year) {
-        return Ok(None);
-    }
-    if year < 70 {
-        year += 2000;
-    } else if year < 100 {
-        year += 1900;
-    }
-    let (result_y, result_m, result_d) =
-        Time::native_civil_from_days(Time::native_days_from_civil(year, 1, 1) + day - 1);
-    if !(1..=9999).contains(&result_y) {
-        return Ok(None);
-    }
-    Ok(Some(
-        format!("{result_y:04}-{result_m:02}-{result_d:02}").into_bytes(),
-    ))
+    crate::native_make_date_value(year.copied(), day.copied(), 1024)
+        .map(|v| v.map(String::into_bytes))
+        .map_err(duration_wire_error)
 }
 
 #[rpn_fn(nullable)]
 fn from_days_native(arg: Option<&Int>) -> Result<Option<Bytes>> {
-    let Some(&n) = arg else {
-        return Ok(None);
-    };
-    if (3_652_425..=3_652_499).contains(&n) {
-        return Ok(None);
-    }
-    if !(366..=3_652_424).contains(&n) {
-        // Actual canonical date text; the native result packer preserves its
-        // original zero-Time datum kind without inspecting the input number.
-        return Ok(Some(b"0000-00-00".to_vec()));
-    }
-    let (y, m, d) = Time::native_civil_from_days(n - 719_528);
-    Ok(Some(format!("{y:04}-{m:02}-{d:02}").into_bytes()))
+    crate::native_from_days_value(arg.copied(), 1024)
+        .map(|v| v.map(String::into_bytes))
+        .map_err(duration_wire_error)
 }
 
 fn decode_duration_seconds_native(bytes: BytesRef) -> Result<f64> {
@@ -1863,34 +1840,16 @@ fn make_time_parts_native(
             "Native MAKETIME hour transport requires LE i64 and a 0/1 unsigned flag"
         ));
     }
-    let mut encoded_hour = [0; 8];
-    encoded_hour.copy_from_slice(&hour[..8]);
-    let hour_unsigned = hour[8] == 1;
-    let mut hour = i64::from_le_bytes(encoded_hour);
-    let minute = *minute;
-    let second = decode_duration_seconds_native(second)?;
-    if !(0..60).contains(&minute) || !(0.0..60.0).contains(&second) {
-        return Ok(None);
-    }
-    let mut overflow = false;
-    if hour < 0 && hour_unsigned {
-        hour = 838;
-        overflow = true;
-    }
-    let negative = hour < 0;
-    let hour_abs = hour.unsigned_abs();
-    if hour_abs > 838 || (hour_abs == 838 && minute == 59 && second > 59.0) {
-        overflow = true;
-    }
-    let total = if overflow {
-        838.0 * 3600.0 + 59.0 * 60.0 + 59.0
-    } else {
-        hour_abs as f64 * 3600.0 + minute as f64 * 60.0 + second
-    };
-    let seconds = if negative { -total } else { total };
-    // This is the actual signed seconds value, never a validity marker. The
-    // caller obtains FSP only after this complete worker call returns Some.
-    Ok(Some(seconds.to_bits().to_le_bytes().to_vec()))
+    let mut encoded = [0; 8];
+    encoded.copy_from_slice(&hour[..8]);
+    crate::native_make_time_parts_value(
+        Some((i64::from_le_bytes(encoded), hour[8] == 1)),
+        Some(*minute),
+        Some(decode_duration_seconds_native(second)?),
+        0,
+    )
+    .map(|v| v.map(|v| v.to_bits().to_le_bytes().to_vec()))
+    .map_err(duration_wire_error)
 }
 
 #[rpn_fn(nullable)]
@@ -1902,59 +1861,18 @@ fn sec_to_time_native(seconds: Option<BytesRef>, fsp: Option<&Int>) -> Result<Op
             let fsp = usize::try_from(*fsp).map_err(|_| {
                 other_err!("Native duration FSP transport requires a nonnegative usize value")
             })?;
-            Ok(Some(format_native_duration(seconds, fsp).into_bytes()))
+            let work = fsp
+                .checked_mul(2)
+                .and_then(|n| n.checked_add(4096))
+                .ok_or_else(|| other_err!("Native duration precision work extent overflow"))?;
+            crate::native_seconds_to_time_value(Some(seconds), Some(fsp), work)
+                .map(|v| v.map(String::into_bytes))
+                .map_err(duration_wire_error)
         }
         _ => Err(other_err!(
             "Native duration seconds and demanded FSP must be jointly absent or present"
         )),
     }
-}
-
-fn format_native_duration(seconds: f64, fsp: usize) -> String {
-    let sign = if seconds < 0.0 { "-" } else { "" };
-    let max = 838.0 * 3600.0 + 59.0 * 60.0 + 59.0;
-    let mut seconds = seconds.abs();
-    if seconds > max {
-        seconds = max;
-    }
-    let whole = seconds.trunc() as i64;
-    let hour = whole / 3600;
-    let minute = whole / 60 % 60;
-    let mut second = whole % 60;
-    if fsp == 0 {
-        return format!("{sign}{hour:02}:{minute:02}:{second:02}");
-    }
-    // Go reaches this text through `fmt.Sprintf("%v", second)` followed by
-    // `ParseDuration`, whose fraction rounding works on the DECIMAL DIGITS
-    // and carries half-up at the requested precision
-    // (`Duration.RoundFrac`: Go's time.Round rounds nearest values and sends
-    // exact ties toward positive infinity).
-    // Doing the arithmetic in f64 first re-derives 30.0000005 as
-    // ...4999996µs and loses the digit -- so round off the SHORTEST decimal
-    // rendering instead.
-    // Go formats the REAL second value with %v (shortest repr): 30.1 stays
-    // "30.1", 30.0000005 stays "30.0000005".
-    let digits = format!("{seconds}");
-    let mut digits_fraction = match digits.split_once('.') {
-        Some((_, fraction)) => fraction.to_owned(),
-        None => String::new(),
-    };
-    // Round half-up at the requested precision off the FIRST DISCARDED
-    // digit, carrying into the whole part when the fraction overflows.
-    let round_up = digits_fraction.len() > fsp && digits_fraction.as_bytes()[fsp] >= b'5';
-    digits_fraction.truncate(fsp);
-    while digits_fraction.len() < fsp {
-        digits_fraction.push('0');
-    }
-    let mut fraction: i64 = digits_fraction.parse().unwrap_or(0);
-    if round_up {
-        fraction += 1;
-        if fraction >= 10_i64.pow(fsp as u32) {
-            fraction = 0;
-            second += 1;
-        }
-    }
-    format!("{sign}{hour:02}:{minute:02}:{second:02}.{fraction:0fsp$}")
 }
 
 #[rpn_fn(capture = [ctx])]

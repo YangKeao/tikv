@@ -19,35 +19,10 @@ pub fn native_time_diff_needs_right(left: Option<&str>) -> bool {
 /// Computes the matching datetime/duration difference from actual nullable
 /// text.
 pub fn native_time_diff(left: Option<&str>, right: Option<&str>) -> Option<String> {
-    let left = parse_time_diff_value(left?)?;
-    let right = parse_time_diff_value(right?)?;
-    let (left_micros, right_micros, fsp) = match (left, right) {
-        (
-            TimeDiffValue::DateTime {
-                micros: left,
-                fsp: left_fsp,
-            },
-            TimeDiffValue::DateTime {
-                micros: right,
-                fsp: right_fsp,
-            },
-        )
-        | (
-            TimeDiffValue::Duration {
-                micros: left,
-                fsp: left_fsp,
-            },
-            TimeDiffValue::Duration {
-                micros: right,
-                fsp: right_fsp,
-            },
-        ) => (left, right, left_fsp.max(right_fsp)),
-        _ => return None,
-    };
-    Some(native_format_time_diff(
-        truncate_time_diff(left_micros.saturating_sub(right_micros)),
-        fsp,
-    ))
+    NativeTimeDiffValue {
+        left: parse_time_diff_value(left?)?,
+    }
+    .finish_inner(right)
 }
 
 fn parse_time_diff_value(text: &str) -> Option<TimeDiffValue> {
@@ -141,6 +116,63 @@ pub fn native_format_time_diff(micros: i64, fsp: usize) -> String {
         "{sign}{hours:02}:{minutes:02}:{seconds:02}.{fraction:0width$}",
         width = fsp
     )
+}
+
+/// Actual parsed left TIMEDIFF operand; private ownership prevents replay.
+pub struct NativeTimeDiffValue {
+    left: TimeDiffValue,
+}
+impl NativeTimeDiffValue {
+    /// Parse demanded right and consume the left using the original arithmetic.
+    pub fn finish(
+        self,
+        right: Option<&str>,
+        maximum: usize,
+    ) -> Result<Option<String>, crate::NativeDurationConstructionError> {
+        crate::native_duration_construction::duration_text_work(right, maximum)?;
+        Ok(self.finish_inner(right))
+    }
+    fn finish_inner(self, right: Option<&str>) -> Option<String> {
+        let left = self.left;
+        let right = parse_time_diff_value(right?)?;
+        let (left_micros, right_micros, fsp) = match (left, right) {
+            (
+                TimeDiffValue::DateTime {
+                    micros: left,
+                    fsp: left_fsp,
+                },
+                TimeDiffValue::DateTime {
+                    micros: right,
+                    fsp: right_fsp,
+                },
+            )
+            | (
+                TimeDiffValue::Duration {
+                    micros: left,
+                    fsp: left_fsp,
+                },
+                TimeDiffValue::Duration {
+                    micros: right,
+                    fsp: right_fsp,
+                },
+            ) => (left, right, left_fsp.max(right_fsp)),
+            _ => return None,
+        };
+        Some(native_format_time_diff(
+            truncate_time_diff(left_micros.saturating_sub(right_micros)),
+            fsp,
+        ))
+    }
+}
+/// Parse actual left before permitting right coercion, with finite work.
+pub fn native_time_diff_value(
+    left: Option<&str>,
+    maximum: usize,
+) -> Result<Option<NativeTimeDiffValue>, crate::NativeDurationConstructionError> {
+    crate::native_duration_construction::duration_text_work(left, maximum)?;
+    Ok(left
+        .and_then(parse_time_diff_value)
+        .map(|left| NativeTimeDiffValue { left }))
 }
 
 #[cfg(test)]
