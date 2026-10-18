@@ -2562,3 +2562,16 @@ actual integer operands. Diagnostic strings and buffers are admitted before
 allocation. Resource checks bound logical/retained allowances, not the entire
 statement allocator peak. This source integration does not retire the global
 fallback or the remaining additive ready-value adapters.
+
+
+Frontend generic and typed-integer ADD/SUBTRACT/MULTIPLY callers now use the
+same direct prepared-value compute entry as canonical row/window providers.
+The temporary PreparedArithmetic-to-evaluated-argument conversion, unsigned
+result side channel and arithmetic result unpacking were removed. The original
+subtraction-mode read still occurs during integer value preparation. Direct
+calls supply the existing finite execution allowance; vector ownership and
+Decimal result restoration remain checked. Fixed witnesses were captured from
+74,904 independent old recipe comparisons before deletion, including all three
+truncate policies. Explicit SDK recipes and other purpose-specific frontend
+ready-value consumers remain compatible and need their own migration; their
+existence is not a fallback used by these arithmetic callers.
