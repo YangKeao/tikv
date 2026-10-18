@@ -2589,3 +2589,19 @@ with its actual cause and no invented worker phase. Old fixed result/context
 witnesses were captured in185,274 independent recipe comparisons before this
 switch. Explicit legacy recipe APIs and other ready-value families remain;
 this does not certify global fallback removal or complete SQL coverage.
+
+
+Normalized Boolean/logical frontend entries now use a shared direct predicate
+value module. Canonical hosts call those same helpers only after their original
+truth conversion, warnings and demand decisions. Neither path constructs an
+argument program or consults ReadyValueCache for these predicates. Composite
+NOT/IS predicates preserve the actual official kernel composition. Explicit
+undemanded-right markers still allow only false AND or true OR, with an
+irrelevant false representative and no fabricated SQL NULL. Invalid markers
+retain the original opaque ExpressionAdapterFailure Scope/Contract cause and
+reason before any worker/cache access. Independent720-case OLD witnesses span
+no/fresh/reused caches; actual cache-lookup REDs prove the former secondary
+worker route is gone. These helpers operate on stack-sized truth markers;
+existing canonical source ownership/resource checks remain before them. Other
+ready-value compatibility families and global alternate dispatch still need
+retirement.
