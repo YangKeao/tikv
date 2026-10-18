@@ -1531,3 +1531,9 @@ pub use native_duration_construction::{
     native_time_format_value, native_time_to_sec_value, native_time_value,
 };
 pub use native_time_diff::{NativeTimeDiffValue, native_time_diff_value};
+
+mod native_vector_value;
+pub use native_vector_value::{
+    NativeVectorOperation, NativeVectorValue, NativeVectorValueError,
+    native_vector_from_text_value, native_vector_value, native_vector_work,
+};

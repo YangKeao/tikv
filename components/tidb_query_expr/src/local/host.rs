@@ -96,6 +96,8 @@ pub enum SqlBatchHostOperation {
     TsoNative(crate::NativeTsoOperation),
     /// Actual duration/construction policy with its original fixed arity.
     DurationConstructionNative(crate::NativeDurationConstructionOperation),
+    /// Vector SQL over actual native capabilities.
+    VectorNative(crate::NativeVectorOperation),
     /// Calendar over actual native capabilities.
     CalendarNative {
         /// Original calendar policy.
@@ -220,6 +222,7 @@ impl SqlBatchHostOperation {
             } => arity == usize::from(expected) && operation.accepts_arity(arity),
             Self::TsoNative(op) => arity == op.arity(),
             Self::DurationConstructionNative(op) => arity == op.arity(),
+            Self::VectorNative(op) => arity == op.arity(),
             Self::EpochNative {
                 from,
                 arity: expected,
@@ -287,6 +290,7 @@ impl SqlBatchHostOperation {
             Self::CalendarNative { .. }
             | Self::ClockNative { .. }
             | Self::DurationConstructionNative(_)
+            | Self::VectorNative(_)
             | Self::TsoNative(_)
             | Self::EpochNative { .. }
             | Self::ExtractNative { .. }
@@ -352,6 +356,7 @@ impl SqlBatchHostOperation {
             Self::CalendarNative { .. }
             | Self::ClockNative { .. }
             | Self::DurationConstructionNative(_)
+            | Self::VectorNative(_)
             | Self::TsoNative(_)
             | Self::EpochNative { .. } => EvalType::Bytes,
             Self::ExtractNative { typed: true, .. } => EvalType::Int,

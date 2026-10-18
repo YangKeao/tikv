@@ -3218,3 +3218,52 @@ frontend1722/exact3 inherited, Projection26, exact warning parity and local gate
 These logical work allowances do not certify whole-statement peak allocation.
 Generic fallback, old unistore traversal, unsupported/malformed sources, inherited
 failures, semantic audits and full-server SQL remain open; no package-port claim.
+
+
+### N7r: native vector SQL values and canonical sources
+
+`native_vector_value.rs` exposes actual vector dimension/text/metric outputs and
+strict text parsing with finite work. NativeVectorOperation names the eight
+original VEC_* SQL signatures. NativeVectorValue preserves actual Int, Real,
+Text and NULL separately; NativeVectorValueError retains original typed datatype
+errors apart from Resource and contract failures. Existing native wire workers
+in impl_vec.rs remain ABI compatibility entries. Both their raw vector references
+and the actual NativeVectorFloat32 methods delegate the same native raw_ref
+algorithms, formatter and parser in tidb_query_datatype. No arithmetic, rounding,
+SIMD choice, text grammar or NaN policy is reimplemented in the frontend.
+
+The dedicated SqlBatchHostOperation::VectorNative descriptor uses the existing
+HostFrame, native capabilities and output roles. The frontend retains original
+eager child-expression order and authenticates every capability before body
+conversion. Its fixed one/two-argument demand state closes before any fallible
+body work. Original vector conversion proceeds left then right: NULL left skips
+right conversion, but a bad left still errors before NULL right. Existing vectors
+borrow actual storage without cloning, preserving raw mutated NaN/Inf bits,
+empty and uncapped dimensions. String/Bytes use the original convert_to target
+with unspecified dimensions; other non-NULL kinds retain their original errors.
+All these conversions are pure; no Columns callback occurs under the store borrow.
+
+Only VEC_FROM_TEXT has the original source ETString cast. Identity byte/name views
+remain borrowed; demanded rendering is bounded before materialization and then
+strict text parsing uses the original native parser. Source input metadata does
+not add a vector dimension or type normalization. Original ordinary return-family
+conversion runs once after releasing source borrows, including for contradictory
+result declarations. No generic temporal-result parse is added.
+
+Metric results retain the original NaN-to-NULL policy, infinity and signed-zero
+bits. Dimension mismatch is the original constant-time error before scanning;
+dimension count can read even a huge borrowed vector without a clone. Norm,
+matching metrics, text parsing and rendering charge demanded work before scanning
+or allocating. NULL never demands unused RHS conversion, but provenance checking
+still authenticates the eager RHS. Logical work/ownership allowances do not
+certify allocator failures or whole-statement peak memory.
+
+Original capture207504/D0CDB9F6BB8FB5EB and all independent candidate pairs,
+including actual Real bits, passed while old SQL callers still existed. The
+frontend retires all eight vector Ready callers; generic compatibility routing
+and explicit wire workers remain available to their other consumers. Original
+bodies and executed paired source/logs are archived in persistent workspace
+n7r-*. The permanent fixed checksum is a guard, not renewed independent proof.
+See frontend rust/docs/evidence/no-fallback-n7r.md for final validation and limits.
+This is no complete Go-package port; generic fallback, unsupported/malformed
+sources, old unistore traversal, inherited failures and full-server gates remain.
