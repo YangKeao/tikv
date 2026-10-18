@@ -2523,3 +2523,13 @@ report, so direct value users need no frame allocation and cannot fabricate a
 host answer. These entries share the old arithmetic implementation; they do
 not by themselves add source closure or retire the remaining frontend
 quotient adapters.
+
+The frontend quotient adapters now call these value entries directly. MOD and
+`/` share one plain, bounded domain-preparation layer; integer MOD/DIV and
+borrowed Decimal DIV also avoid ready-argument execution. Decimal DIV's SQL
+warning still precedes its integer outcome error, and its probe and fallback
+precision reads remain independent. The common native arithmetic NULL leaf
+also runs without an argument program. Existing additive adapters, legacy
+explicit recipe consumers, and quotient source-root admission remain separate
+migration work; this change does not broaden native batch eligibility or alter
+whole-column versus row operand demand.
