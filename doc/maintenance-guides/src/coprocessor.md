@@ -2533,3 +2533,14 @@ also runs without an argument program. Existing additive adapters, legacy
 explicit recipe consumers, and quotient source-root admission remain separate
 migration work; this change does not broaden native batch eligibility or alter
 whole-column versus row operand demand.
+
+Quotient scheduling has six explicit catalog identities: native row and window
+forms of MOD, `/` and integer DIV. Each takes two Bytes capability carriers and
+returns a Bytes capability carrier; row and window identities are distinct.
+Window forms use the existing whole-selection callbacks. Row children of those
+windows stay within the same canonical frame and retain original occurrence
+IDs for Fresh/Reuse, errors, cancellation and later reuse. Protocol tests use
+byte relays only; they do not stand in for SQL arithmetic or its demand rules.
+Frontend enum consumers recognize these identities, while quotient source
+construction still requires its operation-specific metadata/value integration;
+protocol availability alone does not broaden SQL admission or batch eligibility.

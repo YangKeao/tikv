@@ -94,10 +94,17 @@ pub enum SqlBatchHostOperation {
     AddNative,
     SubtractNative,
     MultiplyNative,
-    /// Additive arithmetic with complete operand-window demand.
+    /// Native quotient families retain their own SQL operation identities.
+    ModuloNative,
+    DivideNative,
+    IntegerDivideNative,
+    /// Arithmetic with complete operand-window demand.
     AddWindowNative,
     SubtractWindowNative,
     MultiplyWindowNative,
+    ModuloWindowNative,
+    DivideWindowNative,
+    IntegerDivideWindowNative,
     /// Whole-child integer ABS, independent of row ABS value dispatch.
     AbsIntWindowNative,
     /// Whole-child native Decimal and JSON casts.
@@ -113,6 +120,9 @@ impl SqlBatchHostOperation {
             Self::AddWindowNative
                 | Self::SubtractWindowNative
                 | Self::MultiplyWindowNative
+                | Self::ModuloWindowNative
+                | Self::DivideWindowNative
+                | Self::IntegerDivideWindowNative
                 | Self::AbsIntWindowNative
                 | Self::CastDecimalWindowNative
                 | Self::CastJsonWindowNative
@@ -133,9 +143,15 @@ impl SqlBatchHostOperation {
             | Self::AddNative
             | Self::SubtractNative
             | Self::MultiplyNative
+            | Self::ModuloNative
+            | Self::DivideNative
+            | Self::IntegerDivideNative
             | Self::AddWindowNative
             | Self::SubtractWindowNative
-            | Self::MultiplyWindowNative => arity == 2,
+            | Self::MultiplyWindowNative
+            | Self::ModuloWindowNative
+            | Self::DivideWindowNative
+            | Self::IntegerDivideWindowNative => arity == 2,
             Self::IfNative => arity == 3,
             Self::IsTrueWithNullNative
             | Self::UnaryNotNative
@@ -188,9 +204,15 @@ impl SqlBatchHostOperation {
             | Self::AddNative
             | Self::SubtractNative
             | Self::MultiplyNative
+            | Self::ModuloNative
+            | Self::DivideNative
+            | Self::IntegerDivideNative
             | Self::AddWindowNative
             | Self::SubtractWindowNative
             | Self::MultiplyWindowNative
+            | Self::ModuloWindowNative
+            | Self::DivideWindowNative
+            | Self::IntegerDivideWindowNative
             | Self::AbsIntWindowNative
             | Self::CastDecimalWindowNative
             | Self::CastJsonWindowNative => EvalType::Bytes,
@@ -228,9 +250,15 @@ impl SqlBatchHostOperation {
             | Self::AddNative
             | Self::SubtractNative
             | Self::MultiplyNative
+            | Self::ModuloNative
+            | Self::DivideNative
+            | Self::IntegerDivideNative
             | Self::AddWindowNative
             | Self::SubtractWindowNative
             | Self::MultiplyWindowNative
+            | Self::ModuloWindowNative
+            | Self::DivideWindowNative
+            | Self::IntegerDivideWindowNative
             | Self::AbsIntWindowNative
             | Self::CastDecimalWindowNative
             | Self::CastJsonWindowNative => EvalType::Bytes,

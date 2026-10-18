@@ -1635,3 +1635,168 @@ fn unary_sign_catalog_rejects_extra_arguments_and_non_capability_carriers() {
         assert!(!op.is_windowed());
     }
 }
+
+#[test]
+fn quotient_window_and_row_descriptors_keep_occurrences_reuse_primary_errors_and_cleanup() {
+    for (window, row) in [
+        (
+            SqlBatchHostOperation::ModuloWindowNative,
+            SqlBatchHostOperation::ModuloNative,
+        ),
+        (
+            SqlBatchHostOperation::DivideWindowNative,
+            SqlBatchHostOperation::DivideNative,
+        ),
+        (
+            SqlBatchHostOperation::IntegerDivideWindowNative,
+            SqlBatchHostOperation::IntegerDivideNative,
+        ),
+    ] {
+        let mut service = Service::new();
+        service.row_enabled = true;
+        service.requests = vec![
+            request(0, ArgMode::Fresh),
+            request(1, ArgMode::Fresh),
+            request(0, ArgMode::Reuse),
+            request(0, ArgMode::Fresh),
+            request(1, ArgMode::Reuse),
+        ];
+        let signature = || HostSignature {
+            arg_types: vec![bytes_ft(); 2].into_boxed_slice(),
+            return_type: bytes_ft(),
+        };
+        service.catalog =
+            HostCatalog::for_sql_batch(vec![(window, signature()), (row, signature())]).unwrap();
+        let child = host(&service.catalog, 1, vec![input(0), input(1)]);
+        assert_eq!(compile(&child, &service).max_batch_size(), 1);
+        let root = host(&service.catalog, 0, vec![child, input(2)]);
+        let mut program = compile(&root, &service);
+        assert!(program.requires_whole_selection());
+        assert_eq!(program.max_batch_size(), usize::MAX);
+        let selection: Vec<_> = (0..2050).map(|position| [2, 0, 2][position % 3]).collect();
+        let mut pass = Vec::new();
+        for (occurrence, &input_row) in selection.iter().enumerate() {
+            for slot in [0, 1, 0] {
+                pass.push((
+                    slot,
+                    InputRow {
+                        occurrence,
+                        input_row,
+                    },
+                ));
+            }
+        }
+        let expected: Vec<_> = pass
+            .iter()
+            .copied()
+            .chain(rows(2, &selection))
+            .chain(pass.iter().copied())
+            .collect();
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        );
+        assert_eq!(result.unwrap().len(), selection.len());
+        assert_eq!(service.reads(), expected);
+        assert!(service.live.is_empty());
+        service.events.clear();
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits {
+                max_retained_bytes: 0,
+                ..ExecutionLimits::default()
+            },
+        );
+        assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+        assert!(service.reads().is_empty());
+        assert!(service.live.is_empty());
+        service.events.clear();
+        service.read_failure = Some((0, 17));
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        );
+        let Err(LocalError::Evaluation(error)) = result else {
+            panic!("original input error missing")
+        };
+        assert_eq!(
+            Some(error.0.as_ref() as *const _ as usize),
+            service.primary_error
+        );
+        assert!(
+            service
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Cancel(_)))
+        );
+        assert!(service.live.is_empty());
+        service.events.clear();
+        service.read_failure = None;
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        );
+        assert_eq!(result.unwrap().len(), selection.len());
+        assert_eq!(service.reads(), expected);
+        assert!(service.live.is_empty());
+        service.events.clear();
+        let (result, _) = evaluate(&mut program, &mut service, &[], ExecutionLimits::default());
+        assert_eq!(result.unwrap().len(), 0);
+        assert!(service.events.is_empty());
+    }
+}
+
+#[test]
+fn quotient_catalog_keeps_six_distinct_binary_capability_protocols() {
+    let operations = [
+        SqlBatchHostOperation::ModuloNative,
+        SqlBatchHostOperation::DivideNative,
+        SqlBatchHostOperation::IntegerDivideNative,
+        SqlBatchHostOperation::ModuloWindowNative,
+        SqlBatchHostOperation::DivideWindowNative,
+        SqlBatchHostOperation::IntegerDivideWindowNative,
+    ];
+    let signature = |arity| HostSignature {
+        arg_types: vec![bytes_ft(); arity].into_boxed_slice(),
+        return_type: bytes_ft(),
+    };
+    for (index, operation) in operations.into_iter().enumerate() {
+        assert_eq!(operation.is_windowed(), index >= 3);
+        for arity in [0, 1, 3] {
+            assert!(HostCatalog::for_sql_batch(vec![(operation, signature(arity))]).is_err());
+        }
+        for wrong_return in [false, true] {
+            let mut wrong = signature(2);
+            if wrong_return {
+                wrong.return_type = FieldTypeTp::LongLong.into();
+            } else {
+                wrong.arg_types[1] = FieldTypeTp::LongLong.into();
+            }
+            assert!(HostCatalog::for_sql_batch(vec![(operation, wrong)]).is_err());
+        }
+        let catalog = HostCatalog::for_sql_batch(
+            operations
+                .into_iter()
+                .map(|operation| (operation, signature(2)))
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            catalog
+                .sql_batch_operation(catalog.slot(index).unwrap())
+                .unwrap(),
+            operation
+        );
+        for other in operations.into_iter().take(index) {
+            assert_ne!(operation, other);
+        }
+    }
+}
