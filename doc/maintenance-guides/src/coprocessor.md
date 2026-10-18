@@ -2544,3 +2544,21 @@ byte relays only; they do not stand in for SQL arithmetic or its demand rules.
 Frontend enum consumers recognize these identities, while quotient source
 construction still requires its operation-specific metadata/value integration;
 protocol availability alone does not broaden SQL admission or batch eligibility.
+
+
+The frontend now lowers those six quotient identities using detached source
+facts and actual fetched native values. Original row and whole-column demands
+remain separate descriptions within the same driver: Int/Real MOD demands its
+right operand even after a left NULL, while whole arithmetic completes the
+left source/cast phase before starting the right. Only additive operators use
+the original strict typed fast probe. Whole integer MOD/DIV performs no generic
+precision read; initial Decimal DIV performs only its genuine conditional
+probe/fallback reads. Raw DIV shares one value-promotion policy with existing
+tree callers, and real-to-Decimal casts consume captured field declarations
+and diagnostic text without an expression callback or a fake literal tree.
+Row Decimal DIV overflow uses source CAST text and strict-source precision;
+whole Decimal DIV uses the actual converted decimals, and integer DIV uses
+actual integer operands. Diagnostic strings and buffers are admitted before
+allocation. Resource checks bound logical/retained allowances, not the entire
+statement allocator peak. This source integration does not retire the global
+fallback or the remaining additive ready-value adapters.
