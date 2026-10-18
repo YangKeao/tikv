@@ -537,9 +537,9 @@ flag or eligibility policy described above.
   its unchanged complete frame validation, so even early NULL/match cannot
   mask a malformed later frame. TiDB's already-cast typed adapter uses this
   borrowed API and retains its original private scope-contract arity cause.
-  This value-layer change does not admit new compiled SQL sources: three
-  generic/duration/computed-JSON source regressions remain pending genuine
-  canonical-driver integration.
+  The borrowed value API alone grants no source admission. Separate InNative
+  source integration now admits the generic/duration/computed-JSON regressions
+  through genuine same-driver demands, as described below.
   Adjacent `native_in_control.rs` owns AST scalar/row, generic typed,
   prepared-string cache and ready-value IN control. Its synchronous SDK
   services use the existing comparison/NOT workers as their data plane; they
@@ -2023,6 +2023,37 @@ flag or eligibility policy described above.
   allowance before final allocation. Retained owners are measured afterward;
   this is not a hard allocator-peak bound. Host copies remain restricted to
   their checked Int/Bytes domain.
+  `InNative` is a vararg Bytes-capability row operation requiring at least two
+  arguments. It uses this same row scope beneath a whole-selection parent;
+  Fresh requests retain every occurrence and original input row. TiDB's
+  `batch_in.rs` has immutable detached source fields, producer ordinals,
+  comparison facts and original prepared-string cache keys/dynamic indices.
+  It has no expression callbacks, fake literals or nested argument program.
+  Generic IN demands and compares every candidate even after NULL/match.
+  Prepared strings first coerce the actual base, resolve the current effective
+  collator only after successful non-NULL coercion, and probe the original
+  keys. It then exhausts exactly the stored dynamic indices, including after
+  a hash hit. Coerced buffers are dropped before requesting a dynamic source;
+  keys are never rebuilt from a snapshot of global mode. Every comparison
+  observes div_precision_increment at the original point, then uses generic
+  comparison preparation with original unsigned/constant/duration-column facts,
+  not the scalar binary node's typed-integer probe. NativeInMembership owns
+  the shared nullable/match policy; its match signal cannot shorten demands.
+  Datetime/timestamp/duration/JSON IN first authenticates ALL source handles,
+  clones the complete value list, then casts ALL arguments in order before
+  borrowed membership. First JSON input keeps document parsing while string
+  list members become JSON string values. Even a NULL base or early match
+  cannot skip later source errors/casts. Original argument casts remain pure
+  SDK value services. Return coercion and the enclosing ENUM_SET_AS_INT view
+  precede publication through the same authenticated value store. Detached
+  cache/field allocations are preflight-budgeted; task capabilities, cloned
+  payloads and conservative conversion work are separately metered before
+  effects/allocation. These are finite logical allowances, not whole-heap
+  recovery. Invalid/stale/foreign-row/wrong-role handles and resource errors
+  are terminal; cancellation permits reuse without replay. Native eligibility
+  for old character/typed entrypoints remains unchanged; only compiled source
+  closure grows. This is SQL-function IN, not AST row-IN, ready-value IN or
+  either distinct legacy request loop.
   `BitwiseNative(NativeBitwiseOp)` adds the six closed raw-value operations
   AND/OR/XOR/left-shift/right-shift/NOT. The catalog requires two Bytes handles
   for binary operations and one for NOT; output is a Bytes capability with the
