@@ -91,6 +91,11 @@ pub enum SqlBatchHostOperation {
         typed: bool,
         stop_on_null: bool,
     },
+    /// Ordinary eager EXTRACT or its distinct one-argument composite policy.
+    ExtractNative {
+        typed: bool,
+        composite: bool,
+    },
     /// Ordinary date arithmetic over actual eager operands.
     DateArithmeticNative {
         output: SqlTemporalOutput,
@@ -184,6 +189,7 @@ impl SqlBatchHostOperation {
     }
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
+            Self::ExtractNative { composite, .. } => arity == if composite { 1 } else { 2 },
             Self::TimestampDiffNative { .. } => arity == 3,
             Self::StrToDateNative { .. }
             | Self::BoundedStalenessNative { .. }
@@ -236,7 +242,8 @@ impl SqlBatchHostOperation {
     pub fn argument_type(self) -> EvalType {
         match self {
             Self::CastCharInt { .. } => EvalType::Int,
-            Self::TimestampDiffNative { .. }
+            Self::ExtractNative { .. }
+            | Self::TimestampDiffNative { .. }
             | Self::DateArithmeticNative { .. }
             | Self::BoundedStalenessNative { .. }
             | Self::StrToDateNative { .. }
@@ -295,6 +302,8 @@ impl SqlBatchHostOperation {
                 output.eval_type()
             }
             Self::BoundedStalenessNative { typed: true } => EvalType::DateTime,
+            Self::ExtractNative { typed: true, .. } => EvalType::Int,
+            Self::ExtractNative { typed: false, .. } => EvalType::Bytes,
             Self::TimestampDiffNative { typed: true, .. }
             | Self::JsonSumCrc32Native { typed: true } => EvalType::Int,
             Self::TimestampDiffNative { typed: false, .. }

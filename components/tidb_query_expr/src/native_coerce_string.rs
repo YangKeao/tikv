@@ -151,6 +151,59 @@ pub fn native_string_coercion_work(
     })
 }
 
+/// Actual byte coercion work: preserve every byte-bearing kind without UTF-8
+/// validation; other kinds use the exact expression formatter and errors.
+pub fn native_byte_coercion_work(
+    input: NativeSqlStringInput<'_>,
+) -> Result<usize, NativeStringCoercionError> {
+    use NativeSqlStringInput as I;
+    match input {
+        I::String(v)
+        | I::Bytes(v)
+        | I::BinaryLiteral(v)
+        | I::Bit(v)
+        | I::Enum(v)
+        | I::Set(v)
+        | I::Raw(v) => Ok(v.len()),
+        I::MinNotNull | I::MaxValue => Err(NativeStringCoercionError::Unsupported(
+            "range sentinel byte coercion",
+        )),
+        other => native_string_coercion_work(other),
+    }
+}
+/// Bounded original byte coercion, including its nullable result and raw
+/// octets.
+pub fn native_coerce_bytes_bounded(
+    input: NativeSqlStringInput<'_>,
+    maximum: usize,
+) -> Result<Option<Vec<u8>>, NativeStringCoercionError> {
+    check(native_byte_coercion_work(input)?, maximum)?;
+    let bytes = native_coerce_bytes(input).map_err(NativeStringCoercionError::Unsupported)?;
+    check(bytes.as_ref().map_or(0, Vec::capacity), maximum)?;
+    Ok(bytes)
+}
+/// Finite SQL Display allowance for the original duration argument wrapper.
+/// NULL/raw Duration bypass formatting. Invalid byte UTF-8 is deliberately not
+/// rejected here: the original SQL formatter/converter owns that disposition.
+pub fn native_duration_argument_cast_work(
+    input: NativeSqlStringInput<'_>,
+) -> Result<usize, NativeStringCoercionError> {
+    use NativeSqlStringInput as I;
+    let work = match input {
+        I::Null | I::Duration { .. } => return Ok(0),
+        I::String(v)
+        | I::Bytes(v)
+        | I::BinaryLiteral(v)
+        | I::Bit(v)
+        | I::Enum(v)
+        | I::Set(v)
+        | I::Raw(v) => v.len(),
+        I::MinNotNull | I::MaxValue => 128,
+        other => native_string_coercion_work(other)?,
+    };
+    checked_extent(work, 32, 4096)
+}
+
 #[cfg(test)]
 mod tests {
     use NativeSqlStringInput as I;

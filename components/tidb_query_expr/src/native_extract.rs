@@ -4,25 +4,17 @@
 //! broad calendar-composite policy. Casts and session getters stay outside;
 //! neither a selected branch nor a computed answer is supplied by the caller.
 
-use chrono::Utc;
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::codec::{
     data_type::{Bytes, BytesRef, ChunkedVec, EvaluableRef, EvaluableRet, Int},
-    mysql::{
-        Duration, Time, TimeType,
-        duration::{MAX_NANOS, native_parse_mysql_duration},
-        time::{
-            native_extract_datetime_num, native_extract_duration_num, native_get_time_fsp,
-            native_is_clock_unit, native_is_date_unit, native_parse_time,
-        },
-    },
+    mysql::{Time, duration::MAX_NANOS},
 };
 
 use crate::NativeIdentityFrameError;
 
 type FrameResult<T> = std::result::Result<T, NativeIdentityFrameError>;
-const ZERO_WARNING: &str = "Incorrect datetime value: '0000-00-00 00:00:00'";
+pub(super) const ZERO_WARNING: &str = "Incorrect datetime value: '0000-00-00 00:00:00'";
 const INVALID_UNIT_PREFIX: &str = "invalid unit ";
 const INVALID_TIME_PREFIX: &str = "Truncated incorrect time value: '";
 const STATE_HEADER: usize = 25;
@@ -48,6 +40,7 @@ struct MixedState<'a> {
     unit: &'a str,
     text: &'a str,
     nanos: i64,
+    fsp: i64,
 }
 
 fn read_state(report: &[u8]) -> Option<MixedState<'_>> {
@@ -67,6 +60,7 @@ fn read_state(report: &[u8]) -> Option<MixedState<'_>> {
         unit: std::str::from_utf8(report.get(STATE_HEADER..split)?).ok()?,
         text: std::str::from_utf8(report.get(split..)?).ok()?,
         nanos,
+        fsp,
     })
 }
 
@@ -199,25 +193,19 @@ fn report(tag: u8, pieces: &[&[u8]], bound: usize) -> FrameResult<Option<Vec<u8>
     Ok(Some(output))
 }
 
-fn number(
-    value: std::result::Result<i64, tidb_query_datatype::codec::mysql::time::NativeTimeError>,
-    unit: &str,
-    bound: usize,
-) -> FrameResult<Option<Vec<u8>>> {
+fn actual_error(_: crate::NativeExtractWorkError) -> NativeIdentityFrameError {
+    NativeIdentityFrameError::Capacity
+}
+fn value_report(value: crate::NativeExtractValue, bound: usize) -> FrameResult<Option<Vec<u8>>> {
+    use crate::NativeExtractValue as V;
     match value {
-        Ok(value) => report(0, &[&value.to_le_bytes()], bound),
-        Err(_) => report(1, &[INVALID_UNIT_PREFIX.as_bytes(), unit.as_bytes()], bound),
+        V::Null => Ok(None),
+        V::Value(n) => report(0, &[&n.to_le_bytes()], bound),
+        V::InvalidUnit(s) => report(1, &[s.as_bytes()], bound),
+        V::InvalidTime(s) => report(2, &[s.as_bytes()], bound),
+        V::Warning(s) => report(3, &[s.as_bytes()], bound),
     }
 }
-
-fn invalid_time(text: &str, bound: usize) -> FrameResult<Option<Vec<u8>>> {
-    report(
-        2,
-        &[INVALID_TIME_PREFIX.as_bytes(), text.as_bytes(), b"'"],
-        bound,
-    )
-}
-
 pub(crate) fn evaluate_extract_select_native(
     unit: Option<&[u8]>,
     source: Option<i64>,
@@ -227,20 +215,28 @@ pub(crate) fn evaluate_extract_select_native(
     if !extract_select_native_args_valid(unit, source, kind) {
         return Err(NativeIdentityFrameError::Invalid);
     }
-    let unit = text(unit)?;
-    let clock = native_is_clock_unit(unit);
-    let date = native_is_date_unit(unit);
-    let datetime = matches!(source, Some(7 | 10 | 12)) || kind == Some(15);
-    let request = if !clock || (date && datetime) {
-        5
-    } else if date && kind != Some(11) {
-        7
-    } else {
-        6
-    };
-    report(request, &[], bound)
-}
+    use tidb_query_datatype::codec::native_type_name::NativeTypeNameCode as T;
 
+    use super::native_extract_value::{Kind, select_compat};
+    let source = source.map(|s| {
+        if s < 0 {
+            T::Unknown((-1 - s) as u8)
+        } else {
+            T::Known(s as u8)
+        }
+    });
+    let kind = match kind {
+        Some(15) => Kind::Time,
+        Some(11) => Kind::Duration,
+        _ => Kind::Other,
+    };
+    let tag = match select_compat(text(unit)?, source, kind).map_err(actual_error)? {
+        crate::NativeExtractSelection::Datetime => 5,
+        crate::NativeExtractSelection::Duration => 6,
+        crate::NativeExtractSelection::Mixed => 7,
+    };
+    report(tag, &[], bound)
+}
 pub(crate) fn evaluate_extract_datetime_native(
     core: Option<&[u8]>,
     unit: Option<&[u8]>,
@@ -249,15 +245,16 @@ pub(crate) fn evaluate_extract_datetime_native(
     if !extract_datetime_native_args_valid(core, unit) {
         return Err(NativeIdentityFrameError::Invalid);
     }
-    let core = u64::from_le_bytes(
+    let raw = u64::from_le_bytes(
         core.unwrap()
             .try_into()
             .map_err(|_| NativeIdentityFrameError::Invalid)?,
     );
-    let unit = text(unit)?;
-    number(native_extract_datetime_num(core, unit), unit, bound)
+    value_report(
+        super::native_extract_value::datetime_compat(text(unit)?, raw).map_err(actual_error)?,
+        bound,
+    )
 }
-
 pub(crate) fn evaluate_extract_duration_native(
     unit: Option<&[u8]>,
     nanos: Option<i64>,
@@ -266,14 +263,12 @@ pub(crate) fn evaluate_extract_duration_native(
     if !extract_duration_native_args_valid(unit, nanos) {
         return Err(NativeIdentityFrameError::Invalid);
     }
-    let unit = text(unit)?;
-    number(
-        native_extract_duration_num(nanos.unwrap(), unit),
-        unit,
+    value_report(
+        super::native_extract_value::duration_compat(text(unit)?, nanos.unwrap())
+            .map_err(actual_error)?,
         bound,
     )
 }
-
 pub(crate) fn evaluate_extract_mixed_duration_native(
     unit: Option<&[u8]>,
     input: Option<&[u8]>,
@@ -283,78 +278,51 @@ pub(crate) fn evaluate_extract_mixed_duration_native(
     if !extract_mixed_duration_native_args_valid(unit, input, allow) {
         return Err(NativeIdentityFrameError::Invalid);
     }
-    let unit = text(unit)?;
-    let input = text(input)?;
-    let parsed = match native_parse_mysql_duration(
-        input,
-        i64::from(native_get_time_fsp(input)),
-        &Utc,
-        true,
+    match super::native_extract_value::mixed_begin_compat(
+        text(unit)?,
+        text(input)?,
         allow == Some(1),
-    ) {
-        Ok(parsed) if parsed.overflow.is_none() && !parsed.truncated => parsed,
-        _ => return invalid_time(input, bound),
-    };
-    // Preserve MySqlDuration::from_nanoseconds' final FSP check. It does not
-    // impose a second range check or round the parsed nanoseconds.
-    let Some(fsp) = Time::native_normalize_fsp(parsed.fsp) else {
-        return invalid_time(input, bound);
-    };
-    let unit_length = u64::try_from(unit.len()).map_err(|_| NativeIdentityFrameError::Capacity)?;
-    report(
-        4,
-        &[
-            &parsed.nanos.to_le_bytes(),
-            &fsp.to_le_bytes(),
-            &unit_length.to_le_bytes(),
-            unit.as_bytes(),
-            input.as_bytes(),
-        ],
-        bound,
     )
-}
-
-pub(crate) fn evaluate_extract_mixed_finish_native(
-    state: Option<&[u8]>,
-    allow: Option<i64>,
-) -> FrameResult<Option<Vec<u8>>> {
-    let bound = bound(state, None)?;
-    if !extract_mixed_finish_native_args_valid(state, allow) {
-        return Err(NativeIdentityFrameError::Invalid);
-    }
-    let state = read_state(state.unwrap()).ok_or(NativeIdentityFrameError::Invalid)?;
-    // This is a SEPARATELY requested mode value. Recompute datetime FSP from
-    // the original text, not duration FSP (an exact zero core resets that to 0).
-    if let Ok(parsed) = native_parse_time(
-        state.text,
-        TimeType::DateTime,
-        i64::from(native_get_time_fsp(state.text)),
-        false,
-        true,
-        allow == Some(1),
-        true,
-        &Utc,
-    ) {
-        let [year, _, _, hour, minute, second, _] = Time::native_core_fields(parsed.time.raw);
-        if year > 0
-            && i64::from(hour) == i64::from(Duration::hours_from_nanos(state.nanos))
-            && i64::from(minute) == i64::from(Duration::minutes_from_nanos(state.nanos))
-            && i64::from(second) == i64::from(Duration::secs_from_nanos(state.nanos))
-        {
-            return number(
-                native_extract_datetime_num(parsed.time.raw, state.unit),
-                state.unit,
+    .map_err(actual_error)?
+    {
+        crate::NativeExtractMixedStage::Ready(value) => value_report(value, bound),
+        crate::NativeExtractMixedStage::NeedDatetime(s) => {
+            let length =
+                u64::try_from(s.unit.len()).map_err(|_| NativeIdentityFrameError::Capacity)?;
+            report(
+                4,
+                &[
+                    &s.nanos.to_le_bytes(),
+                    &s.fsp.to_le_bytes(),
+                    &length.to_le_bytes(),
+                    s.unit.as_bytes(),
+                    s.text.as_bytes(),
+                ],
                 bound,
-            );
+            )
         }
     }
-    number(
-        native_extract_duration_num(state.nanos, state.unit),
-        state.unit,
+}
+pub(crate) fn evaluate_extract_mixed_finish_native(
+    raw: Option<&[u8]>,
+    allow: Option<i64>,
+) -> FrameResult<Option<Vec<u8>>> {
+    let bound = bound(raw, None)?;
+    if !extract_mixed_finish_native_args_valid(raw, allow) {
+        return Err(NativeIdentityFrameError::Invalid);
+    }
+    let s = read_state(raw.unwrap()).ok_or(NativeIdentityFrameError::Invalid)?;
+    let s = crate::NativeExtractMixedValue {
+        unit: s.unit,
+        text: s.text,
+        nanos: s.nanos,
+        fsp: s.fsp,
+    };
+    value_report(
+        s.finish_compat(allow == Some(1)).map_err(actual_error)?,
         bound,
     )
 }
-
 pub(crate) fn evaluate_extract_composite_native(
     unit: Option<&[u8]>,
     input: Option<&[u8]>,
@@ -363,36 +331,19 @@ pub(crate) fn evaluate_extract_composite_native(
     if !extract_composite_native_args_valid(unit, input) {
         return Err(NativeIdentityFrameError::Invalid);
     }
-    let unit = text(unit)?;
-    let Some(input) = input else {
-        return Ok(None);
-    };
-    let input = std::str::from_utf8(input).map_err(|_| NativeIdentityFrameError::Invalid)?;
-    let trimmed = input.trim();
-    if let Some((negative, hour, minute, second, microsecond)) = parse_signed_duration_hms(trimmed)
-    {
-        let value = duration_composite_value(unit, hour, minute, second, microsecond);
-        return report(
-            0,
-            &[&(if negative { -value } else { value }).to_le_bytes()],
-            bound,
-        );
-    }
-    let (date, suffix) = trimmed
-        .split_once(char::is_whitespace)
-        .map_or((trimmed, None), |(date, time)| (date, Some(time)));
-    let Some((year, month, day)) = Time::parse_native_date_ymd(date) else {
-        return report(3, &[ZERO_WARNING.as_bytes()], bound);
-    };
-    let (hour, minute, second, microsecond) =
-        time_parts_with_micros(suffix).unwrap_or((0, 0, 0, 0));
-    let value = datetime_composite_value(unit, year, month, day, hour, minute, second, microsecond);
-    report(0, &[&value.to_le_bytes()], bound)
+    let input = input
+        .map(std::str::from_utf8)
+        .transpose()
+        .map_err(|_| NativeIdentityFrameError::Invalid)?;
+    value_report(
+        super::native_extract_value::composite_compat(text(unit)?, input).map_err(actual_error)?,
+        bound,
+    )
 }
 
 // The calendar helper's broad policy is NOT the duration lexer: right-aligned
 // groups, unrestricted u32 hour, truncating six-digit fraction, Rust trimming.
-fn parse_signed_duration_hms(input: &str) -> Option<(bool, u32, u32, u32, u32)> {
+pub(super) fn parse_signed_duration_hms(input: &str) -> Option<(bool, u32, u32, u32, u32)> {
     let (negative, body) = input
         .strip_prefix('-')
         .map_or((false, input), |rest| (true, rest));
@@ -457,7 +408,7 @@ pub(crate) fn time_parts_with_micros(suffix: Option<&str>) -> Option<(u32, u32, 
 
 // Keep ordinary i64 arithmetic, including the old debug-overflow behavior for
 // huge accepted u32 hours; do not force these values into a raw duration/core.
-fn duration_composite_value(
+pub(super) fn duration_composite_value(
     unit: &str,
     hour: u32,
     minute: u32,
@@ -486,7 +437,7 @@ fn duration_composite_value(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn datetime_composite_value(
+pub(super) fn datetime_composite_value(
     unit: &str,
     y: i64,
     m: u32,

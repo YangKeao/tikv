@@ -150,6 +150,30 @@ flag or eligibility policy described above.
   expressions or maintain a second signature dispatch table. Prepared calls
   retain the original argument-index mapping: IN's legacy constant extraction
   can leave dynamic children in swap-remove order, not source order.
+- Ordinary EXTRACT and the eleven named broad-composite functions consume
+  actual source values. `native_extract_value` owns original type selection,
+  raw-core/nanosecond extraction, the consuming mixed duration-to-datetime state
+  and broad-composite results. The wire codec retains its validation, output
+  planner and 25-byte mixed-state header, delegating to the same actual functions.
+  Mixed parsing independently obtains allow-invalid-dates before each successful
+  stage; retain the original text, actual duration and original source FieldType.
+  Byte-unit coercion uses lossy UTF-8 plus ASCII uppercase; it must not inherit a
+  string UTF-8 rejection. Original datetime/duration/string argument wrappers own
+  conversions and statement callbacks. Named composites have a distinct broad
+  parser, unrestricted u32 hours and unconditional invalid-date warning1292.
+  Canonical hosts eagerly demand both scalar sources even for NULL units, or the
+  composite's one source, authenticate every origin and detach bounded values
+  before callbacks. After authenticating both sources, NULL units publish NULL
+  without cloning the ignored right payload; an8KiB/16KiB RED guards this rule. Integer and native-value outputs preserve raw NULL/results.
+  N7i independently paired 1,107,720 old/new observations before retiring Ready
+  callers and old wire controllers; fixed old checksum is 9EC51A59F6C44C40.
+  Finite byte/formatter/parser/diagnostic/publication work preserves original
+  error identity, YEAR fast routes and allocation-free duration passthrough.
+  Final N7i validation has frontend1664/core1107 passes with the exact3/1
+  inherited failures, all231 batch and26 Projection tests passing. Clippy keeps
+  the89 expression/171 all-crate warning-title baseline. Lint, dual pinned
+  source formatting and immutable STR_TO_DATE fixtures pass. See frontend
+  `rust/docs/evidence/no-fallback-n7i.md` for validation and limits.
 - Legacy DATE_ADD/SUB text/time/duration callers use actual
   `NativeLegacyDateArithmeticValues` state instead of Ready head/step/parse
   programs. Explicit wire compatibility keeps its original codec, validation,
@@ -185,7 +209,7 @@ flag or eligibility policy described above.
   `native_date_arithmetic_helpers` retains calendar/duration arithmetic unchanged.
   Explicit wire compatibility delegates control to that same state and preserves
   its original codec, reports, validation and output planning. Legacy PB date
-  arithmetic remains a separate pending migration.
+  arithmetic uses the distinct state described above.
   Preserve composite-calendar amount-before-date versus duration-date-first
   demand, original Real/Float32 and Decimal rules, SECOND parsing, pending warning
   replacement at internal boundaries, and late overflow-policy access. AST mode
@@ -591,8 +615,9 @@ flag or eligibility policy described above.
   now uses these services in six EXTRACT profiles: metadata selection, raw
   datetime/duration finishes, two mixed stages and broad calendar compatibility.
   Five use Values; raw datetime retains the existing TimeCoreBitsBytes role.
-  Whole SDK continuation reports preserve two independently demanded native
-  mode reads. The uniform checked input-length-plus64 bound is precharged,
+  These six transport profiles are explicit compatibility adapters after N7i;
+  in-process callers use actual values/state described above. Both retain two
+  independently demanded mode reads. The uniform checked input-length-plus64 bound is precharged,
   with actual input capacities and fresh report capacity checked separately;
   it is not a physical-memory or parser-temporary bound. Existing cast/NULL
   witnesses and original warning delivery remain native adapters, without

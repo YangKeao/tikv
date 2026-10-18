@@ -159,8 +159,9 @@ pub use native_coerce_numeric::{
 
 mod native_coerce_string;
 pub use native_coerce_string::{
-    NativeStringCoercionError, native_coerce_bytes, native_coerce_string,
-    native_coerce_string_bounded, native_string_coercion_work,
+    NativeStringCoercionError, native_byte_coercion_work, native_coerce_bytes,
+    native_coerce_bytes_bounded, native_coerce_string, native_coerce_string_bounded,
+    native_duration_argument_cast_work, native_string_coercion_work,
 };
 mod native_timestamp_diff_value;
 pub use native_timestamp_diff_value::{
@@ -230,6 +231,7 @@ pub use native_duration_parse::{
 };
 
 mod native_extract;
+mod native_extract_value;
 pub use native_extract::{
     NativeExtractResult, decode_native_extract_result, extract_composite_native_args_valid,
     extract_composite_native_fn_meta, extract_datetime_native_args_valid,
@@ -238,6 +240,12 @@ pub use native_extract::{
     extract_mixed_duration_native_fn_meta, extract_mixed_finish_native_args_valid,
     extract_mixed_finish_native_fn_meta, extract_select_native_args_valid,
     extract_select_native_fn_meta,
+};
+pub use native_extract_value::{
+    NativeExtractMixedStage, NativeExtractMixedValue, NativeExtractSelection, NativeExtractValue,
+    NativeExtractWorkError, native_extract_composite_values, native_extract_datetime_values,
+    native_extract_duration_values, native_extract_mixed_duration_values,
+    native_extract_mixed_work, native_extract_select_values,
 };
 
 mod native_extremum;
