@@ -88,6 +88,8 @@ pub enum SqlBatchHostOperation {
     BitwiseNative(crate::impl_op::NativeBitwiseOp),
     /// Both raw operands precede warning probes and nullable truth conversion.
     XorNative,
+    /// Raw unary sign with immutable constant/unsigned operand facts.
+    UnarySignNative(crate::impl_op::NativeUnarySign),
     /// Native additive arithmetic with signature-specific argument demand.
     AddNative,
     SubtractNative,
@@ -145,6 +147,7 @@ impl SqlBatchHostOperation {
             | Self::IsUnknownNative
             | Self::IsNotUnknownNative
             | Self::AbsNative
+            | Self::UnarySignNative(_)
             | Self::AbsIntWindowNative
             | Self::CastDecimalWindowNative
             | Self::CastJsonWindowNative => arity == 1,
@@ -180,6 +183,7 @@ impl SqlBatchHostOperation {
             | Self::NullSafeEqNative
             | Self::NullIfNative
             | Self::AbsNative
+            | Self::UnarySignNative(_)
             | Self::BitwiseNative(_)
             | Self::AddNative
             | Self::SubtractNative
@@ -219,6 +223,7 @@ impl SqlBatchHostOperation {
             | Self::NullSafeEqNative
             | Self::NullIfNative
             | Self::AbsNative
+            | Self::UnarySignNative(_)
             | Self::BitwiseNative(_)
             | Self::AddNative
             | Self::SubtractNative

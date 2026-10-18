@@ -5,7 +5,12 @@ use std::fmt;
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::{Result, error::EvaluateError};
 use tidb_query_datatype::{
-    codec::{Error, batch::LazyBatchColumnVec, data_type::*, mysql::decimal::NativeDecimalOp},
+    codec::{
+        Error,
+        batch::LazyBatchColumnVec,
+        data_type::*,
+        mysql::decimal::{NativeDecimalError, NativeDecimalOp},
+    },
     expr::EvalContext,
 };
 use tipb::FieldType;
@@ -408,7 +413,7 @@ impl fmt::Display for NativeUnaryMinusError {
 
 impl std::error::Error for NativeUnaryMinusError {}
 
-fn checked_unary_minus_integer(
+pub fn native_unary_minus_integer_value(
     bits: u64,
     unsigned: bool,
 ) -> std::result::Result<Int, NativeUnaryMinusError> {
@@ -436,7 +441,7 @@ fn wire_unary_minus_error(error: NativeUnaryMinusError) -> tidb_query_common::Er
 #[inline]
 pub fn unary_minus_uint(arg: Option<&Int>) -> Result<Option<Int>> {
     arg.map(|value| {
-        checked_unary_minus_integer(*value as u64, true).map_err(wire_unary_minus_error)
+        native_unary_minus_integer_value(*value as u64, true).map_err(wire_unary_minus_error)
     })
     .transpose()
 }
@@ -445,7 +450,7 @@ pub fn unary_minus_uint(arg: Option<&Int>) -> Result<Option<Int>> {
 #[inline]
 pub fn unary_minus_int(arg: Option<&Int>) -> Result<Option<Int>> {
     arg.map(|value| {
-        checked_unary_minus_integer(*value as u64, false).map_err(wire_unary_minus_error)
+        native_unary_minus_integer_value(*value as u64, false).map_err(wire_unary_minus_error)
     })
     .transpose()
 }
@@ -479,8 +484,8 @@ fn native_unary_bits(arg: Option<BytesRef>) -> Result<Option<u64>> {
     Ok(Some(u64::from_le_bytes(bits)))
 }
 
-fn native_unary_minus_constant(bits: u64, unsigned: bool) -> Decimal {
-    match checked_unary_minus_integer(bits, unsigned) {
+pub fn native_unary_minus_constant_value(bits: u64, unsigned: bool) -> Decimal {
+    match native_unary_minus_integer_value(bits, unsigned) {
         Ok(value) => Decimal::from(value),
         // The same checked leaf selects the actual Decimal result. Signed MIN
         // has magnitude 2^63; overflowing UInt retains its full u64 magnitude.
@@ -489,66 +494,113 @@ fn native_unary_minus_constant(bits: u64, unsigned: bool) -> Decimal {
     }
 }
 
+/// Exact source unary sign; value transport and declaration facts are
+/// caller-owned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeUnarySign {
+    Plus,
+    Minus,
+}
+
+pub fn native_unary_plus_int_value(value: Int) -> Int {
+    value
+}
+pub fn native_unary_sign_bits_value(sign: NativeUnarySign, bits: u64) -> u64 {
+    match sign {
+        NativeUnarySign::Plus => bits,
+        NativeUnarySign::Minus => (-f64::from_bits(bits)).to_bits(),
+    }
+}
+pub fn native_unary_plus_bytes_value(value: &[u8]) -> Bytes {
+    value.to_vec()
+}
+pub fn native_unary_null_value() -> Option<Int> {
+    None
+}
+/// Shared dense Decimal value kernel. The caller reserves conversion/copy
+/// allowance before invoking this per-buffer bound; no SQL precision cap is
+/// added.
+pub fn native_unary_sign_decimal_value(
+    sign: NativeUnarySign,
+    value: &Decimal,
+    limit: usize,
+) -> std::result::Result<Decimal, NativeDecimalError> {
+    if limit == usize::MAX {
+        return Err(NativeDecimalError::Resource(
+            "native math requires a finite kernel budget",
+        ));
+    }
+    match sign {
+        NativeUnarySign::Plus => value.try_clone_native_math(limit),
+        NativeUnarySign::Minus => value.try_native_math(NativeDecimalOp::Negate, limit),
+    }
+}
+
 // Factory-only unit-metadata recipes. Plus copies computed input values; native
 // callers retain only their original Datum/Float32(f64)/collation/header tags.
 #[rpn_fn]
 fn unary_plus_int_native(arg: &Int) -> Result<Option<Int>> {
-    Ok(Some(*arg))
+    Ok(Some(native_unary_plus_int_value(*arg)))
 }
 
 #[rpn_fn(nullable)]
 fn unary_plus_bits_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
-    Ok(native_unary_bits(arg)?.map(|bits| bits.to_le_bytes().to_vec()))
+    Ok(native_unary_bits(arg)?.map(|bits| {
+        native_unary_sign_bits_value(NativeUnarySign::Plus, bits)
+            .to_le_bytes()
+            .to_vec()
+    }))
 }
 
 #[rpn_fn]
 fn unary_plus_decimal_native(arg: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
-    arg.try_clone_native_math(native_decimal_budget(budget)?)
+    native_unary_sign_decimal_value(NativeUnarySign::Plus, arg, native_decimal_budget(budget)?)
         .map(Some)
         .map_err(native_decimal_failure)
 }
 
 #[rpn_fn]
 fn unary_plus_bytes_native(arg: BytesRef) -> Result<Option<Bytes>> {
-    Ok(Some(arg.to_vec()))
+    Ok(Some(native_unary_plus_bytes_value(arg)))
 }
 
 #[rpn_fn]
 fn unary_minus_int_native(arg: &Int) -> Result<Option<Int>> {
-    checked_unary_minus_integer(*arg as u64, false)
+    native_unary_minus_integer_value(*arg as u64, false)
         .map(Some)
         .map_err(native_unary_minus_error)
 }
 
 #[rpn_fn]
 fn unary_minus_uint_native(arg: &Int) -> Result<Option<Int>> {
-    checked_unary_minus_integer(*arg as u64, true)
+    native_unary_minus_integer_value(*arg as u64, true)
         .map(Some)
         .map_err(native_unary_minus_error)
 }
 
 #[rpn_fn]
 fn unary_minus_int_constant_native(arg: &Int) -> Result<Option<Decimal>> {
-    Ok(Some(native_unary_minus_constant(*arg as u64, false)))
+    Ok(Some(native_unary_minus_constant_value(*arg as u64, false)))
 }
 
 #[rpn_fn]
 fn unary_minus_uint_constant_native(arg: &Int) -> Result<Option<Decimal>> {
-    Ok(Some(native_unary_minus_constant(*arg as u64, true)))
+    Ok(Some(native_unary_minus_constant_value(*arg as u64, true)))
 }
 
 #[rpn_fn(nullable)]
 fn unary_minus_bits_native(arg: Option<BytesRef>) -> Result<Option<Bytes>> {
     // Full f64 negation: no NotNan, finite-only projection, or f32 round trip.
-    Ok(
-        native_unary_bits(arg)?
-            .map(|bits| (-f64::from_bits(bits)).to_bits().to_le_bytes().to_vec()),
-    )
+    Ok(native_unary_bits(arg)?.map(|bits| {
+        native_unary_sign_bits_value(NativeUnarySign::Minus, bits)
+            .to_le_bytes()
+            .to_vec()
+    }))
 }
 
 #[rpn_fn]
 fn unary_minus_decimal_native(arg: &Decimal, budget: &Int) -> Result<Option<Decimal>> {
-    arg.try_native_math(NativeDecimalOp::Negate, native_decimal_budget(budget)?)
+    native_unary_sign_decimal_value(NativeUnarySign::Minus, arg, native_decimal_budget(budget)?)
         .map(Some)
         .map_err(native_decimal_failure)
 }
@@ -556,7 +608,7 @@ fn unary_minus_decimal_native(arg: &Decimal, budget: &Int) -> Result<Option<Deci
 #[rpn_fn(nullable)]
 fn unary_null_native(arg: Option<&Int>) -> Result<Option<Int>> {
     match arg {
-        None => Ok(None),
+        None => Ok(native_unary_null_value()),
         Some(_) => Err(other_err!(
             "Native unary NULL witness must be an actual NULL"
         )),

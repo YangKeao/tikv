@@ -2028,6 +2028,26 @@ flag or eligibility policy described above.
   make the old native caller eligible for vectorization or introduce new
   configuration reads. The protocol supports explicit whole parents with row
   operands independently of the frontend's original eligibility contract.
+  `UnarySignNative(NativeUnarySign)` admits exactly one raw-value handle and
+  returns a native result capability. Its source recipe owns the actual
+  unsigned and folded-constant facts. Shared impl_op value kernels preserve
+  f64 bits (including Float32's f64 payload), bytes, nullable identity, exact
+  Decimal sign/scale storage and integer boundary behavior. The old RPN
+  functions delegate to those same kernels. Constant integer overflow promotes
+  to Decimal; computed overflow retains NativeUnaryMinusError and TiDB's
+  existing DataOutOfRange(BIGINT, minus-original-bits) policy. The frontend
+  always applies the original ScalarFunction result-type normalization before
+  publishing the value; an internal Decimal is not automatically a public
+  Decimal result. Plus restores its original Decimal declaration header and
+  minus does not. Dense Decimal conversion and copies are bounded before
+  allocating the SDK word representation; limits are byte allowances, not new
+  SQL precision caps. The new host does not invoke ready-argument programs.
+  Native character-cast eligibility is now selected independently from compiled
+  capability transport. Adding a new raw value producer must not enlarge the
+  old native signature set, create vectorization getter reads or alter native
+  parent row/batch rules. This is compile-time signature selection, not another
+  runtime evaluator. The fixed native CHAR families remain separate from the
+  growing compiler value closure.
   `impl_op::native_bitwise_value` owns final nullable bit computation and is
   shared by the existing RPN functions and TiDB value-only callers. The latter
   no longer execute ready-argument programs for this family. This closes native
@@ -2476,3 +2496,10 @@ Companion docs:
 - `src/server/service/kv.rs` is the RPC entry point.
 - `src/storage` provides snapshots and the lock-related behavior.
 - `components/in_memory_engine` can accelerate snapshot-backed reads indirectly.
+
+The frontend's SQL capability boundary also preserves the enclosing
+`Expression.Eval` result view: flagged ENUM/SET values become their exact UInt
+ordinal after leaf evaluation or scalar return normalization. Constants borrow
+the original datum until the copy-budget gate; function results reuse their
+existing host-slot result declaration. This is shared with the original public
+expression rule and does not admit a tree callback or a second SDK evaluator.

@@ -1541,3 +1541,97 @@ fn logical_xor_catalog_keeps_two_raw_handles_and_row_operation_identity() {
     assert_eq!(operation, SqlBatchHostOperation::XorNative);
     assert!(!operation.is_windowed());
 }
+
+#[test]
+fn window_unary_sign_rows_keep_original_occurrences_across_parent_fresh_and_reuse() {
+    use crate::impl_op::NativeUnarySign;
+    for sign in [NativeUnarySign::Plus, NativeUnarySign::Minus] {
+        let mut service = Service::new();
+        service.row_enabled = true;
+        service.requests = vec![
+            request(0, ArgMode::Fresh),
+            request(0, ArgMode::Reuse),
+            request(0, ArgMode::Fresh),
+        ];
+        let signature = || HostSignature {
+            arg_types: vec![bytes_ft()].into_boxed_slice(),
+            return_type: bytes_ft(),
+        };
+        service.catalog = HostCatalog::for_sql_batch(vec![
+            (SqlBatchHostOperation::CastJsonWindowNative, signature()),
+            (SqlBatchHostOperation::UnarySignNative(sign), signature()),
+        ])
+        .unwrap();
+        let child = host(&service.catalog, 1, vec![input(0)]);
+        assert_eq!(compile(&child, &service).max_batch_size(), 1);
+        let root = host(&service.catalog, 0, vec![child]);
+        let mut program = compile(&root, &service);
+        assert!(program.requires_whole_selection());
+        let selection: Vec<_> = (0..2050).map(|row| [2, 0, 2][row % 3]).collect();
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        );
+        assert_eq!(result.unwrap().len(), selection.len());
+        let mut expected = Vec::new();
+        for _ in 0..2 {
+            for (occurrence, &input_row) in selection.iter().enumerate() {
+                for _ in 0..2 {
+                    expected.push((
+                        0,
+                        InputRow {
+                            occurrence,
+                            input_row,
+                        },
+                    ));
+                }
+            }
+        }
+        assert_eq!(service.reads(), expected);
+        assert!(service.live.is_empty());
+        service.events.clear();
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits {
+                max_retained_bytes: 0,
+                ..ExecutionLimits::default()
+            },
+        );
+        assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+        assert!(service.reads().is_empty());
+        assert!(service.live.is_empty());
+    }
+}
+
+#[test]
+fn unary_sign_catalog_rejects_extra_arguments_and_non_capability_carriers() {
+    use crate::impl_op::NativeUnarySign;
+    let signature = |arity| HostSignature {
+        arg_types: vec![bytes_ft(); arity].into_boxed_slice(),
+        return_type: bytes_ft(),
+    };
+    for sign in [NativeUnarySign::Plus, NativeUnarySign::Minus] {
+        let op = SqlBatchHostOperation::UnarySignNative(sign);
+        for arity in [0, 2, 3] {
+            assert!(HostCatalog::for_sql_batch(vec![(op, signature(arity))]).is_err());
+        }
+        let mut wrong = signature(1);
+        wrong.arg_types[0] = FieldTypeTp::LongLong.into();
+        assert!(HostCatalog::for_sql_batch(vec![(op, wrong)]).is_err());
+        let mut wrong = signature(1);
+        wrong.return_type = FieldTypeTp::LongLong.into();
+        assert!(HostCatalog::for_sql_batch(vec![(op, wrong)]).is_err());
+        let catalog = HostCatalog::for_sql_batch(vec![(op, signature(1))]).unwrap();
+        assert_eq!(
+            catalog
+                .sql_batch_operation(catalog.slot(0).unwrap())
+                .unwrap(),
+            op
+        );
+        assert!(!op.is_windowed());
+    }
+}
