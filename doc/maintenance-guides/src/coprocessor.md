@@ -760,16 +760,33 @@ flag or eligibility policy described above.
   lookup and the `utf8mb3` alias; the wire `from_name` wrapper still requires
   exact canonical spelling. Evaluator selection is not implied migrated by this
   foundation. No C4 profile or wire policy is added here.
-  Native TIMESTAMPDIFF has separate Text/Core Values/Bytes3/nullable-Int
-  profiles. The datatype `time/native_timestamp_diff.rs` owns strict wide-year
-  text/civil/signed-month arithmetic and the distinct raw i32-daynr/u32-month
-  policy, plus shared interval/difference types and exact uppercase lookup.
-  Text consumes actual display/coercion and computes delta before unknown-unit
-  zero; Core uses actual optional8LE cores, full-raw zero and exact unit bytes,
-  returning unknown-unit zero before arithmetic. Existing wire metadata and
-  invalid-time policy are unchanged. Callers retain ordinary eager casts,
-  Shared PB first-NULL demand and manual legacy unit-first/two-endpoint demand.
-  Native type helpers are aliases/thin delegates, not a second implementation.
+  Native TIMESTAMPDIFF now calls actual text/core value APIs in
+  `native_timestamp_diff_value.rs`; its three Ready programs and raw-core LE64
+  packing are retired from native callers. The datatype
+  `time/native_timestamp_diff.rs` owns strict wide-year parsed endpoints and a
+  computed signed delta, with late unit folding/month selection. The distinct
+  raw i32-daynr/u32-month policy still uses full raw zero and exact unit bytes,
+  returning unknown-unit zero before arithmetic. Text computes delta before
+  unknown-unit zero. Ordinary wire validators, nullable Bytes3 profiles and
+  optional8LE decoding retain their original ownership and delegate only the
+  actual arithmetic. No wire invalid-time or metadata policy is replaced.
+  The canonical frontend source frame authenticates all retained argument
+  capabilities before conversion, preserves generic eager source demand and
+  original endpoint casts AFTER all sources, and releases source-store borrows
+  before mode/zone/clock/warning callbacks. Complete source FieldTypes retain
+  YEAR and exact metadata identity. Exact PB TimestampDiff instead stops at its
+  first actual NULL and skips generic endpoint casts. Only that PB signature
+  and its scoped decoded leaf origins are admitted here; original/effective
+  FieldTypes are separately byte-gated before provenance equality. Other PB
+  signatures still refuse. Actual results publish native capabilities or typed
+  Int values after original result coercion and ENUM/SET views. Shared bounded
+  string coercion is also used by STR_TO_DATE; demanded Decimal padding, float
+  intermediates, parser scratch, source copies and late unit folding are gated
+  before their corresponding work. Calendar argument-cast work uses
+  `native_datetime_argument_cast_work` beside the actual SDK cast, sharing its
+  YEAR route: UInt outside i64 must take the formatter path, while genuine YEAR
+  construction/errors and NULL/Time passthrough stay context/allocation-free.
+  Native type helpers remain thin delegates.
   Native bounded staleness uses `native_bounded_staleness.rs`: a Bytes2 Head
   classifies actual raw Time endpoints into invalid-left/right, reversed-window
   NULL or NeedSafe; a Bytes3 Finish accepts the original endpoints and actual

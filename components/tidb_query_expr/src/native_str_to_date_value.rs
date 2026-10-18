@@ -65,51 +65,10 @@ fn checked_extent(n: usize, m: usize, extra: usize) -> Result<usize, Error> {
         .ok_or_else(resource)
 }
 fn coerce(input: Input<'_>, maximum: usize) -> Result<String, Error> {
-    // Preserve byte-kind UTF-8 failures BEFORE copying and later format work.
-    let bytes = match input {
-        Input::String(v) => Some((v, "invalid UTF-8 string datum")),
-        Input::Bytes(v) => Some((v, "invalid UTF-8 byte datum")),
-        Input::BinaryLiteral(v) | Input::Bit(v) => Some((v, "invalid UTF-8 binary literal")),
-        Input::Enum(v) => Some((v, "invalid UTF-8 ENUM name")),
-        Input::Set(v) => Some((v, "invalid UTF-8 SET name")),
-        Input::Raw(v) => Some((v, "invalid UTF-8 raw datum")),
-        _ => None,
-    };
-    let work = if let Some((bytes, error)) = bytes {
-        std::str::from_utf8(bytes).map_err(|_| Error::Unsupported(error))?;
-        bytes.len()
-    } else {
-        match input {
-            Input::MinNotNull | Input::MaxValue => {
-                return Err(Error::Unsupported("range sentinel string coercion"));
-            }
-            Input::Null => 0,
-            Input::Int(_) | Input::UInt(_) => 128,
-            Input::Real(_) | Input::Float32(_) => 4096,
-            Input::Decimal(v) => checked_extent(
-                v.digits
-                    .len()
-                    .checked_add(v.scale.max(v.storage_scale) as usize)
-                    .ok_or_else(resource)?,
-                16,
-                1024,
-            )?,
-            Input::Json { value, .. } => checked_extent(value.len(), 128, 1024)?,
-            Input::VectorFloat32(v) => checked_extent(v.len(), 512, 1024)?,
-            Input::Duration { fsp, .. } => checked_extent(
-                usize::try_from(fsp.max(64)).map_err(|_| resource())?,
-                16,
-                1024,
-            )?,
-            Input::Time(_) => 1024,
-            _ => unreachable!("byte inputs handled above"),
-        }
-    };
-    check(work, maximum)?;
-    let text = crate::native_coerce_string(input)
-        .map_err(Error::Unsupported)?
-        .unwrap_or_default();
-    owned(text, maximum)
+    crate::native_coerce_string_bounded(input, maximum).map_err(|error| match error {
+        crate::NativeStringCoercionError::Unsupported(reason) => Error::Unsupported(reason),
+        crate::NativeStringCoercionError::ResourceLimit => resource(),
+    })
 }
 /// Owned actual coerce_str results. No input-store borrow survives this value.
 #[derive(Debug)]

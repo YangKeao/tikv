@@ -64,6 +64,93 @@ pub fn native_coerce_bytes(
     }
 }
 
+/// Demanded string formatting failures, distinct from SQL NULL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeStringCoercionError {
+    /// Original expression UTF-8 or sentinel error.
+    Unsupported(&'static str),
+    /// Actual owned text or formatting work exceeds its finite allowance.
+    ResourceLimit,
+}
+fn resource() -> NativeStringCoercionError {
+    NativeStringCoercionError::ResourceLimit
+}
+fn check(bytes: usize, maximum: usize) -> Result<(), NativeStringCoercionError> {
+    if maximum == usize::MAX || bytes > maximum {
+        Err(resource())
+    } else {
+        Ok(())
+    }
+}
+fn checked_extent(n: usize, m: usize, extra: usize) -> Result<usize, NativeStringCoercionError> {
+    n.checked_mul(m)
+        .and_then(|n| n.checked_add(extra))
+        .ok_or_else(resource)
+}
+/// Preserve the original kind-specific coercion and gate each actual copy or
+/// formatting operation before it runs. NULL does not allocate string storage.
+pub fn native_coerce_string_bounded(
+    input: NativeSqlStringInput<'_>,
+    maximum: usize,
+) -> Result<String, NativeStringCoercionError> {
+    let work = native_string_coercion_work(input)?;
+    check(work, maximum)?;
+    let text = crate::native_coerce_string(input)
+        .map_err(NativeStringCoercionError::Unsupported)?
+        .unwrap_or_default();
+    check(text.capacity(), maximum)?;
+    Ok(text)
+}
+/// Borrowed preflight for the original kind-specific formatter. This validates
+/// original UTF-8/sentinel failures but neither formats nor allocates storage.
+pub fn native_string_coercion_work(
+    input: NativeSqlStringInput<'_>,
+) -> Result<usize, NativeStringCoercionError> {
+    use NativeSqlStringInput as Input;
+    // Preserve byte-kind UTF-8 failures BEFORE copying and later format work.
+    let bytes = match input {
+        Input::String(v) => Some((v, "invalid UTF-8 string datum")),
+        Input::Bytes(v) => Some((v, "invalid UTF-8 byte datum")),
+        Input::BinaryLiteral(v) | Input::Bit(v) => Some((v, "invalid UTF-8 binary literal")),
+        Input::Enum(v) => Some((v, "invalid UTF-8 ENUM name")),
+        Input::Set(v) => Some((v, "invalid UTF-8 SET name")),
+        Input::Raw(v) => Some((v, "invalid UTF-8 raw datum")),
+        _ => None,
+    };
+    Ok(if let Some((bytes, error)) = bytes {
+        std::str::from_utf8(bytes).map_err(|_| NativeStringCoercionError::Unsupported(error))?;
+        bytes.len()
+    } else {
+        match input {
+            Input::MinNotNull | Input::MaxValue => {
+                return Err(NativeStringCoercionError::Unsupported(
+                    "range sentinel string coercion",
+                ));
+            }
+            Input::Null => 0,
+            Input::Int(_) | Input::UInt(_) => 128,
+            Input::Real(_) | Input::Float32(_) => 4096,
+            Input::Decimal(v) => checked_extent(
+                v.digits
+                    .len()
+                    .checked_add(v.scale.max(v.storage_scale) as usize)
+                    .ok_or_else(resource)?,
+                16,
+                1024,
+            )?,
+            Input::Json { value, .. } => checked_extent(value.len(), 128, 1024)?,
+            Input::VectorFloat32(v) => checked_extent(v.len(), 512, 1024)?,
+            Input::Duration { fsp, .. } => checked_extent(
+                usize::try_from(fsp.max(64)).map_err(|_| resource())?,
+                16,
+                1024,
+            )?,
+            Input::Time(_) => 1024,
+            _ => unreachable!("byte inputs handled above"),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use NativeSqlStringInput as I;

@@ -96,18 +96,11 @@ fn timestamp_diff_core_native(
             .try_into()
             .expect("validated TIMESTAMPDIFF right core"),
     );
-    if left == 0 || right == 0 {
-        return Ok(None);
-    }
-    use tidb_query_datatype::codec::mysql::time::NativeTimestampInterval;
-    let Some(interval) =
-        NativeTimestampInterval::from_uppercase_bytes(unit.expect("validated TIMESTAMPDIFF unit"))
-    else {
-        return Ok(Some(0));
-    };
-    Ok(Some(Time::native_core_timestamp_diff(
-        left, right, interval,
-    )))
+    Ok(crate::native_timestamp_diff_core_values(
+        unit.expect("validated TIMESTAMPDIFF unit"),
+        Some(left),
+        Some(right),
+    ))
 }
 
 #[cfg(test)]

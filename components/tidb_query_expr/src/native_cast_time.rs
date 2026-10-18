@@ -204,6 +204,32 @@ pub fn native_cast_time<TZ: TimeZone + Debug>(
     Ok(Some(truncate_clock_for_date(time, kind)))
 }
 
+/// Conservative scratch/format allowance for the original datetime argument
+/// cast. This shares the actual YEAR route, so unsigned values outside i64
+/// cannot masquerade as allocation-free year construction. Context-free
+/// Time/NULL passthrough, actual YEAR errors and Duration clock conversion keep
+/// their distinct demand; no formatting or callback runs during this preflight.
+pub fn native_datetime_argument_cast_work(
+    text: NativeSqlStringInput<'_>,
+    number: NativeNumericInput<'_>,
+    source: Option<NativeTypeNameCode>,
+) -> Result<usize, crate::NativeStringCoercionError> {
+    if matches!(
+        text,
+        NativeSqlStringInput::Null | NativeSqlStringInput::Time(_)
+    ) || year_source_value(number, source).is_some()
+    {
+        return Ok(0);
+    }
+    if matches!(text, NativeSqlStringInput::Duration { .. }) {
+        return Ok(1024);
+    }
+    crate::native_string_coercion_work(text)?
+        .checked_mul(32)
+        .and_then(|n| n.checked_add(1024))
+        .ok_or(crate::NativeStringCoercionError::ResourceLimit)
+}
+
 /// Argument wrapping returns existing temporal storage (and NULL) before any
 /// coercion, source-type check, clock access, mode access or zone access.
 pub fn native_cast_arg_as_datetime<TZ: TimeZone + Debug>(
@@ -867,4 +893,54 @@ fn legacy_time_cast_preserves_numeric_text_identity_and_opaque_first_routes() {
     .unwrap();
     assert_eq!(opaque.kind, TimeType::Date);
     assert!(native_legacy_cast_time(I::Bytes(b"bad"), N::Bytes(b"bad"), &zone).is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn datetime_argument_work_uses_the_actual_year_route_and_identity() {
+    use NativeTypeNameCode::{Known, Unknown};
+    for value in [0, 69, i64::MAX as u64] {
+        assert_eq!(
+            native_datetime_argument_cast_work(
+                NativeSqlStringInput::UInt(value),
+                NativeNumericInput::UInt(value),
+                Some(Known(13))
+            ),
+            Ok(0)
+        );
+    }
+    assert_eq!(
+        native_datetime_argument_cast_work(
+            NativeSqlStringInput::UInt(u64::MAX),
+            NativeNumericInput::UInt(u64::MAX),
+            Some(Known(13))
+        ),
+        Ok(5120)
+    );
+    assert_eq!(
+        native_datetime_argument_cast_work(
+            NativeSqlStringInput::UInt(69),
+            NativeNumericInput::UInt(69),
+            Some(Unknown(13))
+        ),
+        Ok(5120)
+    );
+    assert_eq!(
+        native_datetime_argument_cast_work(
+            NativeSqlStringInput::Int(-1),
+            NativeNumericInput::Int(-1),
+            Some(Known(13))
+        ),
+        Ok(0)
+    );
+    assert_eq!(
+        native_datetime_argument_cast_work(
+            NativeSqlStringInput::Bytes(b"\xff"),
+            NativeNumericInput::Bytes(b"\xff"),
+            None
+        ),
+        Err(crate::NativeStringCoercionError::Unsupported(
+            "invalid UTF-8 byte datum"
+        ))
+    );
 }

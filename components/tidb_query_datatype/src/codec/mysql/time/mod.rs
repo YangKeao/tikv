@@ -63,7 +63,10 @@ pub use self::{
         native_parse_time_from_decimal_text, native_parse_time_from_float64,
         native_parse_time_from_int64, native_parse_time_from_num,
     },
-    native_timestamp_diff::{NativeTimeDifference, NativeTimestampInterval},
+    native_timestamp_diff::{
+        NativeTimeDifference, NativeTimestampDiffTextDifference, NativeTimestampDiffTextEndpoint,
+        NativeTimestampInterval,
+    },
     native_value::{NativeTemporalValue, NativeTimeError},
     tz::Tz,
     weekmode::WeekMode,

@@ -61,7 +61,7 @@ impl NativeTimestampInterval {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct TimestampDiffDateTime {
     year: i64,
     month: u32,
@@ -196,10 +196,29 @@ impl Time {
     /// the unit, and unknown-unit zero only AFTER the original delta
     /// computation.
     pub fn native_timestamp_diff_text(unit: &str, left: &str, right: &str) -> Option<i64> {
-        let left = parse_timestamp_diff_datetime(left)?;
-        let right = parse_timestamp_diff_datetime(right)?;
-        let left_day = Self::native_days_from_civil(left.year, left.month, left.day);
-        let right_day = Self::native_days_from_civil(right.year, right.month, right.day);
+        Some(
+            NativeTimestampDiffTextEndpoint::parse(left)?
+                .difference(NativeTimestampDiffTextEndpoint::parse(right)?)
+                .finish(unit),
+        )
+    }
+}
+
+/// Actual strict wide-year calendar endpoint. Construction keeps the original
+/// parser; callers can gate its scratch storage before demanding it.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeTimestampDiffTextEndpoint(TimestampDiffDateTime);
+impl NativeTimestampDiffTextEndpoint {
+    /// Parse the original text/civil domain, without narrowing raw Time fields.
+    pub fn parse(input: &str) -> Option<Self> {
+        parse_timestamp_diff_datetime(input).map(Self)
+    }
+    /// Compute the original signed delta BEFORE any unit lookup or folding.
+    pub fn difference(self, right: Self) -> NativeTimestampDiffTextDifference {
+        let left = self.0;
+        let right = right.0;
+        let left_day = Time::native_days_from_civil(left.year, left.month, left.day);
+        let right_day = Time::native_days_from_civil(right.year, right.month, right.day);
         let left_clock = i64::from(left.hour) * 3_600_000_000
             + i64::from(left.minute) * 60_000_000
             + i64::from(left.second) * 1_000_000
@@ -219,6 +238,34 @@ impl Time {
         } else {
             (left, right)
         };
+        NativeTimestampDiffTextDifference {
+            begin,
+            end,
+            seconds,
+            microseconds,
+            sign,
+        }
+    }
+}
+/// Actual computed delta and ordered endpoints; no encoded report or host flag.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeTimestampDiffTextDifference {
+    begin: TimestampDiffDateTime,
+    end: TimestampDiffDateTime,
+    seconds: u64,
+    microseconds: u64,
+    sign: i64,
+}
+impl NativeTimestampDiffTextDifference {
+    /// Original case-folded unit policy and signed month/second arithmetic.
+    pub fn finish(self, unit: &str) -> i64 {
+        let Self {
+            begin,
+            end,
+            seconds,
+            microseconds,
+            sign,
+        } = self;
         // Lookup stays after delta: unknown text units must not bypass its
         // original wide-year arithmetic (unlike the raw-core profile).
         let interval =
@@ -257,7 +304,7 @@ impl Time {
         } else {
             0
         };
-        Some(match interval {
+        match interval {
             Some(NativeTimestampInterval::Year) => months / 12 * sign,
             Some(NativeTimestampInterval::Quarter) => months / 3 * sign,
             Some(NativeTimestampInterval::Month) => months * sign,
@@ -270,7 +317,7 @@ impl Time {
                 (seconds * 1_000_000 + microseconds) as i64 * sign
             }
             None => 0,
-        })
+        }
     }
 }
 
