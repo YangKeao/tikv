@@ -8,7 +8,7 @@
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::codec::{
-    collation::native_encoding::{TransformOp, find_encoding, is_supported_encoding},
+    collation::native_encoding::{TransformOp, is_supported_encoding},
     data_type::{Bytes, BytesRef, ChunkedVec, EvaluableRef, EvaluableRet},
 };
 
@@ -97,6 +97,30 @@ fn encode_report(result: NativeConvertCharsetResult<'_>, bound: usize) -> FrameR
     Ok(report)
 }
 
+fn value_error(error: crate::NativeCharsetValueError) -> NativeIdentityFrameError {
+    match error {
+        crate::NativeCharsetValueError::Invalid => NativeIdentityFrameError::Invalid,
+        crate::NativeCharsetValueError::ResourceLimit(_) => NativeIdentityFrameError::Capacity,
+    }
+}
+fn value_report(value: crate::NativeCharsetValue, bound: usize) -> FrameResult<Option<Vec<u8>>> {
+    use crate::NativeCharsetValue as V;
+    match value {
+        V::Null => Ok(None),
+        V::Bytes(bytes) => {
+            encode_report(NativeConvertCharsetResult::Bytes(&bytes), bound).map(Some)
+        }
+        V::RetagString(bytes) => {
+            encode_report(NativeConvertCharsetResult::RetagString(&bytes), bound).map(Some)
+        }
+        V::InvalidCharacter => {
+            encode_report(NativeConvertCharsetResult::InvalidCharacter, bound).map(Some)
+        }
+        V::UnknownCharset => {
+            encode_report(NativeConvertCharsetResult::UnknownCharset, bound).map(Some)
+        }
+    }
+}
 fn binary_transform(
     value: Option<&[u8]>,
     charset: Option<&[u8]>,
@@ -105,14 +129,11 @@ fn binary_transform(
     let charset = name(charset).ok_or(NativeIdentityFrameError::Invalid)?;
     let bound =
         native_convert_charset_output_bound(value).ok_or(NativeIdentityFrameError::Capacity)?;
-    let (bytes, error) =
-        find_encoding(charset).transform(value.unwrap_or_default(), operation, |_| ());
-    let result = if error.is_some() {
-        NativeConvertCharsetResult::InvalidCharacter
-    } else {
-        NativeConvertCharsetResult::Bytes(&bytes)
-    };
-    encode_report(result, bound).map(Some)
+    value_report(
+        crate::native_convert_charset_value::binary(value, charset, operation, bound)
+            .map_err(value_error)?,
+        bound,
+    )
 }
 
 pub(crate) fn evaluate_to_binary_native(
@@ -144,30 +165,17 @@ pub(crate) fn evaluate_convert_using_native(
     }
     let bound =
         native_convert_charset_output_bound(value).ok_or(NativeIdentityFrameError::Capacity)?;
-    let bytes = value.unwrap_or_default();
-    let source_is_binary = name(source_effective) == Some("binary");
-    let target_is_binary = target == "binary";
-    if source_is_binary && !target_is_binary {
-        let (decoded, error) =
-            find_encoding(target).transform(bytes, TransformOp::DECODE_REPLACE, |_| ());
-        return if error.is_some() {
-            Ok(None)
-        } else {
-            encode_report(NativeConvertCharsetResult::Bytes(&decoded), bound).map(Some)
-        };
-    }
-    if target_is_binary {
-        // Original to_binary called pure eval_string a second time. The caller
-        // may reuse its first computed byte value; no context/getters/warnings
-        // are involved. Encoding still uses the EXACT source name, not effective.
-        return evaluate_to_binary_native(value, source_exact);
-    }
-    let encoding = find_encoding(target);
-    if encoding.is_valid(bytes) {
-        return encode_report(NativeConvertCharsetResult::RetagString(bytes), bound).map(Some);
-    }
-    let (replaced, _) = encoding.transform(bytes, TransformOp::REPLACE_NO_ERR, |_| ());
-    encode_report(NativeConvertCharsetResult::RetagString(&replaced), bound).map(Some)
+    value_report(
+        crate::native_convert_using_value(
+            value,
+            name(source_exact).expect("validated exact source"),
+            name(source_effective).expect("validated effective source"),
+            target,
+            bound,
+        )
+        .map_err(value_error)?,
+        bound,
+    )
 }
 
 fn transport_error(error: NativeIdentityFrameError) -> tidb_query_common::Error {
@@ -198,7 +206,7 @@ fn convert_using_native(
 #[cfg(test)]
 mod tests {
     use tidb_query_datatype::codec::collation::native_encoding::{
-        SharedNativeEncoding, find_encoding_take_utf8_as_noop,
+        SharedNativeEncoding, find_encoding, find_encoding_take_utf8_as_noop,
     };
 
     use super::*;

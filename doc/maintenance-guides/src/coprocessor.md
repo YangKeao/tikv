@@ -697,15 +697,29 @@ flag or eligibility policy described above.
   validation adapters. The exact unicode-general-category 1.1.0 dependency and Go-version table
   exclusions move with this policy. This grammar is distinct from both wire and
   ordinary expression parsing; no new evaluator profile/admission is implied.
-  Native charset expression workers in `native_convert_charset.rs` use
-  ToBinary/FromBinary Bytes2 and ConvertUsing Bytes4, one Values call each.
-  The latter retains exact source spelling, effective field charset and target
-  as separate actual inputs; its four-argument compile allowance is profile-only.
-  Reports distinguish Bytes, retag payload, conversion error and unknown target;
-  only ConvertUsing can compute NULL. Default-collation projection remains late
-  in the frontend because GB defaults observe the original global mode.
-  Checked `8*n+1` precharge bounds the retained reply; actual input/reply capacities
-  remain charged, without claiming codec temporary or physical allocation peaks.
+  Native charset actual-value services live in `native_convert_charset_value.rs`.
+  They consume borrowed nullable ETString bytes and return computed owned bytes,
+  retag payload, NULL or the original conversion/unknown-target outcome. Exact
+  source spelling, effective canonical field charset and actual target remain
+  separate; case-sensitive lookup fallback differs from FieldType aliases.
+  Typed-reader None means empty bytes; actual SQL NULL is a separate primitive.
+  Binary/Latin1 copies precharge exact length and check allocated capacity; GB
+  transforms precharge checked 8*n and all transforms check actual output capacity.
+  These finite logical allowances do not claim recovery from whole-process OOM.
+  Existing `native_convert_charset.rs` ToBinary/FromBinary Bytes2 and ConvertUsing
+  Bytes4 wire workers keep their original complete validation/report protocol and
+  checked 8*n+1 bound, delegating only actual byte production to these services.
+  Canonical frontend CharsetNative sources share the same SDK frame and actual
+  source-NULL demand policy: source, target coercion, source cast, unconditional
+  connection getter, chosen metadata, codec, then late GB default collation.
+  Source/result fields, explicit coercibility and producer ordinals are detached;
+  retained source capabilities are reauthenticated before target work. No store
+  borrow crosses connection callbacks. Native results publish authenticated values;
+  typed string parents receive the same computed ETString value, preserving their
+  original demand phases without another evaluator. Actual clone/format/metadata
+  and publication overlap are bounded before their corresponding work; skipped
+  work and shared immutable strings do not incur fabricated copies. Public native
+  Ready adapters and their frame/report/NULL-program dispatch are removed.
   Existing wire Encoding policies and native PB admission are unchanged.
   Native-compatible charset byte policy lives in
   `codec/collation/native_encoding.rs`, separate from wire Encoding traits.

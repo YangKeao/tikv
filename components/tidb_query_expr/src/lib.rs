@@ -72,6 +72,12 @@ pub use native_clock::{
     native_utc_time_without_fsp, native_utc_timestamp,
 };
 
+mod native_convert_charset_value;
+pub use native_convert_charset_value::{
+    NativeCharsetOperation, NativeCharsetSourceStep, NativeCharsetValue, NativeCharsetValueError,
+    native_charset_after_source, native_charset_null_value, native_convert_using_value,
+    native_from_binary_value, native_to_binary_value,
+};
 mod native_convert_charset;
 pub use native_convert_charset::{
     NativeConvertCharsetResult, convert_using_native_args_valid, convert_using_native_fn_meta,

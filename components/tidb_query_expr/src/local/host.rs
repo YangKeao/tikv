@@ -61,6 +61,8 @@ pub enum SqlBatchHostOperation {
     IntervalNative,
     /// Eager GREATEST/LEAST sources followed by genuine typed value reducers.
     ExtremumNative,
+    /// Exact-metadata charset conversion with actual NULL/target source demand.
+    CharsetNative(crate::NativeCharsetOperation),
     /// Native nullable selection over actual value handles.
     CoalesceNative,
     /// Exactly two native nullable arguments.
@@ -138,6 +140,7 @@ impl SqlBatchHostOperation {
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
             Self::BitwiseNative(op) => arity == op.arity(),
+            Self::CharsetNative(op) => arity == op.arity(),
             Self::Concat | Self::CoalesceNative | Self::CaseNative | Self::ExtremumNative => {
                 arity >= 1
             }
@@ -191,6 +194,7 @@ impl SqlBatchHostOperation {
             | Self::InNative
             | Self::IntervalNative
             | Self::ExtremumNative
+            | Self::CharsetNative(_)
             | Self::CoalesceNative
             | Self::IfNullNative
             | Self::IfNative
@@ -240,6 +244,7 @@ impl SqlBatchHostOperation {
             | Self::InNative
             | Self::IntervalNative
             | Self::ExtremumNative
+            | Self::CharsetNative(_)
             | Self::CoalesceNative
             | Self::IfNullNative
             | Self::IfNative
