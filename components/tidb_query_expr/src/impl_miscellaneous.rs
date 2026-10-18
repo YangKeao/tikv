@@ -481,26 +481,34 @@ fn decode_format_real_native(input: Option<BytesRef>) -> Result<Option<f64>> {
 
 #[rpn_fn(nullable)]
 fn get_native_format_bytes(input: Option<BytesRef>) -> Result<Option<Bytes>> {
-    Ok(decode_format_real_native(input)?.map(|value| {
-        format_scaled(
-            value,
-            &[
-                (1_u64 << 60, "EiB"),
-                (1_u64 << 50, "PiB"),
-                (1_u64 << 40, "TiB"),
-                (1_u64 << 30, "GiB"),
-                (1_u64 << 20, "MiB"),
-                (1_u64 << 10, "KiB"),
-            ],
-            "bytes",
-        )
-        .into_bytes()
-    }))
+    Ok(decode_format_real_native(input)?
+        .map(|value| format_metric_value(value, false).into_bytes()))
 }
 
 #[rpn_fn(nullable)]
 fn get_native_format_nano_time(input: Option<BytesRef>) -> Result<Option<Bytes>> {
-    Ok(decode_format_real_native(input)?.map(|value| {
+    Ok(
+        decode_format_real_native(input)?
+            .map(|value| format_metric_value(value, true).into_bytes()),
+    )
+}
+
+/// Format an actual nullable binary64 quantity without encoding it as SQL
+/// bytes. Existing nonfinite-value and signed-zero behavior belongs to the
+/// shared formatter; finite work admission does not add a numeric-kind
+/// restriction.
+pub fn native_metric_format_value(
+    value: Option<f64>,
+    nanos: bool,
+    maximum: usize,
+) -> std::result::Result<Option<String>, crate::NativeDurationConstructionError> {
+    crate::native_duration_construction::duration_work(maximum, 0)?;
+    let Some(value) = value else { return Ok(None) };
+    crate::native_duration_construction::duration_work(maximum, 1024)?;
+    Ok(Some(format_metric_value(value, nanos)))
+}
+fn format_metric_value(value: f64, nanos: bool) -> String {
+    if nanos {
         format_scaled(
             value,
             &[
@@ -513,8 +521,20 @@ fn get_native_format_nano_time(input: Option<BytesRef>) -> Result<Option<Bytes>>
             ],
             "ns",
         )
-        .into_bytes()
-    }))
+    } else {
+        format_scaled(
+            value,
+            &[
+                (1_u64 << 60, "EiB"),
+                (1_u64 << 50, "PiB"),
+                (1_u64 << 40, "TiB"),
+                (1_u64 << 30, "GiB"),
+                (1_u64 << 20, "MiB"),
+                (1_u64 << 10, "KiB"),
+            ],
+            "bytes",
+        )
+    }
 }
 
 /// Shared structural port of `GetFormatBytes` and `GetFormatNanoTime`.
@@ -1711,6 +1731,61 @@ mod tests {
                 .evaluate::<Decimal>(ScalarFuncSig::UuidTimestamp)
                 .unwrap();
             assert_eq!(got, expected_ts);
+        }
+    }
+    #[test]
+    fn actual_metric_formats_keep_thresholds_ieee_and_finite_work() {
+        use crate::NativeDurationConstructionError as E;
+        assert_eq!(native_metric_format_value(None, false, 0), Ok(None));
+        assert_eq!(
+            native_metric_format_value(None, true, usize::MAX),
+            Err(E::Resource)
+        );
+        assert_eq!(
+            native_metric_format_value(Some(1.0), false, 1023),
+            Err(E::Resource)
+        );
+        for (value, nanos, expected) in [
+            ((1u64 << 10) as f64, false, "1.00 KiB"),
+            ((1u64 << 20) as f64, false, "1.00 MiB"),
+            ((1u64 << 30) as f64, false, "1.00 GiB"),
+            ((1u64 << 40) as f64, false, "1.00 TiB"),
+            ((1u64 << 50) as f64, false, "1.00 PiB"),
+            ((1u64 << 60) as f64, false, "1.00 EiB"),
+            (1000.0, true, "1.00 us"),
+            (1e6, true, "1.00 ms"),
+            (1e9, true, "1.00 s"),
+            (6e10, true, "1.00 min"),
+            (3.6e12, true, "1.00 h"),
+            (8.64e13, true, "1.00 d"),
+            (-0.0, false, "0 bytes"),
+            (-0.0, true, "0 ns"),
+            (f64::NAN, false, "NaN bytes"),
+            (f64::NAN, true, "NaN ns"),
+            (f64::MAX, false, "1.56e+290 EiB"),
+            (f64::MAX, true, "2.08e+294 d"),
+        ] {
+            assert_eq!(
+                native_metric_format_value(Some(value), nanos, 1024)
+                    .unwrap()
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        for nanos in [false, true] {
+            assert!(
+                std::panic::catch_unwind(|| native_metric_format_value(
+                    Some(f64::INFINITY),
+                    nanos,
+                    1024
+                ))
+                .is_err()
+            );
+            assert!(
+                native_metric_format_value(Some(2048.0), nanos, 1024)
+                    .unwrap()
+                    .is_some()
+            );
         }
     }
 }

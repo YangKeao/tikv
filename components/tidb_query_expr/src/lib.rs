@@ -42,6 +42,7 @@ pub mod impl_json;
 pub mod impl_like;
 pub mod impl_math;
 pub mod impl_miscellaneous;
+pub use impl_miscellaneous::native_metric_format_value;
 pub mod impl_op;
 pub mod impl_other;
 pub mod impl_regexp;

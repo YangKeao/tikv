@@ -3177,3 +3177,44 @@ real computed expressions and both row/column classifications. See frontend
 rust/docs/evidence/no-fallback-n7p.md for independent proof, commands and gates.
 Remaining format-source families, generic fallback, unistore traversal, malformed/
 unsupported shapes, inherited failures and semantic/full-server gates remain open.
+
+
+### N7q: actual metric formatting and presentation sources
+
+`impl_miscellaneous.rs::native_metric_format_value` accepts an actual nullable
+f64 and finite work allowance, returning optional owned text. The existing two
+wire workers still validate nullable raw8-byte little-endian IEEE754 input and
+retain transport planning; both delegate the same private unit tables and the
+unchanged format_scaled/fixed/scientific primitive. NULL costs no formatter work;
+non-NULL needs1024 logical work. NaN text, signed-zero normalization, thresholds,
+scientific notation and the original infinity panic remain authoritative. No
+native value is encoded as a new expression program.
+
+NativeDurationConstructionOperation adds DateFormat, FormatBytes and
+FormatNanoTime for the existing single SDK frame. The frontend preserves its
+original real_arg conversion: only actual String/Bytes call truncation policy,
+so pure metric operands borrow without copying unsupported vectors or unused
+Enum/Set names. BinaryLiteral/Bit conversion scans leading zeros then tests the
+remaining width, without scanning a long nonzero suffix. A real Resource RED
+exposed length-based overcharging; metric-specific work now bounds that demanded
+prefix before calling the original converter. Unresolved long zero prefixes fail
+before unbounded scan. Other operations' numeric work is unchanged.
+
+DATE_FORMAT reuses its existing N7j actual body. Its canonical source first
+performs the original ETDatetime cast with full FieldType/YEAR metadata, then
+strictly coerces both texts even after NULL, without a context callback spanning
+the second value borrow. All eager capabilities authenticate and invocation
+demand closes before body work. Ordinary return-family conversion runs once;
+none of these three adds generic temporal-result parsing. Caught original infinity
+panic cannot replay; a later invocation recovers without retired Ready-cache
+poison. Source tests compare full partial physical output and context on panic.
+
+All56016 independent original/candidate pairs passed before the two metric Ready
+callers retired: frozen hash02F463312450CC05. The later prefix-work correction is
+explicit and leaves that witness unchanged. Frontend receipt
+rust/docs/evidence/no-fallback-n7q.md records original archives, source matrix,
+84 provider operation/fact cases across both roles, SDK1124/exact1 inherited,
+frontend1722/exact3 inherited, Projection26, exact warning parity and local gates.
+These logical work allowances do not certify whole-statement peak allocation.
+Generic fallback, old unistore traversal, unsupported/malformed sources, inherited
+failures, semantic audits and full-server SQL remain open; no package-port claim.

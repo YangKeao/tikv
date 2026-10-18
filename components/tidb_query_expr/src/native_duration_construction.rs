@@ -52,6 +52,12 @@ pub enum NativeDurationConstructionOperation {
     Timestamp2,
     /// Native TIMESTAMPADD policy.
     TimestampAdd,
+    /// Native DATE_FORMAT text policy.
+    DateFormat,
+    /// Native FORMAT_BYTES scalar presentation policy.
+    FormatBytes,
+    /// Native FORMAT_NANO_TIME scalar presentation policy.
+    FormatNanoTime,
 }
 impl NativeDurationConstructionOperation {
     /// Original function spelling.
@@ -75,6 +81,9 @@ impl NativeDurationConstructionOperation {
             Self::SubTime { .. } => "subtime",
             Self::Timestamp1 | Self::Timestamp2 => "timestamp",
             Self::TimestampAdd => "timestampadd",
+            Self::DateFormat => "date_format",
+            Self::FormatBytes => "format_bytes",
+            Self::FormatNanoTime => "format_nano_time",
         }
     }
     /// Original fixed argument count.
@@ -88,7 +97,8 @@ impl NativeDurationConstructionOperation {
             | Self::PeriodAdd
             | Self::PeriodDiff
             | Self::GetFormat
-            | Self::DateDiff => 2,
+            | Self::DateDiff
+            | Self::DateFormat => 2,
             _ => 1,
         }
     }
