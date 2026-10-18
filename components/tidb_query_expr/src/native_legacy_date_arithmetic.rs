@@ -1,22 +1,18 @@
 // Copyright 2026 TiKV Project Authors. Licensed under Apache-2.0.
 
-//! Legacy DATE_ADD/SUB's three reader domains. This is not the ordinary
-//! calendar evaluator or a wire arithmetic alias. MyDecimal parse/round/render
-//! remains an explicitly requested generic native primitive, not a claim that
-//! MyDecimal itself has been shared or transcreated.
+//! Legacy DATE_ADD/SUB compatibility transport for three original reader
+//! domains. Actual control and arithmetic live in
+//! NativeLegacyDateArithmeticValues. The DecimalText wire request remains
+//! compatible; native callers use the exact shared NativeMyDecimal
+//! parse/round/render primitive directly. This is not a complete upstream
+//! Go-package transcreation claim.
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::codec::{
     data_type::{Bytes, BytesRef, ChunkedVec, EvaluableRef, EvaluableRet, Int},
     mysql::{
-        Decimal, Time, TimeType,
-        time::{
-            NativeSessionTimeZone, NativeTemporalValue, native_core_add_date,
-            native_core_add_duration, native_extract_duration_value, native_is_clock_unit,
-            native_is_date_format, native_parse_duration_value, native_parse_time,
-            native_parse_time_from_decimal_text, native_parse_time_from_float64,
-            native_parse_time_from_int64,
-        },
+        TimeType,
+        time::{NativeSessionTimeZone, NativeTemporalValue},
     },
 };
 
@@ -210,24 +206,6 @@ fn duration_value(value: &[u8]) -> Option<(i64, i64)> {
         return None;
     };
     Some((nanos, fsp))
-}
-fn decimal_text(value: &[u8]) -> Option<String> {
-    let Identity::Decimal {
-        negative,
-        scale,
-        storage_scale,
-        coefficient,
-        ..
-    } = decode_native_identity(value).ok()?
-    else {
-        return None;
-    };
-    Some(Decimal::native_format_visible(
-        negative,
-        coefficient,
-        scale,
-        storage_scale,
-    ))
 }
 fn date_channel(meta: NativeLegacyDateArithmeticMetadata) -> NativeLegacyDateArithmeticChannel {
     use NativeLegacyDateArithmeticChannel as C;
@@ -541,24 +519,163 @@ pub fn legacy_date_arithmetic_parse_native_args_valid(
         && raw.and_then(state).is_some_and(|s| s.phase == 2)
         && native_legacy_date_arithmetic_output_bound(raw, None).is_some()
 }
+fn value_error(error: crate::NativeLegacyDateArithmeticValueError) -> Error {
+    match error {
+        crate::NativeLegacyDateArithmeticValueError::InvalidResponse => Error::Invalid,
+        crate::NativeLegacyDateArithmeticValueError::ResourceLimit => Error::Capacity,
+    }
+}
+fn value_input(
+    channel: NativeLegacyDateArithmeticChannel,
+    value: Option<&[u8]>,
+) -> FrameResult<crate::NativeLegacyDateArithmeticInput<'_>> {
+    use NativeLegacyDateArithmeticChannel as C;
+
+    use crate::NativeLegacyDateArithmeticInput as V;
+    Ok(match channel {
+        C::Bytes => V::Bytes(value),
+        C::FoldedInt => V::FoldedInt(
+            value
+                .map(|v| {
+                    v.try_into()
+                        .map(i128::from_le_bytes)
+                        .map_err(|_| Error::Invalid)
+                })
+                .transpose()?,
+        ),
+        C::Real => V::Real(
+            value
+                .map(|v| {
+                    v.try_into()
+                        .map(u64::from_le_bytes)
+                        .map(f64::from_bits)
+                        .map_err(|_| Error::Invalid)
+                })
+                .transpose()?,
+        ),
+        C::Time => V::Time(
+            value
+                .map(|v| time_value(v).ok_or(Error::Invalid))
+                .transpose()?,
+        ),
+        C::Duration => V::Duration(
+            value
+                .map(|v| duration_value(v).ok_or(Error::Invalid))
+                .transpose()?,
+        ),
+        C::Decimal => V::Decimal(
+            value
+                .map(|v| {
+                    let Identity::Decimal {
+                        negative,
+                        scale,
+                        storage_scale,
+                        declared_shape,
+                        coefficient,
+                    } = decode_native_identity(v)?
+                    else {
+                        return Err(Error::Invalid);
+                    };
+                    Ok(tidb_query_datatype::codec::mysql::NativeDecimalParseRef {
+                        negative,
+                        digits: coefficient,
+                        scale,
+                        storage_scale,
+                        declared_shape,
+                    })
+                })
+                .transpose()?,
+        ),
+    })
+}
+fn value_state(s: State<'_>) -> FrameResult<crate::NativeLegacyDateArithmeticValues> {
+    crate::NativeLegacyDateArithmeticValues::from_compat_parts(
+        s.meta,
+        s.phase,
+        s.unit,
+        s.date
+            .map(|v| value_input(date_channel(s.meta), Some(v)))
+            .transpose()?,
+        s.time,
+        s.duration,
+        s.text,
+    )
+    .map_err(value_error)
+}
+fn value_report(
+    s: State<'_>,
+    actual: &crate::NativeLegacyDateArithmeticValues,
+    step: crate::NativeLegacyDateArithmeticValueStep,
+    date_reply: Option<&[u8]>,
+    limit: usize,
+) -> FrameResult<Option<Vec<u8>>> {
+    use crate::{NativeLegacyDateArithmeticValue as V, NativeLegacyDateArithmeticValueStep as A};
+    match step {
+        A::Ready {
+            value: V::Null,
+            presence: 0,
+        } => null(limit),
+        A::Ready {
+            value: V::Text(text),
+            presence: 1,
+        } => terminal(1, &text, limit),
+        A::Ready {
+            value: V::Time(value),
+            presence: 1,
+        } => terminal(
+            2,
+            &encode_native_identity(Identity::Time {
+                core: value.raw,
+                kind: value.kind as u8,
+                fsp: value.fsp,
+            })?,
+            limit,
+        ),
+        A::Ready {
+            value: V::Duration { nanos, fsp },
+            presence: 1,
+        } => terminal(
+            3,
+            &encode_native_identity(Identity::Duration { nanos, fsp })?,
+            limit,
+        ),
+        A::Ready { .. } => Err(Error::Invalid),
+        A::Source { .. } | A::ParseDate | A::DecimalText { .. } => state_report(
+            State {
+                meta: s.meta,
+                phase: actual.phase,
+                unit: actual.unit.as_deref(),
+                date: if actual.date.is_some() {
+                    date_reply.or(s.date)
+                } else {
+                    None
+                },
+                time: actual.time,
+                duration: actual.duration,
+                text: actual.text.as_deref(),
+            },
+            limit,
+        ),
+    }
+}
 fn head(raw: Option<&[u8]>, domain: u8) -> FrameResult<Option<Vec<u8>>> {
     let limit = bound(raw, None)?;
     if !head_valid(raw, domain) {
         return Err(Error::Invalid);
     }
     let meta = metadata(raw.unwrap()).ok_or(Error::Invalid)?;
-    state_report(
-        State {
-            meta,
-            phase: if domain == 0 { 0 } else { 1 },
-            unit: None,
-            date: None,
-            time: None,
-            duration: None,
-            text: None,
-        },
-        limit,
-    )
+    let s = State {
+        meta,
+        phase: if domain == 0 { 0 } else { 1 },
+        unit: None,
+        date: None,
+        time: None,
+        duration: None,
+        text: None,
+    };
+    let mut actual = crate::NativeLegacyDateArithmeticValues::compat_initial(meta);
+    let step = actual.begin().map_err(value_error)?;
+    value_report(s, &actual, step, None, limit)
 }
 pub(crate) fn evaluate_legacy_date_arithmetic_text_head_native(
     raw: Option<&[u8]>,
@@ -575,109 +692,6 @@ pub(crate) fn evaluate_legacy_date_arithmetic_duration_head_native(
 ) -> FrameResult<Option<Vec<u8>>> {
     head(raw, 2)
 }
-fn apply(s: State<'_>, interval: &str, limit: usize) -> FrameResult<Option<Vec<u8>>> {
-    let unit = s.unit.ok_or(Error::Invalid)?;
-    if let Some((nanos, fsp)) = s.duration {
-        let Ok((delta, delta_fsp)) = native_extract_duration_value(unit, interval) else {
-            return null(limit);
-        };
-        let result = if s.meta.subtract {
-            nanos.checked_sub(delta)
-        } else {
-            nanos.checked_add(delta)
-        };
-        let Some(nanos) = result else {
-            return null(limit);
-        };
-        let value = encode_native_identity(Identity::Duration {
-            nanos,
-            fsp: fsp.max(delta_fsp),
-        })?;
-        return terminal(3, &value, limit);
-    }
-    let mut time = s.time.ok_or(Error::Invalid)?;
-    let Ok(parsed) = native_parse_duration_value(unit, interval) else {
-        return null(limit);
-    };
-    let sign = if s.meta.subtract { -1_i64 } else { 1_i64 };
-    // Original plain signed products, and original duration-before-calendar
-    // order. Truncation on ParsedInterval is intentionally not rejected here.
-    let raw = native_core_add_duration(time.raw, sign * parsed.nanoseconds);
-    let Some(raw) = native_core_add_date(
-        raw,
-        sign * parsed.years,
-        sign * parsed.months,
-        sign * parsed.days,
-    ) else {
-        return null(limit);
-    };
-    time.raw = raw;
-    if s.text_domain() {
-        let fsp = i64::from(Time::native_core_fields(raw)[6] != 0) * 6;
-        if time.set_fsp(fsp).is_err() {
-            return null(limit);
-        }
-        let mut text = String::new();
-        Time::write_native_core_display(time.raw, time.kind == TimeType::Date, time.fsp, &mut text)
-            .expect("String formatting cannot fail");
-        terminal(1, text.as_bytes(), limit)
-    } else {
-        let value = encode_native_identity(Identity::Time {
-            core: time.raw,
-            kind: time.kind as u8,
-            fsp: time.fsp,
-        })?;
-        terminal(2, &value, limit)
-    }
-}
-fn string_interval(s: State<'_>, text: &str, limit: usize) -> FrameResult<Option<Vec<u8>>> {
-    match s.unit.ok_or(Error::Invalid)?.to_ascii_uppercase().as_str() {
-        "MICROSECOND" | "MINUTE" | "HOUR" | "DAY" | "WEEK" | "MONTH" | "QUARTER" | "YEAR" => {
-            let trimmed = text.trim();
-            let bytes = trimmed.as_bytes();
-            let mut end = usize::from(matches!(bytes.first(), Some(b'+') | Some(b'-')));
-            let from = end;
-            while end < bytes.len() && bytes[end].is_ascii_digit() {
-                end += 1;
-            }
-            apply(s, if end == from { "0" } else { &trimmed[..end] }, limit)
-        }
-        "SECOND" => state_report(
-            State {
-                phase: 4,
-                text: Some(text),
-                ..s
-            },
-            limit,
-        ),
-        _ => apply(s, text, limit),
-    }
-}
-fn decimal_interval(s: State<'_>, text: &str, limit: usize) -> FrameResult<Option<Vec<u8>>> {
-    let reformatted = match s.unit.ok_or(Error::Invalid)?.to_ascii_uppercase().as_str() {
-        "HOUR_MINUTE" | "MINUTE_SECOND" => text.replace('.', ":"),
-        "YEAR_MONTH" => text.replace('.', "-"),
-        "DAY_HOUR" => text.replace('.', " "),
-        "DAY_MINUTE" => format!("0 {}", text.replace('.', ":")),
-        "DAY_SECOND" => format!("0 00:{}", text.replace('.', ":")),
-        "DAY_MICROSECOND" => format!("0 00:00:{text}"),
-        "HOUR_MICROSECOND" => format!("00:00:{text}"),
-        "HOUR_SECOND" => format!("00:{}", text.replace('.', ":")),
-        "MINUTE_MICROSECOND" => format!("00:{text}"),
-        "SECOND" | "SECOND_MICROSECOND" => text.to_owned(),
-        _ => {
-            return state_report(
-                State {
-                    phase: 5,
-                    text: Some(text),
-                    ..s
-                },
-                limit,
-            );
-        }
-    };
-    apply(s, &reformatted, limit)
-}
 pub(crate) fn evaluate_legacy_date_arithmetic_step_native(
     raw: Option<&[u8]>,
     value: Option<&[u8]>,
@@ -687,80 +701,20 @@ pub(crate) fn evaluate_legacy_date_arithmetic_step_native(
         return Err(Error::Invalid);
     }
     let s = state(raw.unwrap()).ok_or(Error::Invalid)?;
-    let Some(value) = value else {
-        return null(limit);
-    };
-    match s.phase {
-        0 => {
-            let unit = String::from_utf8_lossy(value);
-            state_report(
-                State {
-                    unit: Some(&unit),
-                    phase: if s.text_domain() { 1 } else { 3 },
-                    ..s
-                },
-                limit,
-            )
-        }
-        1 if s.text_domain() => {
-            if s.meta.date == NativeLegacyDateArithmeticDateKind::Int
-                && i64::try_from(i128::from_le_bytes(
-                    value.try_into().map_err(|_| Error::Invalid)?,
-                ))
-                .is_err()
-            {
-                return null(limit);
-            }
-            state_report(
-                State {
-                    date: Some(value),
-                    phase: 2,
-                    ..s
-                },
-                limit,
-            )
-        }
-        1 => {
-            let next = if s.meta.date == NativeLegacyDateArithmeticDateKind::Datetime {
-                State {
-                    time: Some(time_value(value).ok_or(Error::Invalid)?),
-                    phase: 0,
-                    ..s
-                }
-            } else {
-                State {
-                    duration: Some(duration_value(value).ok_or(Error::Invalid)?),
-                    phase: 0,
-                    ..s
-                }
-            };
-            // Typed zero datetimes do NOT skip either later getter.
-            state_report(next, limit)
-        }
-        3 => match s.meta.interval {
-            NativeLegacyDateArithmeticIntervalKind::String => {
-                string_interval(s, &String::from_utf8_lossy(value), limit)
-            }
-            NativeLegacyDateArithmeticIntervalKind::Int => apply(
-                s,
-                &i128::from_le_bytes(value.try_into().map_err(|_| Error::Invalid)?).to_string(),
-                limit,
-            ),
-            NativeLegacyDateArithmeticIntervalKind::Real => apply(
-                s,
-                &f64::from_bits(u64::from_le_bytes(
-                    value.try_into().map_err(|_| Error::Invalid)?,
-                ))
-                .to_string(),
-                limit,
-            ),
-            NativeLegacyDateArithmeticIntervalKind::Decimal => {
-                decimal_interval(s, &decimal_text(value).ok_or(Error::Invalid)?, limit)
-            }
-        },
-        4 | 5 => apply(s, &String::from_utf8_lossy(value), limit),
-        _ => Err(Error::Invalid),
+    let mut actual = value_state(s)?;
+    let step = if matches!(s.phase, 4 | 5) {
+        actual.resume_decimal_text(value.ok_or(Error::Invalid)?)
+    } else {
+        actual.resume_source(value_input(s.request().ok_or(Error::Invalid)?.1, value)?)
     }
+    .map_err(value_error)?;
+    value_report(
+        s,
+        &actual,
+        step,
+        if s.phase == 1 { value } else { None },
+        limit,
+    )
 }
 pub(crate) fn evaluate_legacy_date_arithmetic_parse_native(
     raw: Option<&[u8]>,
@@ -772,66 +726,9 @@ pub(crate) fn evaluate_legacy_date_arithmetic_parse_native(
         return Err(Error::Invalid);
     }
     let s = state(raw.unwrap()).ok_or(Error::Invalid)?;
-    let value = s.date.ok_or(Error::Invalid)?;
-    let clock = native_is_clock_unit(s.unit.ok_or(Error::Invalid)?);
-    use NativeLegacyDateArithmeticDateKind as D;
-    let parsed = match s.meta.date {
-        D::String => {
-            let text = String::from_utf8_lossy(value);
-            let kind = if !native_is_date_format(&text) || clock {
-                TimeType::DateTime
-            } else {
-                TimeType::Date
-            };
-            native_parse_time(&text, kind, 6, false, false, false, true, zone)
-                .map(|p| p.time)
-                .ok()
-        }
-        D::Int => {
-            let n = i128::from_le_bytes(value.try_into().map_err(|_| Error::Invalid)?);
-            match i64::try_from(n) {
-                Ok(n) => native_parse_time_from_int64(n, false, false, zone).ok(),
-                Err(_) => None,
-            }
-        }
-        D::Real => native_parse_time_from_float64(
-            f64::from_bits(u64::from_le_bytes(
-                value.try_into().map_err(|_| Error::Invalid)?,
-            )),
-            false,
-            false,
-            zone,
-        )
-        .into_result()
-        .ok(),
-        D::Decimal => native_parse_time_from_decimal_text(
-            &decimal_text(value).ok_or(Error::Invalid)?,
-            false,
-            false,
-            zone,
-        )
-        .into_result()
-        .ok(),
-        _ => return Err(Error::Invalid),
-    };
-    let Some(mut time) = parsed else {
-        return null(limit);
-    };
-    if clock && s.meta.date != D::String {
-        time.set_kind(TimeType::DateTime);
-    }
-    if time.raw == 0 {
-        return null(limit);
-    }
-    state_report(
-        State {
-            date: None,
-            time: Some(time),
-            phase: 3,
-            ..s
-        },
-        limit,
-    )
+    let mut actual = value_state(s)?;
+    let step = actual.parse_date(zone).map_err(value_error)?;
+    value_report(s, &actual, step, None, limit)
 }
 fn kernel(value: FrameResult<Option<Vec<u8>>>) -> Result<Option<Bytes>> {
     value.map_err(|e| other_err!("Invalid legacy date arithmetic transport: {:?}", e))

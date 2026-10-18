@@ -150,6 +150,34 @@ flag or eligibility policy described above.
   expressions or maintain a second signature dispatch table. Prepared calls
   retain the original argument-index mapping: IN's legacy constant extraction
   can leave dynamic children in swap-remove order, not source order.
+- Legacy DATE_ADD/SUB text/time/duration callers use actual
+  `NativeLegacyDateArithmeticValues` state instead of Ready head/step/parse
+  programs. Explicit wire compatibility keeps its original codec, validation,
+  report layout, pending raw date identity and output planner, delegating control
+  to that same state. It is separate from ordinary scalar date_add_<unit>.
+  Preserve unit-before-date text demand versus date-before-unit typed demand,
+  zero typed Time's later reads, full folded i128 intervals, early out-of-i64
+  date NULL, fixed parse flags and the caller's explicit legacy timezone.
+  Presence is a distinct SDK projection; zero duration remains present. Generic
+  MyDecimal parsing/HalfUp/rendering calls the exact shared datatype primitive
+  used by the frontend facade; wire owners still supply their original replies.
+  Check demanded owned text/coefficient, visible scale, parse, generic decimal,
+  math and result work under finite allowances. Each public advance closes its
+  liveness flag BEFORE running and reopens only on success, so a caught invariant
+  unwind cannot be replaced by a NULL reply. Do not catch/normalize that panic.
+  The raw coefficient panic/replay defect has an explicit RED and regression.
+  N7h independently compared 2,377,728 old/new observations before retiring the
+  old caller/controller: 1,188,864/F0099F79736B34C1 plus
+  1,188,864/1F5BF8B3E75AD934 across all 20 units. Consumer tests retain six date x
+  four interval x two signs, explicit-zone authority and zero prepared Ready
+  programs. Final frontend1656/core1103 passes retain the exact3/1 inherited
+  failures; all226 batch and4 consumer tests pass. Clippy89 expression/171
+  all-crate warning titles match N7g exactly; lint, pinned source/hunk formatting
+  and immutable fixture checks pass. See frontend
+  `rust/docs/evidence/no-fallback-n7h.md` for commands and evidence.
+  The broader unistore SimpleExpr walker, its other unsupported source families
+  and eight child-free Duration-to-Datetime ids remain global migration work;
+  this checkpoint does not claim their canonical source migration.
 - Ordinary native DATE_ADD/SUB calendar, AST-default and typed-duration callers
   use `NativeDateArithmeticValues`, an opaque actual-value continuation. Static
   unit/sign/result metadata, demanded text and prepared numeric values are actual

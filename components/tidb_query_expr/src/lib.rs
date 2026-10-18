@@ -195,6 +195,7 @@ mod native_cast_vector;
 pub use native_cast_vector::native_cast_vector;
 
 mod native_legacy_date_arithmetic;
+mod native_legacy_date_arithmetic_value;
 pub use native_legacy_date_arithmetic::{
     NativeLegacyDateArithmeticChannel, NativeLegacyDateArithmeticDateKind,
     NativeLegacyDateArithmeticIntervalKind, NativeLegacyDateArithmeticMetadata,
@@ -208,6 +209,11 @@ pub use native_legacy_date_arithmetic::{
     legacy_date_arithmetic_text_head_native_fn_meta,
     legacy_date_arithmetic_time_head_native_args_valid,
     legacy_date_arithmetic_time_head_native_fn_meta,
+};
+pub use native_legacy_date_arithmetic_value::{
+    NativeLegacyDateArithmeticInput, NativeLegacyDateArithmeticValue,
+    NativeLegacyDateArithmeticValueError, NativeLegacyDateArithmeticValueStep,
+    NativeLegacyDateArithmeticValues,
 };
 
 mod native_decimal_int_div;
