@@ -150,6 +150,34 @@ flag or eligibility policy described above.
   expressions or maintain a second signature dispatch table. Prepared calls
   retain the original argument-index mapping: IN's legacy constant extraction
   can leave dynamic children in swap-remove order, not source order.
+- UNIX_TIMESTAMP and FROM_UNIXTIME in-process callers consume actual values
+  from `native_epoch_value`, including a consuming parsed-time continuation and
+  an actual accepted epoch. Explicit wire adapters retain the six/five original
+  profile codecs and planners and delegate to those same functions; a private
+  no-work-limit policy belongs only to their existing transport planner.
+  Ordinary UNIX_TIMESTAMP keeps input FSP, all-zero NULL versus partial-zero
+  numeric zero, unconditional parsing warnings and a fresh second zone getter
+  only for an accepted parsed time. Legacy typed Time uses its explicit strict
+  zone policy and exact Decimal zero-scale0/valid-scale6 representations.
+  FROM_UNIXTIME keeps numeric-kind precision, native rounding/carry, warning plus
+  its accepted zero epoch, and HandleTruncate before the zone. Legacy Decimal
+  retains visible-text/f64 conversion and its extra ordinary u32 nanos*1000.
+  DATE_FORMAT text/core callers use the existing shared datatype primitives;
+  text/core trailing-percent and invalid-date policies remain different.
+  Canonical source hosts authenticate all eager operands, including suppressed
+  formats, drop store borrows before callbacks and copy a format only when a
+  valid local result consumes it. Clock0 finishes without a fabricated argument.
+  FROM_UNIXTIME's temporal result policy precedes the original ScalarFunction
+  return-family conversion. That same bounded original conversion also closes
+  the previously missed EXTRACT/DATE_ADD source boundaries. Work accounts for
+  actual Decimal/fixed-binary padding; a huge VARCHAR truncation width does not
+  imply that many allocated bytes.
+  N7j paired384264 old/new observations with old digest14B4FDA02CC55EED before
+  retiring independent old callers/controllers. Final frontend1676/core1111
+  passes retain exactly3/1 inherited failures; all240 batch,26 Projection and
+  four existing unistore timestamp/format consumer tests pass. Clippy89 expression/
+  171 all-crate warning titles match N7i. See frontend
+  `rust/docs/evidence/no-fallback-n7j.md` for proof, commands and remaining scope.
 - Ordinary EXTRACT and the eleven named broad-composite functions consume
   actual source values. `native_extract_value` owns original type selection,
   raw-core/nanosecond extraction, the consuming mixed duration-to-datetime state
@@ -1249,42 +1277,24 @@ flag or eligibility policy described above.
   the demanded second child and Finish after the head invocation has ended.
   No-context preparation still occurs before creating its one-shot owner.
   There is no new carrier, general driver or PB/legacy admission. IF is separate.
-  FROM_UNIXTIME uses five closed profiles in `native_from_unixtime.rs`: actual
-  numeric identity, coerced UTF8 text, local-zone continuation, typed legacy
-  Decimal and actual NULL. Epoch output is tag0+secondsLE8+microsLE4+FSP, or
-  tag1 with the same fields plus a computed truncate message. The frontend
-  handles that warning policy before reading the zone and forwards the whole
-  original report in existing TemporalValue metadata. Only valid local UTF8
-  reaches lazy layout coercion and the existing DateFormatTextNative worker.
-  Numeric14/Text(max14,inputlen+64)/Null0 reply preflight lives in the common
-  ready path; Local/Legacy retain existing64-byte preflight and owned-zone
-  capacity/RAII checks. Raw Decimal representation is not math admission.
-  Legacy instead keeps its original f64 range (whose upper literal rounds to
-  MAX+1), ordinary u32 nanos-times1000 and DateTime FSP0 with retained raw
-  microseconds. The native generic scoped callback projects actual Time/NULL;
-  successful two-argument legacy then evaluates lossy layout and reuses
-  DateFormatCoreNative under selected raw_columns. It preserves missing-first
-  panic. Native eval_shared borrows an available parent scope/execution with
-  the existing lexical binding while keeping the Shared child's semantic
-  context; an already-active child scope wins, and no-capability callers keep
-  their old path. Live DAG request-owner lifecycle remains M6 work. Native PB's extra return-time cast and outer
-  declared-family conversion remain separate; wire kernels are unchanged.
-  UNIX_TIMESTAMP adds six closed profiles in `native_unix_timestamp.rs`.
-  Ordinary parsing uses actual TemporalParseText/source-kind/zone1, then returns
-  NULL, a terminal numeric identity, a computed warning, or an actual Time frame
-  requesting zone2. Only that last disposition permits the second native getter.
-  Unary TemporalValue carries the unchanged frame and fresh owned zone to the
-  value worker; the two legacy profiles instead carry actual typed Time and the
-  separately borrowed request zone. Legacy accepts raw kind/FSP without DATE
-  clock clearing or normalization, uses strict native_core_to_datetime(false),
-  and preserves Decimal zero-scale0 versus valid-scale6. Ordinary conversion
-  keeps its distinct Naive gap policy and source FSP. Clock input is actual
-  seconds/full-u32 nanos, with original i64 arithmetic and no dummy offset.
-  The old wire kernels retain their DST/ret-field Decimal policies; only the
-  pure microsecond-range predicate is shared. TemporalValue uses the same owned
-  zone guard/accounting and a closed unary role; no new pool, EvalConfig or
-  resource cause is added. Native PB signatures retain the ordinary route,
-  including actual observed NULL, rather than adopting legacy result policies.
+  FROM_UNIXTIME retains five explicit wire-compatibility profiles in
+  `native_from_unixtime.rs`: numeric identity, UTF8 text, local epoch handoff,
+  typed legacy Decimal and actual NULL. The14-byte epoch header and optional
+  truncate diagnostic are unchanged. Since N7j, native callers use actual epoch
+  state rather than forwarding this report. HandleTruncate finishes before zone
+  access; only a valid local result consumes the already evaluated format.
+  The legacy pack callback receives its original context without selecting a
+  second execution; text/core DATE_FORMAT use the same existing datatype
+  formatting primitives as compatibility workers. Legacy fractional and native
+  rounding policies remain deliberately separate.
+  UNIX_TIMESTAMP retains six explicit compatibility profiles in
+  `native_unix_timestamp.rs`. Their codecs/validators/planners delegate to the
+  same actual numeric/parse/finish/strict-legacy functions as in-process callers.
+  The opaque actual parsed time alone requests the independently obtained second
+  zone; there is no serialized native continuation or repeated parse. Original
+  source FSP, range, full-u32 clock nanos, ordinary i64 arithmetic and distinct
+  native/legacy DST/zero-scale policies remain intact. No new pool, EvalConfig,
+  fallback expression executor or broad PB-source admission is introduced.
   Ordinary TIMESTAMP uses four closed profiles in `native_timestamp.rs`:
   actual-NULL, one-argument parse/format, two-argument parse/base and duration
   addition. Nonnull heads carry actual TemporalParseText text/source-kind/zone,

@@ -4,13 +4,10 @@
 //! legacy typed-Time policy. No caller performs numeric preparation or
 //! rounding.
 
-use chrono::{Datelike, NaiveDateTime, TimeZone, Timelike, Utc};
+use chrono::{Datelike, NaiveDateTime, Timelike, Utc};
 use tidb_query_datatype::codec::{
-    convert::{ToStringValue, native_warning_subject_byte_cap},
-    mysql::{
-        Decimal, TimeType,
-        time::{NativeSessionTimeZone, NativeTemporalValue, native_core_from_datetime},
-    },
+    mysql::{NativeDecimalParseRef, time::NativeSessionTimeZone},
+    native_sql_string::NativeSqlStringInput as Input,
 };
 
 use crate::{
@@ -18,6 +15,43 @@ use crate::{
 };
 
 type FrameResult<T> = Result<T, NativeIdentityFrameError>;
+use crate::native_epoch_value::{self as actual, Budget};
+fn actual_error(e: crate::NativeEpochValueError) -> NativeIdentityFrameError {
+    match e {
+        crate::NativeEpochValueError::Resource => NativeIdentityFrameError::Capacity,
+        crate::NativeEpochValueError::InvalidKind => NativeIdentityFrameError::Invalid,
+    }
+}
+fn actual_input(value: NativeIdentityRef<'_>) -> FrameResult<Input<'_>> {
+    Ok(match value {
+        NativeIdentityRef::Int(n) => Input::Int(n),
+        NativeIdentityRef::UInt(n) => Input::UInt(n),
+        NativeIdentityRef::Real(n) => Input::Real(f64::from_bits(n)),
+        NativeIdentityRef::Float32(n) => Input::Float32(f64::from_bits(n)),
+        NativeIdentityRef::Decimal {
+            negative,
+            coefficient,
+            scale,
+            storage_scale,
+            declared_shape,
+        } => Input::Decimal(NativeDecimalParseRef {
+            negative,
+            digits: coefficient,
+            scale,
+            storage_scale,
+            declared_shape,
+        }),
+        _ => return Err(NativeIdentityFrameError::Invalid),
+    })
+}
+fn encode_actual(value: crate::NativeFromUnixTimeValue) -> FrameResult<Option<Vec<u8>>> {
+    use crate::NativeFromUnixTimeValue as V;
+    match value {
+        V::Null => Ok(None),
+        V::Ready(v) => encode_epoch(v.epoch, None).map(Some),
+        V::Truncate { value, message } => encode_epoch(value.epoch, Some(&message)).map(Some),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeFromUnixTimeEpoch {
@@ -110,7 +144,7 @@ fn encode_epoch(epoch: NativeFromUnixTimeEpoch, message: Option<&str>) -> FrameR
     Ok(bytes)
 }
 
-fn rounded_epoch(total_nanos: i128, fsp: usize) -> Option<NativeFromUnixTimeEpoch> {
+pub(super) fn rounded_epoch(total_nanos: i128, fsp: usize) -> Option<NativeFromUnixTimeEpoch> {
     let integral = total_nanos / 1_000_000_000;
     if integral > 32_536_771_199 {
         return None;
@@ -124,7 +158,7 @@ fn rounded_epoch(total_nanos: i128, fsp: usize) -> Option<NativeFromUnixTimeEpoc
     })
 }
 
-fn parse_epoch(text: &str, fsp: usize) -> Option<NativeFromUnixTimeEpoch> {
+pub(super) fn parse_epoch(text: &str, fsp: usize) -> Option<NativeFromUnixTimeEpoch> {
     let text = text.trim();
     let (int_part, frac_part) = text.split_once('.').unwrap_or((text, ""));
     let int_part = int_part.parse::<i64>().ok()?;
@@ -143,71 +177,20 @@ fn parse_epoch(text: &str, fsp: usize) -> Option<NativeFromUnixTimeEpoch> {
     rounded_epoch(i128::from(int_part) * 1_000_000_000 + frac_nanos, fsp)
 }
 
-fn decimal_text(value: NativeIdentityRef<'_>) -> Option<String> {
-    let NativeIdentityRef::Decimal {
-        negative,
-        coefficient,
-        scale,
-        storage_scale,
-        ..
-    } = value
-    else {
-        return None;
-    };
-    Some(Decimal::native_format_visible(
-        negative,
-        coefficient,
-        scale,
-        storage_scale,
-    ))
-}
-
 pub(crate) fn evaluate_from_unixtime_numeric_native(
     value: NativeIdentityRef<'_>,
 ) -> FrameResult<Option<Vec<u8>>> {
-    let (text, fsp) = match value {
-        NativeIdentityRef::Int(value) => (value.to_string(), 0),
-        NativeIdentityRef::UInt(value) => (value.to_string(), 0),
-        value @ NativeIdentityRef::Decimal { .. } => {
-            let text = decimal_text(value).expect("matched actual decimal identity");
-            let scale = text
-                .split_once('.')
-                .map_or(0, |(_, fraction)| fraction.len())
-                .min(6);
-            (text, scale)
-        }
-        NativeIdentityRef::Real(bits) | NativeIdentityRef::Float32(bits) => {
-            let Some(decimal) = Decimal::native_from_f64(f64::from_bits(bits)) else {
-                return Ok(None);
-            };
-            // native_from_f64's MySQL parser sets result_frac=storage_frac on
-            // every exit (its logical-zero finish also sets both to zero).
-            // Thus this storage presenter is exactly the source visible text;
-            // it is never used for the arbitrary raw-Decimal input branch.
-            debug_assert_eq!(decimal.storage_scale(), decimal.result_scale());
-            (decimal.to_string_value(), 6)
-        }
-        _ => return Err(NativeIdentityFrameError::Invalid),
-    };
-    parse_epoch(&text, fsp)
-        .map(|epoch| encode_epoch(epoch, None))
-        .transpose()
+    encode_actual(
+        actual::native_from_unixtime_numeric_values_budget(actual_input(value)?, Budget(None))
+            .map_err(actual_error)?,
+    )
 }
 
 pub(crate) fn evaluate_from_unixtime_text_native(text: &str) -> FrameResult<Option<Vec<u8>>> {
-    let trimmed = text.trim();
-    let (int_part, _) = trimmed.split_once('.').unwrap_or((trimmed, ""));
-    if int_part.parse::<i64>().is_err() {
-        let message = format!(
-            "Truncated incorrect DECIMAL value: '{}'",
-            native_warning_subject_byte_cap(trimmed)
-        );
-        let epoch = rounded_epoch(0, 0).expect("the source's zero epoch is in range");
-        return encode_epoch(epoch, Some(&message)).map(Some);
-    }
-    parse_epoch(text, 6)
-        .map(|epoch| encode_epoch(epoch, None))
-        .transpose()
+    encode_actual(
+        actual::native_from_unixtime_text_values_budget(text, Budget(None))
+            .map_err(actual_error)?,
+    )
 }
 
 /// The original native instant-to-local policy, including raw fixed offsets and
@@ -227,7 +210,7 @@ pub fn native_from_unixtime_instant_to_local(
     })
 }
 
-fn format_local(local: NaiveDateTime, fsp: usize) -> String {
+pub(super) fn format_local(local: NaiveDateTime, fsp: usize) -> String {
     let mut out = format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         local.year(),
@@ -251,42 +234,32 @@ pub(crate) fn evaluate_from_unixtime_local_native(
     zone: &NativeSessionTimeZone,
 ) -> Option<String> {
     let epoch = match result {
-        NativeFromUnixTimeResult::Continue(epoch)
-        | NativeFromUnixTimeResult::Truncate { epoch, .. } => epoch,
+        NativeFromUnixTimeResult::Continue(v)
+        | NativeFromUnixTimeResult::Truncate { epoch: v, .. } => v,
     };
-    native_from_unixtime_instant_to_local(epoch.seconds, epoch.micros, zone)
-        .map(|local| format_local(local, usize::from(epoch.fsp)))
+    crate::NativeFromUnixTimeValues { epoch }
+        .local_budget(zone, Budget(None))
+        .expect("wire compatibility has no actual-work limit")
 }
 
 pub(crate) fn evaluate_from_unixtime_legacy(
     value: NativeIdentityRef<'_>,
     zone: &NativeSessionTimeZone,
 ) -> FrameResult<Option<Vec<u8>>> {
-    let text = decimal_text(value).ok_or(NativeIdentityFrameError::Invalid)?;
-    let unix = text
-        .parse::<f64>()
-        .expect("Decimal's own Display always produces valid float syntax");
-    if !(0.0..=32_536_771_199.999_999).contains(&unix) {
-        return Ok(None);
-    }
-    let whole = unix.trunc();
-    let nanos = ((unix - whole) * 1e9).round() as u32;
-    // Preserve the legacy source's additional ordinary u32 multiplication,
-    // including overflow behavior; this is intentionally NOT the native path.
-    let Some(built) = zone.timestamp_opt(whole as i64, nanos * 1_000).single() else {
-        return Ok(None);
+    let Input::Decimal(value) = actual_input(value)? else {
+        return Err(NativeIdentityFrameError::Invalid);
     };
-    let Some(time) =
-        NativeTemporalValue::new(native_core_from_datetime(built), TimeType::DateTime, 0).ok()
-    else {
-        return Ok(None);
-    };
-    encode_native_identity(NativeIdentityRef::Time {
-        core: time.raw,
-        kind: 1,
-        fsp: time.fsp,
-    })
-    .map(Some)
+    let result = actual::native_from_unixtime_legacy_values_budget(Some(value), zone, Budget(None))
+        .map_err(actual_error)?;
+    result
+        .map(|t| {
+            encode_native_identity(NativeIdentityRef::Time {
+                core: t.raw,
+                kind: 1,
+                fsp: t.fsp,
+            })
+        })
+        .transpose()
 }
 
 #[cfg(test)]

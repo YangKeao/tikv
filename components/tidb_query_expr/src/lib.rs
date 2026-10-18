@@ -276,6 +276,16 @@ pub use native_extremum_policy::{
 
 mod native_format;
 
+mod native_epoch_value;
+pub use native_epoch_value::{
+    NativeEpochValueError, NativeFromUnixTimeValue, NativeFromUnixTimeValues,
+    NativeUnixTimestampParsed, NativeUnixTimestampValue, native_date_format_core_values,
+    native_date_format_text_values, native_epoch_text_work, native_from_unixtime_legacy_values,
+    native_from_unixtime_numeric_values, native_from_unixtime_numeric_work,
+    native_from_unixtime_text_values, native_unix_timestamp_legacy_values,
+    native_unix_timestamp_now_values, native_unix_timestamp_parse_values,
+};
+
 mod native_from_unixtime;
 pub use native_from_unixtime::{
     NativeFromUnixTimeEpoch, NativeFromUnixTimeResult, decode_native_from_unixtime_result,

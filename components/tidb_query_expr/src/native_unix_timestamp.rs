@@ -6,18 +6,62 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use tidb_query_datatype::codec::mysql::{
     Time, TimeType,
-    time::{
-        NativeSessionTimeZone, NativeTemporalValue, native_core_to_datetime, native_get_time_fsp,
-        native_parse_time,
-    },
+    time::{NativeSessionTimeZone, NativeTemporalValue, native_core_to_datetime},
 };
 
 use crate::{
     NativeIdentityFrameError, NativeIdentityRef, decode_native_identity, encode_native_identity,
-    native_legacy_local_to_instant,
 };
 
 type FrameResult<T> = Result<T, NativeIdentityFrameError>;
+use crate::native_epoch_value::{self as actual, Budget};
+fn actual_error(e: crate::NativeEpochValueError) -> NativeIdentityFrameError {
+    match e {
+        crate::NativeEpochValueError::Resource => NativeIdentityFrameError::Capacity,
+        crate::NativeEpochValueError::InvalidKind => NativeIdentityFrameError::Invalid,
+    }
+}
+fn encode_actual(value: crate::NativeUnixTimestampValue) -> FrameResult<Option<Vec<u8>>> {
+    use crate::NativeUnixTimestampValue as V;
+    match value {
+        V::Null => Ok(None),
+        V::Int(n) => encode_native_identity(NativeIdentityRef::Int(n)).map(Some),
+        V::Decimal(value) => {
+            let v = value.as_ref();
+            encode_native_identity(NativeIdentityRef::Decimal {
+                negative: v.negative,
+                coefficient: v.digits,
+                scale: v.scale,
+                storage_scale: v.storage_scale,
+                declared_shape: v.declared_shape,
+            })
+            .map(Some)
+        }
+        V::NeedZone(state) => {
+            let v = state.value;
+            encode_native_identity(NativeIdentityRef::Time {
+                core: v.raw,
+                kind: 1,
+                fsp: v.fsp,
+            })
+            .map(Some)
+        }
+        V::Warning(message) => {
+            let length = message
+                .len()
+                .checked_add(3)
+                .ok_or(NativeIdentityFrameError::Capacity)?;
+            let mut frame = Vec::new();
+            frame
+                .try_reserve_exact(length)
+                .map_err(|_| NativeIdentityFrameError::Capacity)?;
+            frame.push(17);
+            frame.extend_from_slice(&1292u16.to_le_bytes());
+            frame.extend_from_slice(message.as_bytes());
+            Ok(Some(frame))
+        }
+    }
+}
 
 /// A computed numeric value, actual parsed base demanding the second zone read,
 /// or the original parsing warning. SQL NULL is the outer absence of a frame.
@@ -103,51 +147,13 @@ pub(crate) fn unix_timestamp_micros_in_range(micros: i64) -> bool {
     (1_000_000..=32_536_771_199_999_999).contains(&micros)
 }
 
-fn encode_decimal(coefficient: &[u8], scale: u32) -> FrameResult<Vec<u8>> {
-    encode_native_identity(NativeIdentityRef::Decimal {
-        negative: false,
-        scale,
-        storage_scale: scale,
-        declared_shape: None,
-        coefficient,
-    })
-}
-
+#[cfg(test)]
 fn native_result(micros: i64, fsp: usize) -> FrameResult<Vec<u8>> {
-    let micros = if unix_timestamp_micros_in_range(micros) {
-        micros
-    } else {
-        0
-    };
-    if fsp == 0 {
-        return encode_native_identity(NativeIdentityRef::Int(micros / 1_000_000));
-    }
-    let secs = micros / 1_000_000;
-    let frac = (micros % 1_000_000) / 10_i64.pow(6 - fsp as u32);
-    // This is the source canonical decimal's normalized coefficient. Its zero
-    // magnitude retains exactly storage_scale digits, not a single zero byte.
-    let coefficient = secs * 10_i64.pow(fsp as u32) + frac;
-    let digits = format!("{coefficient:0fsp$}");
-    encode_decimal(digits.as_bytes(), fsp as u32)
+    encode_actual(actual::numeric(micros, fsp, Budget(None)).map_err(actual_error)?)?
+        .ok_or(NativeIdentityFrameError::Invalid)
 }
 
-fn warning(text: &str) -> FrameResult<Vec<u8>> {
-    let message = format!("Incorrect datetime value: '{text}'");
-    let length = message
-        .len()
-        .checked_add(3)
-        .ok_or(NativeIdentityFrameError::Capacity)?;
-    let mut frame = Vec::new();
-    frame
-        .try_reserve_exact(length)
-        .map_err(|_| NativeIdentityFrameError::Capacity)?;
-    frame.push(17);
-    frame.extend_from_slice(&1292u16.to_le_bytes());
-    frame.extend_from_slice(message.as_bytes());
-    Ok(frame)
-}
-
-fn naive(value: NativeTemporalValue) -> Option<NaiveDateTime> {
+pub(super) fn naive(value: NativeTemporalValue) -> Option<NaiveDateTime> {
     let [year, month, day, hour, minute, second, micro] = Time::native_core_fields(value.raw);
     NaiveDate::from_ymd_opt(year, month as u32, day as u32)?.and_hms_micro_opt(
         hour as u32,
@@ -158,10 +164,11 @@ fn naive(value: NativeTemporalValue) -> Option<NaiveDateTime> {
 }
 
 pub(crate) fn evaluate_unix_timestamp_now_native(secs: i64, nanos: u32) -> FrameResult<Vec<u8>> {
-    // Preserve the source's ordinary i64 multiplication/addition and u32
-    // division, rather than validating through a chrono timestamp constructor.
-    let micros = i64::from(nanos / 1000) + secs * 1_000_000;
-    native_result(micros, 0)
+    encode_actual(
+        actual::native_unix_timestamp_now_values_budget(secs, nanos, Budget(None))
+            .map_err(actual_error)?,
+    )?
+    .ok_or(NativeIdentityFrameError::Invalid)
 }
 
 pub(crate) fn evaluate_unix_timestamp_parse_native(
@@ -169,54 +176,28 @@ pub(crate) fn evaluate_unix_timestamp_parse_native(
     is_float: bool,
     zone: &NativeSessionTimeZone,
 ) -> FrameResult<Option<Vec<u8>>> {
-    let parsed = native_parse_time(
-        text,
-        TimeType::DateTime,
-        i64::from(native_get_time_fsp(text)),
-        is_float,
-        true,
-        false,
-        true,
-        zone,
-    );
-    let Ok(parsed) = parsed else {
-        return warning(text).map(Some);
-    };
-    let value = parsed.time;
-    let [year, month, day, ..] = Time::native_core_fields(value.raw);
-    if year == 0 && month == 0 && day == 0 {
-        return Ok(None);
-    }
-    if month == 0 || day == 0 || naive(value).is_none() {
-        return native_result(0, usize::from(value.fsp)).map(Some);
-    }
-    encode_native_identity(NativeIdentityRef::Time {
-        core: value.raw,
-        kind: 1,
-        fsp: value.fsp,
-    })
-    .map(Some)
+    encode_actual(
+        actual::native_unix_timestamp_parse_values_budget(text, is_float, zone, Budget(None))
+            .map_err(actual_error)?,
+    )
 }
 
 pub(crate) fn evaluate_unix_timestamp_value_native(
     value: NativeTemporalValue,
     zone: &NativeSessionTimeZone,
 ) -> FrameResult<Vec<u8>> {
-    let fsp = usize::from(value.fsp);
-    let Some(naive) = naive(value) else {
-        return native_result(0, fsp);
-    };
-    let instant = match zone {
-        NativeSessionTimeZone::Local => native_legacy_local_to_instant(&chrono::Local, &naive),
-        NativeSessionTimeZone::Fixed { offset_secs, .. } => {
-            Some(naive.and_utc() - chrono::Duration::seconds(i64::from(*offset_secs)))
-        }
-        NativeSessionTimeZone::Named(tz) => native_legacy_local_to_instant(tz, &naive),
-    };
-    native_result(instant.map_or(0, |instant| instant.timestamp_micros()), fsp)
+    encode_actual(
+        crate::NativeUnixTimestampParsed { value }
+            .finish_budget(zone, Budget(None))
+            .map_err(actual_error)?,
+    )?
+    .ok_or(NativeIdentityFrameError::Invalid)
 }
 
-fn legacy_micros(value: NativeTemporalValue, zone: &NativeSessionTimeZone) -> Option<i64> {
+pub(super) fn legacy_micros(
+    value: NativeTemporalValue,
+    zone: &NativeSessionTimeZone,
+) -> Option<i64> {
     if value.raw == 0 {
         return None;
     }
@@ -230,19 +211,22 @@ pub(crate) fn evaluate_unix_timestamp_int_legacy(
     value: NativeTemporalValue,
     zone: &NativeSessionTimeZone,
 ) -> FrameResult<Vec<u8>> {
-    encode_native_identity(NativeIdentityRef::Int(
-        legacy_micros(value, zone).map_or(0, |micros| micros.div_euclid(1_000_000)),
-    ))
+    encode_actual(
+        actual::native_unix_timestamp_legacy_values_budget(Some(value), zone, false, Budget(None))
+            .map_err(actual_error)?,
+    )?
+    .ok_or(NativeIdentityFrameError::Invalid)
 }
 
 pub(crate) fn evaluate_unix_timestamp_dec_legacy(
     value: NativeTemporalValue,
     zone: &NativeSessionTimeZone,
 ) -> FrameResult<Vec<u8>> {
-    match legacy_micros(value, zone) {
-        None => encode_decimal(b"0", 0),
-        Some(micros) => encode_decimal(micros.to_string().as_bytes(), 6),
-    }
+    encode_actual(
+        actual::native_unix_timestamp_legacy_values_budget(Some(value), zone, true, Budget(None))
+            .map_err(actual_error)?,
+    )?
+    .ok_or(NativeIdentityFrameError::Invalid)
 }
 
 #[cfg(test)]
@@ -409,7 +393,10 @@ mod tests {
         }
         let wrong = encode_native_identity(NativeIdentityRef::UInt(1)).unwrap();
         assert!(decode_native_unix_timestamp_result(&wrong).is_none());
-        let warning = warning("界").unwrap();
+        let warning =
+            evaluate_unix_timestamp_parse_native("界", false, &NativeSessionTimeZone::utc())
+                .unwrap()
+                .unwrap();
         assert_eq!(
             decode_native_unix_timestamp_result(&warning),
             Some(NativeUnixTimestampResult::Warning {
