@@ -6,12 +6,11 @@
 //! not formatted members, a class flag, per-member checksums, or a computed
 //! sum.
 
-use serde_json::{Number, Value as Json};
+use serde_json::Value as Json;
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
-use tidb_query_datatype::codec::{
-    data_type::{Bytes, BytesRef, ChunkedVec, EvaluableRef, EvaluableRet},
-    mysql::Decimal,
+use tidb_query_datatype::codec::data_type::{
+    Bytes, BytesRef, ChunkedVec, EvaluableRef, EvaluableRet,
 };
 
 use crate::NativeIdentityFrameError;
@@ -52,50 +51,6 @@ pub(crate) fn native_json_sum_crc32_output_bound(input: Option<&[u8]>) -> Option
     Some(if input.is_some() { 9 } else { 0 })
 }
 
-fn format_number(number: &Number) -> String {
-    if let Some(integer) = number.as_i64() {
-        return integer.to_string();
-    }
-    if let Some(integer) = number.as_u64() {
-        return integer.to_string();
-    }
-    let value = number
-        .as_f64()
-        .expect("serde JSON numbers are finite f64 here");
-    Decimal::native_format_json_sum_float(value)
-}
-
-fn compute(document: Json) -> NativeJsonSumCrc32Result {
-    let Json::Array(values) = document else {
-        return NativeJsonSumCrc32Result::RequiresArray;
-    };
-    let mut saw_string = false;
-    let mut saw_number = false;
-    let mut sum = 0_i64;
-    for value in values {
-        let text = match value {
-            Json::String(value) if !saw_number => {
-                saw_string = true;
-                value
-            }
-            Json::Number(value) if !saw_string => {
-                saw_number = true;
-                format_number(&value)
-            }
-            Json::Bool(_) | Json::Null | Json::Array(_) | Json::Object(_) => {
-                return NativeJsonSumCrc32Result::RequiresScalar;
-            }
-            Json::String(_) | Json::Number(_) => {
-                return NativeJsonSumCrc32Result::RequiresHomogeneous;
-            }
-        };
-        // Shared IEEE implementation already used by the CRC32 builtin. Keep
-        // the sum's explicit wrapping rather than saturating or checked addition.
-        sum = sum.wrapping_add(i64::from(file_system::calc_crc32_bytes(text.as_bytes())));
-    }
-    NativeJsonSumCrc32Result::Value(sum)
-}
-
 fn encode_report(result: NativeJsonSumCrc32Result) -> FrameResult<Vec<u8>> {
     let (tag, sum) = match result {
         NativeJsonSumCrc32Result::Value(value) => (0, Some(value)),
@@ -128,7 +83,11 @@ pub(crate) fn evaluate_json_sum_crc32_serde_native(
     // expression crate's float_roundtrip feature preserves serialized f64 bits.
     let document: Json =
         serde_json::from_slice(input).map_err(|_| NativeIdentityFrameError::Invalid)?;
-    encode_report(compute(document)).map(Some)
+    encode_report(
+        crate::native_json_sum_crc32_value::compute(&document, None)
+            .expect("ordinary wire owner imposes no new value allowance"),
+    )
+    .map(Some)
 }
 
 #[rpn_fn(nullable)]

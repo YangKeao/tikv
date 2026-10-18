@@ -671,16 +671,28 @@ flag or eligibility policy described above.
   capacities are checked by the SDK reducer. This is not whole-process allocation
   recovery. Native eligibility and compiled source closure remain separate;
   other families and final global fallback retirement remain incomplete.
-  The existing native JSON_SUM_CRC32 scalar-array domain uses query_expr's
-  `native_json_sum_crc32.rs`: one nullable Bytes/OwnBytes worker owns ordered
-  classification, numeric spelling, IEEE CRC and wrapping accumulation.
-  Actual prepared serde documents are inputs, not precomputed checksums;
-  NULL versus JSON null and three original semantic errors remain distinct.
-  The output is bounded by9bytes before dispatch (actual NULL needs0), with
-  actual capacities checked. Decimal's narrow `native_format_json_sum_float`
-  keeps Rust Display digits but shares Go-g layout; CRC uses the existing
-  file_system service. This is not SQL ARRAY-target conversion support or
-  new wire admission, nor a physical parsing/allocation peak guarantee.
+  The native JSON_SUM_CRC32 scalar-array domain computes actual documents in
+  `native_json_sum_crc32_value.rs`. Borrowed string members are checksummed
+  without copies; numeric members retain original integer/u64/finite-f64 Go-g
+  spelling. Ordered scalar/homogeneity errors, SQL NULL versus JSON null, IEEE
+  CRC and explicit wrapping accumulation remain unchanged. The input API uses
+  the existing ordinary-document coercion/parser directly, eliminating the
+  frontend Ready worker's serialization/reparse and report projection.
+  Native value calls bound demanded document parse/display, Decimal visible
+  padding and number-format capacity before work; invalid UTF-8 and unsupported
+  kinds retain their earlier admission errors. Zero-cost borrowed document
+  string/empty/first-error cases pay no retired report-header charge. These are
+  finite logical allowances, not physical parsing/allocation peak guarantees.
+  JsonSumCrc32Native sources authenticate actual producer/occurrence capabilities
+  and publish native output tokens or the same computed typed Int value for an
+  existing typed parent; original return coercion and Enum/Set view remain.
+  No store borrow crosses publication; errors are terminal without fallback.
+  Explicit ordinary `native_json_sum_crc32.rs` nullable Bytes/OwnBytes workers
+  retain transport validation and original9byte/NULL0 report bounds and share
+  the single actual document reducer under their unchanged ordinary owner.
+  Decimal `native_format_json_sum_float` keeps Rust Display digits with Go-g
+  layout; CRC uses the existing file_system service. SQL ARRAY-target conversion
+  and new wire admission are not implied by this native-source integration.
   Ordinary STR_TO_DATE expression policy lives separately in query_expr's
   `native_str_to_date.rs`: three one-call Values/OwnBytes profiles parse, finish
   date-mode validation and finish typed DATETIME's late zero-date-prefix policy.

@@ -328,6 +328,10 @@ pub use native_json_coercion::{
     native_parse_json_expression,
 };
 
+mod native_json_sum_crc32_value;
+pub use native_json_sum_crc32_value::{
+    NativeJsonSumCrc32ValueError, native_json_sum_crc32_document_value, native_json_sum_crc32_value,
+};
 mod native_json_sum_crc32;
 pub use native_json_sum_crc32::{
     NativeJsonSumCrc32Result, decode_native_json_sum_crc32_result,

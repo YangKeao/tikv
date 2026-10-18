@@ -63,6 +63,11 @@ pub enum SqlBatchHostOperation {
     ExtremumNative,
     /// Exact-metadata charset conversion with actual NULL/target source demand.
     CharsetNative(crate::NativeCharsetOperation),
+    /// Actual JSON document checksum, with native capability or typed Int
+    /// output.
+    JsonSumCrc32Native {
+        typed: bool,
+    },
     /// Native nullable selection over actual value handles.
     CoalesceNative,
     /// Exactly two native nullable arguments.
@@ -139,6 +144,7 @@ impl SqlBatchHostOperation {
     }
     pub fn accepts_arity(self, arity: usize) -> bool {
         match self {
+            Self::JsonSumCrc32Native { .. } => arity == 1,
             Self::BitwiseNative(op) => arity == op.arity(),
             Self::CharsetNative(op) => arity == op.arity(),
             Self::Concat | Self::CoalesceNative | Self::CaseNative | Self::ExtremumNative => {
@@ -186,7 +192,8 @@ impl SqlBatchHostOperation {
     pub fn argument_type(self) -> EvalType {
         match self {
             Self::CastCharInt { .. } => EvalType::Int,
-            Self::Concat
+            Self::JsonSumCrc32Native { .. }
+            | Self::Concat
             | Self::ConcatWs
             | Self::RegexpLike { .. }
             | Self::CastCharNative { .. }
@@ -236,7 +243,9 @@ impl SqlBatchHostOperation {
     }
     pub fn output_type(self) -> EvalType {
         match self {
-            Self::Concat
+            Self::JsonSumCrc32Native { typed: true } => EvalType::Int,
+            Self::JsonSumCrc32Native { typed: false }
+            | Self::Concat
             | Self::ConcatWs
             | Self::CastCharInt { .. }
             | Self::CastCharNative { .. }
