@@ -703,6 +703,13 @@ flag or eligibility policy described above.
   visible padding, f64/JSON/vector formatting, two Vec<char> scanner buffers,
   warning/text capacity and publication overlap. Empty scanning adds no retired
   frame charge. These are finite logical allowances, not process-OOM recovery.
+  Calendar finishing accepts partial and allzero calendars when NO_ZERO_DATE is
+  off, matching original Go SELECT IgnoreZeroInDate(true) plus the builtin's
+  separate NO_ZERO_DATE decision. It does not unconditionally reject month0.
+  The invalid/wide-day diagnostic branch and scanner remain separate; complete
+  Go scanner parity (including its currently ignored %j) is not claimed here.
+  Original844344 observations retain their frozen historical digest; tests
+  compare826200 unchanged records and18144 explicit Go-calendar-validated deltas.
   The frontend Ready/report/scoped-rebinding stages are removed. Canonical
   StrToDateNative sources authenticate both producer/occurrence capabilities
   before owned preparation and release store borrows before mode/warning/time

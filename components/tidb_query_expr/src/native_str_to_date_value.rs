@@ -232,9 +232,9 @@ pub(crate) fn finish_date(
     maximum: Option<usize>,
 ) -> Result<Value, Error> {
     let maximum = Allowance(maximum);
-    if v.month == 0 {
-        return warning(true, input, maximum);
-    }
+    // SELECT's Go type context permits zero month/day; the builtin's
+    // NO_ZERO_DATE check below decides whether a partial calendar is NULL.
+    // Keep the distinct invalid/wide-day diagnostic branch unchanged.
     let max_day = if allow_invalid_dates || v.month == 0 {
         31
     } else {
@@ -263,9 +263,6 @@ pub(crate) fn finish_date(
     }
     if no_zero_date && (v.year == 0 || v.month == 0 || v.day == 0) {
         return warning(v.saw_date && v.month == 0, input, maximum);
-    }
-    if v.year == 0 && v.month == 0 && v.day == 0 {
-        return warning(true, input, maximum);
     }
     check(512, maximum)?;
     let date = format!("{:04}-{:02}-{:02}", v.year, v.month, v.day);
@@ -420,5 +417,33 @@ mod tests {
                 message: warning.into()
             }
         );
+    }
+    #[test]
+    fn partial_calendar_and_full_zero_follow_original_go_validation() {
+        for (input, format, expected) in [
+            ("01", "%d", "0000-00-01"),
+            ("2019", "%Y", "2019-00-00"),
+            ("0", "%m", "0000-00-00"),
+            ("0000-00-00", "%Y-%m-%d", "0000-00-00"),
+        ] {
+            let prepared = native_prepare_str_to_date(
+                Input::String(input.as_bytes()),
+                Input::String(format.as_bytes()),
+                8192,
+            )
+            .unwrap()
+            .unwrap();
+            for bits in 0..8 {
+                let NativeStrToDateStep::Date(date) = prepared.begin(None, 8192).unwrap() else {
+                    panic!("actual calendar expected")
+                };
+                let value = date.finish(bits & 1 != 0, bits & 4 != 0).unwrap();
+                if bits & 1 != 0 {
+                    assert!(matches!(value, Value::Warning { .. }));
+                } else {
+                    assert_eq!(value, Value::Text(expected.to_owned()));
+                }
+            }
+        }
     }
 }

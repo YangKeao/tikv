@@ -723,8 +723,14 @@ mod tests {
         ));
         let missing_month = head("2020", "%Y", None);
         assert_eq!(missing_month[0], 3); // even month0 MUST request the getter
+        // Go SELECT calendar validation permits missing month/day. The
+        // builtin's explicit NO_ZERO_DATE decision remains separate.
         assert!(matches!(
             decode_native_str_to_date_result(&finish(&missing_month, 0, 0)),
+            Some(NativeStrToDateResult::Value("2020-00-00"))
+        ));
+        assert!(matches!(
+            decode_native_str_to_date_result(&finish(&missing_month, 1, 0)),
             Some(NativeStrToDateResult::Warning {
                 code: 1411,
                 message: "Incorrect datetime value: '2020' for function str_to_date"
