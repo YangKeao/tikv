@@ -537,6 +537,32 @@ flag or eligibility policy described above.
   its unchanged complete frame validation, so even early NULL/match cannot
   mask a malformed later frame. TiDB's already-cast typed adapter uses this
   borrowed API and retains its original private scope-contract arity cause.
+  Legacy caller adapters now use `native_in_legacy_i128_values` and
+  `native_in_legacy_bytes_values`, genuine synchronous SDK services over their
+  original typed source channels. They create no head/step argument program,
+  byte-encoded i128 surrogate, report buffer or scoped cache context. Operand0
+  is demanded even for count0/1 (including a caller's non-NULL absent-child
+  reply), and the complete i128 range is retained. A NULL base still demands
+  all candidates; only a real non-NULL equality match stops. Byte policy is
+  resolved using the original signed collation ID only after the actual
+  non-NULL candidate read, so mutable mode changes in that callback are seen.
+  NULL pairs never request a collator. SDK owns comparison, not a host-produced
+  Boolean. Original wire recipes keep complete validation and explicit
+  compatibility profiles, sharing actual equality/no-match primitives with
+  these direct services; they no longer sit behind the native legacy adapters.
+  `NativeInLegacyError::Source(E)` preserves the original generic source error
+  without conversion, error-text inspection or replay. Explicit ResourceLimit
+  remains separate. Byte services require a finite allowance (native default
+  64MiB), charge actual returned vector capacities before another source read,
+  and bound known native GB binary encoding work after late policy resolution
+  but before its allocations. Streaming comparison/empty owners incur no
+  retired frame overhead; i128 comparison uses constant stack state. Source
+  allocation is measured only after its callback returns; shared immutable
+  tables and whole-process allocator recovery are not covered. Frontend maps
+  only explicit SDK budget refusals to the existing ResourceLimit/phaseNone
+  boundary, leaving source E identity intact. Error paths retain no cursor or
+  cache guard, allowing a clean subsequent invocation. These services do not
+  unify or replace the separate legacy evaluator's source lowering.
   The borrowed value API alone grants no source admission. Separate InNative
   source integration now admits the generic/duration/computed-JSON regressions
   through genuine same-driver demands, as described below.

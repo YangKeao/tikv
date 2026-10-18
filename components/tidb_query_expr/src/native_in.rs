@@ -116,6 +116,131 @@ pub fn native_in_typed_values<'a>(
     Ok(if saw_null { None } else { Some(false) })
 }
 
+/// A demanded legacy source error remains its original generic type. Only
+/// explicit finite retained/comparison allowances create ResourceLimit.
+#[derive(Debug)]
+pub enum NativeInLegacyError<E> {
+    /// The exact error returned by the original integer/byte channel.
+    Source(E),
+    /// A logical allowance failed, independently of source SQL/error contents.
+    ResourceLimit(&'static str),
+}
+fn legacy_no_match(saw_null: bool) -> Option<bool> {
+    if saw_null { None } else { Some(false) }
+}
+fn legacy_int_equal(left: i128, right: i128) -> bool {
+    left == right
+}
+fn legacy_bytes_equal(left: &[u8], right: &[u8], collation: NativeCollation) -> bool {
+    collation
+        .compare(left, right)
+        .expect("raw supported collation comparison cannot fail")
+        .is_eq()
+}
+fn legacy_values<T, E>(
+    count: usize,
+    mut read: impl FnMut(usize) -> std::result::Result<Option<T>, E>,
+    mut inspect: impl FnMut(Option<&T>, Option<&T>) -> std::result::Result<(), NativeInLegacyError<E>>,
+    mut equal: impl FnMut(&T, &T) -> std::result::Result<bool, NativeInLegacyError<E>>,
+) -> std::result::Result<Option<bool>, NativeInLegacyError<E>> {
+    // This is an actual source-channel read, even when no child exists. The
+    // caller supplies its original missing-child NULL, not a fabricated base.
+    let base = read(0).map_err(NativeInLegacyError::Source)?;
+    inspect(None, base.as_ref())?;
+    let mut saw_null = base.is_none();
+    for index in 1..count {
+        let candidate = read(index).map_err(NativeInLegacyError::Source)?;
+        inspect(base.as_ref(), candidate.as_ref())?;
+        match (base.as_ref(), candidate.as_ref()) {
+            (Some(left), Some(right)) if equal(left, right)? => return Ok(Some(true)),
+            (Some(_), Some(_)) => {}
+            _ => saw_null = true,
+        }
+    }
+    Ok(legacy_no_match(saw_null))
+}
+/// Legacy integer membership over actual native integer channels. Neither an
+/// i64 surrogate nor a value frame is introduced. NULL base still demands the
+/// complete list; a genuine equality match alone permits an early return.
+/// `read` must be the caller's original channel, not an expression surrogate.
+pub fn native_in_legacy_i128_values<E>(
+    count: usize,
+    read: impl FnMut(usize) -> std::result::Result<Option<i128>, E>,
+) -> std::result::Result<Option<bool>, NativeInLegacyError<E>> {
+    legacy_values(
+        count,
+        read,
+        |_, _| Ok(()),
+        |left, right| Ok(legacy_int_equal(*left, *right)),
+    )
+}
+fn legacy_bytes_allowance<E>(
+    bytes: Option<usize>,
+    maximum: usize,
+) -> std::result::Result<(), NativeInLegacyError<E>> {
+    match bytes {
+        Some(bytes) if bytes <= maximum => Ok(()),
+        _ => Err(NativeInLegacyError::ResourceLimit(
+            "legacy IN actual retained/comparison allowance exceeded",
+        )),
+    }
+}
+/// Legacy byte membership owns the actual returned byte vectors, not encoded
+/// copies. Resolve the effective collator only after both real operands are
+/// present, after the candidate callback. A resolver supplies policy, never a
+/// host-computed equality answer. NULL pairs never resolve it.
+///
+/// The finite allowance bounds actual retained vector capacities and known GB
+/// binary comparison buffers before their work. Unknown source allocations are
+/// measured only after the source returns; shared immutable table
+/// initialization and process-wide allocator recovery are not covered by this
+/// logical bound.
+pub fn native_in_legacy_bytes_values<E>(
+    count: usize,
+    maximum: usize,
+    read: impl FnMut(usize) -> std::result::Result<Option<Vec<u8>>, E>,
+    mut resolve: impl FnMut() -> NativeCollation,
+) -> std::result::Result<Option<bool>, NativeInLegacyError<E>> {
+    if maximum == usize::MAX {
+        return Err(NativeInLegacyError::ResourceLimit(
+            "legacy IN requires a finite byte allowance",
+        ));
+    }
+    legacy_values(
+        count,
+        read,
+        |left, right| {
+            legacy_bytes_allowance(
+                left.map_or(0, Vec::capacity)
+                    .checked_add(right.map_or(0, Vec::capacity)),
+                maximum,
+            )
+        },
+        |left, right| {
+            let collation = resolve();
+            // Native GB binary comparison creates encoded vectors; its CI
+            // counterpart and the other native comparators scan borrowed data.
+            // Include conservative capacity growth and short-lived GB groups.
+            if matches!(
+                collation,
+                NativeCollation::GbkBin | NativeCollation::Gb18030Bin
+            ) {
+                let work = left
+                    .len()
+                    .checked_add(right.len())
+                    .and_then(|bytes| bytes.checked_mul(16))
+                    .and_then(|bytes| bytes.checked_add(128));
+                let total = left
+                    .capacity()
+                    .checked_add(right.capacity())
+                    .and_then(|bytes| bytes.checked_add(work?));
+                legacy_bytes_allowance(total, maximum)?;
+            }
+            Ok(legacy_bytes_equal(left, right, collation))
+        },
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeInRequest {
     Int128 { index: usize },
@@ -452,7 +577,7 @@ fn advance(mut s: State<'_>, limit: usize) -> FrameResult<Option<Vec<u8>>> {
     s.phase = 1;
     s.candidate = None;
     if s.next >= s.count {
-        terminal(if s.saw_null { None } else { Some(false) }, limit)
+        terminal(legacy_no_match(s.saw_null), limit)
     } else {
         request(s, limit)
     }
@@ -478,14 +603,11 @@ pub(crate) fn evaluate_in_legacy_step_native<'a>(
     }
     if s.phase == 2 {
         let collator = collation_reply(value).ok_or(Error::Invalid)?;
-        if collator
-            .compare(
-                s.base.ok_or(Error::Invalid)?,
-                s.candidate.ok_or(Error::Invalid)?,
-            )
-            .expect("raw supported collation comparison cannot fail")
-            .is_eq()
-        {
+        if legacy_bytes_equal(
+            s.base.ok_or(Error::Invalid)?,
+            s.candidate.ok_or(Error::Invalid)?,
+            collator,
+        ) {
             return terminal(Some(true), limit);
         }
         return advance(s, limit);
@@ -502,7 +624,7 @@ pub(crate) fn evaluate_in_legacy_step_native<'a>(
         (Some(left), Some(right)) => {
             let left = i128::from_le_bytes(left.try_into().map_err(|_| Error::Invalid)?);
             let right = i128::from_le_bytes(right.try_into().map_err(|_| Error::Invalid)?);
-            if left == right {
+            if legacy_int_equal(left, right) {
                 terminal(Some(true), limit)
             } else {
                 advance(s, limit)
@@ -799,6 +921,189 @@ mod typed_value_tests {
         assert_eq!(
             decode_native_in_result(&result),
             Some(NativeInResult::Bool(true))
+        );
+    }
+}
+
+#[cfg(test)]
+mod legacy_value_tests {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+    #[test]
+    fn actual_legacy_channels_keep_zero_count_wide_integers_nullable_demands_and_source_errors() {
+        for count in [0, 1] {
+            for base in [None, Some(i128::MIN), Some(i128::MAX)] {
+                let seen = RefCell::new(vec![]);
+                let actual = native_in_legacy_i128_values::<()>(count, |index| {
+                    seen.borrow_mut().push(index);
+                    Ok(base)
+                })
+                .unwrap();
+                assert_eq!(actual, base.map(|_| false));
+                assert_eq!(*seen.borrow(), vec![0]);
+            }
+        }
+        assert_eq!(
+            native_in_legacy_i128_values::<()>(2, |i| Ok(Some(if i == 0 {
+                1i128 << 64
+            } else {
+                0
+            })))
+            .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            native_in_legacy_i128_values::<()>(3, |i| {
+                assert!(i < 2, "early match demanded a dead source");
+                Ok(Some(i128::MAX))
+            })
+            .unwrap(),
+            Some(true)
+        );
+        let seen = RefCell::new(vec![]);
+        assert_eq!(
+            native_in_legacy_i128_values::<()>(4, |i| {
+                seen.borrow_mut().push(i);
+                Ok((i != 0).then_some(1))
+            })
+            .unwrap(),
+            None
+        );
+        assert_eq!(*seen.borrow(), vec![0, 1, 2, 3]);
+        let token = 7;
+        let error =
+            native_in_legacy_i128_values(
+                usize::MAX,
+                |i| if i == 0 { Ok(None) } else { Err(&token) },
+            )
+            .unwrap_err();
+        let NativeInLegacyError::Source(actual) = error else {
+            panic!("source error folded")
+        };
+        assert!(std::ptr::eq(actual, &token));
+    }
+    #[test]
+    fn legacy_byte_resources_charge_actual_owners_and_work_without_frames_or_later_reads() {
+        let reads = RefCell::new(vec![]);
+        let policies = Cell::new(0);
+        let error = native_in_legacy_bytes_values::<()>(
+            2,
+            usize::MAX,
+            |_| panic!("invalid unlimited policy must not fetch"),
+            || panic!("no pair"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, NativeInLegacyError::ResourceLimit(_)));
+        for count in [0, 1] {
+            let actual = native_in_legacy_bytes_values::<()>(
+                count,
+                0,
+                |i| {
+                    assert_eq!(i, 0);
+                    Ok(Some(Vec::new()))
+                },
+                || panic!("no pair"),
+            )
+            .unwrap();
+            assert_eq!(actual, Some(false));
+        }
+        // NULL base still reads every candidate; empty owners require no frame
+        // overhead and must not request a policy for any NULL pair.
+        assert_eq!(
+            native_in_legacy_bytes_values::<()>(
+                4,
+                0,
+                |i| {
+                    reads.borrow_mut().push(i);
+                    Ok(if i == 0 { None } else { Some(Vec::new()) })
+                },
+                || panic!("NULL pair resolved a collator")
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(*reads.borrow(), vec![0, 1, 2, 3]);
+        for large_index in [0, 1] {
+            reads.borrow_mut().clear();
+            let error = native_in_legacy_bytes_values::<()>(
+                3,
+                128,
+                |i| {
+                    reads.borrow_mut().push(i);
+                    let mut value = if i == large_index {
+                        Vec::with_capacity(1024)
+                    } else {
+                        Vec::new()
+                    };
+                    value.push(b'x');
+                    Ok(Some(value))
+                },
+                || {
+                    policies.set(policies.get() + 1);
+                    NativeCollation::Binary
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(error, NativeInLegacyError::ResourceLimit(_)));
+            assert_eq!(*reads.borrow(), (0..=large_index).collect::<Vec<_>>());
+            assert_eq!(policies.get(), 0);
+        }
+        // Exact retained capacity succeeds for a streaming binary comparator.
+        reads.borrow_mut().clear();
+        assert_eq!(
+            native_in_legacy_bytes_values::<()>(
+                3,
+                2,
+                |i| {
+                    reads.borrow_mut().push(i);
+                    Ok(Some(vec![b'x']))
+                },
+                || NativeCollation::Binary
+            )
+            .unwrap(),
+            Some(true)
+        );
+        assert_eq!(*reads.borrow(), vec![0, 1]);
+        // GB binary conversion is separately bounded AFTER its actual late
+        // policy lookup and BEFORE creating the encoded comparison buffers.
+        reads.borrow_mut().clear();
+        let error = native_in_legacy_bytes_values::<()>(
+            3,
+            2,
+            |i| {
+                reads.borrow_mut().push(i);
+                Ok(Some(vec![b'x']))
+            },
+            || {
+                policies.set(policies.get() + 1);
+                NativeCollation::GbkBin
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, NativeInLegacyError::ResourceLimit(_)));
+        assert_eq!(*reads.borrow(), vec![0, 1]);
+        assert_eq!(policies.get(), 1);
+        assert_eq!(
+            native_in_legacy_bytes_values::<()>(
+                3,
+                1024,
+                |_| Ok(Some(vec![b'x'])),
+                || NativeCollation::GbkBin
+            )
+            .unwrap(),
+            Some(true)
+        );
+        // Reuse after refusal has no suspended cursor or poisoned global state.
+        assert_eq!(
+            native_in_legacy_bytes_values::<()>(
+                2,
+                2,
+                |_| Ok(Some(vec![b'x'])),
+                || NativeCollation::Binary
+            )
+            .unwrap(),
+            Some(true)
         );
     }
 }

@@ -264,13 +264,15 @@ pub use native_if_null::{
 
 mod native_in;
 pub use native_in::{
-    NativeInRequest, NativeInResult, NativeInTypedArityError, NativeInTypedDomain,
-    NativeInTypedValue, decode_native_in_result, encode_native_in_legacy_int_head,
-    encode_native_in_legacy_string_head, encode_native_in_typed_values,
-    in_legacy_int_head_native_args_valid, in_legacy_int_head_native_fn_meta,
-    in_legacy_step_native_args_valid, in_legacy_step_native_fn_meta,
-    in_legacy_string_head_native_args_valid, in_legacy_string_head_native_fn_meta,
-    in_typed_values_native_args_valid, in_typed_values_native_fn_meta, native_in_typed_values,
+    NativeInLegacyError, NativeInRequest, NativeInResult, NativeInTypedArityError,
+    NativeInTypedDomain, NativeInTypedValue, decode_native_in_result,
+    encode_native_in_legacy_int_head, encode_native_in_legacy_string_head,
+    encode_native_in_typed_values, in_legacy_int_head_native_args_valid,
+    in_legacy_int_head_native_fn_meta, in_legacy_step_native_args_valid,
+    in_legacy_step_native_fn_meta, in_legacy_string_head_native_args_valid,
+    in_legacy_string_head_native_fn_meta, in_typed_values_native_args_valid,
+    in_typed_values_native_fn_meta, native_in_legacy_bytes_values, native_in_legacy_i128_values,
+    native_in_typed_values,
 };
 
 mod native_in_control;
