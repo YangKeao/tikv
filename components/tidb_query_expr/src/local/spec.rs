@@ -106,6 +106,14 @@ pub enum NativeJsonTypeDisposition {
 }
 
 impl LocalError {
+    /// The original evaluated-argument admission failure. Value-only migration
+    /// callers use the same producer without creating a compatibility worker.
+    pub fn evaluated_argument_shape_mismatch() -> Self {
+        Self::InvalidBatch(
+            "evaluated arguments differ from the operation's closed input shape".into(),
+        )
+    }
+
     /// Match explicit native producer provenance, never error text or code.
     pub fn native_json_type_disposition(&self) -> Option<NativeJsonTypeDisposition> {
         use tidb_query_common::error::{ErrorInner, EvaluateError};

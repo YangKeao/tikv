@@ -285,12 +285,14 @@ pub use native_in_control::{
 
 mod native_interval;
 pub use native_interval::{
-    NativeIntervalCast, NativeIntervalEvalType, NativeIntervalFieldType, NativeIntervalResult,
-    decode_native_interval_result, encode_native_interval_eager_head,
+    NativeIntervalCast, NativeIntervalEagerInput, NativeIntervalEagerReal,
+    NativeIntervalEagerStart, NativeIntervalEvalType, NativeIntervalFieldType,
+    NativeIntervalNumber, NativeIntervalResult, NativeIntervalSearch, NativeIntervalValueError,
+    NativeIntervalValueStep, decode_native_interval_result, encode_native_interval_eager_head,
     encode_native_interval_lazy_head, interval_eager_head_native_args_valid,
     interval_eager_head_native_fn_meta, interval_lazy_head_native_args_valid,
     interval_lazy_head_native_fn_meta, interval_step_native_args_valid,
-    interval_step_native_fn_meta,
+    interval_step_native_fn_meta, native_interval_eager_values,
 };
 
 mod native_json;

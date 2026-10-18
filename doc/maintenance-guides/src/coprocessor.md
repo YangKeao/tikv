@@ -621,19 +621,30 @@ flag or eligibility policy described above.
   and the native day-number domain, distinct from wire limits. Existing eight
   child-free Duration-to-Datetime refusals and wrong-reader admission remain
   unchanged; no new wire/PB signature is enabled.
-- Query_expr `native_interval.rs` owns eager and lazy native INTERVAL through
-  two heads and one continuation step, all Values/OwnBytes/one-call profiles.
-  Actual identities or complete evaluation-type/flags metadata drive SDK
-  classification; the frontend only evaluates requested children and performs
-  original generic casts. Eager sentinel-before-NULL and complete real
-  conversion precede its partition search; lazy metadata selects linear or
-  binary demand without reading skipped children. Raw f64 NaN behavior differs
-  between eager boundary<=target and lazy target<boundary and remains distinct.
-  Integer comparison reuses existing signed/unsigned comparers. Successful
-  replies are always present, including the integer -1 for a NULL target.
-  Compact eager state stores NULL markers and only converted real payloads;
-  retained reply bounds do not certify transient materialization or physical
-  memory. Existing wire kernels and admission are unchanged.
+- Query_expr `native_interval_value.rs` owns borrowed INTERVAL classification,
+  eager converted-real state and metadata-selected lazy `NativeIntervalSearch`.
+  Frontend eager/lazy caller heads, continuation programs and scoped Ready
+  rebinding are retired after independent old/new proof. Actual raw identities
+  or complete optional type/flags metadata choose the SDK policy; no Expr,
+  fabricated literal or secondary evaluator is stored. Sentinel-before-NULL,
+  complete eager real conversion, signed/unsigned comparisons, nullable linear
+  search and NOT NULL binary probes retain their original order. Eager uses
+  boundary<=target; lazy uses target<boundary, including distinct NaN results.
+  Arity0/1 keeps the original evaluated-admission InvalidBatch/Invoke cause,
+  through the same LocalError producer used by compatibility workers.
+  Explicit ordinary wire profiles remain validation/protocol compatibility
+  surfaces and share classification/search after proof; their transient decoder
+  allocation contract is not silently replaced by the new value budget.
+  `SqlBatchHostOperation::IntervalNative` requests actual source probes in the
+  same SDK frame. Detached full FieldTypes and producer ordinals authenticate
+  each source token by role/node/row occurrence; conversions use actual values
+  and original context, only for demanded probes. Normal function RT coercion
+  and outer ENUM_SET_AS_INT publication remain at existing seams. Native
+  classification/state and demanded conversion work have finite logical
+  allowances (frontend default64MiB); Decimal visible/storage padding is bounded
+  before formatting. This is not whole-process allocation recovery. Native
+  eligibility and compiled source closure remain separate; global fallback
+  retirement is incomplete.
 - Query_expr `native_extremum.rs` adds eight native GREATEST/LEAST profiles
   over `native_extremum_policy.rs`: head, numeric/time/vector/string steps,
   text preparation, temporal context and final identity/precision conversion.

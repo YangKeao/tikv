@@ -57,6 +57,8 @@ pub enum SqlBatchHostOperation {
     /// Row-scoped IN over actual source values; typed cast barriers and
     /// exhaustive/prepared demand are immutable provider metadata.
     InNative,
+    /// Metadata-selected linear/binary INTERVAL probes over real source values.
+    IntervalNative,
     /// Native nullable selection over actual value handles.
     CoalesceNative,
     /// Exactly two native nullable arguments.
@@ -135,7 +137,7 @@ impl SqlBatchHostOperation {
         match self {
             Self::BitwiseNative(op) => arity == op.arity(),
             Self::Concat | Self::CoalesceNative | Self::CaseNative => arity >= 1,
-            Self::ConcatWs | Self::InNative => arity >= 2,
+            Self::ConcatWs | Self::InNative | Self::IntervalNative => arity >= 2,
             Self::IfNullNative
             | Self::AndNative
             | Self::XorNative
@@ -183,6 +185,7 @@ impl SqlBatchHostOperation {
             | Self::CastCharNative { .. }
             | Self::CastNative
             | Self::InNative
+            | Self::IntervalNative
             | Self::CoalesceNative
             | Self::IfNullNative
             | Self::IfNative
@@ -230,6 +233,7 @@ impl SqlBatchHostOperation {
             | Self::CastCharNative { .. }
             | Self::CastNative
             | Self::InNative
+            | Self::IntervalNative
             | Self::CoalesceNative
             | Self::IfNullNative
             | Self::IfNative

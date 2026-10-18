@@ -216,12 +216,24 @@ fn lazy_head(bytes: &[u8]) -> Option<Vec<Option<NativeIntervalFieldType>>> {
     r.bytes.is_empty().then_some(types)
 }
 
+/// Actual already-cast native INTERVAL numbers; real values retain raw bits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Number {
+pub enum NativeIntervalNumber {
+    /// Actual signed native integer.
     Signed(i64),
+    /// Actual unsigned native integer, never folded through i64 equality.
     Unsigned(u64),
+    /// Actual f64 bits, including NaN and signed zero.
     Real(u64),
 }
+use NativeIntervalNumber as Number;
+#[path = "native_interval_value.rs"]
+mod value;
+pub use value::{
+    NativeIntervalEagerInput, NativeIntervalEagerReal, NativeIntervalEagerStart,
+    NativeIntervalSearch, NativeIntervalValueError, NativeIntervalValueStep,
+    native_interval_eager_values,
+};
 fn number(value: Identity<'_>) -> Option<Number> {
     match value {
         Identity::Int(v) => Some(Number::Signed(v)),
@@ -293,21 +305,22 @@ impl State {
         if self.mode == 0 {
             return (self.low, NativeIntervalCast::Real);
         }
-        let index = if self.target.is_none() {
-            0
-        } else if self.nullable {
-            self.low
-        } else {
-            self.low + (self.high - self.low) / 2
-        };
-        (
-            index,
+        let search = NativeIntervalSearch::resumed(
+            self.count,
+            self.nullable,
             if self.mode == 1 {
                 NativeIntervalCast::Int
             } else {
                 NativeIntervalCast::Real
             },
-        )
+            self.low,
+            self.high,
+            self.target,
+        );
+        let NativeIntervalValueStep::Probe { index, cast } = search.step() else {
+            unreachable!("wire state only holds pending search")
+        };
+        (index, cast)
     }
 }
 fn state(bytes: &[u8]) -> Option<State> {
@@ -465,37 +478,19 @@ pub(crate) fn evaluate_interval_eager_head_native(
 ) -> FrameResult<Option<Vec<u8>>> {
     let limit = bound(packet, None)?;
     let values = packet.and_then(eager_head).ok_or(Error::Invalid)?;
-    if values
-        .iter()
-        .any(|value| matches!(value, Some(Identity::MinNotNull | Identity::MaxValue)))
+    let nullable = match value::eager_classify(&values, |value| match value {
+        None => NativeIntervalEagerInput::Null,
+        Some(Identity::Int(value)) => NativeIntervalEagerInput::Int(*value),
+        Some(Identity::UInt(value)) => NativeIntervalEagerInput::UInt(*value),
+        Some(Identity::MinNotNull | Identity::MaxValue) => NativeIntervalEagerInput::Sentinel,
+        _ => NativeIntervalEagerInput::Other,
+    })
+    .map_err(|_| Error::Invalid)?
     {
-        return fresh(&[1], limit).map(Some);
-    }
-    if values[0].is_none() {
-        return index_result(-1, limit);
-    }
-    let nullable = values.iter().any(Option::is_none);
-    if values
-        .iter()
-        .all(|value| matches!(value, None | Some(Identity::Int(_) | Identity::UInt(_))))
-    {
-        let target = number(values[0].unwrap()).ok_or(Error::Invalid)?;
-        let index = if nullable {
-            values[1..]
-                .iter()
-                .position(|v| {
-                    v.and_then(number)
-                        .is_some_and(|boundary| integer_predicate::<CmpOpLt>(target, boundary))
-                })
-                .unwrap_or(values.len() - 1)
-        } else {
-            values[1..].partition_point(|v| {
-                v.and_then(number)
-                    .is_some_and(|boundary| integer_predicate::<CmpOpLe>(boundary, target))
-            })
-        };
-        return index_result(index as i64, limit);
-    }
+        value::EagerClassification::Index(index) => return index_result(index, limit),
+        value::EagerClassification::Sentinels => return fresh(&[1], limit).map(Some),
+        value::EagerClassification::Real { nullable } => nullable,
+    };
     let s = State {
         mode: 0,
         count: values.len(),
@@ -513,18 +508,19 @@ pub(crate) fn evaluate_interval_lazy_head_native(
 ) -> FrameResult<Option<Vec<u8>>> {
     let limit = bound(packet, None)?;
     let types = packet.and_then(lazy_head).ok_or(Error::Invalid)?;
-    let all_int = types
-        .iter()
-        .all(|ft| ft.is_some_and(|ft| ft.eval_type == NativeIntervalEvalType::Int));
-    let nullable = types.iter().any(|ft| ft.is_none_or(|ft| ft.flags & 1 == 0));
+    let search = NativeIntervalSearch::new(types.iter().copied()).map_err(|_| Error::Invalid)?;
     state_report(
         &State {
-            mode: if all_int { 1 } else { 2 },
-            count: types.len(),
-            nullable,
-            low: 1,
-            high: types.len(),
-            target: None,
+            mode: if search.cast == NativeIntervalCast::Int {
+                1
+            } else {
+                2
+            },
+            count: search.count,
+            nullable: search.nullable,
+            low: search.low,
+            high: search.high,
+            target: search.target,
             nulls: Vec::new(),
             reals: Vec::new(),
         },
@@ -556,56 +552,29 @@ pub(crate) fn evaluate_interval_step_native(
         if s.low < s.count {
             return state_report(&s, limit);
         }
-        let target = f64::from_bits(s.reals[0]);
-        let mut real = s.reals[1..].iter();
-        let boundaries: Vec<Option<f64>> = s.nulls[1..]
-            .iter()
-            .map(|null| {
-                if *null {
-                    None
-                } else {
-                    Some(f64::from_bits(
-                        *real
-                            .next()
-                            .expect("one actual conversion per non-NULL boundary"),
-                    ))
-                }
-            })
-            .collect();
-        let index = if s.nullable {
-            boundaries
-                .iter()
-                .position(|boundary| boundary.is_some_and(|value| target < value))
-                .unwrap_or(s.count - 1)
+        let index = value::eager_real_index(&s.nulls, &s.reals, s.nullable);
+        return index_result(index, limit);
+    }
+    let mut search = NativeIntervalSearch::resumed(
+        s.count,
+        s.nullable,
+        if s.mode == 1 {
+            NativeIntervalCast::Int
         } else {
-            // This is intentionally NOT !(target < boundary): NaN differs.
-            boundaries.partition_point(|boundary| boundary.is_some_and(|value| value <= target))
-        };
-        return index_result(index as i64, limit);
-    }
-    let Some(target) = s.target else {
-        let Some(target) = value else {
-            return index_result(-1, limit);
-        };
-        s.target = Some(target);
-        return state_report(&s, limit);
-    };
-    let (index, _) = s.request();
-    let before = value.is_some_and(|boundary| less(target, boundary));
-    if s.nullable {
-        if before {
-            return index_result((index - 1) as i64, limit);
+            NativeIntervalCast::Real
+        },
+        s.low,
+        s.high,
+        s.target,
+    );
+    match search.accept(value).map_err(|_| Error::Invalid)? {
+        NativeIntervalValueStep::Index(index) => index_result(index, limit),
+        NativeIntervalValueStep::Probe { .. } => {
+            s.low = search.low;
+            s.high = search.high;
+            s.target = search.target;
+            state_report(&s, limit)
         }
-        s.low += 1;
-    } else if before {
-        s.high = index;
-    } else {
-        s.low = index + 1;
-    }
-    if s.low >= s.high {
-        index_result((s.low - 1) as i64, limit)
-    } else {
-        state_report(&s, limit)
     }
 }
 

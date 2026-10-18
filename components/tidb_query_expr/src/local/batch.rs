@@ -10162,9 +10162,7 @@ impl EvaluatedBytesWorker {
             || !args.admission_matches(self.operation)
         {
             return Err(ReportedEvaluatedFailure::unreported(
-                LocalError::InvalidBatch(
-                    "evaluated arguments differ from the operation's closed input shape".into(),
-                ),
+                LocalError::evaluated_argument_shape_mismatch(),
             ));
         }
         self.begin_invocation()
