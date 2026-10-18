@@ -24,6 +24,98 @@ pub enum NativeInTypedDomain {
     Duration,
     Json,
 }
+/// Actual already-cast values used by temporal/JSON membership. Other records
+/// a non-NULL source kind outside these domains; it never compares equal here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeInTypedValue<'a> {
+    /// Raw native time core; source kind/FSP remain outside comparison policy.
+    Time(u64),
+    /// Actual signed nanoseconds, independent of display FSP.
+    Duration(i64),
+    /// Native binary JSON identity, borrowed without text parsing or transport.
+    Json {
+        /// Actual native binary JSON type byte.
+        type_code: u8,
+        /// Actual native binary JSON payload without the type byte.
+        bytes: &'a [u8],
+    },
+    /// An actual non-NULL datum belonging to another native domain.
+    Other,
+}
+/// Typed value membership requires a real left value and at least one
+/// candidate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeInTypedArityError {
+    /// Number of supplied already-evaluated values.
+    pub actual: usize,
+}
+fn typed_view(value: Identity<'_>) -> NativeInTypedValue<'_> {
+    match value {
+        Identity::Time { core, .. } => NativeInTypedValue::Time(core),
+        Identity::Duration { nanos, .. } => NativeInTypedValue::Duration(nanos),
+        Identity::Json { type_code, bytes } => NativeInTypedValue::Json { type_code, bytes },
+        _ => NativeInTypedValue::Other,
+    }
+}
+fn equal_typed(
+    domain: NativeInTypedDomain,
+    left: NativeInTypedValue<'_>,
+    right: NativeInTypedValue<'_>,
+) -> bool {
+    match (domain, left, right) {
+        (
+            NativeInTypedDomain::Datetime | NativeInTypedDomain::Timestamp,
+            NativeInTypedValue::Time(left),
+            NativeInTypedValue::Time(right),
+        ) => Time::native_core_compare(left, right).is_eq(),
+        (
+            NativeInTypedDomain::Duration,
+            NativeInTypedValue::Duration(left),
+            NativeInTypedValue::Duration(right),
+        ) => left == right,
+        (
+            NativeInTypedDomain::Json,
+            NativeInTypedValue::Json {
+                type_code: left_type,
+                bytes: left,
+            },
+            NativeInTypedValue::Json {
+                type_code: right_type,
+                bytes: right,
+            },
+        ) => compare_native_binary_json(left_type, left, right_type, right).is_eq(),
+        _ => false,
+    }
+}
+/// Computes only already-provided, already-cast views. Callers must complete
+/// their original operand evaluation/cast barriers before constructing views;
+/// the iterator must not evaluate expressions or repeat source coercion.
+/// No frame, input copy, output report or work buffer is allocated here.
+pub fn native_in_typed_values<'a>(
+    domain: NativeInTypedDomain,
+    mut values: impl ExactSizeIterator<Item = Option<NativeInTypedValue<'a>>>,
+) -> std::result::Result<Option<bool>, NativeInTypedArityError> {
+    let count = values.len();
+    if count < 2 {
+        return Err(NativeInTypedArityError { actual: count });
+    }
+    let Some(first) = values
+        .next()
+        .expect("exact-size typed values retain their first item")
+    else {
+        return Ok(None);
+    };
+    let mut saw_null = false;
+    for candidate in values {
+        match candidate {
+            None => saw_null = true,
+            Some(candidate) if equal_typed(domain, first, candidate) => return Ok(Some(true)),
+            _ => {}
+        }
+    }
+    Ok(if saw_null { None } else { Some(false) })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeInRequest {
     Int128 { index: usize },
@@ -308,32 +400,6 @@ pub fn in_legacy_step_native_args_valid(raw: Option<&[u8]>, value: Option<&[u8]>
     };
     valid && native_in_output_bound(raw, value).is_some()
 }
-fn equal(domain: NativeInTypedDomain, left: Identity<'_>, right: Identity<'_>) -> bool {
-    match (domain, left, right) {
-        (
-            NativeInTypedDomain::Datetime | NativeInTypedDomain::Timestamp,
-            Identity::Time { core: left, .. },
-            Identity::Time { core: right, .. },
-        ) => Time::native_core_compare(left, right).is_eq(),
-        (
-            NativeInTypedDomain::Duration,
-            Identity::Duration { nanos: left, .. },
-            Identity::Duration { nanos: right, .. },
-        ) => left == right,
-        (
-            NativeInTypedDomain::Json,
-            Identity::Json {
-                type_code: left_type,
-                bytes: left,
-            },
-            Identity::Json {
-                type_code: right_type,
-                bytes: right,
-            },
-        ) => compare_native_binary_json(left_type, left, right_type, right).is_eq(),
-        _ => false,
-    }
-}
 pub(crate) fn evaluate_in_typed_values_native(
     value: Option<&[u8]>,
 ) -> FrameResult<Option<Vec<u8>>> {
@@ -342,21 +408,16 @@ pub(crate) fn evaluate_in_typed_values_native(
         return Err(Error::Invalid);
     }
     let (domain, count, mut r) = typed_header(value.unwrap()).ok_or(Error::Invalid)?;
-    let first = identity(r.optional().ok_or(Error::Invalid)?).ok_or(Error::Invalid)?;
-    let Some(first) = first else {
-        return terminal(None, limit);
-    };
-    let mut saw_null = false;
-    for _ in 1..count {
-        match identity(r.optional().ok_or(Error::Invalid)?).ok_or(Error::Invalid)? {
-            None => saw_null = true,
-            Some(candidate) if equal(domain, first, candidate) => {
-                return terminal(Some(true), limit);
-            }
-            _ => {}
-        }
-    }
-    terminal(if saw_null { None } else { Some(false) }, limit)
+    // Full framing validation above still precedes early NULL/match decisions.
+    // This iterator only borrows already-validated identities, without a view
+    // vector allocation or a second membership implementation.
+    let values = (0..count).map(|_| {
+        identity(r.optional().expect("validated typed item framing"))
+            .expect("validated native identity")
+            .map(typed_view)
+    });
+    let result = native_in_typed_values(domain, values).map_err(|_| Error::Invalid)?;
+    terminal(result, limit)
 }
 fn head(value: Option<&[u8]>, string: bool) -> FrameResult<Option<Vec<u8>>> {
     let limit = bound(value, None)?;
@@ -633,5 +694,111 @@ mod tests {
         let mut broken = h;
         broken.push(0);
         assert!(decode_native_in_result(&broken).is_none());
+    }
+}
+
+#[cfg(test)]
+mod typed_value_tests {
+    use super::*;
+    #[test]
+    fn borrowed_typed_values_keep_real_domains_nullable_progress_and_arity() {
+        use NativeInTypedDomain as D;
+        use NativeInTypedValue as V;
+        let eval = |domain, values: Vec<Option<V<'_>>>| {
+            native_in_typed_values(domain, values.into_iter()).unwrap()
+        };
+        for domain in [D::Datetime, D::Timestamp] {
+            assert_eq!(
+                eval(domain, vec![Some(V::Time(0)), None, Some(V::Time(0))]),
+                Some(true)
+            );
+            assert_eq!(
+                eval(
+                    domain,
+                    vec![Some(V::Time(0)), Some(V::Time(1u64 << 32)), None]
+                ),
+                None
+            );
+            // Existing Time Ord ignores packed type/FSP metadata bits.
+            assert_eq!(
+                eval(domain, vec![Some(V::Time(0)), Some(V::Time(1))]),
+                Some(true)
+            );
+            assert_eq!(
+                eval(domain, vec![Some(V::Other), Some(V::Other)]),
+                Some(false)
+            );
+            assert_eq!(eval(domain, vec![None, Some(V::Time(u64::MAX))]), None);
+        }
+        assert_eq!(
+            eval(
+                D::Duration,
+                vec![Some(V::Duration(i64::MIN)), Some(V::Duration(i64::MIN))]
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            eval(
+                D::Duration,
+                vec![Some(V::Duration(1)), Some(V::Duration(2))]
+            ),
+            Some(false)
+        );
+        // Keep the existing native binary-JSON malformed-array comparison;
+        // neither this value API nor the wire caller adds a parser/validator.
+        assert_eq!(
+            eval(
+                D::Json,
+                vec![
+                    Some(V::Json {
+                        type_code: 0x03,
+                        bytes: &[]
+                    }),
+                    Some(V::Json {
+                        type_code: 0x03,
+                        bytes: &[255]
+                    })
+                ]
+            ),
+            Some(true)
+        );
+        for domain in [D::Datetime, D::Timestamp, D::Duration, D::Json] {
+            assert_eq!(
+                native_in_typed_values(domain, std::iter::empty()),
+                Err(NativeInTypedArityError { actual: 0 })
+            );
+            assert_eq!(
+                native_in_typed_values(domain, [None].into_iter()),
+                Err(NativeInTypedArityError { actual: 1 })
+            );
+        }
+    }
+    #[test]
+    fn wire_keeps_full_frame_validation_before_borrowed_value_short_circuit() {
+        let valid = crate::encode_native_identity(Identity::Duration {
+            nanos: 1,
+            fsp: i64::MAX,
+        })
+        .unwrap();
+        let mut input =
+            encode_native_in_typed_values(NativeInTypedDomain::Duration, &[None, Some(&valid)])
+                .unwrap();
+        input.pop();
+        assert_eq!(
+            evaluate_in_typed_values_native(Some(&input)),
+            Err(Error::Invalid)
+        );
+        let input = encode_native_in_typed_values(
+            NativeInTypedDomain::Duration,
+            &[Some(&valid), Some(&valid)],
+        )
+        .unwrap();
+        let result = evaluate_in_typed_values_native(Some(&input))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decode_native_in_result(&result),
+            Some(NativeInResult::Bool(true))
+        );
     }
 }

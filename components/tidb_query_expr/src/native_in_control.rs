@@ -24,13 +24,38 @@ pub enum NativeInControlResult {
     Null,
     Bool(bool),
 }
-#[derive(Clone, Copy, Default)]
-struct Membership {
+/// Encapsulated state shared by existing control services and staged native
+/// hosts. Only actual source classifications/comparison outcomes enter it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NativeInMembership {
     found_null: bool,
     found_match: bool,
 }
-impl Membership {
-    fn observe(&mut self, value: NativeInControlValue) -> bool {
+impl NativeInMembership {
+    /// Preserve the original independent left-NULL and stored cache-NULL flags.
+    pub fn new(left: NativeInControlValue, cache_has_null: bool) -> Self {
+        Self {
+            found_null: left == NativeInControlValue::Null || cache_has_null,
+            found_match: false,
+        }
+    }
+    /// Probe original stored keys after actual coercion and late collator
+    /// resolution. Callers account key work before this existing kernel runs.
+    pub fn probe_prepared(
+        &mut self,
+        keys: &HashSet<Vec<u8>>,
+        value: &[u8],
+        collation: NativeCollation,
+    ) {
+        self.found_match = if collation.can_use_raw_mem_as_key() {
+            keys.contains(value)
+        } else {
+            keys.contains(&key(collation, value))
+        };
+    }
+    /// Observe a real computed comparison; the return value reports a match,
+    /// without choosing whether the source is allowed to stop reading operands.
+    pub fn observe(&mut self, value: NativeInControlValue) -> bool {
         match value {
             NativeInControlValue::Null => {
                 self.found_null = true;
@@ -43,7 +68,8 @@ impl Membership {
             }
         }
     }
-    fn finish(self) -> NativeInControlResult {
+    /// Compute the original match/NULL/no-match result after required demands.
+    pub fn finish(self) -> NativeInControlResult {
         if self.found_match {
             NativeInControlResult::Bool(true)
         } else if self.found_null {
@@ -54,7 +80,7 @@ impl Membership {
     }
 }
 fn scalar<E>(
-    mut state: Membership,
+    mut state: NativeInMembership,
     candidate_count: usize,
     early_match: bool,
     mut compare: impl FnMut(usize) -> Result<NativeInControlValue, E>,
@@ -74,7 +100,12 @@ pub fn native_in_ast_scalar<E>(
     candidate_count: usize,
     compare: impl FnMut(usize) -> Result<NativeInControlValue, E>,
 ) -> Result<NativeInControlResult, E> {
-    scalar(Membership::default(), candidate_count, false, compare)
+    scalar(
+        NativeInMembership::default(),
+        candidate_count,
+        false,
+        compare,
+    )
 }
 /// Ready-value IN returns on its first match. `compare(i)` denotes the original
 /// comparison with values[i + 1], after the mandatory left value is available.
@@ -84,7 +115,7 @@ pub fn native_in_ready_values<E>(
     compare: impl FnMut(usize) -> Result<NativeInControlValue, E>,
 ) -> Result<NativeInControlResult, E> {
     scalar(
-        Membership {
+        NativeInMembership {
             found_null: left == NativeInControlValue::Null,
             found_match: false,
         },
@@ -104,7 +135,7 @@ pub fn native_in_generic<E>(
     compare: impl FnMut(usize) -> Result<NativeInControlValue, E>,
 ) -> Result<NativeInControlResult, E> {
     scalar(
-        Membership {
+        NativeInMembership {
             found_null: left == NativeInControlValue::Null || cache_has_null,
             found_match: false,
         },
@@ -166,7 +197,7 @@ pub fn native_in_ast_rows<T, E>(
     mut read: impl FnMut(usize) -> Result<NativeInRowCandidate<T>, E>,
     mut compare: impl FnMut(&T, &T) -> Result<NativeInControlValue, E>,
 ) -> Result<NativeInControlResult, NativeInRowError<E>> {
-    let mut state = Membership::default();
+    let mut state = NativeInMembership::default();
     for index in 0..candidate_count {
         let right = match read(index).map_err(NativeInRowError::Child)? {
             NativeInRowCandidate::NotRow => return Err(NativeInRowError::ItemMismatch),
@@ -264,17 +295,13 @@ pub fn native_in_prepared<'a, E>(
     collation: impl FnOnce() -> NativeCollation,
     mut compare: impl FnMut(usize) -> Result<NativeInControlValue, E>,
 ) -> Result<NativeInControlResult, E> {
-    let mut state = Membership {
+    let mut state = NativeInMembership {
         found_null: left == NativeInControlValue::Null || has_null,
         found_match: false,
     };
     if let Some(value) = coerce()? {
         let collation = collation();
-        state.found_match = if collation.can_use_raw_mem_as_key() {
-            keys.contains(value.as_ref())
-        } else {
-            keys.contains(&key(collation, value.as_ref()))
-        };
+        state.probe_prepared(keys, value.as_ref(), collation);
     }
     if state.found_match && dynamic_indices.is_empty() {
         return Ok(NativeInControlResult::Bool(true));
@@ -690,5 +717,51 @@ mod tests {
             ),
             Ok(R::Bool(true))
         );
+    }
+}
+
+#[cfg(test)]
+mod membership_state_tests {
+    use super::*;
+    #[test]
+    fn staged_membership_matches_original_exhaustive_and_prepared_control_services() {
+        use NativeInControlValue as V;
+        let values = [V::Null, V::Int(0), V::Int(1), V::Int(-1), V::Other];
+        for left in values {
+            for cache_null in [false, true] {
+                for a in values {
+                    for b in values {
+                        let mut state = NativeInMembership::new(left, cache_null);
+                        state.observe(a);
+                        state.observe(b);
+                        assert_eq!(
+                            state.finish(),
+                            native_in_generic::<()>(left, 2, cache_null, |i| Ok([a, b][i]))
+                                .unwrap()
+                        );
+                    }
+                }
+                for collation in [NativeCollation::Binary, NativeCollation::Utf8Mb4GeneralCi] {
+                    let keys = [b"a".to_vec()].into_iter().collect::<HashSet<_>>();
+                    let mut state = NativeInMembership::new(left, cache_null);
+                    state.probe_prepared(&keys, b"A", collation);
+                    state.observe(V::Null);
+                    state.observe(V::Int(0));
+                    assert_eq!(
+                        state.finish(),
+                        native_in_prepared::<()>(
+                            left,
+                            &keys,
+                            &[3, 1],
+                            cache_null,
+                            || Ok(Some(Cow::Borrowed(b"A"))),
+                            || collation,
+                            |i| Ok(if i == 3 { V::Null } else { V::Int(0) })
+                        )
+                        .unwrap()
+                    );
+                }
+            }
+        }
     }
 }

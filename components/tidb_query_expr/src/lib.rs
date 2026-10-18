@@ -264,21 +264,21 @@ pub use native_if_null::{
 
 mod native_in;
 pub use native_in::{
-    NativeInRequest, NativeInResult, NativeInTypedDomain, decode_native_in_result,
-    encode_native_in_legacy_int_head, encode_native_in_legacy_string_head,
-    encode_native_in_typed_values, in_legacy_int_head_native_args_valid,
-    in_legacy_int_head_native_fn_meta, in_legacy_step_native_args_valid,
-    in_legacy_step_native_fn_meta, in_legacy_string_head_native_args_valid,
-    in_legacy_string_head_native_fn_meta, in_typed_values_native_args_valid,
-    in_typed_values_native_fn_meta,
+    NativeInRequest, NativeInResult, NativeInTypedArityError, NativeInTypedDomain,
+    NativeInTypedValue, decode_native_in_result, encode_native_in_legacy_int_head,
+    encode_native_in_legacy_string_head, encode_native_in_typed_values,
+    in_legacy_int_head_native_args_valid, in_legacy_int_head_native_fn_meta,
+    in_legacy_step_native_args_valid, in_legacy_step_native_fn_meta,
+    in_legacy_string_head_native_args_valid, in_legacy_string_head_native_fn_meta,
+    in_typed_values_native_args_valid, in_typed_values_native_fn_meta, native_in_typed_values,
 };
 
 mod native_in_control;
 pub use native_in_control::{
     NativeInCacheArg, NativeInCacheValue, NativeInControlEvalType, NativeInControlResult,
-    NativeInControlValue, NativeInRowCandidate, NativeInRowError, NativeInStringCache,
-    native_in_ast_rows, native_in_ast_scalar, native_in_build_string_cache, native_in_generic,
-    native_in_prepared, native_in_ready_values, native_row_equality,
+    NativeInControlValue, NativeInMembership, NativeInRowCandidate, NativeInRowError,
+    NativeInStringCache, native_in_ast_rows, native_in_ast_scalar, native_in_build_string_cache,
+    native_in_generic, native_in_prepared, native_in_ready_values, native_row_equality,
 };
 
 mod native_interval;

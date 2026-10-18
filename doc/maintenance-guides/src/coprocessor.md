@@ -526,6 +526,20 @@ flag or eligibility policy described above.
   Typed identities retain representation metadata, while comparison reuses
   existing core-time, raw-duration and binary-JSON primitives. The checked
   input-length-sum-plus128 report bound is not a physical-memory claim.
+  The borrowed `native_in_typed_values` API now owns the same typed membership
+  calculation over actual already-cast views, without identity encoding, input
+  copies or report buffers. Complete source evaluation and then complete casts
+  remain caller obligations; its iterator cannot evaluate expressions. Wrong
+  non-NULL kinds compare false, even against an identical wrong kind; fewer
+  than two values report arity failure. Time comparison ignores the original
+  packed type/FSP bits, duration compares nanos, and binary JSON retains the
+  existing primitive's behavior. The ordinary wire recipe delegates only after
+  its unchanged complete frame validation, so even early NULL/match cannot
+  mask a malformed later frame. TiDB's already-cast typed adapter uses this
+  borrowed API and retains its original private scope-contract arity cause.
+  This value-layer change does not admit new compiled SQL sources: three
+  generic/duration/computed-JSON source regressions remain pending genuine
+  canonical-driver integration.
   Adjacent `native_in_control.rs` owns AST scalar/row, generic typed,
   prepared-string cache and ready-value IN control. Its synchronous SDK
   services use the existing comparison/NOT workers as their data plane; they
@@ -533,6 +547,13 @@ flag or eligibility policy described above.
   policies, row shape/evaluation/error timing and late effective-collator
   lookup remain distinct. SDK builds and probes the actual standard HashSet;
   native nodes retain storage, literal metadata and original invalidation.
+  Public `NativeInMembership` encapsulates the same original left/cache NULL,
+  match and final-result state; its prepared-key probe consumes actual stored
+  keys and the caller's late effective collation. `observe` reports a match
+  without authorizing source short circuit. Generic and prepared sources must
+  still exhaust their required candidates, including after an earlier match.
+  AST's independently seeded NULL policy and ready-value early-match policy
+  remain separate. Exposing state does not introduce expression callbacks.
   A common SDK row-equality primitive also backs native row equality outside
   IN, without duplicating its loop. Pure-cache and empty-list paths retain
   their original comparison-call counts and admission behavior, not a new
