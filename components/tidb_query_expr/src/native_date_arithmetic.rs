@@ -2,18 +2,16 @@
 
 //! Ordinary DATE_ADD/SUB controller. Calendar and typed-Duration entries keep
 //! their original, different demand order; legacy date arithmetic is separate.
-use chrono::Utc;
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
-use tidb_query_datatype::codec::{
-    data_type::{Bytes, BytesRef, ChunkedVec, EvaluableRef, EvaluableRet, Int},
-    mysql::{Decimal, Time, TimeType, time::native_parse_time_from_num},
+use tidb_query_datatype::codec::data_type::{
+    Bytes, BytesRef, ChunkedVec, EvaluableRef, EvaluableRet, Int,
 };
 
 pub use crate::NativeIntervalEvalType as NativeDateArithmeticEvalType;
 use crate::{
     NativeIdentityFrameError as Error, NativeIdentityRef as Identity, decode_native_identity,
-    native_date_arithmetic_helpers as helpers,
+    native_date_arithmetic_helpers as helpers, native_date_arithmetic_value::OVERFLOW,
 };
 type FrameResult<T> = std::result::Result<T, Error>;
 
@@ -441,15 +439,6 @@ fn unsupported(
 ) -> FrameResult<Option<Vec<u8>>> {
     report(3, text.as_bytes(), w, limit)
 }
-fn warn_null(message: String, limit: usize) -> FrameResult<Option<Vec<u8>>> {
-    null(
-        Some(NativeDateArithmeticWarning {
-            code: 1292,
-            message: &message,
-        }),
-        limit,
-    )
-}
 fn fixed_width(s: State<'_>) -> Option<usize> {
     let m = metadata(s.metadata)?;
     if !m.duration || helpers::composite_spec(s.unit).is_none() {
@@ -565,284 +554,125 @@ pub fn date_arithmetic_overflow_native_args_valid(a: Option<&[u8]>, level: Optio
         && matches!(level, Some(0..=2))
         && native_date_arithmetic_output_bound(a, None, None, None).is_some()
 }
-fn visible_decimal(value: Identity<'_>) -> String {
+fn value_error(error: crate::NativeDateArithmeticValueError) -> Error {
+    match error {
+        crate::NativeDateArithmeticValueError::InvalidResponse => Error::Invalid,
+        crate::NativeDateArithmeticValueError::ResourceLimit => Error::Capacity,
+    }
+}
+fn decimal_value(
+    value: Identity<'_>,
+) -> Option<tidb_query_datatype::codec::mysql::NativeDecimalParseRef<'_>> {
     let Identity::Decimal {
         negative,
         scale,
         storage_scale,
+        declared_shape,
         coefficient,
-        ..
     } = value
     else {
-        unreachable!()
+        return None;
     };
-    Decimal::native_format_visible(negative, coefficient, scale, storage_scale)
-}
-// Preserve the native raw-coefficient rule (including its invariant panics),
-// not a validated SQL DECIMAL import that would narrow the admitted identity.
-fn rounded_decimal(value: Identity<'_>) -> i64 {
-    let Identity::Decimal {
+    Some(tidb_query_datatype::codec::mysql::NativeDecimalParseRef {
         negative,
+        digits: coefficient,
+        scale,
         storage_scale,
-        coefficient,
-        ..
-    } = value
-    else {
-        unreachable!()
-    };
-    let digits = std::str::from_utf8(coefficient).expect("decimal coefficients are ASCII digits");
-    let split = digits.len() - storage_scale as usize;
-    let integer = if split == 0 { "0" } else { &digits[..split] };
-    let rounded = (|| {
-        let mut n = integer.parse::<u64>().ok()?;
-        if storage_scale != 0 && digits.as_bytes()[split] >= b'5' {
-            n = n.checked_add(1)?;
-        }
-        if negative && n == i64::MIN.unsigned_abs() {
-            return Some(i64::MIN);
-        }
-        let n = i64::try_from(n).ok()?;
-        Some(if negative { -n } else { n })
-    })();
-    rounded.unwrap_or(if negative { i64::MIN } else { i64::MAX })
+        declared_shape,
+    })
 }
-fn single_string(text: &str) -> (i64, bool) {
-    let trimmed = text.trim();
-    let bytes = trimmed.as_bytes();
-    let mut i = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
-    let start = i;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    let n = if i == start {
-        0
-    } else {
-        trimmed[..i].parse::<i64>().unwrap_or(i64::MAX)
-    };
-    (n, i == start || i < bytes.len())
-}
-fn with_number(s: State<'_>, number: i64, second: bool) -> State<'_> {
-    State {
-        phase: 0,
-        prepared: if second { 2 } else { 1 },
-        number: Some(number),
-        amount_text: None,
-        ..s
-    }
-}
-fn with_composite<'a>(s: State<'a>, text: &'a str) -> State<'a> {
-    State {
-        phase: 0,
-        prepared: 3,
-        amount_text: Some(text),
-        number: None,
-        ..s
-    }
-}
-fn seconds(
-    s: State<'_>,
-    text: &str,
-    w: Option<NativeDateArithmeticWarning<'_>>,
-    limit: usize,
-) -> FrameResult<Option<Vec<u8>>> {
-    match helpers::decimal_seconds_to_micros(text) {
-        Some(n) => drive(with_number(s, n, true), w, limit),
-        None => null(w, limit),
-    }
-}
-fn accept_date<'a>(
-    s: State<'a>,
-    text: &'a str,
-    w: Option<NativeDateArithmeticWarning<'_>>,
-    limit: usize,
-) -> FrameResult<Option<Vec<u8>>> {
-    if !helpers::calendar_date_valid(text) {
-        let message = match s.date.and_then(|v| decode_native_identity(v).ok()) {
-            Some(Identity::Int(n)) => format!("Incorrect time value: '{n}'"),
-            Some(Identity::UInt(n)) => format!("Incorrect time value: '{}'", n as i64),
-            _ => format!("Incorrect datetime value: '{text}'"),
-        };
-        return warn_null(message, limit);
-    }
-    drive(
-        State {
-            phase: 0,
-            date_text: Some(text),
-            ..s
-        },
-        w,
-        limit,
+#[cfg(test)]
+fn rounded_decimal(value: Identity<'_>) -> i64 {
+    crate::native_date_arithmetic_value::rounded_decimal(
+        decimal_value(value).expect("decimal identity"),
     )
 }
-fn prepare_date(
+fn value_input(
+    bytes: Option<&[u8]>,
+) -> FrameResult<crate::native_date_arithmetic_value::ValueInput<'_>> {
+    use crate::native_date_arithmetic_value::ValueInput as I;
+    let Some(bytes) = bytes else {
+        return Ok(I::Null);
+    };
+    Ok(match decode_native_identity(bytes)? {
+        Identity::Int(v) => I::Int(v),
+        Identity::UInt(v) => I::UInt(v),
+        value @ Identity::Decimal { .. } => I::Decimal(decimal_value(value).ok_or(Error::Invalid)?),
+        Identity::Real(bits) => I::Real(f64::from_bits(bits)),
+        Identity::Float32(bits) => I::Float32(f64::from_bits(bits)),
+        Identity::String { .. } | Identity::Bytes(_) => I::Text,
+        Identity::Duration { nanos, .. } => I::Duration(nanos),
+        Identity::MinNotNull | Identity::MaxValue => I::Sentinel,
+        _ => I::Other,
+    })
+}
+fn value_state(s: State<'_>) -> FrameResult<crate::NativeDateArithmeticValues<'_>> {
+    let metadata = metadata(s.metadata).ok_or(Error::Invalid)?;
+    let config = if metadata.duration {
+        crate::NativeDateArithmeticValueConfig::duration(
+            metadata.sign,
+            metadata.duration_fsp,
+            metadata.decimal,
+        )
+    } else {
+        crate::NativeDateArithmeticValueConfig::calendar(metadata.sign, metadata.fsp)
+    };
+    // The wire owner retains its original independent transport/work bound.
+    // Native callers can construct only a finite actual-value allowance.
+    let mut state = crate::NativeDateArithmeticValues::from_values(
+        [value_input(s.date)?, value_input(s.amount)?],
+        s.unit,
+        config,
+        None,
+    );
+    state.phase = s.phase;
+    state.date_text = s.date_text.map(std::borrow::Cow::Borrowed);
+    state.amount_text = s.amount_text.map(std::borrow::Cow::Borrowed);
+    state.number = s.number;
+    state.prepared = s.prepared;
+    Ok(state)
+}
+fn value_report(
     s: State<'_>,
-    w: Option<NativeDateArithmeticWarning<'_>>,
+    state: &crate::NativeDateArithmeticValues<'_>,
+    step: crate::NativeDateArithmeticValueStep,
     limit: usize,
 ) -> FrameResult<Option<Vec<u8>>> {
-    let Some(raw) = s.date else {
-        return null(w, limit);
-    };
-    let number = match decode_native_identity(raw)? {
-        Identity::Int(n) => n,
-        Identity::UInt(n) => match i64::try_from(n) {
-            Ok(n) => n,
-            Err(_) => return warn_null("Incorrect time value: '-1'".into(), limit),
-        },
-        d @ Identity::Decimal { .. } => rounded_decimal(d),
-        Identity::Real(bits) => f64::from_bits(bits).trunc() as i64,
-        _ => return request(State { phase: 1, ..s }, w, limit),
-    };
-    let parsed =
-        match native_parse_time_from_num(number, TimeType::DateTime, 0, true, false, true, &Utc)
-            .into_result()
-        {
-            Ok(p) => p,
-            Err(_) => return warn_null(format!("Incorrect time value: '{number}'"), limit),
-        };
-    let mut text = String::new();
-    Time::write_native_core_display(parsed.time.raw, number < 101_000_000, 0, &mut text)
-        .expect("String formatting cannot fail");
-    accept_date(s, &text, w, limit)
-}
-fn prepare_amount(
-    s: State<'_>,
-    w: Option<NativeDateArithmeticWarning<'_>>,
-    limit: usize,
-) -> FrameResult<Option<Vec<u8>>> {
-    let Some(raw) = s.amount else {
-        return null(w, limit);
-    };
-    let value = decode_native_identity(raw)?;
-    let m = metadata(s.metadata).ok_or(Error::Invalid)?;
-    if helpers::composite_spec(s.unit).is_some() {
-        let text = match value {
-            Identity::Int(n) => n.to_string(),
-            Identity::UInt(n) => n.to_string(),
-            d @ Identity::Decimal { .. } => {
-                helpers::format_decimal_composite_text(s.unit, &visible_decimal(d))
-            }
-            Identity::Real(bits) | Identity::Float32(bits) if m.duration => {
-                let n = f64::from_bits(bits);
-                match m.decimal.filter(|n| *n >= 0) {
-                    Some(p) => format!("{n:.precision$}", precision = p as usize),
-                    None => n.to_string(),
-                }
-            }
-            Identity::String { .. } | Identity::Bytes(_) => {
-                return request(State { phase: 2, ..s }, w, limit);
-            }
-            _ if m.duration => return request(State { phase: 2, ..s }, w, limit),
-            _ => return unsupported("composite INTERVAL amount", w, limit),
-        };
-        return drive(with_composite(s, &text), w, limit);
-    }
-    if s.unit.eq_ignore_ascii_case("SECOND") {
-        let text = match value {
-            Identity::Int(n) => n.to_string(),
-            Identity::UInt(n) => n.to_string(),
-            d @ Identity::Decimal { .. } => visible_decimal(d),
-            Identity::String { .. } | Identity::Bytes(_) => {
-                return request(State { phase: 2, ..s }, w, limit);
-            }
-            Identity::Real(bits) => {
-                let text = f64::from_bits(bits).to_string();
-                return request(
-                    State {
-                        phase: 4,
-                        amount_text: Some(&text),
-                        ..s
-                    },
-                    w,
-                    limit,
-                );
-            }
-            Identity::MinNotNull | Identity::MaxValue => {
-                return unsupported("range sentinel INTERVAL amount", w, limit);
-            }
-            _ => return request(State { phase: 3, ..s }, w, limit),
-        };
-        return seconds(s, &text, w, limit);
-    }
-    let n = match value {
-        Identity::Int(n) => n,
-        Identity::UInt(n) => i64::try_from(n).unwrap_or(i64::MAX),
-        d @ Identity::Decimal { .. } => rounded_decimal(d),
-        Identity::Real(bits) => f64::from_bits(bits).round() as i64,
-        Identity::String { .. } | Identity::Bytes(_) => {
-            return request(State { phase: 2, ..s }, w, limit);
+    use crate::{NativeDateArithmeticValue as V, NativeDateArithmeticValueAction as A};
+    let warning = step.warning.as_ref().map(|w| NativeDateArithmeticWarning {
+        code: w.code,
+        message: &w.message,
+    });
+    match step.action {
+        A::Ready(V::Null) => null(warning, limit),
+        A::Ready(V::Text(text)) => report(1, text.as_bytes(), warning, limit),
+        A::Ready(V::Duration { nanos, fsp }) => {
+            let mut out = Vec::new();
+            put(&mut out, nanos);
+            put(&mut out, fsp);
+            report(2, &out, warning, limit)
         }
-        Identity::MinNotNull | Identity::MaxValue => {
-            return unsupported("range sentinel INTERVAL amount", w, limit);
+        A::Ready(V::Unsupported(reason)) => unsupported(reason, warning, limit),
+        A::Ready(V::Error(message)) => {
+            let mut out = 1441u16.to_le_bytes().to_vec();
+            out.extend_from_slice(message.as_bytes());
+            report(4, &out, warning, limit)
         }
-        _ => return request(State { phase: 3, ..s }, w, limit),
-    };
-    drive(with_number(s, n, false), w, limit)
-}
-fn drive(
-    s: State<'_>,
-    w: Option<NativeDateArithmeticWarning<'_>>,
-    limit: usize,
-) -> FrameResult<Option<Vec<u8>>> {
-    let m = metadata(s.metadata).ok_or(Error::Invalid)?;
-    let composite = helpers::composite_spec(s.unit).is_some();
-    if m.duration {
-        let Some(date) = s.date else {
-            return null(w, limit);
-        };
-        let Identity::Duration { nanos, .. } = decode_native_identity(date)? else {
-            return unsupported("DATE_ADD duration operand", w, limit);
-        };
-        if !composite
-            && !matches!(
-                s.unit.to_ascii_uppercase().as_str(),
-                "MICROSECOND" | "SECOND" | "MINUTE" | "HOUR"
-            )
-        {
-            return null(w, limit);
-        }
-        if s.prepared == 0 {
-            return prepare_amount(s, w, limit);
-        }
-        let amount = prepared(s)?;
-        return match helpers::apply_duration(s.unit, nanos, amount, m.sign, m.duration_fsp) {
-            Some((nanos, fsp)) => {
-                let mut out = Vec::new();
-                put(&mut out, nanos);
-                put(&mut out, fsp);
-                report(2, &out, w, limit)
-            }
-            None => null(w, limit),
-        };
-    }
-    // Composite amount is demanded first, even when the date is SQL NULL.
-    if composite && s.prepared == 0 {
-        return prepare_amount(s, w, limit);
-    }
-    if s.date_text.is_none() {
-        return prepare_date(s, w, limit);
-    }
-    if s.prepared == 0 {
-        return prepare_amount(s, w, limit);
-    }
-    match helpers::apply_calendar(s.unit, s.date_text.unwrap(), prepared(s)?, m.sign, m.fsp) {
-        helpers::CalendarOutcome::Text(text) => report(1, text.as_bytes(), w, limit),
-        helpers::CalendarOutcome::Null => null(w, limit),
-        helpers::CalendarOutcome::Overflow => request(State { phase: 5, ..s }, w, limit),
-        helpers::CalendarOutcome::UnsupportedUnit => unsupported("INTERVAL unit", w, limit),
-    }
-}
-fn prepared(s: State<'_>) -> FrameResult<helpers::PreparedAmount<'_>> {
-    match s.prepared {
-        1 => Ok(helpers::PreparedAmount::Whole(
-            s.number.ok_or(Error::Invalid)?,
-        )),
-        2 => Ok(helpers::PreparedAmount::SecondMicros(
-            s.number.ok_or(Error::Invalid)?,
-        )),
-        3 => Ok(helpers::PreparedAmount::Composite(
-            s.amount_text.ok_or(Error::Invalid)?,
-        )),
-        _ => Err(Error::Invalid),
+        A::Request { .. } | A::Overflow => request(
+            State {
+                phase: state.phase,
+                date_text: state.date_text.as_deref(),
+                amount_text: state
+                    .amount_text
+                    .as_deref()
+                    .map(|v| if state.phase == 4 { v.trim() } else { v }),
+                number: state.number,
+                prepared: state.prepared,
+                ..s
+            },
+            warning,
+            limit,
+        ),
     }
 }
 fn evaluate_head<'a>(
@@ -856,21 +686,20 @@ fn evaluate_head<'a>(
     if !head_valid(a, b, c, d, duration) {
         return Err(Error::Invalid);
     }
-    drive(
-        State {
-            date: a,
-            amount: b,
-            unit: std::str::from_utf8(c.unwrap()).map_err(|_| Error::Invalid)?,
-            metadata: d.unwrap(),
-            phase: 0,
-            date_text: None,
-            amount_text: None,
-            number: None,
-            prepared: 0,
-        },
-        None,
-        limit,
-    )
+    let s = State {
+        date: a,
+        amount: b,
+        unit: std::str::from_utf8(c.unwrap()).map_err(|_| Error::Invalid)?,
+        metadata: d.unwrap(),
+        phase: 0,
+        date_text: None,
+        amount_text: None,
+        number: None,
+        prepared: 0,
+    };
+    let mut state = value_state(s)?;
+    let step = state.begin().map_err(value_error)?;
+    value_report(s, &state, step, limit)
 }
 pub(crate) fn evaluate_date_arithmetic_head_native<'a>(
     a: Option<&'a [u8]>,
@@ -897,67 +726,29 @@ pub(crate) fn evaluate_date_arithmetic_step_native<'a>(
         return Err(Error::Invalid);
     }
     let s = pending(a.unwrap()).ok_or(Error::Invalid)?;
-    // Any warning on the incoming request was already replayed, exactly once.
-    match s.phase {
-        1 => match b {
-            None => null(None, limit),
-            Some(text) => accept_date(
-                s,
-                std::str::from_utf8(text).map_err(|_| Error::Invalid)?,
-                None,
-                limit,
-            ),
-        },
-        2 => {
-            let Some(text) = b else {
-                return null(None, limit);
-            };
-            let text = std::str::from_utf8(text).map_err(|_| Error::Invalid)?;
-            if helpers::composite_spec(s.unit).is_some() {
-                return drive(with_composite(s, text), None, limit);
-            }
-            if s.unit.eq_ignore_ascii_case("SECOND") {
-                return request(
-                    State {
-                        phase: 4,
-                        amount_text: Some(text.trim()),
-                        ..s
-                    },
-                    None,
-                    limit,
-                );
-            }
-            let (n, warn) = single_string(text);
-            let message = format!("Truncated incorrect DECIMAL value: '{text}'");
-            drive(
-                with_number(s, n, false),
-                warn.then_some(NativeDateArithmeticWarning {
-                    code: 1292,
-                    message: &message,
-                }),
-                limit,
-            )
-        }
+    // Incoming report warnings were already delivered once by their owner.
+    let mut state = value_state(s)?;
+    let step = match s.phase {
+        1 | 2 => state.resume_string_cow(
+            b.map(|text| std::str::from_utf8(text).map(std::borrow::Cow::Borrowed))
+                .transpose()
+                .map_err(|_| Error::Invalid)?,
+        ),
         3 => {
-            let Identity::Int(n) = decode_native_identity(b.unwrap())? else {
+            let Identity::Int(number) = decode_native_identity(b.ok_or(Error::Invalid)?)? else {
                 return Err(Error::Invalid);
             };
-            if s.unit.eq_ignore_ascii_case("SECOND") {
-                seconds(s, &n.to_string(), None, limit)
-            } else {
-                drive(with_number(s, n, false), None, limit)
-            }
+            state.resume_integer(number)
         }
-        4 => seconds(
-            s,
-            &visible_decimal(decode_native_identity(b.unwrap())?),
-            None,
-            limit,
+        4 => state.resume_decimal(
+            decimal_value(decode_native_identity(b.ok_or(Error::Invalid)?)?)
+                .ok_or(Error::Invalid)?,
         ),
-        _ => Err(Error::Invalid),
+        _ => return Err(Error::Invalid),
     }
+    .map_err(value_error)?;
+    value_report(s, &state, step, limit)
 }
-const OVERFLOW: &str = "Datetime function: datetime field overflow";
 pub(crate) fn evaluate_date_arithmetic_overflow_native(
     a: Option<&[u8]>,
     level: Option<i64>,
@@ -966,23 +757,18 @@ pub(crate) fn evaluate_date_arithmetic_overflow_native(
     if !date_arithmetic_overflow_native_args_valid(a, level) {
         return Err(Error::Invalid);
     }
-    match level.unwrap() {
-        0 => null(None, limit),
-        1 => null(
-            Some(NativeDateArithmeticWarning {
-                code: 1441,
-                message: OVERFLOW,
-            }),
-            limit,
-        ),
-        2 => {
-            let mut out = 1441_u16.to_le_bytes().to_vec();
-            out.extend_from_slice(OVERFLOW.as_bytes());
-            report(4, &out, None, limit)
-        }
-        _ => Err(Error::Invalid),
-    }
+    let s = pending(a.unwrap()).ok_or(Error::Invalid)?;
+    let mut state = value_state(s)?;
+    let mode = match level {
+        Some(0) => crate::NativeDateArithmeticOverflowMode::Ignore,
+        Some(1) => crate::NativeDateArithmeticOverflowMode::Warn,
+        Some(2) => crate::NativeDateArithmeticOverflowMode::Error,
+        _ => return Err(Error::Invalid),
+    };
+    let step = state.resume_overflow(mode).map_err(value_error)?;
+    value_report(s, &state, step, limit)
 }
+
 fn kernel(value: FrameResult<Option<Vec<u8>>>) -> Result<Option<Bytes>> {
     value.map_err(|e| other_err!("Invalid native date arithmetic transport: {:?}", e))
 }

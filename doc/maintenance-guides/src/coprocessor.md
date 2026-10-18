@@ -150,6 +150,36 @@ flag or eligibility policy described above.
   expressions or maintain a second signature dispatch table. Prepared calls
   retain the original argument-index mapping: IN's legacy constant extraction
   can leave dynamic children in swap-remove order, not source order.
+- Ordinary native DATE_ADD/SUB calendar, AST-default and typed-duration callers
+  use `NativeDateArithmeticValues`, an opaque actual-value continuation. Static
+  unit/sign/result metadata, demanded text and prepared numeric values are actual
+  state; datatype conversion requests do not invoke expression evaluation.
+  `native_date_arithmetic_helpers` retains calendar/duration arithmetic unchanged.
+  Explicit wire compatibility delegates control to that same state and preserves
+  its original codec, reports, validation and output planning. Legacy PB date
+  arithmetic remains a separate pending migration.
+  Preserve composite-calendar amount-before-date versus duration-date-first
+  demand, original Real/Float32 and Decimal rules, SECOND parsing, pending warning
+  replacement at internal boundaries, and late overflow-policy access. AST mode
+  retains NoColumns policy. Generic date_add_/date_sub_ sources eagerly demand
+  both authenticated native capabilities and share the frontend's original FSP,
+  Duration cast and computed-time result policy. Bounded ownership is detached
+  before warning, mode, timezone, clock or overflow callbacks; Bytes, DateTime,
+  Duration and native-value outputs keep provenance and raw representation.
+  Failed public continuation advances permanently invalidate the state. Account
+  for incoming owned String capacity while warning work still keeps it live;
+  valid nonfinite format precision does not expand text, but formatter parameter
+  validation still requires its work gate. No resource maximum is raised.
+  N7g froze 2,325,024 original observations/digest FEEA99CD98022F82 at
+  TiDB49333e87/TiKVe212b91, then compared all independent old/new observations
+  before retiring the old caller/controller. Ready lookup/source refusal REDs,
+  source/context/capability/resource/cancel tests and mixed Projection accompany
+  the frontend receipt `rust/docs/evidence/no-fallback-n7g.md`. Final frontend
+  1652/core1099 passes retain the exact3/1 inherited failures; all226 batch and26
+  Projection tests pass. Clippy89 expression/171 all-crate warning titles match
+  N7f exactly; lint,15-file pinned formatting and immutable fixture checks pass.
+  This is a local checkpoint; global no-fallback/package completion is not
+  claimed.
 - Native bounded-staleness consumers use actual `NativeTemporalValue` endpoints
   through `native_bounded_staleness_head_values` and
   `native_bounded_staleness_finish_values`. The legacy explicit wire APIs delegate

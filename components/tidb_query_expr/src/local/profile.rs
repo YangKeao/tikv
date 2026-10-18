@@ -126,6 +126,7 @@ impl BatchCallSignature {
             self.host,
             Some(
                 SqlBatchHostOperation::TimestampDiffNative { .. }
+                    | SqlBatchHostOperation::DateArithmeticNative { .. }
                     | SqlBatchHostOperation::BoundedStalenessNative { .. }
                     | SqlBatchHostOperation::StrToDateNative { .. }
                     | SqlBatchHostOperation::CastCharNative { .. }
