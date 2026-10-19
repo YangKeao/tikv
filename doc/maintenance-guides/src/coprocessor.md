@@ -3327,14 +3327,15 @@ peak memory. Generic fallback, remaining Ready families, unistore, unsupported/
 malformed sources, inherited failures and semantic/full-server gates remain open.
 
 
-### N7t0: finite actual wildcard matching (source integration pending)
+### N7t0: finite actual wildcard matching (SDK checkpoint)
 
 `NativeLikeInvocation::evaluate_bounded` accepts actual text/pattern/escape and a
 finite logical allowance. `NativeLikeValueError::Resource` is distinct from false,
 NULL and a request to run another evaluator. This entry does not evaluate child
 expressions, serialize identities or call Ready. The old explicit worker entry
-retains its transport contract. Ordinary frontend callers and canonical lazy
-LIKE/ILIKE sources remain pending N7t work; this SDK step does not retire them.
+retains its transport contract. At the SDK-only N7t0 checkpoint, ordinary frontend callers and canonical lazy
+LIKE/ILIKE sources were still pending. Their subsequent N7t integration is
+described below; the SDK-only step did not retire them.
 
 The datatype `pattern` module has one token/backtracking loop with an optional
 step quota. Existing unlimited raw, compiled and tuple wrappers use that loop;
@@ -3363,3 +3364,53 @@ recovery remain intact. Work/visible ownership budgets do not certify physical
 allocator failure or whole-statement peak memory. Source authentication, terminal
 host demand and full ordinary SQL conversion belong to the following frontend
 integration; these SDK APIs alone do not establish their coverage.
+
+
+### N7t: lazy wildcard caller and source integration
+
+The frontend now uses consuming actual-value LIKE stages, not a Ready argument
+program. `Prepared::Text/Pattern/Escape` in frontend `tikv/wildcard_value.rs`
+performs the original SQL Datum.ToString byte conversion before requesting the
+following child. This is distinct from expression coerce_bytes: preserve Go float
+rendering, raw bytes and strict Raw UTF-8. NULL stops the ordinary scalar signature
+immediately; AST LIKE still evaluates both child expressions eagerly, then lets
+either NULL suppress both byte conversions. Legacy Missing/NULL return directly,
+and its invalid non-NULL witness retains the exact original Scope/Contract cause.
+The broader old unistore traversal is not retired by this helper replacement.
+
+`SqlBatchHostOperation::LikeNative { ilike }` uses the existing frame, authenticated
+native capabilities and native outputs. Its metadata captures all three source
+ordinals, the complete escape FieldType, original collation/cache eligibility,
+shared owner handles, result declaration and output provenance. Preparation never
+resolves a cache, compiles a pattern, fetches context id or evaluates a child.
+Only demanded operands authenticate; each state is taken before any fallible
+conversion or callback and reinstalled only after successful Need. NULL, errors
+and caught panics cannot replay a consumed stage. Retained actual byte capacities
+are included in host allowance accounting.
+
+Text/pattern coercions are callback-free. Escape casting keeps the existing
+cast_arg_as_int, strict integer reading, unsigned metadata and wrapping u8 escape.
+Before its callbacks, release all value-store borrows and detach bounded actual
+values. String/Enum/Set copies share their real immutable GoString headers;
+unused huge hybrid names are not deep-copied or formatted. Original unsupported
+vector/sentinel escape errors precede payload copying and context access. Decimal
+integer work reads storage; visible precision is charged only when an original
+exceptional diagnostic needs it. No numeric answer or placeholder is injected.
+
+For a non-NULL escape, read context id only when both original pattern/escape
+const-levels permit caching, after all earlier demand/cast barriers. Bind this id
+on the invocation and match through the finite N7t0 SDK entry. Canonical sources
+apply ScalarFunction's original ordinary return-family conversion once, after
+matching and after releasing all store borrows; no generic temporal parse is
+added. Preserve physical output prefixes when later errors/panics occur, selection
+order, duplicate occurrences, both execution flags and serial/parallel Projection.
+
+Before retiring old callers, independent comparison passed63,504 utility/legacy,
+34,344 scalar and78 cache/AST observations; the original9 Missing/NULL/invalid-null
+contract cases remain fixed witnesses with unchanged contract branches. Original
+checksums remain1952BB7F6D8F1E9B/C49CB830518858A9/94085E5905346BCD. Pair sources/logs
+are archived in the persistent workspace before removal; re-running a fixed
+witness is not renewed independent proof. The frontend plan/receipt records final
+validation and limits. No complete Go-package transcreation, global fallback
+retirement, complete malformed/PB coverage or full-server SQL validation is
+implied by this family checkpoint.

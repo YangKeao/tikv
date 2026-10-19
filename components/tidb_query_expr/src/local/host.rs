@@ -98,6 +98,10 @@ pub enum SqlBatchHostOperation {
     DurationConstructionNative(crate::NativeDurationConstructionOperation),
     /// Vector SQL over actual native capabilities.
     VectorNative(crate::NativeVectorOperation),
+    /// Lazy actual LIKE operands with original collation/cache metadata.
+    LikeNative {
+        ilike: bool,
+    },
     /// Actual grouping id and optional immutable planner metadata.
     GroupingNative,
     /// Calendar over actual native capabilities.
@@ -225,6 +229,7 @@ impl SqlBatchHostOperation {
             Self::TsoNative(op) => arity == op.arity(),
             Self::DurationConstructionNative(op) => arity == op.arity(),
             Self::VectorNative(op) => arity == op.arity(),
+            Self::LikeNative { .. } => arity == 3,
             Self::GroupingNative => arity == 1,
             Self::EpochNative {
                 from,
@@ -295,6 +300,7 @@ impl SqlBatchHostOperation {
             | Self::DurationConstructionNative(_)
             | Self::VectorNative(_)
             | Self::GroupingNative
+            | Self::LikeNative { .. }
             | Self::TsoNative(_)
             | Self::EpochNative { .. }
             | Self::ExtractNative { .. }
@@ -362,6 +368,7 @@ impl SqlBatchHostOperation {
             | Self::DurationConstructionNative(_)
             | Self::VectorNative(_)
             | Self::GroupingNative
+            | Self::LikeNative { .. }
             | Self::TsoNative(_)
             | Self::EpochNative { .. } => EvalType::Bytes,
             Self::ExtractNative { typed: true, .. } => EvalType::Int,
