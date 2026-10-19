@@ -3414,3 +3414,39 @@ witness is not renewed independent proof. The frontend plan/receipt records fina
 validation and limits. No complete Go-package transcreation, global fallback
 retirement, complete malformed/PB coverage or full-server SQL validation is
 implied by this family checkpoint.
+
+
+### N7u: actual identity selection and the scalar signature prefix
+
+`SqlBatchHostOperation::ValueIdentityNative { name_const }` uses the existing
+frame/native capability ABI, arity1 for ANY_VALUE and2 for NAME_CONST. Both
+arguments are eager; a NULL name does not suppress value demand. Authenticate
+namespace/generation/role/source/physical row/occurrence, advance the demand state
+before fallible work, discard the evaluated name without body coercion, then
+copy the selected actual Datum through its original Clone primitive. Deep copied
+Bytes/Raw/bit/Decimal coefficient/JSON/vector extents are bounded first; immutable
+GoString String/Enum/Set headers share real backing. Preserve raw NaN bits,
+malformed opaque values and precision metadata without SQL rendering in the body.
+Release all store borrows before ordinary return-family conversion/publication.
+Mint the result under its producer and requested output role; no replay after
+copy failure, coercion panic or completed publication.
+
+The frontend's original ScalarFunction has an unconditional uservar_name probe
+of stored first Constant.value before checking function names and before child
+evaluation. N7u preserves this surprising observable prefix separately: source
+metadata snapshots the genuine stored constant header (never an evaluated operand
+or callback), charged before deep cloning; host start runs the bounded real SQL
+formatter before requesting argument0. Invalid Decimal coefficient UTF-8 retains
+its original formatter panic before unused huge scale; valid huge precision is
+bounded before rendering. Computed first expressions have no such probe. Existing
+parameter/deferred source admission is unchanged. The actual values-only helper
+has no scalar probe. ANY_VALUE stays unfoldable; the ordinary return boundary
+runs once, including contradictory declarations and original NaN conversion panic.
+
+All234315 old/candidate pairs passed before the two frontend Ready calls were
+retired, with fixed direct3213/60F023D7530726AF and scalar231102/E5E2EFBE8F3E3F49
+witnesses unchanged. Original codec/frame workers and public ABI remain for explicit
+wire compatibility; the obsolete frontend identity codec is test-only. See frontend
+N7u plan/receipt for final gates, source limits and archived independent evidence.
+Logical copy/work allowances are not physical allocator-peak guarantees. This
+family does not establish generic fallback/unistore or complete Go-package coverage.

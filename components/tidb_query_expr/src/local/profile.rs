@@ -127,6 +127,7 @@ impl BatchCallSignature {
             Some(
                 SqlBatchHostOperation::DurationConstructionNative(_)
                     | SqlBatchHostOperation::VectorNative(_)
+                    | SqlBatchHostOperation::ValueIdentityNative { .. }
                     | SqlBatchHostOperation::GroupingNative
                     | SqlBatchHostOperation::LikeNative { .. }
                     | SqlBatchHostOperation::CalendarNative { .. }
