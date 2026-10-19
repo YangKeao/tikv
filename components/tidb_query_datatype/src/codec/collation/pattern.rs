@@ -173,15 +173,35 @@ fn match_tokens<T: Copy, E>(
     decoder: Decoder,
     equal: impl Fn(Unit<'_>, T) -> std::result::Result<bool, E>,
 ) -> std::result::Result<bool, E> {
+    match_tokens_bounded(target, pattern_len, next_token, decoder, equal, None)
+        .map(|result| result.expect("unlimited matcher cannot exhaust steps"))
+}
+
+fn match_tokens_bounded<T: Copy, E>(
+    target: &[u8],
+    pattern_len: usize,
+    next_token: impl Fn(usize) -> Option<(Token<T>, usize)>,
+    decoder: Decoder,
+    equal: impl Fn(Unit<'_>, T) -> std::result::Result<bool, E>,
+    mut remaining: Option<&mut usize>,
+) -> std::result::Result<Option<bool>, E> {
     let (mut px, mut tx) = (0, 0);
     let mut backtrack = None;
     while px < pattern_len || tx < target.len() {
+        // Debit before token decoding, equality and backtracking. A trailing
+        // percent can succeed in one step without visiting the target suffix.
+        if let Some(steps) = remaining.as_deref_mut() {
+            let Some(next) = steps.checked_sub(1) else {
+                return Ok(None);
+            };
+            *steps = next;
+        }
         if let Some((token, next_px)) = next_token(px) {
             match token {
                 Token::Any => {
                     px = next_px;
                     if px == pattern_len {
-                        return Ok(true);
+                        return Ok(Some(true));
                     }
                     backtrack = Some((px, tx));
                     continue;
@@ -201,7 +221,7 @@ fn match_tokens<T: Copy, E>(
                         };
                         if matched {
                             if matches!(token, Token::PrefixLiteral(_)) {
-                                return Ok(true);
+                                return Ok(Some(true));
                             }
                             px = next_px;
                             tx += width;
@@ -221,9 +241,9 @@ fn match_tokens<T: Copy, E>(
                 continue;
             }
         }
-        return Ok(false);
+        return Ok(Some(false));
     }
-    Ok(true)
+    Ok(Some(true))
 }
 
 fn char_bytes_for_compare<C: Collator>(unit: Unit<'_>) -> &[u8] {
@@ -261,6 +281,25 @@ pub fn matches_raw<C: Collator, CS: Charset>(
         |pos| next_raw_token(pattern, pos, decode::<CS>, options),
         decode::<CS>,
         literal_equal::<C>,
+    )
+}
+
+/// The same raw matcher with a finite token/backtracking step allowance.
+/// `None` means exhaustion, distinct from an actual non-match or collation
+/// error.
+pub fn matches_raw_bounded<C: Collator, CS: Charset>(
+    target: &[u8],
+    pattern: &[u8],
+    options: MatchOptions,
+    remaining: &mut usize,
+) -> Result<Option<bool>> {
+    match_tokens_bounded(
+        target,
+        pattern.len(),
+        |pos| next_raw_token(pattern, pos, decode::<CS>, options),
+        decode::<CS>,
+        literal_equal::<C>,
+        Some(remaining),
     )
 }
 
@@ -362,6 +401,27 @@ impl CompiledPattern {
             },
         )
     }
+
+    /// Match with a finite step allowance over the same immutable tokens.
+    /// `None` is exhaustion, not SQL false.
+    pub fn is_match_bounded(&self, target: &[u8], remaining: &mut usize) -> Result<Option<bool>> {
+        match_tokens_bounded(
+            target,
+            self.tokens.len(),
+            |pos| self.tokens.get(pos).copied().map(|token| (token, pos + 1)),
+            self.decoder,
+            |left, right| {
+                (self.equal)(
+                    left,
+                    Unit {
+                        code: right.code,
+                        bytes: &self.pattern[right.start..right.end],
+                    },
+                )
+            },
+            Some(remaining),
+        )
+    }
 }
 
 fn compile_units<T: From<u8>>(
@@ -452,9 +512,127 @@ pub fn matches_runes(target: &[u8], pattern: &[u8], options: MatchOptions) -> bo
         .expect("binary-rune literal comparison cannot fail")
 }
 
+/// Exact Go-rune policy with a finite shared matcher step allowance.
+pub fn matches_runes_bounded(
+    target: &[u8],
+    pattern: &[u8],
+    options: MatchOptions,
+    remaining: &mut usize,
+) -> Option<bool> {
+    matches_raw_bounded::<CollatorUtf8Mb4BinNoPadding, CharsetUtf8mb4>(
+        target, pattern, options, remaining,
+    )
+    .expect("binary-rune literal comparison cannot fail")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{super::collator::*, *};
+
+    #[test]
+    fn bounded_matcher_debits_actual_steps_and_preserves_policies() {
+        let target = vec![b'a'; 1 << 20];
+        for policy in [
+            TrailingEscape::Literal,
+            TrailingEscape::Reject,
+            TrailingEscape::PrefixLiteral,
+        ] {
+            let opts = options(92, policy);
+            let compiled = compile::<CollatorUtf8Mb4BinNoPadding, CharsetUtf8mb4>(b"%", opts);
+            assert_eq!(
+                matches_runes_bounded(&target, b"%", opts, &mut 1),
+                Some(true)
+            );
+            assert_eq!(
+                compiled.is_match_bounded(&target, &mut 1).unwrap(),
+                Some(true)
+            );
+            assert_eq!(matches_runes_bounded(&target, b"%", opts, &mut 0), None);
+            assert_eq!(compiled.is_match_bounded(&target, &mut 0).unwrap(), None);
+            assert_eq!(matches_runes_bounded(b"", b"", opts, &mut 0), Some(true));
+            assert_eq!(
+                matches_runes_bounded(&target, b"%aaab", opts, &mut 128),
+                None
+            );
+            assert_eq!(
+                compile::<CollatorUtf8Mb4BinNoPadding, CharsetUtf8mb4>(b"%aaab", opts)
+                    .is_match_bounded(&target, &mut 128)
+                    .unwrap(),
+                None
+            );
+            for text in [
+                b"".as_slice(),
+                b"abc",
+                b"a%b",
+                b"a_",
+                b"a\\",
+                b"\xff",
+                "é".as_bytes(),
+            ] {
+                for pattern in [
+                    b"".as_slice(),
+                    b"%",
+                    b"_",
+                    b"a%",
+                    b"a\\%b",
+                    b"a\\",
+                    b"\xfe",
+                    "É".as_bytes(),
+                ] {
+                    let original = matches_runes(text, pattern, opts);
+                    assert_eq!(
+                        matches_runes_bounded(text, pattern, opts, &mut 10000),
+                        Some(original)
+                    );
+                    let compiled =
+                        compile::<CollatorUtf8Mb4BinNoPadding, CharsetUtf8mb4>(pattern, opts);
+                    assert_eq!(
+                        compiled.is_match_bounded(text, &mut 10000).unwrap(),
+                        Some(original)
+                    );
+                }
+            }
+        }
+        // Debit occurs before literal equality, and equality errors retain their
+        // original identity rather than becoming exhaustion or false.
+        let mut remaining = 0;
+        assert_eq!(
+            match_tokens_bounded(
+                b"x",
+                1,
+                |_| Some((Token::Literal(()), 1)),
+                decode::<CharsetBinary>,
+                |_, _| Err::<bool, _>(7),
+                Some(&mut remaining)
+            ),
+            Ok(None)
+        );
+        let mut remaining = 1;
+        assert_eq!(
+            match_tokens_bounded(
+                b"x",
+                1,
+                |_| Some((Token::Literal(()), 1)),
+                decode::<CharsetBinary>,
+                |_, _| Err::<bool, _>(7),
+                Some(&mut remaining)
+            ),
+            Err(7)
+        );
+        // No equality callback is reached by a one-step trailing percent.
+        assert_eq!(
+            match_tokens_bounded(
+                b"abc",
+                1,
+                |_| Some((Token::Any::<()>, 1)),
+                decode::<CharsetBinary>,
+                |_, _| Ok::<_, ()>(false),
+                Some(&mut 1)
+            ),
+            Ok(Some(true))
+        );
+        assert_eq!(remaining, 0);
+    }
 
     fn options(escape: u32, trailing_escape: TrailingEscape) -> MatchOptions {
         MatchOptions {

@@ -3325,3 +3325,41 @@ rust/docs/evidence/no-fallback-n7s.md for source/metadata/resource/Projection ga
 and limits. Logical copied ownership/work budgets do not certify whole-statement
 peak memory. Generic fallback, remaining Ready families, unistore, unsupported/
 malformed sources, inherited failures and semantic/full-server gates remain open.
+
+
+### N7t0: finite actual wildcard matching (source integration pending)
+
+`NativeLikeInvocation::evaluate_bounded` accepts actual text/pattern/escape and a
+finite logical allowance. `NativeLikeValueError::Resource` is distinct from false,
+NULL and a request to run another evaluator. This entry does not evaluate child
+expressions, serialize identities or call Ready. The old explicit worker entry
+retains its transport contract. Ordinary frontend callers and canonical lazy
+LIKE/ILIKE sources remain pending N7t work; this SDK step does not retire them.
+
+The datatype `pattern` module has one token/backtracking loop with an optional
+step quota. Existing unlimited raw, compiled and tuple wrappers use that loop;
+finite wrappers return `None` for quota exhaustion and preserve equality errors.
+Charge before decoding/comparing/backtracking. A trailing percent may consume one
+step without reading a huge target suffix; a length-product estimate is not an
+equivalent demanded-work bound. Native collation selection, invalid-byte decoding,
+escape priority and trailing-escape policies remain unchanged.
+
+Cache keys remain context ids only. Cold compilation checks run inside the
+existing cache constructor so a concurrent hit does not charge a newly supplied
+ignored pattern. Match the same resolved Arc whose retained capacities were
+checked. Owner Clone resets the slot; invocation Clone shares it. `cache_enabled`
+and `with_context_id` expose/bind immutable invocation metadata without resolving
+or compiling. Consumers must request context id only after their original NULL,
+byte conversion and full escape cast barriers, and only for eligible caches.
+
+ILIKE still folds whole target/pattern buffers with the existing ASCII-only
+helpers; bound each demanded fold before allocation. The legacy path separately
+preserves Go simple-Unicode lowering and whole-operand empty replacement for
+invalid UTF-8. Inspect a bounded validation prefix: a definite first invalid
+sequence makes the unread suffix irrelevant, while an unresolved/incomplete
+prefix exhausts the allowance. The shared original matcher then applies legacy
+trailing-escape Reject. Original unsupported-collation panics and poisoned-cache
+recovery remain intact. Work/visible ownership budgets do not certify physical
+allocator failure or whole-statement peak memory. Source authentication, terminal
+host demand and full ordinary SQL conversion belong to the following frontend
+integration; these SDK APIs alone do not establish their coverage.

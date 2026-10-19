@@ -187,6 +187,71 @@ impl Clone for NativeLikeInvocation {
     }
 }
 
+/// Failure of finite actual-value LIKE work, distinct from a non-match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeLikeValueError {
+    /// Compilation, folding, retained cache or actual matcher steps exceed the
+    /// allowance.
+    Resource,
+}
+
+// Logical work/visible ownership, not a physical allocator or statement limit.
+struct LikeWork {
+    remaining: usize,
+}
+impl LikeWork {
+    fn new(maximum: usize) -> Result<Self, NativeLikeValueError> {
+        if maximum == usize::MAX {
+            return Err(NativeLikeValueError::Resource);
+        }
+        Ok(Self { remaining: maximum })
+    }
+    fn take(&mut self, bytes: usize, factor: usize) -> Result<(), NativeLikeValueError> {
+        self.remaining = bytes
+            .checked_mul(factor)
+            .and_then(|n| self.remaining.checked_sub(n))
+            .ok_or(NativeLikeValueError::Resource)?;
+        Ok(())
+    }
+    fn compiled<T>(&mut self, heap: Option<usize>) -> Result<(), NativeLikeValueError> {
+        let bytes = heap
+            .and_then(|n| n.checked_add(mem::size_of::<T>()))
+            .ok_or(NativeLikeValueError::Resource)?;
+        self.take(bytes, 1)
+    }
+    fn matched(
+        &self,
+        run: impl FnOnce(&mut usize) -> Option<bool>,
+    ) -> Result<bool, NativeLikeValueError> {
+        let mut steps = self.remaining / 32;
+        run(&mut steps).ok_or(NativeLikeValueError::Resource)
+    }
+}
+
+// Check only a bounded UTF-8 prefix before calling the original legacy policy.
+// A definite first error makes the WHOLE original operand empty; the ignored
+// suffix must not be copied or charged as if it were validated/lowercased.
+fn legacy_text_bounded<'a>(
+    bytes: &'a [u8],
+    ci: bool,
+    work: &mut LikeWork,
+) -> Result<Cow<'a, str>, NativeLikeValueError> {
+    let extent = bytes.len().min(work.remaining / 16);
+    match std::str::from_utf8(&bytes[..extent]) {
+        Err(error) if error.error_len().is_some() => {
+            work.take(error.valid_up_to() + error.error_len().unwrap(), 16)?;
+            Ok(legacy_text(&[], ci))
+        }
+        _ if extent < bytes.len() => Err(NativeLikeValueError::Resource),
+        _ => {
+            // Includes validation, a possible second validation, Unicode
+            // lowering and worst-case owned UTF-8 expansion before allocation.
+            work.take(bytes.len(), 16)?;
+            Ok(legacy_text(bytes, ci))
+        }
+    }
+}
+
 impl NativeLikeInvocation {
     pub fn like(
         collation: NativeCollation,
@@ -223,6 +288,125 @@ impl NativeLikeInvocation {
             InvocationState::Like { .. } => NativeLikeKind::Like,
             InvocationState::Ilike { .. } => NativeLikeKind::Ilike,
             InvocationState::Legacy { .. } => NativeLikeKind::Legacy,
+        }
+    }
+
+    /// Whether the original constant-pattern policy selected a live owner
+    /// cache.
+    pub fn cache_enabled(&self) -> bool {
+        match &self.state {
+            InvocationState::Like { cache, .. } => cache.is_some(),
+            InvocationState::Ilike { cache, .. } => cache.is_some(),
+            InvocationState::Legacy { .. } => false,
+        }
+    }
+
+    /// Bind the actual late-demanded context id without cloning/resetting
+    /// owners.
+    pub fn with_context_id(mut self, context: u64) -> Self {
+        match &mut self.state {
+            InvocationState::Like {
+                cache: Some((_, id)),
+                ..
+            }
+            | InvocationState::Ilike {
+                cache: Some((_, id)),
+                ..
+            } => *id = context,
+            _ => {}
+        }
+        self
+    }
+
+    /// Evaluate actual operands with finite demanded work. Cache hits use only
+    /// the held compiled Arc, even if newly supplied pattern/escape differ.
+    /// A cold constructor is gated inside get_or_init_cache's lock, so a racing
+    /// hit does not pay for an ignored pattern. Original comparison panics are
+    /// preserved. This method neither evaluates expressions nor encodes inputs.
+    pub fn evaluate_bounded(
+        &self,
+        text: &[u8],
+        pattern: &[u8],
+        escape: u8,
+        maximum: usize,
+    ) -> Result<bool, NativeLikeValueError> {
+        let mut work = LikeWork::new(maximum)?;
+        match &self.state {
+            InvocationState::Like { collation, cache } => {
+                if let Some((cache, context)) = cache {
+                    let compiled = cache.get_or_init_cache(*context, || {
+                        work.take(1024, 1)?;
+                        work.take(pattern.len(), 128)?;
+                        Ok::<_, NativeLikeValueError>(NativeCompiledLikePattern::new(
+                            pattern, escape, *collation,
+                        ))
+                    })?;
+                    work.compiled::<NativeCompiledLikePattern>(compiled.retained_heap_bytes())?;
+                    work.matched(|steps| {
+                        compiled
+                            .pattern
+                            .is_match_bounded(text, steps)
+                            .expect("raw supported LIKE comparison cannot fail")
+                    })
+                } else {
+                    work.matched(|steps| {
+                        collation
+                            .matches_pattern_bounded(text, pattern, escape, steps)
+                            .expect("raw supported LIKE comparison cannot fail")
+                    })
+                }
+            }
+            InvocationState::Ilike { collation, cache } => {
+                // Cached construction precedes target folding in the original.
+                if let Some((cache, context)) = cache {
+                    let compiled = cache.get_or_init_cache(*context, || {
+                        work.take(1024, 1)?;
+                        work.take(pattern.len(), 128)?;
+                        Ok::<_, NativeLikeValueError>(NativeCompiledIlikePattern::new(
+                            pattern, escape, *collation,
+                        ))
+                    })?;
+                    work.compiled::<NativeCompiledIlikePattern>(compiled.retained_heap_bytes())?;
+                    work.take(text.len(), 4)?;
+                    let mut text = text.to_vec();
+                    pattern::lower_one_string(&mut text);
+                    work.matched(|steps| {
+                        compiled
+                            .pattern
+                            .pattern
+                            .is_match_bounded(&text, steps)
+                            .expect("raw supported LIKE comparison cannot fail")
+                    })
+                } else {
+                    // Uncached ILIKE folds target before pattern; retain that
+                    // order and charge both allocations before each is made.
+                    work.take(text.len(), 4)?;
+                    let mut text = text.to_vec();
+                    pattern::lower_one_string(&mut text);
+                    work.take(pattern.len(), 4)?;
+                    let (pattern, escape) = lower_pattern(pattern, escape);
+                    work.matched(|steps| {
+                        ilike_collation(*collation)
+                            .matches_pattern_bounded(&text, &pattern, escape, steps)
+                            .expect("raw supported LIKE comparison cannot fail")
+                    })
+                }
+            }
+            InvocationState::Legacy { case_insensitive } => {
+                let text = legacy_text_bounded(text, *case_insensitive, &mut work)?;
+                let pattern = legacy_text_bounded(pattern, *case_insensitive, &mut work)?;
+                work.matched(|steps| {
+                    pattern::matches_runes_bounded(
+                        text.as_bytes(),
+                        pattern.as_bytes(),
+                        MatchOptions {
+                            escape: u32::from(escape),
+                            trailing_escape: TrailingEscape::Reject,
+                        },
+                        steps,
+                    )
+                })
+            }
         }
     }
 
@@ -290,6 +474,181 @@ fn resolve<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finite_like_actual_values_match_original_all_supported_policies() {
+        let words: &[&[u8]] = &[
+            b"",
+            b"abc",
+            b"AbC",
+            b"%",
+            b"_",
+            b"a%_",
+            b"a\\%",
+            b"a\\",
+            b"a\0b",
+            b"\xff",
+            b"\xfe",
+            b"\xc3",
+            b"a\xffb",
+            "é".as_bytes(),
+            "e\u{301}".as_bytes(),
+            "中".as_bytes(),
+            "İ".as_bytes(),
+            "ß".as_bytes(),
+            b"a_a",
+        ];
+        let mut count = 0;
+        for tag in 0..=15 {
+            let collation = NativeCollation::from_tag(tag).unwrap();
+            if collation == NativeCollation::Utf8Mb4ZhPinyinTiDbAsCs {
+                continue;
+            }
+            for &text in words {
+                for &pattern in words {
+                    for escape in [92, 0, 37, 95, 97, 65, 255] {
+                        for ilike in [false, true] {
+                            let cache_like = NativeContextCache::new();
+                            let cache_ilike = NativeContextCache::new();
+                            let uncached = if ilike {
+                                NativeLikeInvocation::ilike(collation, None)
+                            } else {
+                                NativeLikeInvocation::like(collation, None)
+                            };
+                            let cached = if ilike {
+                                NativeLikeInvocation::ilike(collation, Some((&cache_ilike, 7)))
+                            } else {
+                                NativeLikeInvocation::like(collation, Some((&cache_like, 7)))
+                            };
+                            assert_eq!(
+                                uncached.evaluate_bounded(text, pattern, escape, 1 << 20),
+                                Ok(uncached.evaluate(text, pattern, escape).0)
+                            );
+                            // Original and candidate own independent cold cache slots.
+                            let owner_like = NativeContextCache::new();
+                            let owner_ilike = NativeContextCache::new();
+                            let old_cached = if ilike {
+                                NativeLikeInvocation::ilike(collation, Some((&owner_ilike, 7)))
+                            } else {
+                                NativeLikeInvocation::like(collation, Some((&owner_like, 7)))
+                            };
+                            assert_eq!(
+                                cached.evaluate_bounded(text, pattern, escape, 1 << 20),
+                                Ok(old_cached.evaluate(text, pattern, escape).0)
+                            );
+                            count += 2;
+                        }
+                    }
+                }
+            }
+        }
+        for &text in words {
+            for &pattern in words {
+                for ci in [false, true] {
+                    for escape in [92, 0, 37, 95, 97, 65, 255] {
+                        let invocation = NativeLikeInvocation::legacy(ci);
+                        assert_eq!(
+                            invocation.evaluate_bounded(text, pattern, escape, 1 << 20),
+                            Ok(invocation.evaluate(text, pattern, escape).0)
+                        );
+                        count += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(count, 156674);
+    }
+
+    #[test]
+    fn finite_like_demand_cache_compilation_folding_and_backtracking() {
+        use NativeLikeValueError::Resource;
+        let policy = NativeCollation::Utf8Mb4Bin;
+        let large = vec![b'a'; 1 << 20];
+        let uncached = NativeLikeInvocation::like(policy, None);
+        assert!(!uncached.cache_enabled());
+        assert_eq!(uncached.evaluate_bounded(&large, b"%", 92, 32), Ok(true));
+        assert_eq!(
+            uncached.evaluate_bounded(&large, b"%aaab", 92, 1024),
+            Err(Resource)
+        );
+        assert_eq!(uncached.evaluate_bounded(b"", b"", 92, 0), Ok(true));
+        assert_eq!(
+            uncached.evaluate_bounded(b"a", b"%", 92, usize::MAX),
+            Err(Resource)
+        );
+        let cache = NativeContextCache::new();
+        let invocation = NativeLikeInvocation::like(policy, Some((&cache, 7)));
+        assert!(invocation.cache_enabled());
+        assert_eq!(
+            invocation.evaluate_bounded(b"a", &large, 92, 1024),
+            Err(Resource)
+        );
+        assert!(cache.get_cache(7).is_none());
+        assert_eq!(
+            invocation.evaluate_bounded(b"abc", b"a%", 92, 8192),
+            Ok(true)
+        );
+        let first = cache.get_cache(7).unwrap();
+        let shared = invocation.clone();
+        assert_eq!(shared.evaluate_bounded(b"abc", &large, 0, 1024), Ok(true));
+        assert!(Arc::ptr_eq(&first, &cache.get_cache(7).unwrap()));
+        assert!(cache.clone().get_cache(7).is_none());
+        let new_context = shared.with_context_id(8);
+        assert_eq!(
+            new_context.evaluate_bounded(b"abc", &large, 0, 1024),
+            Err(Resource)
+        );
+        // Failure in a cold constructor leaves the old owner's entry intact.
+        assert!(Arc::ptr_eq(&first, &cache.get_cache(7).unwrap()));
+        assert!(cache.get_cache(8).is_none());
+        assert_eq!(
+            new_context.evaluate_bounded(b"zxc", b"z%", 92, 8192),
+            Ok(true)
+        );
+        assert!(cache.get_cache(7).is_none());
+        assert!(first.is_match(b"abc"));
+        let ilike = NativeLikeInvocation::ilike(policy, None);
+        assert_eq!(
+            ilike.evaluate_bounded(&large, b"%", 92, 1024),
+            Err(Resource)
+        );
+        assert_eq!(
+            ilike.evaluate_bounded(b"a", &large, 92, 1024),
+            Err(Resource)
+        );
+        let legacy = NativeLikeInvocation::legacy(true);
+        assert_eq!(
+            legacy.evaluate_bounded(&large, b"%", 92, 1024),
+            Err(Resource)
+        );
+        let mut invalid = large;
+        invalid[0] = 255;
+        // Original invalid UTF-8 becomes empty before lowering. A definite
+        // short invalid prefix never demands the large ignored suffix.
+        assert_eq!(legacy.evaluate_bounded(&invalid, b"", 92, 64), Ok(true));
+        assert_eq!(legacy.evaluate_bounded(b"", &invalid, 92, 64), Ok(true));
+        let mut incomplete = vec![b'a'; 128];
+        incomplete[0] = 0xc3;
+        assert_eq!(
+            legacy.evaluate_bounded(&incomplete, b"", 92, 16),
+            Err(Resource)
+        );
+        assert_eq!(legacy.evaluate_bounded(&incomplete, b"", 92, 64), Ok(true));
+        assert_eq!(uncached.evaluate_bounded(b"abc", b"a%", 92, 1024), Ok(true));
+    }
+
+    #[test]
+    fn finite_like_preserves_original_panic_and_recovers_poisoned_cache() {
+        let cache = NativeContextCache::new();
+        let invocation =
+            NativeLikeInvocation::like(NativeCollation::Utf8Mb4ZhPinyinTiDbAsCs, Some((&cache, 7)));
+        assert!(
+            std::panic::catch_unwind(|| invocation.evaluate_bounded(b"a", b"a", 92, 8192)).is_err()
+        );
+        assert!(cache.get_cache(7).is_none());
+        let ordinary = NativeLikeInvocation::like(NativeCollation::Utf8Mb4Bin, Some((&cache, 7)));
+        assert_eq!(ordinary.evaluate_bounded(b"abc", b"a%", 92, 8192), Ok(true));
+    }
 
     #[test]
     fn native_like_invocations_share_live_cache_but_owners_clone_empty() {

@@ -210,6 +210,22 @@ impl NativeCollation {
     pub fn matches_pattern(self, value: &[u8], pattern: &[u8], escape: u8) -> Result<bool> {
         with_native_collator!(self, C, match_native_pattern::<C>(value, pattern, escape))
     }
+
+    /// The native LIKE policy with a finite token/backtracking step allowance.
+    /// `None` denotes exhaustion, not an actual non-match.
+    pub fn matches_pattern_bounded(
+        self,
+        value: &[u8],
+        pattern: &[u8],
+        escape: u8,
+        remaining: &mut usize,
+    ) -> Result<Option<bool>> {
+        with_native_collator!(
+            self,
+            C,
+            match_native_pattern_bounded::<C>(value, pattern, escape, remaining)
+        )
+    }
 }
 
 fn pattern_options(escape: u8) -> MatchOptions {
@@ -247,6 +263,28 @@ fn match_native_pattern<C: Collator>(value: &[u8], pattern: &[u8], escape: u8) -
         >(value, pattern, options),
         LikePatternMode::CollatorDefined => {
             pattern::matches_raw::<C, C::Charset>(value, pattern, options)
+        }
+    }
+}
+
+fn match_native_pattern_bounded<C: Collator>(
+    value: &[u8],
+    pattern: &[u8],
+    escape: u8,
+    remaining: &mut usize,
+) -> Result<Option<bool>> {
+    let options = pattern_options(escape);
+    match C::LIKE_PATTERN_MODE {
+        LikePatternMode::Bytes => pattern::matches_raw_bounded::<
+            CollatorBinary,
+            <CollatorBinary as Collator>::Charset,
+        >(value, pattern, options, remaining),
+        LikePatternMode::BinaryRunes => pattern::matches_raw_bounded::<
+            CollatorUtf8Mb4BinNoPadding,
+            <CollatorUtf8Mb4BinNoPadding as Collator>::Charset,
+        >(value, pattern, options, remaining),
+        LikePatternMode::CollatorDefined => {
+            pattern::matches_raw_bounded::<C, C::Charset>(value, pattern, options, remaining)
         }
     }
 }
