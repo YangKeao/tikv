@@ -1560,3 +1560,9 @@ pub use native_crypto_value::{
     NativeCryptoOperation, NativeCryptoValueError, native_crypto_unary_actual_value,
     native_sha2_actual_value, native_sql_crypt_actual_value,
 };
+
+mod native_compression_value;
+pub use native_compression_value::{
+    NativeCompressionOperation, NativeCompressionValueError, native_compress_actual_value,
+    native_uncompress_actual_value, native_uncompressed_length_actual_value,
+};

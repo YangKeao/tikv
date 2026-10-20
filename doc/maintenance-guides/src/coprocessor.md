@@ -3592,3 +3592,27 @@ and explicit development-only clock input. The existing source/provider matrices
 now cover all eight crypto operations, including large unused length/data cases
 and terminal resource consumption/recovery. Frontend N7y receipt records exact
 validation and the remaining generic fallback/unistore/full-server scope.
+
+
+### N7z: actual compression values and one decoder owner
+
+`native_compression_value` exposes nullable compression bytes, the original
+uncompressed-length header result and typed `UncompressOutcome` dispositions.
+It reuses the original Go-compatible encoder and header helper. Both the legacy
+wire API and actual entry now use `inflate_actual` and `uncompress_report`; the
+legacy adapter alone packs the 0/1/2 wire envelope. No second decoder is retained.
+
+Finite execution bounds actual consumed input, fixed decoder storage, output
+chunks and copy capacity. It never reserves from the untrusted length header,
+and stops at the original stream end without scanning unused trailing input.
+Resource refusal remains distinct from corrupt-input and SQL output-limit
+reports. Frontend warnings use the original report and happen outside storage
+borrows, followed by capability authentication and one return conversion.
+Length's short-header warning fact survives a subsequent body resource refusal.
+
+The original encoder generated85 immutable frame fixtures before retirement.
+75816 independent original/candidate comparisons passed before consolidating
+owners; fixed direct6318/51EC3B8C9ED75F51 and scalar69498/4EBAC72F3EA6BB39
+witnesses retain their original explicit clock. Source/provider/callback/resource
+and recovery coverage is recorded in the frontend N7z receipt. Finite work does
+not certify allocator or whole-statement peak-memory behavior.

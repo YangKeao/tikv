@@ -1,11 +1,11 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{convert::TryFrom, fmt, io::Read};
+use std::{fmt, io::Read};
 
 use byteorder::{ByteOrder, LittleEndian};
 use crypto::rand;
 use flate2::{
-    Compression, Decompress, FlushDecompress, Status,
+    Compression,
     read::{ZlibDecoder, ZlibEncoder},
 };
 use openssl::hash::{self, MessageDigest};
@@ -290,47 +290,18 @@ pub enum InflateError {
 /// prefix. Preserve the native progress, checksum and one-byte-over-limit
 /// decisions.
 pub fn inflate(data: &[u8], max_output: usize) -> std::result::Result<Vec<u8>, InflateError> {
-    let mut decoder = Decompress::new(true);
-    let mut out = Vec::new();
-    let mut input_offset = 0;
-    let mut chunk = [0; 8 * 1024];
-    loop {
-        let input_before = decoder.total_in();
-        let output_before = decoder.total_out();
-        let remaining = max_output.saturating_sub(out.len());
-        // Give zlib one byte beyond the remaining budget so an over-limit
-        // write is detected without ever appending bytes past the limit.
-        let output_len = chunk.len().min(remaining.saturating_add(1));
-        let status = decoder
-            .decompress(
-                &data[input_offset..],
-                &mut chunk[..output_len],
-                FlushDecompress::None,
-            )
-            .map_err(|_| InflateError::Decode)?;
-        input_offset = usize::try_from(decoder.total_in()).map_err(|_| InflateError::Decode)?;
-        let produced = usize::try_from(decoder.total_out() - output_before)
-            .map_err(|_| InflateError::Decode)?;
-        if produced > remaining {
-            return Err(InflateError::OutputLimit);
+    use crate::native_compression_value::InflateFailure as E;
+    crate::native_compression_value::inflate_actual(data, max_output, None).map_err(|e| match e {
+        E::Decode => InflateError::Decode,
+        E::OutputLimit => InflateError::OutputLimit,
+        E::Resource => {
+            unreachable!("unbounded compatibility inflate cannot exhaust a finite allowance")
         }
-        out.extend_from_slice(&chunk[..produced]);
-        if status == Status::StreamEnd {
-            return Ok(out);
-        }
-        // `compress/zlib.NewReader` refuses a stream that ends before the
-        // DEFLATE terminator and Adler-32 checksum.  The high-level flate2
-        // reader can instead report a successful zero-byte read for that
-        // truncated input, so require either stream completion or forward
-        // progress toward it here.
-        if decoder.total_in() == input_before && produced == 0 {
-            return Err(InflateError::Decode);
-        }
-    }
+    })
 }
 
 #[rpn_fn(nullable)]
-fn compress_go_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+pub(crate) fn compress_go_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
     let Some(payload) = input else {
         return Ok(None);
     };
@@ -346,31 +317,21 @@ fn compress_go_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
 // corruption/output-limit dispositions. No EvalContext warning is emitted here.
 #[rpn_fn(nullable)]
 fn uncompress_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
-    let Some(payload) = input else {
-        return Ok(None);
-    };
-    if payload.is_empty() {
-        return Ok(Some(vec![0]));
-    }
-    if payload.len() <= 4 {
-        return Ok(Some(vec![1]));
-    }
-    let length = LittleEndian::read_u32(&payload[..4]);
-    let mut bytes = match inflate(&payload[4..], length as usize) {
-        Ok(bytes) => bytes,
-        Err(InflateError::OutputLimit) => return Ok(Some(vec![2])),
-        Err(InflateError::Decode) => return Ok(Some(vec![1])),
-    };
-    // Retain the original final declared-length check after successful inflate.
-    if length < bytes.len() as u32 {
-        return Ok(Some(vec![2]));
-    }
-    // Envelope allocation failure is a transport error, not a zlib disposition.
-    bytes.try_reserve(1).map_err(|source| {
-        other_err!("Unable to allocate UNCOMPRESS result envelope: {}", source)
-    })?;
-    bytes.insert(0, 0);
-    Ok(Some(bytes))
+    use crate::local::UncompressOutcome;
+    let outcome = crate::native_compression_value::uncompress_report(input, None)
+        .map_err(|e| other_err!("Native UNCOMPRESS report contract: {:?}", e))?;
+    Ok(match outcome {
+        UncompressOutcome::Null => None,
+        UncompressOutcome::Corrupt => Some(vec![1]),
+        UncompressOutcome::OutputLimit => Some(vec![2]),
+        UncompressOutcome::Value(mut bytes) => {
+            bytes.try_reserve(1).map_err(|source| {
+                other_err!("Unable to allocate UNCOMPRESS result envelope: {}", source)
+            })?;
+            bytes.insert(0, 0);
+            Some(bytes)
+        }
+    })
 }
 
 #[rpn_fn(writer)]
@@ -521,7 +482,7 @@ fn uncompressed_length_native(arg: BytesRef) -> Result<Option<Int>> {
 }
 
 #[inline]
-fn uncompressed_length_impl(arg: BytesRef) -> (Int, bool) {
+pub(crate) fn uncompressed_length_impl(arg: BytesRef) -> (Int, bool) {
     if arg.is_empty() {
         (0, false)
     } else if arg.len() <= 4 {
