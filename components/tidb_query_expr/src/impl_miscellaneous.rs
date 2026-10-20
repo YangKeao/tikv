@@ -328,7 +328,7 @@ fn uuid_decimal_micros(micros: Decimal) -> Decimal {
 }
 
 #[rpn_fn(nullable)]
-fn is_uuid_native(input: Option<BytesRef>) -> Result<Option<Int>> {
+pub(crate) fn is_uuid_native(input: Option<BytesRef>) -> Result<Option<Int>> {
     Ok(input.map(|input| {
         let trim_view = String::from_utf8_lossy(input);
         if trim_view.trim() != trim_view.as_ref() {
@@ -340,7 +340,7 @@ fn is_uuid_native(input: Option<BytesRef>) -> Result<Option<Int>> {
 }
 
 #[rpn_fn(nullable)]
-fn uuid_version_native(input: Option<BytesRef>) -> Result<Option<Int>> {
+pub(crate) fn uuid_version_native(input: Option<BytesRef>) -> Result<Option<Int>> {
     let Some(input) = input else {
         return Ok(None);
     };
@@ -349,7 +349,7 @@ fn uuid_version_native(input: Option<BytesRef>) -> Result<Option<Int>> {
 }
 
 #[rpn_fn(nullable)]
-fn uuid_timestamp_native(input: Option<BytesRef>) -> Result<Option<Decimal>> {
+pub(crate) fn uuid_timestamp_native(input: Option<BytesRef>) -> Result<Option<Decimal>> {
     let Some(input) = input else {
         return Ok(None);
     };
@@ -378,7 +378,7 @@ fn uuid_timestamp_native(input: Option<BytesRef>) -> Result<Option<Decimal>> {
 }
 
 #[rpn_fn(nullable)]
-fn uuid_to_bin_parse_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+pub(crate) fn uuid_to_bin_parse_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
     let Some(input) = input else {
         return Ok(None);
     };
@@ -393,7 +393,10 @@ fn uuid_to_bin_parse_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
 }
 
 #[rpn_fn(nullable)]
-fn uuid_to_bin_swap_native(input: Option<BytesRef>, flag: Option<&Int>) -> Result<Option<Bytes>> {
+pub(crate) fn uuid_to_bin_swap_native(
+    input: Option<BytesRef>,
+    flag: Option<&Int>,
+) -> Result<Option<Bytes>> {
     let (Some(input), Some(flag)) = (input, flag) else {
         return Err(other_err!("invalid UUID_TO_BIN computed operand shape"));
     };
@@ -412,7 +415,10 @@ fn uuid_to_bin_swap_native(input: Option<BytesRef>, flag: Option<&Int>) -> Resul
 }
 
 #[rpn_fn(nullable)]
-fn bin_to_uuid_native(input: Option<BytesRef>, flag: Option<&Int>) -> Result<Option<Bytes>> {
+pub(crate) fn bin_to_uuid_native(
+    input: Option<BytesRef>,
+    flag: Option<&Int>,
+) -> Result<Option<Bytes>> {
     let flag = flag.ok_or_else(|| other_err!("missing BIN_TO_UUID prepared flag"))?;
     let Some(input) = input else {
         return Ok(None);
@@ -455,12 +461,12 @@ pub(crate) fn get_native_bin_to_uuid_fn_meta() -> crate::RpnFnMeta {
 }
 
 #[rpn_fn(nullable)]
-fn get_native_tidb_shard(input: Option<&Int>) -> Result<Option<Int>> {
+pub(crate) fn get_native_tidb_shard(input: Option<&Int>) -> Result<Option<Int>> {
     Ok(input.map(|key| (tidb_query_crypto::hash_uint64(*key as u64) % 256) as i64))
 }
 
 #[rpn_fn(nullable)]
-fn get_native_vitess_hash(input: Option<&Int>) -> Result<Option<Int>> {
+pub(crate) fn get_native_vitess_hash(input: Option<&Int>) -> Result<Option<Int>> {
     Ok(input.map(|key| tidb_query_crypto::hash_uint64(*key as u64) as i64))
 }
 

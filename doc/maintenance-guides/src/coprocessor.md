@@ -3450,3 +3450,43 @@ wire compatibility; the obsolete frontend identity codec is test-only. See front
 N7u plan/receipt for final gates, source limits and archived independent evidence.
 Logical copy/work allowances are not physical allocator-peak guarantees. This
 family does not establish generic fallback/unistore or complete Go-package coverage.
+
+
+### N7v: actual UUID/hash operands and distinct flag phases
+
+`native_misc_value.rs` exposes finite actual values over the same original pure
+miscellaneous owners. NativeMiscOperation is closed to seven names and their
+one/two-argument shapes; explicit wire workers retain their ABI and original
+owners. Typed owned UUID errors retain the rejected input, exact layout/swap
+semantics, strict-versus-byte coercion policy, six-place timestamp Decimal and
+unsigned hash bits. Frontend wrappers own original casts and diagnostic effects;
+no child expression or Ready argument program is stored in the SDK value API.
+
+`MiscNative` uses the existing frame/native capability protocol. The frontend
+captures the authentic stored first Constant header, budgets its actual copy,
+and probes it before demanding argument0, preserving the original generic
+ScalarFunction prefix. All child EXPRESSIONS remain eager. Only after every
+required capability authenticates does the body apply its own conversion order:
+UUID_TO_BIN parses first and may skip flag conversion, whereas BIN_TO_UUID's
+string/bytes flag warnings precede even NULL data. Consume demand before fallible
+body work or panic; output has the producer's own role/source/row/occurrence.
+
+Only callback-capable flag/value ownership is detached. BIN_TO_UUID's other
+quiet actual flags remain borrowed, so an unused large vector is not cloned.
+For Raw/vector hash operands, the original input/signed-warning stages are empty:
+bound their fixed work, drop the store borrow, read the real session zone, then
+reauthenticate the actual operand and run the original pure signed conversion
+with that zone before the original hash. Other hash kinds retain the detached
+warning composition. No synthetic operand, captured scalar answer or skipped
+callback substitutes for the original computation. Ordinary return-family
+conversion runs once after all source borrows are released.
+
+All416556 old/candidate comparisons passed before caller retirement; original
+34713/2E9C5CB462D67999 and381843/1EE864887CAE1C77 witnesses remain unchanged.
+Large real-payload regressions, source/provenance/callback/resource/panic recovery,
+Projection and final full-gate details belong to the frontend N7v receipt. A
+separate development-only clock fixture replays N7u's historically sampled date;
+production default clock behavior and the SDK datatype algorithms stay unchanged.
+Logical work/copy quotas do not certify whole-statement allocator peak behavior.
+Generic fallback, remaining families, unsupported/PB/deferred producers, old
+unistore traversal, inherited failures and full-server gates remain global work.

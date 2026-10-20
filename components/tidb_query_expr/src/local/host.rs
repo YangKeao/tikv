@@ -104,6 +104,11 @@ pub enum SqlBatchHostOperation {
     },
     /// Actual grouping id and optional immutable planner metadata.
     GroupingNative,
+    /// Actual UUID/shard/Vitess inputs with the original optional flag arity.
+    MiscNative {
+        operation: crate::NativeMiscOperation,
+        arity: u8,
+    },
     /// Eager identity selection over actual values, with the original arity.
     ValueIdentityNative {
         name_const: bool,
@@ -235,6 +240,10 @@ impl SqlBatchHostOperation {
             Self::VectorNative(op) => arity == op.arity(),
             Self::LikeNative { .. } => arity == 3,
             Self::GroupingNative => arity == 1,
+            Self::MiscNative {
+                operation,
+                arity: expected,
+            } => arity == usize::from(expected) && operation.accepts_arity(arity),
             Self::ValueIdentityNative { name_const } => arity == 1 + usize::from(name_const),
             Self::EpochNative {
                 from,
@@ -305,6 +314,7 @@ impl SqlBatchHostOperation {
             | Self::DurationConstructionNative(_)
             | Self::VectorNative(_)
             | Self::GroupingNative
+            | Self::MiscNative { .. }
             | Self::ValueIdentityNative { .. }
             | Self::LikeNative { .. }
             | Self::TsoNative(_)
@@ -374,6 +384,7 @@ impl SqlBatchHostOperation {
             | Self::DurationConstructionNative(_)
             | Self::VectorNative(_)
             | Self::GroupingNative
+            | Self::MiscNative { .. }
             | Self::ValueIdentityNative { .. }
             | Self::LikeNative { .. }
             | Self::TsoNative(_)

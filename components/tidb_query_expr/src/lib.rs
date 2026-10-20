@@ -1541,3 +1541,10 @@ pub use native_vector_value::{
 
 mod native_grouping_value;
 pub use native_grouping_value::{NativeGroupingValueError, native_grouping_value};
+
+mod native_misc_value;
+pub use native_misc_value::{
+    NativeMiscOperation, NativeMiscValueError, native_bin_to_uuid_value, native_is_uuid_value,
+    native_misc_work, native_shard_value, native_uuid_parse_value, native_uuid_swap_value,
+    native_uuid_timestamp_value, native_uuid_version_value,
+};
