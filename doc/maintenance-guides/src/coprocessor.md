@@ -3558,3 +3558,37 @@ with executed source archives. Fixed direct34866/51014D84299C1F50 and scalar3835
 96AFB40E405F1DF7 witnesses retain the explicit development-only UTC test clock;
 they are regression witnesses rather than new independent proof. Frontend N7x
 plan/receipt records validation and remaining global source/fallback/unistore work.
+
+
+### N7y: MD5 and SHA digest values in the same crypto frame
+
+`NativeCryptoOperation` also names MD5, SHA, SHA1 and SHA2, with separate SHA/SHA1
+spellings at the frontend return boundary. Unary actual calls use the original
+public `impl_encryption::md5` and `sha1` functions. `native_sha2_actual_value`
+accepts genuine non-NULL data and an already-converted integer length and calls
+the original warning-free `sha2_native` owner; its visibility alone changes.
+Wire SHA2 retains its existing warning policy, and the digest algorithms and
+selector-to-result decision remain in their original owners. Finite work charges
+full input only for original valid selectors0/224/256/384/512; invalid selectors
+still call that owner to produce the original NULL without scanning unused data.
+If the original owner adds a selector, update this work classification and tests.
+
+The frontend retains `hash_input` and `encryption_int_argument` as its single
+conversion owners. SHA2 converts data first, then skips length conversion for
+NULL data, but all child expressions and capabilities remain eager in the same
+CryptoNative frame. A NULL converted length returns actual NULL before calling
+the non-NULL SDK API. Decimal length conversion reads raw coefficient/storage
+scale and ignores declared display precision; Real keeps ties-to-even rounding,
+while Decimal keeps half-away rounding. Strings retain UTF-8 validation and the
+original numeric-prefix rule. Native hybrid ordinals ignore names; unsupported
+Raw/vector lengths ignore their payloads. Binary literals budget their demanded
+leading-zero prefix rather than an unused suffix; JSON containers ignore members
+while JSON strings budget the actual text. Pure digest phases never call Columns.
+
+514944 independent original/candidate comparisons and six executed source
+snapshots were completed before retiring ordinary Ready callers. Preserve the
+fixed direct42912/C0AA6D5E6AB8F921 and scalar472032/6B9F95BC40BDD875 observations
+and explicit development-only clock input. The existing source/provider matrices
+now cover all eight crypto operations, including large unused length/data cases
+and terminal resource consumption/recovery. Frontend N7y receipt records exact
+validation and the remaining generic fallback/unistore/full-server scope.

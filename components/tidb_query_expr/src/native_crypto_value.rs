@@ -4,6 +4,14 @@ use crate::impl_encryption as original;
 /// Closed original native crypto operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeCryptoOperation {
+    /// Original MD5 lowercase digest.
+    Md5,
+    /// Original SHA spelling of SHA1.
+    Sha,
+    /// Original SHA1 lowercase digest.
+    Sha1,
+    /// Original warning-free native SHA2 with eager children.
+    Sha2,
     /// Original SM3 lowercase hexadecimal digest.
     Sm3,
     /// Native double-raw SHA1 password policy, distinct from wire PASSWORD.
@@ -17,6 +25,10 @@ impl NativeCryptoOperation {
     /// Original lower-case SQL name.
     pub fn name(self) -> &'static str {
         match self {
+            Self::Md5 => "md5",
+            Self::Sha => "sha",
+            Self::Sha1 => "sha1",
+            Self::Sha2 => "sha2",
             Self::Sm3 => "sm3",
             Self::Password => "password",
             Self::Encode => "encode",
@@ -26,8 +38,8 @@ impl NativeCryptoOperation {
     /// Original eager child-expression count.
     pub fn arity(self) -> usize {
         match self {
-            Self::Sm3 | Self::Password => 1,
-            Self::Encode | Self::Decode => 2,
+            Self::Md5 | Self::Sha | Self::Sha1 | Self::Sm3 | Self::Password => 1,
+            Self::Sha2 | Self::Encode | Self::Decode => 2,
         }
     }
 }
@@ -60,17 +72,39 @@ pub fn native_crypto_unary_actual_value(
 ) -> Result<Option<Vec<u8>>, E> {
     if !matches!(
         op,
-        NativeCryptoOperation::Sm3 | NativeCryptoOperation::Password
+        NativeCryptoOperation::Md5
+            | NativeCryptoOperation::Sha
+            | NativeCryptoOperation::Sha1
+            | NativeCryptoOperation::Sm3
+            | NativeCryptoOperation::Password
     ) {
         return Err(E::Contract);
     }
     work(input.map_or(Ok(0), |v| extent(v.len()))?, maximum)?;
     match op {
+        NativeCryptoOperation::Md5 => original::md5(input),
+        NativeCryptoOperation::Sha | NativeCryptoOperation::Sha1 => original::sha1(input),
         NativeCryptoOperation::Sm3 => original::sm3_native(input),
         NativeCryptoOperation::Password => original::password_native(input),
         _ => unreachable!(),
     }
     .map_err(|_| E::Contract)
+}
+/// Actual non-NULL SHA2 bytes and original converted length, without wire
+/// warnings. Invalid selectors do not demand a scan of the borrowed payload;
+/// the original pure owner still decides the genuine NULL result.
+pub fn native_sha2_actual_value(
+    input: &[u8],
+    length: i64,
+    maximum: usize,
+) -> Result<Option<Vec<u8>>, E> {
+    let cost = if matches!(length, 0 | 224 | 256 | 384 | 512) {
+        extent(input.len())?
+    } else {
+        0
+    };
+    work(cost, maximum)?;
+    original::sha2_native(input, &length).map_err(|_| E::Contract)
 }
 /// Both inputs are genuine already-coerced non-NULL byte values. The frontend
 /// retains ordered NULL/coercion barriers before invoking this pure owner.
@@ -164,6 +198,82 @@ mod tests {
         }
         assert_eq!(
             native_sql_crypt_actual_value(O::Password, b"", b"", 8192),
+            Err(E::Contract)
+        );
+    }
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+    #[test]
+    fn actual_digests_keep_original_vectors_aliases_null_invalid_selectors_and_finite_work() {
+        for (op, expected) in [
+            (
+                NativeCryptoOperation::Md5,
+                b"900150983cd24fb0d6963f7d28e17f72".as_slice(),
+            ),
+            (
+                NativeCryptoOperation::Sha,
+                b"a9993e364706816aba3e25717850c26c9cd0d89d".as_slice(),
+            ),
+            (
+                NativeCryptoOperation::Sha1,
+                b"a9993e364706816aba3e25717850c26c9cd0d89d".as_slice(),
+            ),
+        ] {
+            assert_eq!(
+                native_crypto_unary_actual_value(op, Some(b"abc"), 8192),
+                Ok(Some(expected.to_vec()))
+            );
+            assert_eq!(native_crypto_unary_actual_value(op, None, 0), Ok(None));
+            assert_eq!(
+                native_crypto_unary_actual_value(op, None, usize::MAX),
+                Err(E::Resource)
+            );
+            assert_eq!(
+                native_crypto_unary_actual_value(op, Some(&vec![255; 1 << 20]), 8192),
+                Err(E::Resource)
+            );
+        }
+        for (bits, expected) in [
+            (
+                0,
+                "2871823be240f8ecd1d72f24c99eaa2e58af18b4b8ba99a4fc2823ba5c43930a",
+            ),
+            (
+                224,
+                "cd036dc9bec69e758401379c522454ea24a6327b48724b449b40c6b7",
+            ),
+            (
+                256,
+                "2871823be240f8ecd1d72f24c99eaa2e58af18b4b8ba99a4fc2823ba5c43930a",
+            ),
+            (
+                384,
+                "c50955b6b0c7b9919740d956849eedcb0f0f90bf8a34e8c1f4e071e3773f53bd6f8f16c04425ff728bed04de1b63db51",
+            ),
+            (
+                512,
+                "ea903c574370774c4844a83b7122105a106e04211673810e1baae7c2ae7aba2cf07465e02f6c413126111ef74a417232683ce7ba210052e63c15fc82204aad80",
+            ),
+        ] {
+            assert_eq!(
+                native_sha2_actual_value(b"pingcap", bits, 8192),
+                Ok(Some(expected.as_bytes().to_vec()))
+            );
+        }
+        let big = vec![255; 1 << 20];
+        for bits in [-1, 128, i64::MAX] {
+            assert_eq!(native_sha2_actual_value(&big, bits, 0), Ok(None));
+            assert_eq!(
+                native_sha2_actual_value(&big, bits, usize::MAX),
+                Err(E::Resource)
+            );
+        }
+        assert_eq!(native_sha2_actual_value(&big, 256, 8192), Err(E::Resource));
+        assert_eq!(
+            native_crypto_unary_actual_value(NativeCryptoOperation::Sha2, None, 8192),
             Err(E::Contract)
         );
     }

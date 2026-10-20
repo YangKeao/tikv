@@ -1558,5 +1558,5 @@ pub use native_byte_unary_value::{
 mod native_crypto_value;
 pub use native_crypto_value::{
     NativeCryptoOperation, NativeCryptoValueError, native_crypto_unary_actual_value,
-    native_sql_crypt_actual_value,
+    native_sha2_actual_value, native_sql_crypt_actual_value,
 };

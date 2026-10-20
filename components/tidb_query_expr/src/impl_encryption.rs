@@ -241,7 +241,7 @@ pub fn sha2(
 
 #[rpn_fn]
 #[inline]
-fn sha2_native(input: BytesRef, hash_length: &Int) -> Result<Option<Bytes>> {
+pub(crate) fn sha2_native(input: BytesRef, hash_length: &Int) -> Result<Option<Bytes>> {
     sha2_impl(input, hash_length)
 }
 
