@@ -111,6 +111,8 @@ pub enum SqlBatchHostOperation {
     ByteUnaryNative(crate::NativeByteUnaryOperation),
     /// Actual compression input and completed decoder/warning report.
     CompressionNative(crate::NativeCompressionOperation),
+    /// Eager original scalar value body over authenticated actual operands.
+    EagerValuesNative,
     /// Actual UUID/shard/Vitess inputs with the original optional flag arity.
     MiscNative {
         operation: crate::NativeMiscOperation,
@@ -247,6 +249,7 @@ impl SqlBatchHostOperation {
             Self::VectorNative(op) => arity == op.arity(),
             Self::LikeNative { .. } => arity == 3,
             Self::CryptoNative(op) => arity == op.arity(),
+            Self::EagerValuesNative => true,
             Self::GroupingNative | Self::ByteUnaryNative(_) | Self::CompressionNative(_) => {
                 arity == 1
             }
@@ -325,6 +328,7 @@ impl SqlBatchHostOperation {
             | Self::VectorNative(_)
             | Self::GroupingNative
             | Self::CryptoNative(_)
+            | Self::EagerValuesNative
             | Self::CompressionNative(_)
             | Self::ByteUnaryNative(_)
             | Self::MiscNative { .. }
@@ -398,6 +402,7 @@ impl SqlBatchHostOperation {
             | Self::VectorNative(_)
             | Self::GroupingNative
             | Self::CryptoNative(_)
+            | Self::EagerValuesNative
             | Self::CompressionNative(_)
             | Self::ByteUnaryNative(_)
             | Self::MiscNative { .. }

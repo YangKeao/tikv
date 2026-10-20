@@ -5876,3 +5876,9 @@ mod in_worker_tests {
 
 #[cfg(test)]
 mod window_host_tests;
+
+mod value_work;
+pub use value_work::{
+    charge_value_kernel_work, value_kernel_work_remaining, value_kernel_work_status,
+    with_value_kernel_work_limit,
+};

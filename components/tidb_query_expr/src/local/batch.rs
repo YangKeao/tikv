@@ -10368,12 +10368,16 @@ impl EvaluatedBytesWorker {
                 self.eval_ready_with_budget(ready, arity, &mut budget, &mut sql_failure)
             }
         })();
-        self.finish_invocation(result)
-            .map_err(|error| ReportedEvaluatedFailure {
+        self.finish_invocation(result).map_err(|error| {
+            if matches!(error, LocalError::ResourceLimit(_)) {
+                super::value_work::mark_value_kernel_resource_failure();
+            }
+            ReportedEvaluatedFailure {
                 error,
                 operation: sql_failure.map(|_| self.operation),
                 sql_failure,
-            })
+            }
+        })
     }
 
     fn finish_invocation<T>(&mut self, result: LocalResult<T>) -> LocalResult<T> {

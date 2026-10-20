@@ -249,6 +249,12 @@ impl EvalBudget {
     /// Checked actual-buffer accounting with no output precharge. Execution
     /// domain and result annotations are independent driver policies.
     pub(crate) fn exact(limits: ExecutionLimits) -> LocalResult<Self> {
+        super::value_kernel_work_status()?;
+        let mut limits = limits;
+        if let Some(remaining) = super::value_kernel_work_remaining() {
+            limits.max_retained_bytes = limits.max_retained_bytes.min(remaining);
+        }
+
         let result = Self {
             limits,
             steps: 0,

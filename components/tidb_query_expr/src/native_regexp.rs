@@ -53,6 +53,13 @@ impl<T> NativeContextCache<T> {
         Self::default()
     }
 
+    /// Share this live cache owner for one prepared value-body invocation.
+    /// This does not inspect or initialize cached values. Ordinary expression
+    /// ownership cloning still starts empty through Clone.
+    pub fn share_for_invocation(&self) -> Self {
+        self.share_state()
+    }
+
     pub(crate) fn share_state(&self) -> Self {
         Self {
             cached: Arc::clone(&self.cached),

@@ -3642,3 +3642,43 @@ coverage. Unbound invocation metadata is intentionally refused in this low-level
 corpus. Existing public-worker tests cover real bound LIKE/regexp/temporal/decimal
 metadata, cache effects, faults and recovery. The frontend N8 receipt records
 validation and the remaining overall no-fallback work.
+
+
+### N9: shared eager value bodies and lexical work allowance
+
+The frontend's original eager scalar body now has immutable type/constant facts
+and explicit live JSON/regexp cache handles. `share_for_invocation()` shares an
+existing NativeContextCache owner without inspecting or initializing it; ordinary
+Clone retains its original empty-cache ownership semantics. No executable
+expression children enter the value body.
+
+`EagerValuesNative` is a variadic Bytes-capability host contract, including zero
+arguments. The frontend retains the real function identity, original declarations,
+constant-name probe and producer roles. The same SDK frame requests actual
+arguments; it never invokes an old expression evaluator. The common body still
+uses existing closed values facades, which call kernels directly through N8.
+It does not claim retirement of all Ready codecs.
+
+`with_value_kernel_work_limit` bounds demanded conversion work and clamps the
+existing direct-kernel EvalBudget. Actual Byte/Decimal/vector capacities remain
+in their original ledger. Scope failure is sticky: a helper catching a Resource
+Result cannot authorize SQL NULL, another kernel or successful publication.
+Nested scopes retain work spent and failure; unwind restores the parent and
+threads remain independent. Existing public-worker resource refusals mark the
+active scope before returning their original error. The frontend preserves an
+actual returned resource cause and audits only a swallowed refusal.
+
+Finite checks are installed only at demanded formatting owners. In particular,
+Decimal JSON numeric conversion calls visible Display before f64; it needs a
+work check. Strict JSON numeric rejection never reads that display and must not
+be charged for an unused huge scale. SQL diagnostics and original panic domains
+remain owned by their existing algorithms. These logical allowances do not
+certify physical allocator peaks or opaque regex/JSON-engine scratch.
+
+The frontend captured796554 original observations and independently compared all
+before extracting the shared body. The initial actual-source set covers54 names,
+including preservation of their existing Unsupported results; it is not a claim
+that54 formerly missing functions were newly implemented. Its receipt records
+source/type/return/provenance/callback/resource/cache and Projection validation.
+Generic Admission fallback, other demand policies and public/unistore traversals
+remain active overall work after this local checkpoint.
