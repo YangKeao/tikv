@@ -3490,3 +3490,35 @@ production default clock behavior and the SDK datatype algorithms stay unchanged
 Logical work/copy quotas do not certify whole-statement allocator peak behavior.
 Generic fallback, remaining families, unsupported/PB/deferred producers, old
 unistore traversal, inherited failures and full-server gates remain global work.
+
+### N7w: borrowed byte-unary values and original trim ownership
+
+`native_byte_unary_value.rs` exposes nullable ASCII and borrowed LTRIM/RTRIM
+results. ASCII calls the original pure `impl_string::ascii` owner and reads no
+unused suffix. `impl_string::trim_space_bytes` owns the single original forward/
+reverse U+0020 scan used by both original writer workers and actual-value calls.
+The explicit wire ABI remains available; the ordinary frontend no longer calls
+its Ready entry. A finite allowance bounds demanded scans and output ownership;
+NULL, empty bytes, invalid UTF-8 and non-space Unicode remain distinct.
+
+`ByteUnaryNative` has exactly one authenticated native capability argument and
+uses the existing SDK frame. Original constant-probe metadata is captured and
+budgeted before cloning; the probe runs before demanding argument0. Body demand
+is consumed before conversion, resource failure, panic or publication. The
+frontend preserves its distinct ASCII expression-byte coercion and trim ETString
+argument wrapper. That original trim cast ignores source metadata/context and
+keeps string/hybrid headers and collations; other scalar kinds still execute
+its genuine formatting action. Direct trim requires an already-cast ETString
+kind. Binary-versus-character output follows the actual cast value. Ordinary
+result conversion runs once with the original return declaration. Existing exact
+typed SDK recipes remain in their prior same-frame path.
+
+The actual body and signature cast are pure; they never read Columns, and source
+callbacks execute without a store borrow. ASCII can borrow a real large byte
+suffix without copying it just to inspect the first byte. Demanded formatted
+non-byte inputs and trim scans/output copies remain budgeted. The original
+490806 independent comparisons were executed and archived before retiring callers
+or consolidating the trim owner. Preserve fixed direct4023/C717C464D28B4353 and
+scalar486783/B3CF56F72DC700B1 witnesses and the explicit development-only clock
+input; they do not replace independent proof. See the frontend N7w plan/receipt
+for final validation status and open global source/fallback/unistore scope.

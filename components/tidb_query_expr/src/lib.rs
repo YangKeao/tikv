@@ -1548,3 +1548,9 @@ pub use native_misc_value::{
     native_misc_work, native_shard_value, native_uuid_parse_value, native_uuid_swap_value,
     native_uuid_timestamp_value, native_uuid_version_value,
 };
+
+mod native_byte_unary_value;
+pub use native_byte_unary_value::{
+    NativeByteUnaryError, NativeByteUnaryOperation, native_ascii_actual_value,
+    native_trim_actual_value,
+};

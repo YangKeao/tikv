@@ -1141,22 +1141,24 @@ pub fn hex_int_arg(arg: &Int, writer: BytesWriter) -> Result<BytesGuard> {
     Ok(writer.write(Some(format!("{:X}", arg).into_bytes())))
 }
 
+pub(crate) fn trim_space_bytes(arg: BytesRef<'_>, left: bool) -> BytesRef<'_> {
+    if left {
+        let pos = arg.iter().position(|&x| x != SPACE);
+        if let Some(i) = pos { &arg[i..] } else { b"" }
+    } else {
+        let pos = arg.iter().rposition(|&x| x != SPACE);
+        if let Some(i) = pos { &arg[..=i] } else { b"" }
+    }
+}
 #[rpn_fn(writer)]
 #[inline]
 pub fn ltrim(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
-    let pos = arg.iter().position(|&x| x != SPACE);
-    let result = if let Some(i) = pos { &arg[i..] } else { b"" };
-
-    Ok(writer.write_ref(Some(result)))
+    Ok(writer.write_ref(Some(trim_space_bytes(arg, true))))
 }
-
 #[rpn_fn(writer)]
 #[inline]
 pub fn rtrim(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
-    let pos = arg.iter().rposition(|&x| x != SPACE);
-    let result = if let Some(i) = pos { &arg[..=i] } else { b"" };
-
-    Ok(writer.write_ref(Some(result)))
+    Ok(writer.write_ref(Some(trim_space_bytes(arg, false))))
 }
 
 #[rpn_fn(writer)]
