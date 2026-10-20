@@ -444,12 +444,12 @@ pub fn uncompress(
 }
 
 #[rpn_fn]
-fn get_native_sql_encode(data: BytesRef, password: BytesRef) -> Result<Option<Bytes>> {
+pub(crate) fn get_native_sql_encode(data: BytesRef, password: BytesRef) -> Result<Option<Bytes>> {
     Ok(Some(tidb_query_crypto::sql_encode(data, password)))
 }
 
 #[rpn_fn]
-fn get_native_sql_decode(data: BytesRef, password: BytesRef) -> Result<Option<Bytes>> {
+pub(crate) fn get_native_sql_decode(data: BytesRef, password: BytesRef) -> Result<Option<Bytes>> {
     Ok(Some(tidb_query_crypto::sql_decode(data, password)))
 }
 
@@ -464,12 +464,12 @@ fn get_native_sql_crypt_null(arg: Option<&Int>) -> Result<Option<Bytes>> {
 }
 
 #[rpn_fn(nullable)]
-fn password_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+pub(crate) fn password_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
     Ok(input.map(|bytes| tidb_query_crypto::encode_password_bytes(bytes).into_bytes()))
 }
 
 #[rpn_fn(nullable)]
-fn sm3_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+pub(crate) fn sm3_native(input: Option<BytesRef>) -> Result<Option<Bytes>> {
     Ok(input.map(|bytes| hex::encode(tidb_query_crypto::sm3_hash(bytes)).into_bytes()))
 }
 

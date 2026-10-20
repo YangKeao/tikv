@@ -3522,3 +3522,39 @@ or consolidating the trim owner. Preserve fixed direct4023/C717C464D28B4353 and
 scalar486783/B3CF56F72DC700B1 witnesses and the explicit development-only clock
 input; they do not replace independent proof. See the frontend N7w plan/receipt
 for final validation status and open global source/fallback/unistore scope.
+
+
+### N7x: actual deterministic crypto values and eager native sources
+
+`native_crypto_value.rs` exposes finite nullable SM3/PASSWORD byte values and
+non-NULL ENCODE/DECODE byte inputs over the original `impl_encryption` pure
+owners. Their visibility changes; the algorithms stay in one place. Native
+PASSWORD uses double raw SHA1, preserving its existing distinct policy from the
+wire PASSWORD helper. Actual APIs never traverse expressions or invoke Ready.
+Finite work exhaustion and impossible owner contracts are separate errors.
+
+`CryptoNative` has the operation's exact one/two-argument signature in the same
+SDK host frame. The frontend metadata binds real argument nodes, stored constant
+probe, declared return type and producer role/node. It budgets probe ownership
+before cloning and runs that original probe before argument zero. All children
+are eager, even when NULL data will skip password conversion in ENCODE/DECODE.
+The body authenticates all capabilities and consumes its demand stage before
+PASSWORD's genuine warning1681 callback. No value-store borrow survives that
+callback; capabilities are authenticated again afterward, so generation mutation
+cannot authorize stale inputs. Panics/errors cannot replay a consumed call.
+
+The frontend retains its single original hash/string coercion-policy owners,
+including distinct sentinel/error subjects, raw bytes and scalar formatting.
+PASSWORD's warning precedes body coercion and NULL handling; this preserves its
+side effect without adding warning/error sorting. Byte-bearing actual values can
+be borrowed, while demanded formatting, held conversion capacity and crypto output
+work stay finite. NULL data skips converting or cloning a huge ignored password
+payload after that child's expression and capability have been evaluated.
+Return conversion executes once and preserves character metadata even for
+non-UTF8 ciphertext. Existing exact typed SDK recipes keep their same-frame path.
+
+Before retiring callers,418392 independent original/candidate observations passed
+with executed source archives. Fixed direct34866/51014D84299C1F50 and scalar383526/
+96AFB40E405F1DF7 witnesses retain the explicit development-only UTC test clock;
+they are regression witnesses rather than new independent proof. Frontend N7x
+plan/receipt records validation and remaining global source/fallback/unistore work.

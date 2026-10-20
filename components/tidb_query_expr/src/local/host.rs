@@ -104,6 +104,9 @@ pub enum SqlBatchHostOperation {
     },
     /// Actual grouping id and optional immutable planner metadata.
     GroupingNative,
+    /// Actual deterministic crypto operands, with original arity/warning
+    /// policy.
+    CryptoNative(crate::NativeCryptoOperation),
     /// Actual byte-unary argument; output is an authenticated native value.
     ByteUnaryNative(crate::NativeByteUnaryOperation),
     /// Actual UUID/shard/Vitess inputs with the original optional flag arity.
@@ -241,6 +244,7 @@ impl SqlBatchHostOperation {
             Self::DurationConstructionNative(op) => arity == op.arity(),
             Self::VectorNative(op) => arity == op.arity(),
             Self::LikeNative { .. } => arity == 3,
+            Self::CryptoNative(op) => arity == op.arity(),
             Self::GroupingNative | Self::ByteUnaryNative(_) => arity == 1,
             Self::MiscNative {
                 operation,
@@ -316,6 +320,7 @@ impl SqlBatchHostOperation {
             | Self::DurationConstructionNative(_)
             | Self::VectorNative(_)
             | Self::GroupingNative
+            | Self::CryptoNative(_)
             | Self::ByteUnaryNative(_)
             | Self::MiscNative { .. }
             | Self::ValueIdentityNative { .. }
@@ -387,6 +392,7 @@ impl SqlBatchHostOperation {
             | Self::DurationConstructionNative(_)
             | Self::VectorNative(_)
             | Self::GroupingNative
+            | Self::CryptoNative(_)
             | Self::ByteUnaryNative(_)
             | Self::MiscNative { .. }
             | Self::ValueIdentityNative { .. }
