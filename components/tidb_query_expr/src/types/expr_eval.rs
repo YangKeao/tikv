@@ -3808,6 +3808,16 @@ fn legacy_error(error: LocalError) -> tidb_query_common::Error {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static READY_KERNEL_FRAME_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn ready_kernel_frame_entries() -> usize {
+    READY_KERNEL_FRAME_ENTRIES.with(std::cell::Cell::get)
+}
+
 /// One official RPN frame loop for legacy wire, controls, staged hosts and
 /// profile-checked ordinary demand. No callback recursively invokes eval.
 fn eval_frames<'a, 'data: 'a>(
@@ -3820,6 +3830,10 @@ fn eval_frames<'a, 'data: 'a>(
     budget: &mut EvalBudget,
     execution: EvalExecution,
 ) -> LocalResult<FrameResult<'a>> {
+    #[cfg(test)]
+    if execution.evaluated_bytes_operation().is_some() {
+        READY_KERNEL_FRAME_ENTRIES.with(|count| count.set(count.get() + 1));
+    }
     execution.check_budget(budget)?;
     execution.check_input(input)?;
     if execution.evaluated_bytes_operation().is_some() && host_catalog.is_some() {
@@ -4669,11 +4683,9 @@ impl RpnExpression {
         )
     }
 
-    /// Fixed ready operands, borrowed from the facade until its result
-    /// extraction completes. Only the selected closed recipe is admitted;
-    /// zero operands require PiRaw, JsonValidOtherNative,
-    /// DateFormatMissingNative, RegexpMissingLegacyNative or
-    /// BinaryArithmeticMissingLegacy with the exact NoArgs role.
+    /// Invoke the immutable closed value recipe without entering the expression
+    /// scheduler. Inputs are genuine borrowed values; only the three fixed
+    /// NOT(IS ...) recipes have a second generated-kernel stage.
     pub(crate) fn eval_with_ready_args<'a, 'data: 'a>(
         &'a self,
         operation: EvaluatedBytesOp,
@@ -4700,29 +4712,92 @@ impl RpnExpression {
                 .into(),
             ));
         }
-        let mut input = EvalInput::ReadyArgs {
-            values: ready,
-            role,
-            witness,
-        };
         let execution = match operation {
             EvaluatedBytesOp::Ascii => EvalExecution::EvaluatedAscii,
             _ => EvalExecution::EvaluatedBytes(operation),
         };
-        eval_frames(
-            EvalFrame::Program(ProgramFrame::new(
-                self,
-                FrameRows::Borrowed(input_logical_rows, 1),
-            )),
-            ctx,
-            schema,
-            &mut input,
+        execution.check_budget(budget)?;
+        let input_bytes = {
+            let input = EvalInput::ReadyArgs {
+                values: ready,
+                role,
+                witness,
+            };
+            execution.check_input(&input)?;
+            input.retained_input_bytes().ok_or_else(|| {
+                LocalError::ResourceLimit("evaluated ready-argument storage overflow".into())
+            })?
+        };
+        budget.storage(input_bytes)?;
+        budget.depth(1)?;
+        budget.charge_many(ready.len() as u64)?;
+        let requested = ready
+            .len()
+            .checked_mul(std::mem::size_of::<RpnStackNode<'_>>())
+            .ok_or_else(|| {
+                LocalError::ResourceLimit("ready kernel argument storage overflow".into())
+            })?;
+        budget.storage(input_bytes.saturating_add(requested))?;
+        let mut args = Vec::new();
+        reserve(&mut args, ready.len())?;
+        let args_bytes = args
+            .capacity()
+            .saturating_mul(std::mem::size_of::<RpnStackNode<'_>>());
+        budget.storage(input_bytes.saturating_add(args_bytes))?;
+        for (value, field_type) in ready.iter().zip(schema) {
+            args.push(RpnStackNode::Scalar { value, field_type });
+        }
+        let call = |index: usize,
+                    operands: &[RpnStackNode<'_>],
+                    live: usize,
+                    ctx: &mut EvalContext,
+                    witness: &mut ReadyValueDispatchWitness,
+                    budget: &mut EvalBudget|
+         -> LocalResult<RpnStackNode<'a>> {
+            let RpnExpressionNode::FnCall {
+                func_meta,
+                field_type,
+                metadata,
+                ..
+            } = &self.as_ref()[ready.len() + index]
+            else {
+                unreachable!("closed recipe was checked before allocation")
+            };
+            budget.charge()?;
+            let stage = operation
+                .call_operation(index)
+                .expect("checked fixed recipe stage");
+            let minimum = batch_min_storage_bytes(stage.eval_type(), 1).unwrap_or(usize::MAX);
+            budget.storage(live.saturating_add(minimum))?;
+            let result = eval_prepared_kernel(
+                ctx,
+                1,
+                operands,
+                *func_meta,
+                field_type,
+                &**metadata,
+                Some(witness),
+            )?;
+            budget.storage(live.saturating_add(node_storage(&result, budget.mode())))?;
+            Ok(result)
+        };
+        let first = call(
             0,
-            None,
+            &args,
+            input_bytes.saturating_add(args_bytes),
+            ctx,
+            witness,
             budget,
-            execution,
-        )
-        .and_then(FrameResult::into_unannotated)
+        )?;
+        drop(args);
+        let result = if operation.call_count() == 2 {
+            let live = input_bytes.saturating_add(node_storage(&first, budget.mode()));
+            call(1, std::slice::from_ref(&first), live, ctx, witness, budget)?
+        } else {
+            first
+        };
+        budget.storage(input_bytes.saturating_add(node_storage(&result, budget.mode())))?;
+        Ok(result)
     }
 
     #[inline]

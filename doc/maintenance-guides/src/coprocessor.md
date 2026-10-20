@@ -3616,3 +3616,29 @@ owners; fixed direct6318/51EC3B8C9ED75F51 and scalar69498/4EBAC72F3EA6BB39
 witnesses retain their original explicit clock. Source/provider/callback/resource
 and recovery coverage is recorded in the frontend N7z receipt. Finite work does
 not certify allocator or whole-statement peak-memory behavior.
+
+
+### N8: closed value recipes call prepared kernels directly
+
+`RpnExpression::eval_with_ready_args` validates the same immutable closed recipe,
+full generated-function identity, metadata, canonical schema, singleton row and
+semantic input role. It borrows actual scalar values and calls the same private
+`eval_prepared_kernel` used by the shared expression driver. It does not call
+`eval_frames` or evaluate an expression tree. Only the three fixed NOT(IS ...)
+recipes have a second generated-kernel stage, using the genuine first result.
+
+One invocation budget still checks depth, argument storage before allocation,
+node work and output capacity before/after each real dispatch. Witness counts
+are recorded at the unchanged generated-wrapper seam. Public worker admission,
+invocation metadata binding/unbinding, typed SQL receipts, output decoding,
+poisoning and reuse remain in their existing single owners. Preparation still
+retains a checked immutable recipe descriptor; this checkpoint does not replace
+that representation or complete frontend source closure.
+
+Before replacing the nested entry,11448 independent old/new observations across
+477 recipes passed with the original8992E4132C233F8C hash. Of these6561 entered a
+real wrapper and5271 succeeded; refusals are not reported as successful kernel
+coverage. Unbound invocation metadata is intentionally refused in this low-level
+corpus. Existing public-worker tests cover real bound LIKE/regexp/temporal/decimal
+metadata, cache effects, faults and recovery. The frontend N8 receipt records
+validation and the remaining overall no-fallback work.

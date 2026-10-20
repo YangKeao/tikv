@@ -20994,3 +20994,7 @@ mod ready_value_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "ready_kernel_tests.rs"]
+mod ready_kernel_tests;
