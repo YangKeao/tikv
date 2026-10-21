@@ -3100,6 +3100,10 @@ fn copy_host_rows(node: &RpnStackNode<'_>, rows: usize) -> LocalResult<VectorVal
     }
 }
 
+struct HostRowArgument {
+    position: usize,
+    value: Option<VectorValue>,
+}
 struct HostFrame<'a> {
     prepared: &'a PreparedHostCall,
     args: &'a [RpnExpression],
@@ -3109,6 +3113,7 @@ struct HostFrame<'a> {
     awaiting: Option<usize>,
     ready: Option<usize>,
     cache: Vec<Option<VectorValue>>,
+    scoped: Option<Box<HostRowArgument>>,
 }
 
 impl<'a> HostFrame<'a> {
@@ -3145,12 +3150,22 @@ impl<'a> HostFrame<'a> {
             awaiting: None,
             ready: None,
             cache,
+            scoped: None,
         })
     }
 
     fn storage(&self, mode: StorageMode) -> usize {
         self.cache.iter().flatten().fold(
-            Self::initial_storage(self.cache.capacity(), &self.rows),
+            Self::initial_storage(self.cache.capacity(), &self.rows).saturating_add(
+                self.scoped.as_ref().map_or(0, |scope| {
+                    std::mem::size_of::<HostRowArgument>().saturating_add(
+                        scope
+                            .value
+                            .as_ref()
+                            .map_or(0, |value| vector_storage_bytes(value, mode)),
+                    )
+                }),
+            ),
             |total, value| total.saturating_add(vector_storage_bytes(value, mode)),
         )
     }
@@ -3177,6 +3192,18 @@ impl<'a> HostFrame<'a> {
         }
     }
     fn window_reply(&self, index: usize) -> HostWindowArgReply<'_> {
+        if let Some(scope) = &self.scoped {
+            return HostWindowArgReply {
+                index,
+                occurrence_start: self.rows.occurrence(scope.position, 0),
+                field_type: &self.prepared.arg_types()[index],
+                physical_rows: &self.rows.physical()[scope.position..scope.position + 1],
+                values: scope
+                    .value
+                    .as_ref()
+                    .expect("successful fresh scoped argument"),
+            };
+        }
         HostWindowArgReply {
             index,
             occurrence_start: self.rows.occurrence(0, 0),
@@ -3188,6 +3215,7 @@ impl<'a> HostFrame<'a> {
         }
     }
     fn request(&mut self, request: HostArgRequest) -> LocalResult<()> {
+        self.scoped = None;
         if request.index >= self.args.len() {
             return Err(LocalError::HostContract(
                 "host requested an absent argument".into(),
@@ -3197,9 +3225,39 @@ impl<'a> HostFrame<'a> {
         Ok(())
     }
 
+    fn request_row(
+        &mut self,
+        index: usize,
+        position: usize,
+        budget: &EvalBudget,
+        other_live: usize,
+    ) -> LocalResult<()> {
+        if !self.prepared.is_windowed() || position >= self.rows.len() || index >= self.args.len() {
+            return Err(LocalError::HostContract(
+                "scoped host demand is outside its registered window".into(),
+            ));
+        }
+        budget.storage(other_live.saturating_add(std::mem::size_of::<HostRowArgument>()))?;
+        self.request = Some(HostArgRequest {
+            index,
+            mode: ArgMode::Fresh,
+        });
+        self.scoped = Some(Box::new(HostRowArgument {
+            position,
+            value: None,
+        }));
+        Ok(())
+    }
+    fn argument_rows(&self) -> usize {
+        if self.scoped.is_some() {
+            1
+        } else {
+            self.rows.len()
+        }
+    }
     fn accept(&mut self, value: RpnStackNode<'a>) -> LocalResult<()> {
         let index = self.awaiting.take().expect("host awaited an argument");
-        validate_frame_result(&value, self.rows.len())?;
+        validate_frame_result(&value, self.argument_rows())?;
         if value.field_type() != &self.prepared.arg_types()[index] {
             return Err(LocalError::HostContract(
                 "argument complete field type differs from registration".into(),
@@ -3215,7 +3273,12 @@ impl<'a> HostFrame<'a> {
             ));
         }
         // Cache only successful, bounded compact results for this invocation.
-        self.cache[index] = Some(copy_host_rows(&value, self.rows.len())?);
+        let copied = copy_host_rows(&value, self.argument_rows())?;
+        if let Some(scope) = &mut self.scoped {
+            scope.value = Some(copied);
+        } else {
+            self.cache[index] = Some(copied);
+        }
         self.ready = Some(index);
         Ok(())
     }
@@ -4275,7 +4338,7 @@ fn eval_frames<'a, 'data: 'a>(
                     budget.charge()?;
                     budget.storage(retained.saturating_add(host_node_copy_precharge(
                         &value.node,
-                        frame.rows.len(),
+                        frame.argument_rows(),
                     )?))?;
                     frame.accept(value.into_unannotated()?)?;
                     retained = frames_storage(&frames, frames.capacity(), budget.mode())
@@ -4325,6 +4388,9 @@ fn eval_frames<'a, 'data: 'a>(
                     };
                     match step {
                         HostStep::NeedArg(request) => frame.request(request)?,
+                        HostStep::NeedArgRow { index, position } => {
+                            frame.request_row(index, position, budget, retained)?;
+                        }
                         HostStep::Ready(value) => {
                             // Keep cleanup armed through validation/normalization,
                             // even when the provider has already completed its task.
@@ -4343,19 +4409,26 @@ fn eval_frames<'a, 'data: 'a>(
 
                 let request = frame.request.take().expect("host requested an argument");
                 budget.charge()?; // Reuse hits are not a free/infinite host loop.
-                if request.mode == ArgMode::Fresh {
+                if frame.scoped.is_none() && request.mode == ArgMode::Fresh {
                     // Discard the old value before restarting; a failure cannot
                     // accidentally fall back to a previous successful reply.
                     frame.cache[request.index] = None;
                 }
-                if frame.cache[request.index].is_some() {
+                if frame.scoped.is_none() && frame.cache[request.index].is_some() {
                     frame.ready = Some(request.index);
                     push_frame(&mut frames, EvalFrame::Host(frame), budget, tasks.storage())?;
                 } else {
                     frame.awaiting = Some(request.index);
                     let child = &frame.args[request.index];
                     budget.storage(retained.saturating_add(frame.rows.storage()))?;
-                    let rows = frame.rows.clone();
+                    let rows = if let Some(scope) = &frame.scoped {
+                        FrameRows::Scoped(
+                            [frame.rows.physical()[scope.position]],
+                            frame.rows.occurrence(scope.position, 0),
+                        )
+                    } else {
+                        frame.rows.clone()
+                    };
                     push_frame(&mut frames, EvalFrame::Host(frame), budget, tasks.storage())?;
                     push_frame(
                         &mut frames,

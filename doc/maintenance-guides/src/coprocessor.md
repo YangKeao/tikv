@@ -2251,6 +2251,18 @@ flag or eligibility policy described above.
   round to FSP. Identity and presence kernels must not silently round values
   already evaluated by a native owner. This import is separate from parsing,
   arithmetic range policy and output-field conversion.
+- `EagerValuesWindowNative` registers a variadic Bytes window whose concrete
+  SQL kernel and argument roles remain immutable caller metadata. A window
+  `HostStep::NeedArgRow { index, position }` requests one Fresh original occurrence
+  after an earlier complete argument phase. The same HostFrame pushes a scoped
+  child ProgramFrame, retaining both the original occurrence and physical row;
+  no nested evaluator, fabricated rows or skipped SQL values are involved.
+  The singleton reply uses HostWindowArgReply with the actual one-row slice and
+  occurrence origin. It never replaces/reuses a whole-vector cache. Ordinary
+  row hosts and invalid positions/indexes are rejected before the requested
+  child. Scoped owners are precharged, metered and dropped at the next demand;
+  final Ready still requires the complete parent width. The normal step/task
+  limits and cancellation ledger cover errors, budget exhaustion and unwinds.
 - Explicit `AddWindowNative`, `SubtractWindowNative`, `MultiplyWindowNative`,
   `AbsIntWindowNative`, `CastDecimalWindowNative` and `CastJsonWindowNative`
   descriptors use `start_window`/`resume_window` instead of the row callbacks.

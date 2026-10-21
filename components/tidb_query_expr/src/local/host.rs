@@ -216,6 +216,9 @@ pub enum SqlBatchHostOperation {
     /// Whole-child native Decimal and JSON casts.
     CastDecimalWindowNative,
     CastJsonWindowNative,
+    /// Whole-source phases followed by fresh single-occurrence diagnostics.
+    /// SQL kernel and original argument roles remain caller-owned metadata.
+    EagerValuesWindowNative,
 }
 
 impl SqlBatchHostOperation {
@@ -232,6 +235,7 @@ impl SqlBatchHostOperation {
                 | Self::AbsIntWindowNative
                 | Self::CastDecimalWindowNative
                 | Self::CastJsonWindowNative
+                | Self::EagerValuesWindowNative
         )
     }
     pub fn accepts_arity(self, arity: usize) -> bool {
@@ -250,6 +254,7 @@ impl SqlBatchHostOperation {
             Self::LikeNative { .. } => arity == 3,
             Self::CryptoNative(op) => arity == op.arity(),
             Self::EagerValuesNative => true,
+            Self::EagerValuesWindowNative => arity >= 1,
             Self::GroupingNative | Self::ByteUnaryNative(_) | Self::CompressionNative(_) => {
                 arity == 1
             }
@@ -329,6 +334,7 @@ impl SqlBatchHostOperation {
             | Self::GroupingNative
             | Self::CryptoNative(_)
             | Self::EagerValuesNative
+            | Self::EagerValuesWindowNative
             | Self::CompressionNative(_)
             | Self::ByteUnaryNative(_)
             | Self::MiscNative { .. }
@@ -403,6 +409,7 @@ impl SqlBatchHostOperation {
             | Self::GroupingNative
             | Self::CryptoNative(_)
             | Self::EagerValuesNative
+            | Self::EagerValuesWindowNative
             | Self::CompressionNative(_)
             | Self::ByteUnaryNative(_)
             | Self::MiscNative { .. }
@@ -766,6 +773,12 @@ pub enum HostStart {
 #[derive(Debug)]
 pub enum HostStep {
     NeedArg(HostArgRequest),
+    /// Freshly evaluate one original occurrence of an argument of a window
+    /// host. This neither consumes nor replaces its whole-vector cache.
+    NeedArgRow {
+        index: usize,
+        position: usize,
+    },
     Ready(VectorValue),
 }
 

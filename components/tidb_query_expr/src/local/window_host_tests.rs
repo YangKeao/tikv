@@ -1800,3 +1800,432 @@ fn quotient_catalog_keeps_six_distinct_binary_capability_protocols() {
         }
     }
 }
+
+// A protocol-only byte relay. No SQL expression/evaluator callback is stored.
+struct RowDemandTask {
+    rows: Vec<usize>,
+    origin: usize,
+    phase: usize,
+    left: Vec<Option<Vec<u8>>>,
+}
+struct RowDemandService {
+    catalog: HostCatalog,
+    schema: Vec<FieldType>,
+    live: HashMap<HostTaskId, RowDemandTask>,
+    next: usize,
+    mode: u8,
+    reads: Vec<(usize, InputRow)>,
+    replies: Vec<(usize, usize, Vec<usize>, Vec<Option<Vec<u8>>>)>,
+    batches: Vec<usize>,
+    cancelled: usize,
+    primary: Option<usize>,
+}
+impl RowDemandService {
+    fn new(mode: u8) -> Self {
+        Self {
+            catalog: HostCatalog::for_sql_batch(vec![(
+                SqlBatchHostOperation::EagerValuesWindowNative,
+                HostSignature {
+                    arg_types: vec![bytes_ft(); 3].into_boxed_slice(),
+                    return_type: bytes_ft(),
+                },
+            )])
+            .unwrap(),
+            schema: vec![bytes_ft(); 3],
+            live: HashMap::new(),
+            next: 0,
+            mode,
+            reads: vec![],
+            replies: vec![],
+            batches: vec![],
+            cancelled: 0,
+            primary: None,
+        }
+    }
+    fn program(&self) -> LocalBatchProgram {
+        let root = host(&self.catalog, 0, vec![input(0), input(1), input(2)]);
+        let mut source = vec![];
+        sites(&root, &mut 0, &mut source);
+        let facts = BatchFacts::sql_native_batch_with_hosts(
+            &root,
+            &self.schema,
+            source,
+            CompileLimits::default(),
+            &self.catalog,
+        )
+        .unwrap();
+        compile_batch(&root, &self.schema, LocalCompileContext::default(), &facts).unwrap()
+    }
+    fn evaluate(
+        &mut self,
+        program: &mut LocalBatchProgram,
+        selection: &[usize],
+        limits: ExecutionLimits,
+    ) -> LocalResult<VectorValue> {
+        program.eval_with_bindings(limits, &mut EvalContext::default(), 3, selection, self)
+    }
+}
+impl LocalRuntimeServices for RowDemandService {
+    fn binding_schema(&self) -> &[FieldType] {
+        &self.schema
+    }
+    fn read_input(
+        &mut self,
+        _ctx: &mut EvalContext,
+        slot: usize,
+        row: InputRow,
+        expected: &FieldType,
+    ) -> LocalResult<VectorValue> {
+        assert_eq!(expected, &bytes_ft());
+        self.reads.push((slot, row));
+        if slot == 1 && self.mode == 3 {
+            let error = other_err!("scoped primary input");
+            self.primary = Some(error.0.as_ref() as *const _ as usize);
+            return Err(LocalError::Evaluation(error));
+        }
+        if slot == 1 && self.mode == 4 {
+            panic!("scoped input panic");
+        }
+        if slot == 1 && self.mode == 7 {
+            return Ok(VectorValue::from_scalar(&ScalarValue::Int(Some(7)), 1));
+        }
+        Ok(bytes([Some(
+            format!(
+                "{slot}/{}:{}/{}",
+                row.occurrence,
+                row.input_row,
+                self.reads.len()
+            )
+            .into_bytes(),
+        )]))
+    }
+    fn read_input_batch(
+        &mut self,
+        _ctx: &mut EvalContext,
+        slot: usize,
+        _rows: &[usize],
+        _expected: &FieldType,
+    ) -> LocalResult<Option<VectorValue>> {
+        self.batches.push(slot);
+        Ok(None)
+    }
+    fn host_services(&mut self) -> Option<&mut dyn LocalHostServices> {
+        Some(self)
+    }
+}
+impl LocalHostServices for RowDemandService {
+    fn catalog_key(&self) -> &HostCatalogKey {
+        self.catalog.key()
+    }
+    fn start(
+        &mut self,
+        ctx: &mut EvalContext,
+        invocation: HostInvocation<'_>,
+    ) -> LocalResult<HostStart> {
+        assert_eq!(self.mode, 8, "window must use its genuine callback");
+        self.start_window(
+            ctx,
+            HostWindowInvocation {
+                slot: invocation.slot,
+                occurrence_start: invocation.row.occurrence,
+                physical_rows: &[invocation.row.input_row],
+                arg_types: invocation.arg_types,
+                return_type: invocation.return_type,
+            },
+        )
+    }
+    fn resume(
+        &mut self,
+        ctx: &mut EvalContext,
+        id: &HostTaskId,
+        reply: HostArgReply<'_>,
+    ) -> LocalResult<HostStep> {
+        assert_eq!(self.mode, 8, "window must use its genuine callback");
+        let task = self.live.get(id).unwrap();
+        let rows = task.rows.clone();
+        let origin = task.origin;
+        self.resume_window(
+            ctx,
+            id,
+            HostWindowArgReply {
+                index: reply.index,
+                occurrence_start: origin,
+                field_type: reply.field_type,
+                physical_rows: &rows,
+                values: reply.values,
+            },
+        )
+    }
+    fn start_window(
+        &mut self,
+        _ctx: &mut EvalContext,
+        invocation: HostWindowInvocation<'_>,
+    ) -> LocalResult<HostStart> {
+        let id = HostTaskId {
+            slot: self.next,
+            generation: self.next as u64 + 1,
+        };
+        self.next += 1;
+        self.live.insert(
+            id,
+            RowDemandTask {
+                rows: invocation.physical_rows.to_vec(),
+                origin: invocation.occurrence_start,
+                phase: 0,
+                left: vec![],
+            },
+        );
+        Ok(HostStart::Pending {
+            task: id,
+            request: request(0, ArgMode::Fresh),
+        })
+    }
+    fn resume_window(
+        &mut self,
+        _ctx: &mut EvalContext,
+        id: &HostTaskId,
+        reply: HostWindowArgReply<'_>,
+    ) -> LocalResult<HostStep> {
+        let task = self.live.get_mut(id).unwrap();
+        assert_eq!(reply.field_type, &bytes_ft());
+        let values = (0..reply.values.len())
+            .map(|i| {
+                let ScalarValueRef::Bytes(v) = reply.values.get_scalar_ref(i) else {
+                    panic!("carrier changed")
+                };
+                v.map(<[u8]>::to_vec)
+            })
+            .collect::<Vec<_>>();
+        self.replies.push((
+            reply.index,
+            reply.occurrence_start,
+            reply.physical_rows.to_vec(),
+            values.clone(),
+        ));
+        let phase = task.phase;
+        task.phase += 1;
+        if phase == 0 {
+            assert_eq!(reply.index, 0);
+            assert_eq!(reply.occurrence_start, task.origin);
+            assert_eq!(reply.physical_rows, task.rows);
+            task.left = values;
+            if self.mode == 1 {
+                return Ok(HostStep::NeedArgRow {
+                    index: 3,
+                    position: 0,
+                });
+            }
+            if self.mode == 2 {
+                return Ok(HostStep::NeedArgRow {
+                    index: 1,
+                    position: usize::MAX,
+                });
+            }
+            if self.mode == 5 {
+                return Ok(HostStep::Ready(bytes([Some(vec![0])])));
+            }
+            return Ok(HostStep::NeedArgRow {
+                index: 1,
+                position: task.rows.len() - 1,
+            });
+        }
+        if self.mode == 6 {
+            return Ok(HostStep::NeedArgRow {
+                index: 1,
+                position: 0,
+            });
+        }
+        match phase {
+            1..=3 => {
+                let position = if phase == 2 { 0 } else { task.rows.len() - 1 };
+                assert_eq!(reply.index, 1);
+                assert_eq!(reply.occurrence_start, task.origin + position);
+                assert_eq!(reply.physical_rows, [task.rows[position]]);
+                assert_eq!(reply.values.len(), 1);
+                Ok(match phase {
+                    1 => HostStep::NeedArgRow {
+                        index: 1,
+                        position: 0,
+                    },
+                    2 => HostStep::NeedArgRow {
+                        index: 1,
+                        position: task.rows.len() - 1,
+                    },
+                    _ => HostStep::NeedArg(request(0, ArgMode::Reuse)),
+                })
+            }
+            4 => {
+                assert_eq!(values, task.left);
+                assert_eq!(reply.physical_rows, task.rows);
+                Ok(HostStep::NeedArg(request(1, ArgMode::Reuse)))
+            }
+            5 => {
+                assert_eq!(reply.index, 1);
+                assert_eq!(reply.occurrence_start, task.origin);
+                assert_eq!(reply.physical_rows, task.rows);
+                Ok(HostStep::NeedArg(request(2, ArgMode::Fresh)))
+            }
+            6 => {
+                assert_eq!(reply.index, 2);
+                assert_eq!(reply.physical_rows, task.rows);
+                let result = bytes(task.left.clone());
+                self.live.remove(id);
+                Ok(HostStep::Ready(result))
+            }
+            _ => unreachable!(),
+        }
+    }
+    fn cancel(&mut self, id: &HostTaskId) {
+        self.cancelled += 1;
+        self.live.remove(id);
+    }
+}
+#[test]
+fn window_scoped_row_demand_keeps_fresh_occurrences_and_whole_argument_caches_separate() {
+    for selection in [vec![2, 0, 2], vec![0], (0..2050).map(|i| i % 3).collect()] {
+        let mut service = RowDemandService::new(0);
+        let mut program = service.program();
+        assert!(program.requires_whole_selection());
+        let output = service
+            .evaluate(&mut program, &selection, ExecutionLimits::default())
+            .unwrap();
+        let last = selection.len() - 1;
+        assert_eq!(
+            service.reads,
+            [
+                rows(0, &selection),
+                vec![
+                    (
+                        1,
+                        InputRow {
+                            occurrence: last,
+                            input_row: selection[last]
+                        }
+                    ),
+                    (
+                        1,
+                        InputRow {
+                            occurrence: 0,
+                            input_row: selection[0]
+                        }
+                    ),
+                    (
+                        1,
+                        InputRow {
+                            occurrence: last,
+                            input_row: selection[last]
+                        }
+                    )
+                ],
+                rows(1, &selection),
+                rows(2, &selection)
+            ]
+            .concat()
+        );
+        assert_ne!(
+            service.replies[1].3, service.replies[3].3,
+            "a repeated single row must be Fresh"
+        );
+        assert_eq!(
+            service.replies[0].3, service.replies[4].3,
+            "whole Reuse retains its own original vector"
+        );
+        assert_eq!(
+            service.batches.iter().filter(|&&slot| slot == 1).count(),
+            1,
+            "only the later whole demand may use the batch hook"
+        );
+        assert_eq!(output.len(), selection.len());
+        assert!(service.live.is_empty());
+        assert_eq!(service.cancelled, 0);
+        service.reads.clear();
+        service.replies.clear();
+        service.batches.clear();
+        service
+            .evaluate(&mut program, &selection, ExecutionLimits::default())
+            .unwrap();
+        assert!(service.live.is_empty());
+    }
+}
+#[test]
+fn window_scoped_row_rejects_bad_demand_and_preserves_failures_cleanup_and_reuse() {
+    for mode in [1, 2, 3, 4, 5, 6, 7] {
+        let mut service = RowDemandService::new(mode);
+        let mut program = service.program();
+        let limits = ExecutionLimits {
+            max_steps: 100,
+            ..ExecutionLimits::default()
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.evaluate(&mut program, &[2, 0, 2], limits)
+        }));
+        match mode {
+            3 => {
+                let Err(LocalError::Evaluation(error)) = outcome.unwrap() else {
+                    panic!("primary cause changed")
+                };
+                assert_eq!(Some(error.0.as_ref() as *const _ as usize), service.primary);
+            }
+            4 => assert!(outcome.is_err()),
+            6 => assert!(matches!(
+                outcome.unwrap(),
+                Err(LocalError::ResourceLimit(_))
+            )),
+            _ => assert!(outcome.unwrap().is_err()),
+        }
+        assert!(service.live.is_empty(), "mode={mode}");
+        assert_eq!(service.cancelled, 1, "mode={mode}");
+        assert!(service.reads.iter().all(|(slot, _)| *slot < 2));
+        if matches!(mode, 1 | 2 | 5) {
+            assert_eq!(service.reads, rows(0, &[2, 0, 2]));
+        }
+        service.mode = 0;
+        service.reads.clear();
+        service.replies.clear();
+        service.batches.clear();
+        service
+            .evaluate(&mut program, &[2, 0, 2], ExecutionLimits::default())
+            .unwrap();
+        assert!(service.live.is_empty());
+    }
+}
+
+#[test]
+fn window_scoped_row_requires_a_window_catalog_and_valid_complete_signature() {
+    let mut service = RowDemandService::new(8);
+    service.catalog = HostCatalog::for_sql_batch(vec![(
+        SqlBatchHostOperation::EagerValuesNative,
+        HostSignature {
+            arg_types: vec![bytes_ft(); 3].into_boxed_slice(),
+            return_type: bytes_ft(),
+        },
+    )])
+    .unwrap();
+    let mut program = service.program();
+    let result = service.evaluate(&mut program, &[2], ExecutionLimits::default());
+    assert!(matches!(result, Err(LocalError::HostContract(_))));
+    assert_eq!(service.reads, rows(0, &[2]));
+    assert!(service.live.is_empty());
+    assert_eq!(service.cancelled, 1);
+    assert!(
+        HostCatalog::for_sql_batch(vec![(
+            SqlBatchHostOperation::EagerValuesWindowNative,
+            HostSignature {
+                arg_types: Box::new([]),
+                return_type: bytes_ft()
+            }
+        )])
+        .is_err()
+    );
+    let integer: FieldType = FieldTypeTp::LongLong.into();
+    assert!(
+        HostCatalog::for_sql_batch(vec![(
+            SqlBatchHostOperation::EagerValuesWindowNative,
+            HostSignature {
+                arg_types: vec![integer].into_boxed_slice(),
+                return_type: bytes_ft()
+            }
+        )])
+        .is_err()
+    );
+}
