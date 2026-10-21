@@ -1,6 +1,6 @@
 // Copyright 2026 TiKV Project Authors. Licensed under Apache-2.0.
 
-//! Context-keyed native regexp state shared with the actual kernel invocation.
+//! Context-keyed native cache and regexp state shared with actual invocations.
 //! Owners clone to empty caches; invocation handles explicitly share live
 //! state. Binding a handle neither reads nor initializes the cache. Compiler
 //! invocation remains lazy, after the caller's original
@@ -8,7 +8,7 @@
 
 use std::{
     fmt,
-    sync::{Arc, RwLock},
+    sync::{Arc, Condvar, Mutex, MutexGuard},
 };
 
 use regex::{Regex, RegexBuilder};
@@ -18,87 +18,163 @@ use crate::{
 };
 
 #[derive(Debug)]
-struct CacheItem<T> {
-    context_id: u64,
-    value: Arc<T>,
+struct CacheState<T> {
+    item: Option<(u64, Arc<T>)>,
+    initializing: bool,
 }
-
-/// A single context-keyed lazy value. Ordinary constructor failures are not
-/// retained; changing context replaces an entry only after successful creation.
-/// The extra shared-state allocation does not promise allocation/OOM
-/// equivalence.
+#[derive(Debug)]
+struct CacheCore<T> {
+    state: Mutex<CacheState<T>>,
+    changed: Condvar,
+}
+/// One context-keyed cache. Cloning an owner starts empty; explicit invocation
+/// handles share live state. Constructor errors and cancellation preserve the
+/// previous item. Allocator/OOM equivalence is not promised.
 #[derive(Debug)]
 pub struct NativeContextCache<T> {
-    cached: Arc<RwLock<Option<CacheItem<T>>>>,
+    core: Arc<CacheCore<T>>,
 }
-
+impl<T> Clone for NativeContextCache<T> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+/// A matching value or exclusive ownership of a pending constructor.
+#[derive(Debug)]
+pub enum NativeCacheAccess<T> {
+    /// The original matching context value; no constructor is demanded.
+    Hit(Arc<T>),
+    /// Reserve before demanding constructor inputs; dropping aborts the
+    /// reservation.
+    Initialize(NativeCacheInitialization<T>),
+}
+/// An owned, non-cloneable initialization reservation. No lock guard or
+/// callback is retained. Commit consumes it; drop wakes waiters without
+/// evicting the previous context value.
+pub struct NativeCacheInitialization<T> {
+    core: Arc<CacheCore<T>>,
+    context: u64,
+    armed: bool,
+}
+impl<T> fmt::Debug for NativeCacheInitialization<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeCacheInitialization")
+            .field("context", &self.context)
+            .field("armed", &self.armed)
+            .finish_non_exhaustive()
+    }
+}
 impl<T> Default for NativeContextCache<T> {
     fn default() -> Self {
-        Self {
-            cached: Arc::new(RwLock::new(None)),
-        }
+        Self::new()
     }
 }
-
-impl<T> Clone for NativeContextCache<T> {
-    /// Cloning an expression owner starts with an empty cache.
-    fn clone(&self) -> Self {
-        Self::default()
-    }
-}
-
 impl<T> NativeContextCache<T> {
-    /// Construct an empty owner, independently of any existing invocation.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Share this live cache owner for one prepared value-body invocation.
-    /// This does not inspect or initialize cached values. Ordinary expression
-    /// ownership cloning still starts empty through Clone.
+    /// Share live state for one invocation without observing or constructing
+    /// it.
     pub fn share_for_invocation(&self) -> Self {
         self.share_state()
     }
 
+    /// Construct an independent empty owner.
+    pub fn new() -> Self {
+        Self {
+            core: Arc::new(CacheCore {
+                state: Mutex::new(CacheState {
+                    item: None,
+                    initializing: false,
+                }),
+                changed: Condvar::new(),
+            }),
+        }
+    }
     pub(crate) fn share_state(&self) -> Self {
         Self {
-            cached: Arc::clone(&self.cached),
+            core: Arc::clone(&self.core),
         }
     }
-
-    /// Observe a matching context without initializing or replacing its value.
-    pub fn get_cache(&self, context_id: u64) -> Option<Arc<T>> {
-        self.cached
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .filter(|item| item.context_id == context_id)
-            .map(|item| Arc::clone(&item.value))
+    fn available(&self) -> MutexGuard<'_, CacheState<T>> {
+        let mut state = self
+            .core
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while state.initializing {
+            state = self
+                .core
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state
     }
-
-    /// Preserve the original generic cache constructor contract. This closure
-    /// is not carried in regexp metadata: kernels construct their own typed
-    /// values, without a native callback or a precomputed-result snapshot.
+    /// Observe a matching value without construction. Like the original write
+    /// lock, any in-progress constructor blocks even reads of another context.
+    pub fn get_cache(&self, context: u64) -> Option<Arc<T>> {
+        self.available()
+            .item
+            .as_ref()
+            .filter(|(id, _)| *id == context)
+            .map(|(_, v)| Arc::clone(v))
+    }
+    /// Wait for prior construction, then return a hit or reserve this context
+    /// before any constructor child effects. The reservation can span a driver
+    /// demand without retaining a borrowed mutex guard.
+    pub fn begin_initialization(&self, context: u64) -> NativeCacheAccess<T> {
+        let mut state = self.available();
+        if let Some((_, value)) = state.item.as_ref().filter(|(id, _)| *id == context) {
+            return NativeCacheAccess::Hit(Arc::clone(value));
+        }
+        state.initializing = true;
+        NativeCacheAccess::Initialize(NativeCacheInitialization {
+            core: Arc::clone(&self.core),
+            context,
+            armed: true,
+        })
+    }
+    /// Preserve synchronous constructor semantics over the same reservation.
+    /// A constructor error or unwind drops its reservation and retains the old
+    /// item.
     pub fn get_or_init_cache<E>(
         &self,
-        context_id: u64,
+        context: u64,
         construct: impl FnOnce() -> Result<T, E>,
     ) -> Result<Arc<T>, E> {
-        if let Some(value) = self.get_cache(context_id) {
-            return Ok(value);
+        match self.begin_initialization(context) {
+            NativeCacheAccess::Hit(value) => Ok(value),
+            NativeCacheAccess::Initialize(lease) => Ok(lease.commit(construct()?)),
         }
-        let mut cached = self
-            .cached
-            .write()
+    }
+}
+impl<T> NativeCacheInitialization<T> {
+    /// Publish a successfully constructed item and wake all waiting callers.
+    pub fn commit(mut self, value: T) -> Arc<T> {
+        let value = Arc::new(value);
+        let mut state = self
+            .core
+            .state
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(item) = cached.as_ref().filter(|item| item.context_id == context_id) {
-            return Ok(Arc::clone(&item.value));
+        state.item = Some((self.context, Arc::clone(&value)));
+        state.initializing = false;
+        self.armed = false;
+        drop(state);
+        self.core.changed.notify_all();
+        value
+    }
+}
+impl<T> Drop for NativeCacheInitialization<T> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut state = self
+                .core
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.initializing = false;
+            drop(state);
+            self.core.changed.notify_all();
         }
-        let value = Arc::new(construct()?);
-        *cached = Some(CacheItem { context_id, value });
-        Ok(Arc::clone(
-            &cached.as_ref().expect("cache item installed").value,
-        ))
     }
 }
 
@@ -335,7 +411,7 @@ impl NativeRegexpInvocation {
 /// the statement, while uncached engines are transient. Full accounting remains
 /// a deferred M6 task, not implied by a successful observation here.
 pub(crate) fn known_pattern_cache_bytes(value: &Arc<NativeCachedRegexp>) -> Option<usize> {
-    let base = std::mem::size_of::<RwLock<Option<CacheItem<NativeCachedRegexp>>>>()
+    let base = std::mem::size_of::<CacheCore<NativeCachedRegexp>>()
         .checked_add(std::mem::size_of::<NativeCachedRegexp>())?;
     let syntax_capacity = match &value.result {
         Err(NativeRegexpCompileError::InvalidPattern(regex::Error::Syntax(text))) => {
@@ -352,7 +428,7 @@ pub(crate) fn known_pattern_cache_bytes(value: &Arc<NativeCachedRegexp>) -> Opti
 pub(crate) fn known_replacement_cache_bytes(
     value: &Arc<Vec<NativeReplacementPart>>,
 ) -> Option<usize> {
-    let mut bytes = std::mem::size_of::<RwLock<Option<CacheItem<Vec<NativeReplacementPart>>>>>()
+    let mut bytes = std::mem::size_of::<CacheCore<Vec<NativeReplacementPart>>>()
         .checked_add(std::mem::size_of::<Vec<NativeReplacementPart>>())?
         .checked_add(
             value
@@ -430,11 +506,10 @@ mod tests {
         let NativeReplacementPart::Literal(literal) = &first[0] else {
             unreachable!()
         };
-        let token_bytes =
-            std::mem::size_of::<RwLock<Option<CacheItem<Vec<NativeReplacementPart>>>>>()
-                + std::mem::size_of::<Vec<NativeReplacementPart>>()
-                + first.capacity() * std::mem::size_of::<NativeReplacementPart>()
-                + literal.capacity();
+        let token_bytes = std::mem::size_of::<CacheCore<Vec<NativeReplacementPart>>>()
+            + std::mem::size_of::<Vec<NativeReplacementPart>>()
+            + first.capacity() * std::mem::size_of::<NativeReplacementPart>()
+            + literal.capacity();
         assert_eq!(known_replacement_cache_bytes(&first), Some(token_bytes));
         assert!(Arc::ptr_eq(&first, &shared.resolve_replacement("Y")));
         let bypass = NativeRegexpInvocation::new(&patterns, &replacements, 8, false, false);
@@ -547,3 +622,7 @@ mod direct_like_tests {
         assert!(bypass.prepare_like("X", "c").execute("X").unwrap());
     }
 }
+
+#[cfg(test)]
+#[path = "native_cache_lease_tests.rs"]
+mod lease_tests;

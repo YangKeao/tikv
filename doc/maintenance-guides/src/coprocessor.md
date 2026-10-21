@@ -135,6 +135,19 @@ collection and finalization are in `src/coprocessor/batch.rs`.
 
 ### In-process expression-library consumers
 
+`NativeContextCache` can reserve an initializer with `begin_initialization`.
+A hit returns the existing `Arc`; a miss returns a non-cloneable
+`NativeCacheInitialization` before any constructor inputs are demanded. Keep that
+owned reservation across same-frame child demand; it retains no lock guard,
+expression or callback. `commit` consumes it and publishes one context item.
+Dropping on SQL error, panic, resource refusal or cancellation wakes waiters and
+preserves the previous item. The synchronous `get_or_init_cache` facade uses the
+same owner. As with its former write lock, in-progress initialization blocks
+all `get_cache` observations, including another context's old item. Ordinary
+owner Clone remains empty, and only explicit invocation handles share state.
+The original lock owner is retained test-only for independent context/constructor
+and concurrent-wait comparisons; it is not an alternate production path.
+
 `components/tidb_query_datatype` owns the scalar representations and collation
 kernels; `components/tidb_query_expr` owns RPN construction and execution. These
 libraries can also be called in-process without constructing a coprocessor
@@ -3694,3 +3707,19 @@ that54 formerly missing functions were newly implemented. Its receipt records
 source/type/return/provenance/callback/resource/cache and Projection validation.
 Generic Admission fallback, other demand policies and public/unistore traversals
 remain active overall work after this local checkpoint.
+
+The frontend cached FIND_IN_SET source retains the initializer while its same
+HostFrame demands the real list argument on the semantic empty row. Cache hits
+skip that demand; NULL needles still initialize; constructor success precedes
+needle lookup. Its capabilities retain the actual outer occurrence and physical
+row identity. Cancellation drops the reservation; context and prepared-value
+callbacks run without a value-store borrow and publication authenticates inputs
+again. Ordinary owner Clone still starts empty, while source compilation shares
+the live SQL-function owner explicitly.
+
+Prepared FIND_IN_SET encoded headers can exceed the raw comma-list size. The
+shared encoding reservation charges each actual addition to the current lexical
+value-work allowance before allocation or cache publication. Unscoped callers
+retain their original explicit encoded-byte cap. A resource error cancels the
+new initializer, keeps the prior context item and permits a fresh NULL build;
+it must never become an alternate expression execution route.

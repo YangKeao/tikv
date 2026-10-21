@@ -3055,6 +3055,9 @@ fn reserve_find_in_set_encoding(
             "Prepared FIND_IN_SET encoded byte cap exceeded".into(),
         ));
     }
+    // Actual ordered-key headers can be much larger than the raw comma
+    // input. Refuse their demanded storage before allocation or cache commit.
+    crate::local::charge_value_kernel_work(additional)?;
     encoded.try_reserve_exact(additional).map_err(|error| {
         LocalError::ResourceLimit(format!("Prepared FIND_IN_SET allocation: {}", error))
     })
@@ -6878,6 +6881,36 @@ mod tests {
                 .unwrap();
             assert_eq!(got, exp);
         }
+    }
+
+    #[test]
+    fn test_prepared_find_in_set_encoded_growth_uses_current_work_allowance() {
+        crate::local::with_value_kernel_work_limit(1024, || {
+            assert!(matches!(
+                prepare_find_in_set_keys(
+                    Some(&vec![b','; 256]),
+                    NativeCollation::Binary,
+                    usize::MAX
+                ),
+                Err(LocalError::ResourceLimit(_))
+            ));
+            assert!(crate::local::value_kernel_work_status().is_err());
+        });
+        assert!(crate::local::value_kernel_work_remaining().is_none());
+        crate::local::with_value_kernel_work_limit(8, || {
+            let keys = prepare_find_in_set_keys(None, NativeCollation::Binary, usize::MAX).unwrap();
+            assert!(keys.is_null());
+            assert_eq!(crate::local::value_kernel_work_remaining(), Some(8));
+        });
+        // Existing unscoped and explicit byte-cap contracts stay independent.
+        assert!(
+            prepare_find_in_set_keys(Some(&vec![b','; 256]), NativeCollation::Binary, usize::MAX)
+                .is_ok()
+        );
+        assert!(
+            prepare_find_in_set_keys(Some(&vec![b','; 256]), NativeCollation::Binary, 1024)
+                .is_err()
+        );
     }
 
     #[test]
