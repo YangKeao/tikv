@@ -751,12 +751,17 @@ impl LocalProgram {
         selection: &[usize],
         services: &dyn LocalRuntimeServices,
     ) -> LocalResult<()> {
+        self.validate_binding_schema(services)?;
+        validate_selection(physical_rows, selection)
+    }
+
+    fn validate_binding_schema(&self, services: &dyn LocalRuntimeServices) -> LocalResult<()> {
         if services.binding_schema() != self.schema.as_slice() {
             return Err(LocalError::InvalidBatch(
                 "binding schema differs from compiled complete field types".into(),
             ));
         }
-        validate_selection(physical_rows, selection)
+        Ok(())
     }
 
     fn eval_bindings(
@@ -917,6 +922,22 @@ impl LocalBatchProgram {
         self.eval_batch_bindings(limits, ctx, physical_rows, selection, services)
     }
 
+    /// Evaluates one genuine row cursor without claiming a physical row
+    /// universe. The coordinate remains unchanged in every input/host request;
+    /// demanded cells are validated by their source. Schema, catalog, compiled
+    /// entry and resource checks use the same batch frame as bounded selection.
+    /// The sole selection occurrence is zero, even at usize::MAX.
+    pub fn eval_cursor_with_bindings(
+        &mut self,
+        limits: ExecutionLimits,
+        ctx: &mut EvalContext,
+        input_row: usize,
+        services: &mut dyn LocalRuntimeServices,
+    ) -> LocalResult<VectorValue> {
+        self.inner.validate_binding_schema(services)?;
+        self.eval_batch_after_preflight(limits, ctx, &[input_row], services)
+    }
+
     fn eval_batch_bindings(
         &mut self,
         limits: ExecutionLimits,
@@ -927,6 +948,16 @@ impl LocalBatchProgram {
     ) -> LocalResult<VectorValue> {
         self.inner
             .validate_bindings_preflight(physical_rows, selection, services)?;
+        self.eval_batch_after_preflight(limits, ctx, selection, services)
+    }
+
+    fn eval_batch_after_preflight(
+        &mut self,
+        limits: ExecutionLimits,
+        ctx: &mut EvalContext,
+        selection: &[usize],
+        services: &mut dyn LocalRuntimeServices,
+    ) -> LocalResult<VectorValue> {
         self.inner.check_entry(ProgramEntry::SqlBatch)?;
         if self.inner.expression.checked_result_flow().is_some() {
             return Err(LocalError::InvalidSpec(

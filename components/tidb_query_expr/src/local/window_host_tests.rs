@@ -2229,3 +2229,138 @@ fn window_scoped_row_requires_a_window_catalog_and_valid_complete_signature() {
         .is_err()
     );
 }
+
+#[test]
+fn genuine_cursor_preserves_max_coordinate_and_bounded_selection_contract() {
+    let mut service = Service::new();
+    let root = input(0);
+    let mut program = compile(&root, &service);
+    assert!(matches!(
+        program.eval_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            usize::MAX,
+            &[usize::MAX],
+            &mut service
+        ),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert!(service.events.is_empty());
+    for coordinate in [usize::MAX, 0, usize::MAX - 1, usize::MAX, 17] {
+        service.events.clear();
+        let result = program
+            .eval_cursor_with_bindings(
+                ExecutionLimits::default(),
+                &mut EvalContext::default(),
+                coordinate,
+                &mut service,
+            )
+            .unwrap();
+        assert_eq!(service.reads(), rows(0, &[coordinate]));
+        assert!(
+            matches!(result.get_scalar_ref(0),ScalarValueRef::Bytes(Some(value)) if value == format!("0/0:{coordinate}").as_bytes())
+        );
+        assert!(service.live.is_empty());
+    }
+    service.events.clear();
+    let field = service.schema.pop().unwrap();
+    assert!(matches!(
+        program.eval_cursor_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            usize::MAX,
+            &mut service
+        ),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert!(service.events.is_empty());
+    service.schema.push(field);
+    let tiny = ExecutionLimits {
+        max_retained_bytes: 0,
+        ..ExecutionLimits::default()
+    };
+    assert!(matches!(
+        program.eval_cursor_with_bindings(
+            tiny,
+            &mut EvalContext::default(),
+            usize::MAX,
+            &mut service
+        ),
+        Err(LocalError::ResourceLimit(_))
+    ));
+    assert!(service.events.is_empty());
+    program
+        .eval_cursor_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            usize::MAX,
+            &mut service,
+        )
+        .unwrap();
+}
+
+#[test]
+fn genuine_cursor_uses_existing_host_frame_catalog_and_owned_failure() {
+    let mut service = row_in_window_service();
+    let root = host(&service.catalog, 1, vec![input(0), input(1)]);
+    let mut program = compile(&root, &service);
+    let result = program
+        .eval_cursor_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            usize::MAX,
+            &mut service,
+        )
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(service.events.contains(&Event::RowStart(InputRow {
+        occurrence: 0,
+        input_row: usize::MAX
+    })));
+    assert_eq!(
+        service.reads(),
+        [rows(0, &[usize::MAX]), rows(1, &[usize::MAX])].concat()
+    );
+    assert!(service.live.is_empty());
+    service.events.clear();
+    service.read_failure = Some((1, 0));
+    let error = program
+        .eval_cursor_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            usize::MAX,
+            &mut service,
+        )
+        .unwrap_err();
+    let LocalError::Evaluation(error) = error else {
+        panic!("lost original evaluation error")
+    };
+    assert_eq!(
+        Some(error.0.as_ref() as *const _ as usize),
+        service.primary_error
+    );
+    assert!(service.live.is_empty());
+    service.read_failure = None;
+    service.events.clear();
+    program
+        .eval_cursor_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            0,
+            &mut service,
+        )
+        .unwrap();
+    assert!(service.live.is_empty());
+    service.events.clear();
+    service.catalog = Service::new().catalog;
+    assert!(matches!(
+        program.eval_cursor_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            usize::MAX,
+            &mut service
+        ),
+        Err(LocalError::HostContract(_))
+    ));
+    assert!(service.events.is_empty());
+}
