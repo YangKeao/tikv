@@ -3723,3 +3723,31 @@ value-work allowance before allocation or cache publication. Unscoped callers
 retain their original explicit encoded-byte cap. A resource error cancels the
 new initializer, keeps the prior context item and permits a fresh NULL build;
 it must never become an alternate expression execution route.
+
+### Genuine AST source contract
+
+`SqlBatchHostOperation::AstNative` is a separate, variadic Bytes-capability
+contract for genuine parsed-AST sources, including niladic leaves. It uses the
+same `LocalBatchProgram` and HostFrame demand/cancellation protocol as other
+native SQL sources. Bytes here denotes authenticated native-value transport;
+it does not declare a SQL string type for an AST or a named column. The factory
+checks every argument/result carrier and preserves the catalog's process-local
+identity. This tag does not authorize legacy row hosts or window dispatch.
+
+The frontend pins the real AST owner and lowers each demanded value child
+into that same SDK graph. Function names, interval units, sequence paths, cast
+selectors and genuine RAND occurrence addresses remain source metadata. Hosts
+receive only authenticated child values; they cannot recursively evaluate the
+AST, manufacture replacement scalar expressions, or route rejection into a
+second driver. Source policies preserve eager AST AND/OR, exhaustive IN, lazy
+control branches, and coercion before later-child demand. Whole-graph compile
+and retained-byte limits remain terminal. The frontend production AST entry and its borrowed prepared-owner API now target
+this graph. Every actual CHAR charset value is also a genuine literal producer
+with its original consumer policy; it is not appended as an untracked value.
+Source preflight separately counts metadata-only ROW/interval wrappers, sequence
+names, charset payloads and scalar-builder inputs before copies; no SQL lookup
+or value evaluator runs in this preflight. Demanded metadata builders recheck
+actual payloads against the current runtime allowance. Normal cancellation releases owned state;
+panics poison only the cache selected by the original preparation boundary.
+Caller integration and complete validation gates remain necessary: the tag
+alone does not certify an entire frontend migration or a new RPC capability.

@@ -113,6 +113,9 @@ pub enum SqlBatchHostOperation {
     CompressionNative(crate::NativeCompressionOperation),
     /// Eager original scalar value body over authenticated actual operands.
     EagerValuesNative,
+    /// Genuine AST nodes with staged native-value children in this batch frame.
+    /// Source-specific demand and metadata stay with the pinned AST provider.
+    AstNative,
     /// Actual UUID/shard/Vitess inputs with the original optional flag arity.
     MiscNative {
         operation: crate::NativeMiscOperation,
@@ -253,7 +256,7 @@ impl SqlBatchHostOperation {
             Self::VectorNative(op) => arity == op.arity(),
             Self::LikeNative { .. } => arity == 3,
             Self::CryptoNative(op) => arity == op.arity(),
-            Self::EagerValuesNative => true,
+            Self::EagerValuesNative | Self::AstNative => true,
             Self::EagerValuesWindowNative => arity >= 1,
             Self::GroupingNative | Self::ByteUnaryNative(_) | Self::CompressionNative(_) => {
                 arity == 1
@@ -334,6 +337,7 @@ impl SqlBatchHostOperation {
             | Self::GroupingNative
             | Self::CryptoNative(_)
             | Self::EagerValuesNative
+            | Self::AstNative
             | Self::EagerValuesWindowNative
             | Self::CompressionNative(_)
             | Self::ByteUnaryNative(_)
@@ -409,6 +413,7 @@ impl SqlBatchHostOperation {
             | Self::GroupingNative
             | Self::CryptoNative(_)
             | Self::EagerValuesNative
+            | Self::AstNative
             | Self::EagerValuesWindowNative
             | Self::CompressionNative(_)
             | Self::ByteUnaryNative(_)
@@ -1186,5 +1191,60 @@ mod integer_char_cast_tests {
             return_type: FieldTypeTp::VarString.into(),
         };
         assert!(HostCatalog::for_sql_batch(vec![(operation, wrong)]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ast_source_tests {
+    use tidb_query_datatype::FieldTypeTp;
+
+    use super::*;
+
+    #[test]
+    fn ast_catalog_preserves_native_carriers_and_real_catalog_identity() {
+        let bytes: FieldType = FieldTypeTp::Blob.into();
+        for arity in [0, 1, 2, 17] {
+            let signature = HostSignature {
+                arg_types: vec![bytes.clone(); arity].into_boxed_slice(),
+                return_type: bytes.clone(),
+            };
+            let catalog = HostCatalog::for_sql_batch(vec![(
+                SqlBatchHostOperation::AstNative,
+                signature.clone(),
+            )])
+            .unwrap();
+            let slot = catalog.slot(0).unwrap();
+            assert_eq!(
+                catalog.sql_batch_operation(slot).unwrap(),
+                SqlBatchHostOperation::AstNative
+            );
+            assert!(!SqlBatchHostOperation::AstNative.is_windowed());
+            assert!(
+                PreparedHostCall::prepare(&catalog, slot, &signature.arg_types, &bytes).is_ok()
+            );
+            let foreign =
+                HostCatalog::for_sql_batch(vec![(SqlBatchHostOperation::AstNative, signature)])
+                    .unwrap();
+            assert!(foreign.sql_batch_operation(slot).is_err());
+            assert!(
+                PreparedHostCall::prepare(&foreign, slot, &vec![bytes.clone(); arity], &bytes)
+                    .is_err()
+            );
+        }
+        for (args, output) in [
+            (vec![FieldTypeTp::LongLong.into()], bytes.clone()),
+            (vec![bytes], FieldTypeTp::LongLong.into()),
+        ] {
+            assert!(
+                HostCatalog::for_sql_batch(vec![(
+                    SqlBatchHostOperation::AstNative,
+                    HostSignature {
+                        arg_types: args.into_boxed_slice(),
+                        return_type: output
+                    }
+                )])
+                .is_err()
+            );
+        }
     }
 }
