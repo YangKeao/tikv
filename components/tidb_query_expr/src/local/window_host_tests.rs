@@ -2364,3 +2364,171 @@ fn genuine_cursor_uses_existing_host_frame_catalog_and_owned_failure() {
     ));
     assert!(service.events.is_empty());
 }
+
+#[test]
+fn genuine_coordinate_batch_keeps_duplicates_max_and_bounded_api_checks() {
+    let mut service = Service::new();
+    let root = input(0);
+    let mut program = compile(&root, &service);
+    let coordinates = [usize::MAX, 0, usize::MAX - 1, usize::MAX];
+    let output = program
+        .eval_coordinates_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            &coordinates,
+            &mut service,
+        )
+        .unwrap();
+    assert_eq!(service.reads(), rows(0, &coordinates));
+    for (occurrence, coordinate) in coordinates.into_iter().enumerate() {
+        assert!(
+            matches!(output.get_scalar_ref(occurrence), ScalarValueRef::Bytes(Some(value))
+            if value == format!("0/{occurrence}:{coordinate}").as_bytes())
+        );
+    }
+    assert!(service.live.is_empty());
+    service.events.clear();
+    assert!(matches!(
+        program.eval_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            usize::MAX,
+            &coordinates,
+            &mut service
+        ),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert!(service.events.is_empty());
+    let field = service.schema.pop().unwrap();
+    assert!(matches!(
+        program.eval_coordinates_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            &[],
+            &mut service
+        ),
+        Err(LocalError::InvalidBatch(_))
+    ));
+    assert!(service.events.is_empty());
+    service.schema.push(field);
+    for coordinates in [
+        vec![usize::MAX; crate::types::BATCH_MAX_SIZE + 1],
+        vec![usize::MAX],
+    ] {
+        let limits = if coordinates.len() == 1 {
+            ExecutionLimits {
+                max_retained_bytes: 0,
+                ..ExecutionLimits::default()
+            }
+        } else {
+            ExecutionLimits::default()
+        };
+        assert!(matches!(
+            program.eval_coordinates_with_bindings(
+                limits,
+                &mut EvalContext::default(),
+                &coordinates,
+                &mut service
+            ),
+            Err(LocalError::ResourceLimit(_))
+        ));
+        assert!(service.events.is_empty());
+    }
+    let result = program
+        .eval_coordinates_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            &[],
+            &mut service,
+        )
+        .unwrap();
+    assert_eq!(result.len(), 0);
+    assert!(service.events.is_empty());
+    program
+        .eval_coordinates_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            &[17, usize::MAX],
+            &mut service,
+        )
+        .unwrap();
+}
+
+#[test]
+fn genuine_coordinate_batch_uses_same_host_catalog_owned_failure_and_cleanup() {
+    let mut service = row_in_window_service();
+    let row = host(&service.catalog, 1, vec![input(0), input(1)]);
+    let mut row_program = compile(&row, &service);
+    let coordinates = [usize::MAX, 0, usize::MAX];
+    assert_eq!(row_program.max_batch_size(), 1);
+    assert!(matches!(
+        row_program.eval_coordinates_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            &coordinates,
+            &mut service
+        ),
+        Err(LocalError::ResourceLimit(_))
+    ));
+    assert!(service.events.is_empty());
+    let root = host(&service.catalog, 0, vec![row, input(1)]);
+    let mut program = compile(&root, &service);
+    assert!(program.requires_whole_selection());
+    let result = program
+        .eval_coordinates_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            &coordinates,
+            &mut service,
+        )
+        .unwrap();
+    assert_eq!(result.len(), 3);
+    for (occurrence, input_row) in coordinates.into_iter().enumerate() {
+        assert!(service.events.contains(&Event::RowStart(InputRow {
+            occurrence,
+            input_row
+        })));
+    }
+    assert!(service.live.is_empty());
+    service.events.clear();
+    service.read_failure = Some((1, 1));
+    let error = program
+        .eval_coordinates_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            &coordinates,
+            &mut service,
+        )
+        .unwrap_err();
+    let LocalError::Evaluation(error) = error else {
+        panic!("lost original owned failure")
+    };
+    assert_eq!(
+        Some(error.0.as_ref() as *const _ as usize),
+        service.primary_error
+    );
+    assert!(service.live.is_empty());
+    service.read_failure = None;
+    service.events.clear();
+    program
+        .eval_coordinates_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            &coordinates,
+            &mut service,
+        )
+        .unwrap();
+    assert!(service.live.is_empty());
+    service.events.clear();
+    service.catalog = Service::new().catalog;
+    assert!(matches!(
+        program.eval_coordinates_with_bindings(
+            ExecutionLimits::default(),
+            &mut EvalContext::default(),
+            &[],
+            &mut service
+        ),
+        Err(LocalError::HostContract(_))
+    ));
+    assert!(service.events.is_empty());
+}

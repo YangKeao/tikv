@@ -3751,3 +3751,27 @@ actual payloads against the current runtime allowance. Normal cancellation relea
 panics poison only the cache selected by the original preparation boundary.
 Caller integration and complete validation gates remain necessary: the tag
 alone does not certify an entire frontend migration or a new RPC capability.
+
+
+### Selected cursor coordinates and a public native batch caller
+
+`LocalBatchProgram::eval_coordinates_with_bindings` accepts actual selected
+coordinates without claiming a physical row universe. It checks the compiled
+schema and enters the same `eval_batch_after_preflight` implementation used by
+the bounded and singleton cursor APIs. Catalog, entry, occurrence-window,
+resource and host-frame rules remain unchanged. Repeated coordinates and
+`usize::MAX` are preserved; the source authenticates each occurrence and owns
+its original demand-time cell validation. This does not make an ordinary row
+host a whole-selection host or remove checks from `eval_with_bindings`.
+
+TiDB's actual `try_eval_batch` keeps its original native eligibility/type probe
+before its empty guard. Its eligible values now use a genuine borrowed source
+and this same SDK program. It supplies actual Chunk width, original declaration
+metadata and selected coordinates, rather than synthesizing a Projection Suite
+or SQL row schema. The private adapter charges selected/output storage before
+allocation, uses original complete operand phases, authenticates native output
+handles and publishes the returned Vec only after success. Native SQL errors
+retain their original causes; prepare/invoke failures do not select an old
+interpreter. The four recursive native batch bodies are test-only independent
+oracles. Native API entropy declines remain declines; positive scalar/AST
+entropy paths keep their separate genuine consumers.

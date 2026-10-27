@@ -938,6 +938,21 @@ impl LocalBatchProgram {
         self.eval_batch_after_preflight(limits, ctx, &[input_row], services)
     }
 
+    /// Evaluates genuine selected cursor coordinates without declaring a
+    /// physical row universe. Sources authenticate each occurrence and own
+    /// demanded cell validation; schema/catalog/budget checks and the complete
+    /// batch driver are identical to the bounded and singleton APIs.
+    pub fn eval_coordinates_with_bindings(
+        &mut self,
+        limits: ExecutionLimits,
+        ctx: &mut EvalContext,
+        coordinates: &[usize],
+        services: &mut dyn LocalRuntimeServices,
+    ) -> LocalResult<VectorValue> {
+        self.inner.validate_binding_schema(services)?;
+        self.eval_batch_after_preflight(limits, ctx, coordinates, services)
+    }
+
     fn eval_batch_bindings(
         &mut self,
         limits: ExecutionLimits,
