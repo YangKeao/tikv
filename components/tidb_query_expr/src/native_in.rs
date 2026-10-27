@@ -124,6 +124,163 @@ pub enum NativeInLegacyError<E> {
     Source(E),
     /// A logical allowance failed, independently of source SQL/error contents.
     ResourceLimit(&'static str),
+    /// A staged consumer resumed a closed or unstarted value owner.
+    InvalidResponse,
+}
+/// An actual source request or completed nullable membership value. This owns
+/// no expression, context, invocation or borrowed input representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeInLegacyValueStep {
+    Source { index: usize },
+    Ready(Option<bool>),
+}
+
+struct LegacyValuesState<T> {
+    count: usize,
+    next: usize,
+    base: Option<T>,
+    saw_null: bool,
+    started: bool,
+    live: bool,
+}
+impl<T> LegacyValuesState<T> {
+    fn new(count: usize) -> Self {
+        Self {
+            count,
+            next: 0,
+            base: None,
+            saw_null: false,
+            started: false,
+            live: true,
+        }
+    }
+    fn begin<E>(&mut self) -> std::result::Result<NativeInLegacyValueStep, NativeInLegacyError<E>> {
+        if self.started || !self.live {
+            self.live = false;
+            return Err(NativeInLegacyError::InvalidResponse);
+        }
+        self.started = true;
+        Ok(NativeInLegacyValueStep::Source { index: 0 })
+    }
+    fn resume<E>(
+        &mut self,
+        value: Option<T>,
+        mut inspect: impl FnMut(
+            Option<&T>,
+            Option<&T>,
+        ) -> std::result::Result<(), NativeInLegacyError<E>>,
+        mut equal: impl FnMut(&T, &T) -> std::result::Result<bool, NativeInLegacyError<E>>,
+    ) -> std::result::Result<NativeInLegacyValueStep, NativeInLegacyError<E>> {
+        if !self.started || !self.live {
+            self.live = false;
+            return Err(NativeInLegacyError::InvalidResponse);
+        }
+        // Failed or unwound advancement stays closed; only a new source
+        // request publishes a live continuation again.
+        self.live = false;
+        if self.next == 0 {
+            inspect(None, value.as_ref())?;
+            self.saw_null = value.is_none();
+            self.base = value;
+        } else {
+            inspect(self.base.as_ref(), value.as_ref())?;
+            match (self.base.as_ref(), value.as_ref()) {
+                (Some(left), Some(right)) if equal(left, right)? => {
+                    return Ok(NativeInLegacyValueStep::Ready(Some(true)));
+                }
+                (Some(_), Some(_)) => {}
+                _ => self.saw_null = true,
+            }
+        }
+        self.next = self
+            .next
+            .checked_add(1)
+            .ok_or(NativeInLegacyError::InvalidResponse)?;
+        if self.next >= self.count {
+            Ok(NativeInLegacyValueStep::Ready(legacy_no_match(
+                self.saw_null,
+            )))
+        } else {
+            self.live = true;
+            Ok(NativeInLegacyValueStep::Source { index: self.next })
+        }
+    }
+}
+
+/// Full-i128 legacy IN continuation over actual typed source results.
+pub struct NativeInLegacyIntValues {
+    state: LegacyValuesState<i128>,
+}
+impl NativeInLegacyIntValues {
+    pub fn new(count: usize) -> Self {
+        Self {
+            state: LegacyValuesState::new(count),
+        }
+    }
+    pub fn begin(
+        &mut self,
+    ) -> std::result::Result<NativeInLegacyValueStep, NativeInLegacyError<std::convert::Infallible>>
+    {
+        self.state.begin()
+    }
+    pub fn resume_source(
+        &mut self,
+        value: Option<i128>,
+    ) -> std::result::Result<NativeInLegacyValueStep, NativeInLegacyError<std::convert::Infallible>>
+    {
+        self.state.resume(
+            value,
+            |_, _| Ok(()),
+            |left, right| Ok(legacy_int_equal(*left, *right)),
+        )
+    }
+}
+
+/// Owned original byte vectors with the same finite retained/comparison policy
+/// as the synchronous source entry. Collation resolves after a real pair only.
+pub struct NativeInLegacyBytesValues {
+    state: LegacyValuesState<Vec<u8>>,
+    maximum: usize,
+}
+impl NativeInLegacyBytesValues {
+    pub fn new(
+        count: usize,
+        maximum: usize,
+    ) -> std::result::Result<Self, NativeInLegacyError<std::convert::Infallible>> {
+        finite_legacy_byte_allowance(maximum)?;
+        Ok(Self {
+            state: LegacyValuesState::new(count),
+            maximum,
+        })
+    }
+    pub fn begin(
+        &mut self,
+    ) -> std::result::Result<NativeInLegacyValueStep, NativeInLegacyError<std::convert::Infallible>>
+    {
+        self.state.begin()
+    }
+    pub fn retained_bytes(&self) -> usize {
+        self.state.base.as_ref().map_or(0, Vec::capacity)
+    }
+    pub fn resume_source(
+        &mut self,
+        value: Option<Vec<u8>>,
+        mut resolve: impl FnMut() -> NativeCollation,
+    ) -> std::result::Result<NativeInLegacyValueStep, NativeInLegacyError<std::convert::Infallible>>
+    {
+        let maximum = self.maximum;
+        self.state.resume(
+            value,
+            |left, right| {
+                legacy_bytes_allowance(
+                    left.map_or(0, Vec::capacity)
+                        .checked_add(right.map_or(0, Vec::capacity)),
+                    maximum,
+                )
+            },
+            |left, right| legacy_checked_bytes_equal(left, right, maximum, &mut resolve),
+        )
+    }
 }
 fn legacy_no_match(saw_null: bool) -> Option<bool> {
     if saw_null { None } else { Some(false) }
@@ -145,19 +302,18 @@ fn legacy_values<T, E>(
 ) -> std::result::Result<Option<bool>, NativeInLegacyError<E>> {
     // This is an actual source-channel read, even when no child exists. The
     // caller supplies its original missing-child NULL, not a fabricated base.
-    let base = read(0).map_err(NativeInLegacyError::Source)?;
-    inspect(None, base.as_ref())?;
-    let mut saw_null = base.is_none();
-    for index in 1..count {
-        let candidate = read(index).map_err(NativeInLegacyError::Source)?;
-        inspect(base.as_ref(), candidate.as_ref())?;
-        match (base.as_ref(), candidate.as_ref()) {
-            (Some(left), Some(right)) if equal(left, right)? => return Ok(Some(true)),
-            (Some(_), Some(_)) => {}
-            _ => saw_null = true,
-        }
+    let mut state = LegacyValuesState::new(count);
+    let mut step = state.begin()?;
+    loop {
+        step = match step {
+            NativeInLegacyValueStep::Source { index } => state.resume(
+                read(index).map_err(NativeInLegacyError::Source)?,
+                &mut inspect,
+                &mut equal,
+            )?,
+            NativeInLegacyValueStep::Ready(value) => return Ok(value),
+        };
     }
-    Ok(legacy_no_match(saw_null))
 }
 /// Legacy integer membership over actual native integer channels. Neither an
 /// i64 surrogate nor a value frame is introduced. NULL base still demands the
@@ -185,6 +341,41 @@ fn legacy_bytes_allowance<E>(
         )),
     }
 }
+fn finite_legacy_byte_allowance<E>(
+    maximum: usize,
+) -> std::result::Result<(), NativeInLegacyError<E>> {
+    if maximum == usize::MAX {
+        Err(NativeInLegacyError::ResourceLimit(
+            "legacy IN requires a finite byte allowance",
+        ))
+    } else {
+        Ok(())
+    }
+}
+fn legacy_checked_bytes_equal<E>(
+    left: &Vec<u8>,
+    right: &Vec<u8>,
+    maximum: usize,
+    resolve: &mut impl FnMut() -> NativeCollation,
+) -> std::result::Result<bool, NativeInLegacyError<E>> {
+    let collation = resolve();
+    if matches!(
+        collation,
+        NativeCollation::GbkBin | NativeCollation::Gb18030Bin
+    ) {
+        let work = left
+            .len()
+            .checked_add(right.len())
+            .and_then(|n| n.checked_mul(16))
+            .and_then(|n| n.checked_add(128));
+        let total = left
+            .capacity()
+            .checked_add(right.capacity())
+            .and_then(|n| n.checked_add(work?));
+        legacy_bytes_allowance(total, maximum)?;
+    }
+    Ok(legacy_bytes_equal(left, right, collation))
+}
 /// Legacy byte membership owns the actual returned byte vectors, not encoded
 /// copies. Resolve the effective collator only after both real operands are
 /// present, after the candidate callback. A resolver supplies policy, never a
@@ -201,11 +392,7 @@ pub fn native_in_legacy_bytes_values<E>(
     read: impl FnMut(usize) -> std::result::Result<Option<Vec<u8>>, E>,
     mut resolve: impl FnMut() -> NativeCollation,
 ) -> std::result::Result<Option<bool>, NativeInLegacyError<E>> {
-    if maximum == usize::MAX {
-        return Err(NativeInLegacyError::ResourceLimit(
-            "legacy IN requires a finite byte allowance",
-        ));
-    }
+    finite_legacy_byte_allowance(maximum)?;
     legacy_values(
         count,
         read,
@@ -216,28 +403,7 @@ pub fn native_in_legacy_bytes_values<E>(
                 maximum,
             )
         },
-        |left, right| {
-            let collation = resolve();
-            // Native GB binary comparison creates encoded vectors; its CI
-            // counterpart and the other native comparators scan borrowed data.
-            // Include conservative capacity growth and short-lived GB groups.
-            if matches!(
-                collation,
-                NativeCollation::GbkBin | NativeCollation::Gb18030Bin
-            ) {
-                let work = left
-                    .len()
-                    .checked_add(right.len())
-                    .and_then(|bytes| bytes.checked_mul(16))
-                    .and_then(|bytes| bytes.checked_add(128));
-                let total = left
-                    .capacity()
-                    .checked_add(right.capacity())
-                    .and_then(|bytes| bytes.checked_add(work?));
-                legacy_bytes_allowance(total, maximum)?;
-            }
-            Ok(legacy_bytes_equal(left, right, collation))
-        },
+        |left, right| legacy_checked_bytes_equal(left, right, maximum, &mut resolve),
     )
 }
 
@@ -663,6 +829,73 @@ fn in_legacy_step_native(raw: Option<BytesRef>, value: Option<BytesRef>) -> Resu
 mod tests {
     use super::*;
     use crate::encode_native_identity;
+    #[test]
+    fn owned_legacy_in_continuations_keep_full_width_null_demand_and_closed_failures() {
+        use NativeInLegacyValueStep as S;
+        let mut empty = NativeInLegacyIntValues::new(0);
+        assert_eq!(empty.begin().unwrap(), S::Source { index: 0 });
+        assert_eq!(empty.resume_source(None).unwrap(), S::Ready(None));
+        assert!(matches!(
+            empty.resume_source(Some(1)),
+            Err(NativeInLegacyError::InvalidResponse)
+        ));
+        let mut wide = NativeInLegacyIntValues::new(4);
+        assert_eq!(wide.begin().unwrap(), S::Source { index: 0 });
+        assert_eq!(
+            wide.resume_source(Some(i128::MIN)).unwrap(),
+            S::Source { index: 1 }
+        );
+        assert_eq!(
+            wide.resume_source(Some(i128::MAX)).unwrap(),
+            S::Source { index: 2 }
+        );
+        assert_eq!(
+            wide.resume_source(Some(i128::MIN)).unwrap(),
+            S::Ready(Some(true))
+        );
+        assert!(matches!(
+            wide.begin(),
+            Err(NativeInLegacyError::InvalidResponse)
+        ));
+        let mut bytes = NativeInLegacyBytesValues::new(3, 4096).unwrap();
+        assert_eq!(bytes.begin().unwrap(), S::Source { index: 0 });
+        assert_eq!(
+            bytes
+                .resume_source(None, || panic!("NULL base resolves no collator"))
+                .unwrap(),
+            S::Source { index: 1 }
+        );
+        assert_eq!(
+            bytes
+                .resume_source(Some(b"a".to_vec()), || panic!(
+                    "NULL pair resolves no collator"
+                ))
+                .unwrap(),
+            S::Source { index: 2 }
+        );
+        assert_eq!(
+            bytes
+                .resume_source(None, || panic!("NULL pair resolves no collator"))
+                .unwrap(),
+            S::Ready(None)
+        );
+        assert!(matches!(
+            NativeInLegacyBytesValues::new(0, usize::MAX),
+            Err(NativeInLegacyError::ResourceLimit(_))
+        ));
+        let mut denied = NativeInLegacyBytesValues::new(2, 8).unwrap();
+        denied.begin().unwrap();
+        assert!(matches!(
+            denied.resume_source(Some(Vec::with_capacity(32)), || panic!(
+                "allowance precedes collator"
+            )),
+            Err(NativeInLegacyError::ResourceLimit(_))
+        ));
+        assert!(matches!(
+            denied.resume_source(None, || NativeCollation::Binary),
+            Err(NativeInLegacyError::InvalidResponse)
+        ));
+    }
     #[test]
     fn typed_and_legacy_membership_keep_raw_domains_null_demand_and_late_collator() {
         let frame = |value| encode_native_identity(value).unwrap();

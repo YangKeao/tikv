@@ -317,7 +317,8 @@ pub use native_if_null::{
 
 mod native_in;
 pub use native_in::{
-    NativeInLegacyError, NativeInRequest, NativeInResult, NativeInTypedArityError,
+    NativeInLegacyBytesValues, NativeInLegacyError, NativeInLegacyIntValues,
+    NativeInLegacyValueStep, NativeInRequest, NativeInResult, NativeInTypedArityError,
     NativeInTypedDomain, NativeInTypedValue, decode_native_in_result,
     encode_native_in_legacy_int_head, encode_native_in_legacy_string_head,
     encode_native_in_typed_values, in_legacy_int_head_native_args_valid,
