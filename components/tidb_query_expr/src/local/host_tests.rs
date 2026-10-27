@@ -1280,3 +1280,6 @@ fn deep_host_relays_use_heap_frames_and_release_all_tasks() {
         .join()
         .unwrap();
 }
+
+#[path = "host_result_tests.rs"]
+mod result_tests;

@@ -202,10 +202,10 @@ pub use self::{
         compile_local, compile_local_profiled, compile_local_with_hosts,
     },
     host::{
-        ArgMode, HostArgReply, HostArgRequest, HostCatalog, HostCatalogKey, HostInvocation,
-        HostSignature, HostSlot, HostStart, HostStep, HostTaskId, HostWindowArgReply,
-        HostWindowInvocation, LocalHostServices, PreparedHostCall, SqlBatchHostOperation,
-        SqlTemporalOutput,
+        ArgMode, HostArgFailure, HostArgReply, HostArgRequest, HostCatalog, HostCatalogKey,
+        HostInvocation, HostSignature, HostSlot, HostStart, HostStep, HostTaskId,
+        HostWindowArgReply, HostWindowInvocation, LocalHostServices, PreparedHostCall,
+        SqlBatchHostOperation, SqlTemporalOutput,
     },
     lineage::{
         ControlLineageFacts, ControlProducerFact, ControlProducerRole, LineageCarrier,

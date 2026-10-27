@@ -2532,3 +2532,30 @@ fn genuine_coordinate_batch_uses_same_host_catalog_owned_failure_and_cleanup() {
     ));
     assert!(service.events.is_empty());
 }
+
+#[test]
+fn host_result_window_request_refuses_before_any_child() {
+    for selection in [vec![0], vec![2, 0, 2]] {
+        let mut service = Service::new();
+        service.requests = vec![request(0, ArgMode::FreshResult)];
+        let root = host(&service.catalog, 0, vec![input(0), input(1)]);
+        let mut program = compile(&root, &service);
+        let (result, _) = evaluate(
+            &mut program,
+            &mut service,
+            &selection,
+            ExecutionLimits::default(),
+        );
+        assert!(matches!(result, Err(LocalError::HostContract(_))));
+        assert!(service.reads().is_empty());
+        assert!(service.live.is_empty());
+        assert_eq!(
+            service
+                .events
+                .iter()
+                .filter(|event| matches!(event, Event::Cancel(_)))
+                .count(),
+            1
+        );
+    }
+}

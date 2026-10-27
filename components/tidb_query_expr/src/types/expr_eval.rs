@@ -19,9 +19,9 @@ use super::{
 use crate::{
     impl_op::LogicalAccumulator,
     local::{
-        ArgMode, CheckedResultFlow, EvaluatedArgsRole, EvaluatedBytesOp, HostArgReply,
-        HostArgRequest, HostCatalogKey, HostInvocation, HostStart, HostStep, HostTaskId,
-        HostWindowArgReply, HostWindowInvocation, InputRow, LineageCarrier, LocalError,
+        ArgMode, CheckedResultFlow, EvaluatedArgsRole, EvaluatedBytesOp, HostArgFailure,
+        HostArgReply, HostArgRequest, HostCatalogKey, HostInvocation, HostStart, HostStep,
+        HostTaskId, HostWindowArgReply, HostWindowInvocation, InputRow, LineageCarrier, LocalError,
         LocalHostServices, LocalResult, LocalRuntimeServices, OrdinaryProfile, PreparedHostCall,
         PreparedOrdinaryCall, ResultMetaId,
         runtime::{
@@ -2853,10 +2853,18 @@ impl<'a> ControlFrame<'a> {
 
 /// Owns the only mutable input/service seam for one occurrence. The host view
 /// is reborrowed for one callback, never across evaluation of an argument.
+struct ResultDemand {
+    task: HostTaskId,
+    index: usize,
+    checkpoint: usize,
+    failure: Option<HostArgFailure>,
+}
+
 struct TaskGuard<'input, 'data, 'services> {
     input: &'input mut EvalInput<'data, 'services>,
     catalog: Option<HostCatalogKey>,
     live: Vec<HostTaskId>,
+    results: Vec<ResultDemand>,
 }
 
 impl TaskGuard<'_, '_, '_> {
@@ -2866,6 +2874,81 @@ impl TaskGuard<'_, '_, '_> {
             .saturating_mul(std::mem::size_of::<HostTaskId>())
             // check_input rejects overflow before any frame or kernel runs.
             .saturating_add((&*self.input).retained_input_bytes().unwrap_or(usize::MAX))
+            .saturating_add(self.result_storage())
+    }
+
+    fn result_storage(&self) -> usize {
+        self.results.iter().fold(
+            self.results
+                .capacity()
+                .saturating_mul(std::mem::size_of::<ResultDemand>()),
+            |bytes, result| {
+                bytes.saturating_add(
+                    result
+                        .failure
+                        .as_ref()
+                        .map_or(0, HostArgFailure::retained_bytes),
+                )
+            },
+        )
+    }
+    fn await_result(
+        &mut self,
+        task: HostTaskId,
+        index: usize,
+        budget: &EvalBudget,
+        retained: &mut usize,
+    ) -> LocalResult<()> {
+        if self.results.iter().any(|result| result.task == task) {
+            return Err(LocalError::HostContract(
+                "host already owns a Result request".into(),
+            ));
+        }
+        let old = self.result_storage();
+        let target = self
+            .results
+            .capacity()
+            .max(self.results.len().saturating_add(1));
+        let extra = target
+            .saturating_sub(self.results.capacity())
+            .saturating_mul(std::mem::size_of::<ResultDemand>());
+        budget.storage(retained.saturating_add(extra))?;
+        reserve(&mut self.results, 1)?;
+        *retained = retained.saturating_add(self.result_storage().saturating_sub(old));
+        budget.storage(*retained)?;
+        self.results.push(ResultDemand {
+            task,
+            index,
+            checkpoint: self.live.len(),
+            failure: None,
+        });
+        Ok(())
+    }
+    fn result_checkpoint(&self, task: HostTaskId, index: usize) -> Option<usize> {
+        self.results
+            .iter()
+            .find(|result| result.task == task && result.index == index && result.failure.is_none())
+            .map(|result| result.checkpoint)
+    }
+    fn clear_result(&mut self, task: HostTaskId) {
+        if let Some(index) = self.results.iter().position(|result| result.task == task) {
+            self.results.remove(index);
+        }
+    }
+    fn take_result_failure(&mut self, task: HostTaskId) -> Option<HostArgFailure> {
+        let index = self
+            .results
+            .iter()
+            .position(|result| result.task == task && result.failure.is_some())?;
+        self.results.remove(index).failure
+    }
+    fn fail_result(&mut self, task: HostTaskId, index: usize, error: LocalError) {
+        let result = self
+            .results
+            .iter_mut()
+            .find(|result| result.task == task && result.index == index && result.failure.is_none())
+            .expect("driver owns pending Result request");
+        result.failure = Some(HostArgFailure::new(index, error));
     }
 
     fn host(&mut self) -> LocalResult<&mut dyn LocalHostServices> {
@@ -2901,14 +2984,22 @@ impl TaskGuard<'_, '_, '_> {
         // A start may yield Pending. Reserve its potential task/ledger slot
         // before the callback, even if it will actually return immediate Ready.
         budget.task_count(self.live.len().saturating_add(1))?;
-        let old = self.storage();
+        let old = self
+            .live
+            .capacity()
+            .saturating_mul(std::mem::size_of::<HostTaskId>());
         let target = self.live.capacity().max(self.live.len().saturating_add(1));
         let additional = target
             .saturating_mul(std::mem::size_of::<HostTaskId>())
             .saturating_sub(old);
         budget.storage(retained.saturating_add(additional))?;
         reserve(&mut self.live, 1)?;
-        *retained = retained.saturating_add(self.storage().saturating_sub(old));
+        *retained = retained.saturating_add(
+            self.live
+                .capacity()
+                .saturating_mul(std::mem::size_of::<HostTaskId>())
+                .saturating_sub(old),
+        );
         budget.storage(*retained)
     }
 
@@ -2926,6 +3017,47 @@ impl TaskGuard<'_, '_, '_> {
         task.validate_generation()
     }
 
+    // A Result request owns the tasks above its live ancestor checkpoint.
+    // Cleanup remains diagnostic-free and never substitutes a changed provider.
+    fn cancel_descendants(&mut self, checkpoint: usize) -> bool {
+        if checkpoint > self.live.len() {
+            return false;
+        }
+        let expected = self.catalog;
+        let provider = match self.input {
+            EvalInput::Bindings(services) => services.host_services(),
+            EvalInput::Decoded(_) | EvalInput::ReadyBytes { .. } | EvalInput::ReadyArgs { .. } => {
+                None
+            }
+        };
+        if !matches!((expected, provider), (Some(key),Some(provider)) if provider.catalog_key()==&key)
+        {
+            return false;
+        }
+        let mut reachable = true;
+        while self.live.len() > checkpoint {
+            let task = self.live.pop().unwrap();
+            let provider = match self.input {
+                EvalInput::Bindings(services) => services.host_services(),
+                EvalInput::Decoded(_)
+                | EvalInput::ReadyBytes { .. }
+                | EvalInput::ReadyArgs { .. } => None,
+            };
+            if let (Some(expected), Some(provider)) = (expected, provider) {
+                if provider.catalog_key() == &expected {
+                    provider.cancel(&task);
+                } else {
+                    reachable = false;
+                }
+            } else {
+                reachable = false;
+            }
+        }
+        self.results
+            .retain(|result| self.live.contains(&result.task));
+        reachable
+    }
+
     fn complete(&mut self, task: HostTaskId) -> LocalResult<()> {
         let index = self
             .live
@@ -2933,6 +3065,7 @@ impl TaskGuard<'_, '_, '_> {
             .rposition(|known| *known == task)
             .ok_or_else(|| LocalError::HostContract("host task is not live".into()))?;
         self.live.remove(index);
+        self.clear_result(task);
         Ok(())
     }
 }
@@ -3215,6 +3348,13 @@ impl<'a> HostFrame<'a> {
         }
     }
     fn request(&mut self, request: HostArgRequest) -> LocalResult<()> {
+        if request.mode == ArgMode::FreshResult
+            && (self.prepared.is_windowed() || self.rows.len() != 1)
+        {
+            return Err(LocalError::HostContract(
+                "Result demand requires a row host".into(),
+            ));
+        }
         self.scoped = None;
         if request.index >= self.args.len() {
             return Err(LocalError::HostContract(
@@ -3947,6 +4087,7 @@ fn eval_frames<'a, 'data: 'a>(
         input,
         catalog: host_catalog,
         live: Vec::new(),
+        results: Vec::new(),
     };
     let mut frames = Vec::new();
     push_frame(&mut frames, first, budget, tasks.storage())?;
@@ -3965,479 +4106,535 @@ fn eval_frames<'a, 'data: 'a>(
         } else {
             0
         };
-        match frames.pop().unwrap() {
-            EvalFrame::Program(mut frame) => {
-                frame.check_execution(execution, schema)?;
-                if execution.is_batch() && frame.rows.len() > 1 {
-                    let scoped = match frame.nodes {
-                        [RpnExpressionNode::HostCall { prepared, .. }]
-                            if !prepared.is_windowed() =>
-                        {
-                            Some((prepared.return_type(), false))
-                        }
-                        [RpnExpressionNode::ShortCircuitFnCall { field_type, .. }]
-                            if matches!(execution, EvalExecution::SqlWindowBatch) =>
-                        {
-                            Some((field_type, true))
-                        }
-                        _ => None,
-                    };
-                    if let Some((field_type, typed_control)) = scoped {
-                        let count = frame.rows.len();
-                        budget.charge()?;
-                        budget.storage(retained.saturating_add(
-                            count.saturating_mul(std::mem::size_of::<VectorValue>()),
-                        ))?;
-                        let mut values = Vec::new();
-                        reserve(&mut values, count)?;
-                        let scope = RowHostScope {
-                            nodes: frame.nodes,
-                            rows: frame.rows,
-                            field_type,
-                            values,
-                            values_bytes: 0,
-                            typed_control,
+        let step_result: LocalResult<()> = (|| {
+            match frames.pop().unwrap() {
+                EvalFrame::Program(mut frame) => {
+                    frame.check_execution(execution, schema)?;
+                    if execution.is_batch() && frame.rows.len() > 1 {
+                        let scoped = match frame.nodes {
+                            [RpnExpressionNode::HostCall { prepared, .. }]
+                                if !prepared.is_windowed() =>
+                            {
+                                Some((prepared.return_type(), false))
+                            }
+                            [RpnExpressionNode::ShortCircuitFnCall { field_type, .. }]
+                                if matches!(execution, EvalExecution::SqlWindowBatch) =>
+                            {
+                                Some((field_type, true))
+                            }
+                            _ => None,
                         };
-                        push_frame(
-                            &mut frames,
-                            EvalFrame::RowHostScope(scope),
-                            budget,
-                            tasks.storage(),
-                        )?;
-                        continue;
-                    }
-                }
-                if let Some(value) = returned.take() {
-                    let needed = frame.stack.len().saturating_add(1);
-                    reserve_stack(&mut frame, needed, &mut retained, budget)?;
-                    if let Some(flow) = frame.flow {
-                        let id = value.meta.ok_or_else(|| {
-                            LocalError::InvalidSpec(
-                                "annotated program received no result ID".into(),
-                            )
-                        })?;
-                        if id.unit() != flow.own_id().unit() {
-                            return Err(LocalError::InvalidSpec(
-                                "result ID namespace changed across a program boundary".into(),
-                            ));
+                        if let Some((field_type, typed_control)) = scoped {
+                            let count = frame.rows.len();
+                            budget.charge()?;
+                            budget.storage(retained.saturating_add(
+                                count.saturating_mul(std::mem::size_of::<VectorValue>()),
+                            ))?;
+                            let mut values = Vec::new();
+                            reserve(&mut values, count)?;
+                            let scope = RowHostScope {
+                                nodes: frame.nodes,
+                                rows: frame.rows,
+                                field_type,
+                                values,
+                                values_bytes: 0,
+                                typed_control,
+                            };
+                            push_frame(
+                                &mut frames,
+                                EvalFrame::RowHostScope(scope),
+                                budget,
+                                tasks.storage(),
+                            )?;
+                            return Ok(());
                         }
-                        frame.result_meta = Some(id);
-                        frame.stack.push(value.node);
-                    } else {
-                        frame.stack.push(value.into_unannotated()?);
                     }
-                }
-                if frame.pc == frame.nodes.len() {
-                    assert_eq!(frame.stack.len(), 1);
-                    returned = Some(FrameResult {
-                        node: frame.stack.pop().unwrap(),
-                        meta: frame.result_meta,
-                    });
-                    continue;
-                }
-                let node = &frame.nodes[frame.pc];
-                frame.pc += 1;
-                budget.charge()?;
-                if let RpnExpressionNode::ShortCircuitFnCall {
-                    func_meta,
-                    args,
-                    field_type,
-                } = node
-                {
-                    let mut control = ControlFrame::new(
-                        func_meta.kind,
+                    if let Some(value) = returned.take() {
+                        let needed = frame.stack.len().saturating_add(1);
+                        reserve_stack(&mut frame, needed, &mut retained, budget)?;
+                        if let Some(flow) = frame.flow {
+                            let id = value.meta.ok_or_else(|| {
+                                LocalError::InvalidSpec(
+                                    "annotated program received no result ID".into(),
+                                )
+                            })?;
+                            if id.unit() != flow.own_id().unit() {
+                                return Err(LocalError::InvalidSpec(
+                                    "result ID namespace changed across a program boundary".into(),
+                                ));
+                            }
+                            frame.result_meta = Some(id);
+                            frame.stack.push(value.node);
+                        } else {
+                            frame.stack.push(value.into_unannotated()?);
+                        }
+                    }
+                    if frame.pc == frame.nodes.len() {
+                        assert_eq!(frame.stack.len(), 1);
+                        returned = Some(FrameResult {
+                            node: frame.stack.pop().unwrap(),
+                            meta: frame.result_meta,
+                        });
+                        return Ok(());
+                    }
+                    let node = &frame.nodes[frame.pc];
+                    frame.pc += 1;
+                    budget.charge()?;
+                    if let RpnExpressionNode::ShortCircuitFnCall {
+                        func_meta,
                         args,
                         field_type,
-                        frame.rows.clone(),
-                        frame.flow,
-                    )?;
-                    control.batch_selection = execution.is_batch();
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Program(frame),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Control(control),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                } else if let RpnExpressionNode::HostCall { prepared, args } = node {
-                    if tasks.catalog != Some(*prepared.catalog_key()) {
-                        return Err(LocalError::HostContract(
-                            "host node differs from invocation catalog".into(),
-                        ));
-                    }
-                    budget.storage(
-                        retained
-                            .saturating_add(HostFrame::initial_storage(args.len(), &frame.rows)),
-                    )?;
-                    let host = HostFrame::new(prepared, args, frame.rows.clone(), execution)?;
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Program(frame),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                    push_frame(&mut frames, EvalFrame::Host(host), budget, tasks.storage())?;
-                } else if let RpnExpressionNode::OrdinaryFnCall { prepared, args } = node {
-                    budget.storage(
-                        retained.saturating_add(OrdinaryFrame::initial_storage(&frame.rows)),
-                    )?;
-                    let ordinary =
-                        OrdinaryFrame::new(prepared, args, frame.rows.clone(), execution)?;
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Program(frame),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Ordinary(ordinary),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                } else {
-                    let leaf = frame.nodes.len() == 1;
-                    if !leaf {
-                        let used = match node {
-                            RpnExpressionNode::FnCall { args_len, .. } => *args_len,
-                            _ => 0,
-                        };
-                        let needed = frame.stack.len().saturating_sub(used).saturating_add(1);
-                        reserve_stack(&mut frame, needed, &mut retained, budget)?;
-                    }
-                    // Charge space for the result while all argument values are
-                    // still live, before invoking a kernel or input service.
-                    budget.storage(
-                        retained.saturating_add(frame.result_precharge(node, execution, schema)),
-                    )?;
-                    let (used, value) = RpnExpression::eval_one_node(
-                        ctx,
-                        schema,
-                        tasks.input,
-                        &frame.rows,
-                        occurrence,
-                        budget,
-                        node,
-                        &frame.stack,
-                        frame.flow,
-                        execution,
-                        retained,
-                    )?;
-                    budget.storage(retained.saturating_add(node_storage(&value, budget.mode())))?;
-                    if leaf {
-                        returned = Some(frame.leaf_result(value)?);
-                    } else {
-                        frame.stack.truncate(frame.stack.len() - used);
-                        frame.stack.push(value);
+                    } = node
+                    {
+                        let mut control = ControlFrame::new(
+                            func_meta.kind,
+                            args,
+                            field_type,
+                            frame.rows.clone(),
+                            frame.flow,
+                        )?;
+                        control.batch_selection = execution.is_batch();
                         push_frame(
                             &mut frames,
                             EvalFrame::Program(frame),
                             budget,
                             tasks.storage(),
                         )?;
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::Control(control),
+                            budget,
+                            tasks.storage(),
+                        )?;
+                    } else if let RpnExpressionNode::HostCall { prepared, args } = node {
+                        if tasks.catalog != Some(*prepared.catalog_key()) {
+                            return Err(LocalError::HostContract(
+                                "host node differs from invocation catalog".into(),
+                            ));
+                        }
+                        budget.storage(
+                            retained.saturating_add(HostFrame::initial_storage(
+                                args.len(),
+                                &frame.rows,
+                            )),
+                        )?;
+                        let host = HostFrame::new(prepared, args, frame.rows.clone(), execution)?;
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::Program(frame),
+                            budget,
+                            tasks.storage(),
+                        )?;
+                        push_frame(&mut frames, EvalFrame::Host(host), budget, tasks.storage())?;
+                    } else if let RpnExpressionNode::OrdinaryFnCall { prepared, args } = node {
+                        budget.storage(
+                            retained.saturating_add(OrdinaryFrame::initial_storage(&frame.rows)),
+                        )?;
+                        let ordinary =
+                            OrdinaryFrame::new(prepared, args, frame.rows.clone(), execution)?;
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::Program(frame),
+                            budget,
+                            tasks.storage(),
+                        )?;
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::Ordinary(ordinary),
+                            budget,
+                            tasks.storage(),
+                        )?;
+                    } else {
+                        let leaf = frame.nodes.len() == 1;
+                        if !leaf {
+                            let used = match node {
+                                RpnExpressionNode::FnCall { args_len, .. } => *args_len,
+                                _ => 0,
+                            };
+                            let needed = frame.stack.len().saturating_sub(used).saturating_add(1);
+                            reserve_stack(&mut frame, needed, &mut retained, budget)?;
+                        }
+                        // Charge space for the result while all argument values are
+                        // still live, before invoking a kernel or input service.
+                        budget.storage(
+                            retained
+                                .saturating_add(frame.result_precharge(node, execution, schema)),
+                        )?;
+                        let (used, value) = RpnExpression::eval_one_node(
+                            ctx,
+                            schema,
+                            tasks.input,
+                            &frame.rows,
+                            occurrence,
+                            budget,
+                            node,
+                            &frame.stack,
+                            frame.flow,
+                            execution,
+                            retained,
+                        )?;
+                        budget.storage(
+                            retained.saturating_add(node_storage(&value, budget.mode())),
+                        )?;
+                        if leaf {
+                            returned = Some(frame.leaf_result(value)?);
+                        } else {
+                            frame.stack.truncate(frame.stack.len() - used);
+                            frame.stack.push(value);
+                            push_frame(
+                                &mut frames,
+                                EvalFrame::Program(frame),
+                                budget,
+                                tasks.storage(),
+                            )?;
+                        }
                     }
                 }
-            }
-            EvalFrame::Control(mut frame) => {
-                if let Some(value) = returned.take() {
-                    budget.charge()?;
-                    let old_logical = if budget.mode() == StorageMode::ExactRetained {
-                        frame.logical.as_ref().map_or(0, |logical| {
-                            logical.retained_bytes_exact().unwrap_or(usize::MAX)
-                        })
+                EvalFrame::Control(mut frame) => {
+                    if let Some(value) = returned.take() {
+                        budget.charge()?;
+                        let old_logical = if budget.mode() == StorageMode::ExactRetained {
+                            frame.logical.as_ref().map_or(0, |logical| {
+                                logical.retained_bytes_exact().unwrap_or(usize::MAX)
+                            })
+                        } else {
+                            0
+                        };
+                        let extra = if budget.mode() == StorageMode::ConservativeInt {
+                            int_storage_bytes(frame.rows.len())
+                        } else if frame.logical.is_some() {
+                            int_min_storage_bytes(frame.rows.len()).unwrap_or(usize::MAX)
+                        } else {
+                            0
+                        };
+                        budget.storage(retained.saturating_add(extra))?;
+                        frame.accept(value, schema)?;
+                        if budget.mode() == StorageMode::ExactRetained {
+                            retained = frames_storage(&frames, frames.capacity(), budget.mode())
+                                .saturating_add(frame.storage(budget.mode()))
+                                .saturating_add(tasks.storage());
+                            let new_logical = frame.logical.as_ref().map_or(0, |logical| {
+                                logical.retained_bytes_exact().unwrap_or(usize::MAX)
+                            });
+                            if new_logical > old_logical {
+                                budget.storage(retained.saturating_add(old_logical))?;
+                            }
+                            budget.storage(retained)?;
+                        }
+                    }
+                    if let Some((child, rows)) = frame.request() {
+                        budget.charge()?;
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::Control(frame),
+                            budget,
+                            tasks.storage(),
+                        )?;
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::Program(ProgramFrame::new(child, rows)),
+                            budget,
+                            tasks.storage(),
+                        )?;
                     } else {
-                        0
-                    };
-                    let extra = if budget.mode() == StorageMode::ConservativeInt {
-                        int_storage_bytes(frame.rows.len())
-                    } else if frame.logical.is_some() {
-                        int_min_storage_bytes(frame.rows.len()).unwrap_or(usize::MAX)
-                    } else {
-                        0
-                    };
-                    budget.storage(retained.saturating_add(extra))?;
-                    frame.accept(value, schema)?;
-                    if budget.mode() == StorageMode::ExactRetained {
+                        budget.storage(retained.saturating_add(frame.finish_precharge()))?;
+                        let value = frame.finish()?;
+                        budget.storage(
+                            frames_storage(&frames, frames.capacity(), budget.mode())
+                                .saturating_add(tasks.storage())
+                                .saturating_add(value.retained_heap_bytes(budget.mode())),
+                        )?;
+                        returned = Some(value);
+                    }
+                }
+                EvalFrame::Ordinary(mut frame) => {
+                    if let Some(value) = returned.take() {
+                        budget.charge()?;
+                        frame.accept(value.into_unannotated()?, schema, execution)?;
                         retained = frames_storage(&frames, frames.capacity(), budget.mode())
                             .saturating_add(frame.storage(budget.mode()))
                             .saturating_add(tasks.storage());
-                        let new_logical = frame.logical.as_ref().map_or(0, |logical| {
-                            logical.retained_bytes_exact().unwrap_or(usize::MAX)
-                        });
-                        if new_logical > old_logical {
-                            budget.storage(retained.saturating_add(old_logical))?;
-                        }
                         budget.storage(retained)?;
                     }
-                }
-                if let Some((child, rows)) = frame.request() {
-                    budget.charge()?;
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Control(frame),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Program(ProgramFrame::new(child, rows)),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                } else {
-                    budget.storage(retained.saturating_add(frame.finish_precharge()))?;
-                    let value = frame.finish()?;
-                    budget.storage(
-                        frames_storage(&frames, frames.capacity(), budget.mode())
-                            .saturating_add(tasks.storage())
-                            .saturating_add(value.retained_heap_bytes(budget.mode())),
-                    )?;
-                    returned = Some(value);
-                }
-            }
-            EvalFrame::Ordinary(mut frame) => {
-                if let Some(value) = returned.take() {
-                    budget.charge()?;
-                    frame.accept(value.into_unannotated()?, schema, execution)?;
-                    retained = frames_storage(&frames, frames.capacity(), budget.mode())
-                        .saturating_add(frame.storage(budget.mode()))
-                        .saturating_add(tasks.storage());
-                    budget.storage(retained)?;
-                }
-                if (execution.is_batch() || !frame.stopped) && frame.next < frame.args.len() {
-                    budget.charge()?;
-                    let index = frame.next;
-                    frame.awaiting = Some(index);
-                    let child = &frame.args[index];
-                    budget.storage(retained.saturating_add(frame.rows.storage()))?;
-                    let rows = frame.rows.clone();
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Ordinary(frame),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Program(ProgramFrame::new(child, rows)),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                } else if execution.is_batch() {
-                    let value = frame.finish_batch(ctx, budget, retained)?;
-                    budget.storage(retained.saturating_add(node_storage(&value, budget.mode())))?;
-                    returned = Some(FrameResult::unannotated(value));
-                } else {
-                    budget.charge()?;
-                    // Both completed operand values are live during kernel work.
-                    budget.storage(retained.saturating_add(int_storage_bytes(1)))?;
-                    let value = if frame.stopped {
-                        RpnStackNode::Vector {
-                            value: RpnStackNodeVectorValue::Generated {
-                                physical_value: VectorValue::from_scalar(
-                                    &ScalarValue::Int(None),
-                                    1,
-                                ),
-                            },
-                            field_type: frame.prepared.return_type(),
-                        }
+                    if (execution.is_batch() || !frame.stopped) && frame.next < frame.args.len() {
+                        budget.charge()?;
+                        let index = frame.next;
+                        frame.awaiting = Some(index);
+                        let child = &frame.args[index];
+                        budget.storage(retained.saturating_add(frame.rows.storage()))?;
+                        let rows = frame.rows.clone();
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::Ordinary(frame),
+                            budget,
+                            tasks.storage(),
+                        )?;
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::Program(ProgramFrame::new(child, rows)),
+                            budget,
+                            tasks.storage(),
+                        )?;
+                    } else if execution.is_batch() {
+                        let value = frame.finish_batch(ctx, budget, retained)?;
+                        budget.storage(
+                            retained.saturating_add(node_storage(&value, budget.mode())),
+                        )?;
+                        returned = Some(FrameResult::unannotated(value));
                     } else {
-                        eval_ordinary_kernel(ctx, frame.prepared, &frame.values)?
-                    };
-                    validate_frame_result(&value, 1)?;
-                    if !matches!(value.get_logical_scalar_ref(0), ScalarValueRef::Int(_)) {
-                        return Err(LocalError::InvalidSpec(
-                            "ordinary kernel result is not Int".into(),
-                        ));
+                        budget.charge()?;
+                        // Both completed operand values are live during kernel work.
+                        budget.storage(retained.saturating_add(int_storage_bytes(1)))?;
+                        let value = if frame.stopped {
+                            RpnStackNode::Vector {
+                                value: RpnStackNodeVectorValue::Generated {
+                                    physical_value: VectorValue::from_scalar(
+                                        &ScalarValue::Int(None),
+                                        1,
+                                    ),
+                                },
+                                field_type: frame.prepared.return_type(),
+                            }
+                        } else {
+                            eval_ordinary_kernel(ctx, frame.prepared, &frame.values)?
+                        };
+                        validate_frame_result(&value, 1)?;
+                        if !matches!(value.get_logical_scalar_ref(0), ScalarValueRef::Int(_)) {
+                            return Err(LocalError::InvalidSpec(
+                                "ordinary kernel result is not Int".into(),
+                            ));
+                        }
+                        budget.storage(
+                            retained.saturating_add(node_storage(&value, budget.mode())),
+                        )?;
+                        returned = Some(FrameResult::unannotated(value));
                     }
-                    budget.storage(retained.saturating_add(node_storage(&value, budget.mode())))?;
-                    returned = Some(FrameResult::unannotated(value));
                 }
-            }
-            EvalFrame::RowHostScope(mut frame) => {
-                if let Some(value) = returned.take() {
-                    budget.charge()?;
-                    let node = value.into_unannotated()?;
-                    validate_frame_result(&node, 1)?;
-                    if node.field_type() != frame.field_type {
-                        return Err(LocalError::HostContract(
-                            "row scope field type changed".into(),
-                        ));
+                EvalFrame::RowHostScope(mut frame) => {
+                    if let Some(value) = returned.take() {
+                        budget.charge()?;
+                        let node = value.into_unannotated()?;
+                        validate_frame_result(&node, 1)?;
+                        if node.field_type() != frame.field_type {
+                            return Err(LocalError::HostContract(
+                                "row scope field type changed".into(),
+                            ));
+                        }
+                        let value = if frame.typed_control {
+                            let value = node.get_logical_scalar_ref(0);
+                            budget.storage(
+                                retained.saturating_add(batch_scalar_copy_precharge(value)),
+                            )?;
+                            let mut output = VectorValue::with_capacity(1, value.eval_type());
+                            push_batch_scalar(&mut output, value)?;
+                            budget.storage(
+                                retained
+                                    .saturating_add(vector_storage_bytes(&output, budget.mode())),
+                            )?;
+                            output
+                        } else {
+                            budget.storage(
+                                retained.saturating_add(host_node_copy_precharge(&node, 1)?),
+                            )?;
+                            copy_host_rows(&node, 1)?
+                        };
+                        frame.values_bytes = frame
+                            .values_bytes
+                            .checked_add(vector_storage_bytes(&value, budget.mode()))
+                            .ok_or_else(|| {
+                                LocalError::ResourceLimit(
+                                    "row scope retained ledger overflow".into(),
+                                )
+                            })?;
+                        frame.values.push(value);
+                        retained = frames_storage(&frames, frames.capacity(), budget.mode())
+                            .saturating_add(frame.storage(budget.mode()))
+                            .saturating_add(tasks.storage());
+                        budget.storage(retained)?;
                     }
-                    let value = if frame.typed_control {
-                        let value = node.get_logical_scalar_ref(0);
+                    if frame.values.len() == frame.rows.len() {
+                        let physical_value = frame.finish(budget, retained)?;
+                        let node = RpnStackNode::Vector {
+                            value: RpnStackNodeVectorValue::Generated { physical_value },
+                            field_type: frame.field_type,
+                        };
                         budget
-                            .storage(retained.saturating_add(batch_scalar_copy_precharge(value)))?;
-                        let mut output = VectorValue::with_capacity(1, value.eval_type());
-                        push_batch_scalar(&mut output, value)?;
-                        budget.storage(
-                            retained.saturating_add(vector_storage_bytes(&output, budget.mode())),
+                            .storage(retained.saturating_add(node_storage(&node, budget.mode())))?;
+                        returned = Some(FrameResult::unannotated(node));
+                    } else {
+                        budget.charge()?;
+                        let position = frame.values.len();
+                        let child = ProgramFrame {
+                            nodes: frame.nodes,
+                            pc: 0,
+                            rows: FrameRows::Scoped(
+                                [frame.rows.physical()[position]],
+                                frame.rows.occurrence(position, 0),
+                            ),
+                            stack: Vec::new(),
+                            flow: None,
+                            result_meta: None,
+                        };
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::RowHostScope(frame),
+                            budget,
+                            tasks.storage(),
                         )?;
-                        output
-                    } else {
-                        budget.storage(
-                            retained.saturating_add(host_node_copy_precharge(&node, 1)?),
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::Program(child),
+                            budget,
+                            tasks.storage(),
                         )?;
-                        copy_host_rows(&node, 1)?
-                    };
-                    frame.values_bytes = frame
-                        .values_bytes
-                        .checked_add(vector_storage_bytes(&value, budget.mode()))
-                        .ok_or_else(|| {
-                            LocalError::ResourceLimit("row scope retained ledger overflow".into())
-                        })?;
-                    frame.values.push(value);
-                    retained = frames_storage(&frames, frames.capacity(), budget.mode())
-                        .saturating_add(frame.storage(budget.mode()))
-                        .saturating_add(tasks.storage());
-                    budget.storage(retained)?;
-                }
-                if frame.values.len() == frame.rows.len() {
-                    let physical_value = frame.finish(budget, retained)?;
-                    let node = RpnStackNode::Vector {
-                        value: RpnStackNodeVectorValue::Generated { physical_value },
-                        field_type: frame.field_type,
-                    };
-                    budget.storage(retained.saturating_add(node_storage(&node, budget.mode())))?;
-                    returned = Some(FrameResult::unannotated(node));
-                } else {
-                    budget.charge()?;
-                    let position = frame.values.len();
-                    let child = ProgramFrame {
-                        nodes: frame.nodes,
-                        pc: 0,
-                        rows: FrameRows::Scoped(
-                            [frame.rows.physical()[position]],
-                            frame.rows.occurrence(position, 0),
-                        ),
-                        stack: Vec::new(),
-                        flow: None,
-                        result_meta: None,
-                    };
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::RowHostScope(frame),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Program(child),
-                        budget,
-                        tasks.storage(),
-                    )?;
-                }
-            }
-            EvalFrame::Host(mut frame) => {
-                if let Some(value) = returned.take() {
-                    budget.charge()?;
-                    budget.storage(retained.saturating_add(host_node_copy_precharge(
-                        &value.node,
-                        frame.argument_rows(),
-                    )?))?;
-                    frame.accept(value.into_unannotated()?)?;
-                    retained = frames_storage(&frames, frames.capacity(), budget.mode())
-                        .saturating_add(frame.storage(budget.mode()))
-                        .saturating_add(tasks.storage());
-                    budget.storage(retained)?;
-                }
-
-                if frame.task.is_none() {
-                    budget.charge()?;
-                    tasks.reserve_start(budget, &mut retained)?;
-                    budget.storage(retained.saturating_add(int_storage_bytes(1)))?;
-                    let start = if frame.prepared.is_windowed() {
-                        tasks.host()?.start_window(ctx, frame.window_invocation())?
-                    } else {
-                        tasks.host()?.start(ctx, frame.invocation(occurrence))?
-                    };
-                    match start {
-                        HostStart::Ready(value) => {
-                            let value = frame.finish(value, budget, retained)?;
-                            budget.storage(
-                                frames_storage(&frames, frames.capacity(), budget.mode())
-                                    .saturating_add(tasks.storage())
-                                    .saturating_add(node_storage(&value, budget.mode())),
-                            )?;
-                            returned = Some(FrameResult::unannotated(value));
-                            continue;
-                        }
-                        HostStart::Pending { task, request } => {
-                            // Register before validating either the token or request;
-                            // every reachable identity is now owned by cleanup.
-                            tasks.arm(task)?;
-                            frame.task = Some(task);
-                            frame.request(request)?;
-                        }
-                    }
-                } else if let Some(index) = frame.ready.take() {
-                    budget.charge()?;
-                    budget.storage(retained.saturating_add(int_storage_bytes(1)))?;
-                    let task = frame.task.expect("resuming a registered task");
-                    let step = if frame.prepared.is_windowed() {
-                        tasks
-                            .host()?
-                            .resume_window(ctx, &task, frame.window_reply(index))?
-                    } else {
-                        tasks.host()?.resume(ctx, &task, frame.reply(index))?
-                    };
-                    match step {
-                        HostStep::NeedArg(request) => frame.request(request)?,
-                        HostStep::NeedArgRow { index, position } => {
-                            frame.request_row(index, position, budget, retained)?;
-                        }
-                        HostStep::Ready(value) => {
-                            // Keep cleanup armed through validation/normalization,
-                            // even when the provider has already completed its task.
-                            let value = frame.finish(value, budget, retained)?;
-                            budget.storage(
-                                frames_storage(&frames, frames.capacity(), budget.mode())
-                                    .saturating_add(tasks.storage())
-                                    .saturating_add(node_storage(&value, budget.mode())),
-                            )?;
-                            tasks.complete(task)?;
-                            returned = Some(FrameResult::unannotated(value));
-                            continue;
-                        }
                     }
                 }
+                EvalFrame::Host(mut frame) => {
+                    if let Some(value) = returned.take() {
+                        budget.charge()?;
+                        budget.storage(retained.saturating_add(host_node_copy_precharge(
+                            &value.node,
+                            frame.argument_rows(),
+                        )?))?;
+                        frame.accept(value.into_unannotated()?)?;
+                        tasks.clear_result(frame.task.expect("successful host argument owns task"));
+                        retained = frames_storage(&frames, frames.capacity(), budget.mode())
+                            .saturating_add(frame.storage(budget.mode()))
+                            .saturating_add(tasks.storage());
+                        budget.storage(retained)?;
+                    }
 
-                let request = frame.request.take().expect("host requested an argument");
-                budget.charge()?; // Reuse hits are not a free/infinite host loop.
-                if frame.scoped.is_none() && request.mode == ArgMode::Fresh {
-                    // Discard the old value before restarting; a failure cannot
-                    // accidentally fall back to a previous successful reply.
-                    frame.cache[request.index] = None;
-                }
-                if frame.scoped.is_none() && frame.cache[request.index].is_some() {
-                    frame.ready = Some(request.index);
-                    push_frame(&mut frames, EvalFrame::Host(frame), budget, tasks.storage())?;
-                } else {
-                    frame.awaiting = Some(request.index);
-                    let child = &frame.args[request.index];
-                    budget.storage(retained.saturating_add(frame.rows.storage()))?;
-                    let rows = if let Some(scope) = &frame.scoped {
-                        FrameRows::Scoped(
-                            [frame.rows.physical()[scope.position]],
-                            frame.rows.occurrence(scope.position, 0),
-                        )
+                    if frame.task.is_none() {
+                        budget.charge()?;
+                        tasks.reserve_start(budget, &mut retained)?;
+                        budget.storage(retained.saturating_add(int_storage_bytes(1)))?;
+                        let start = if frame.prepared.is_windowed() {
+                            tasks.host()?.start_window(ctx, frame.window_invocation())?
+                        } else {
+                            tasks.host()?.start(ctx, frame.invocation(occurrence))?
+                        };
+                        match start {
+                            HostStart::Ready(value) => {
+                                let value = frame.finish(value, budget, retained)?;
+                                budget.storage(
+                                    frames_storage(&frames, frames.capacity(), budget.mode())
+                                        .saturating_add(tasks.storage())
+                                        .saturating_add(node_storage(&value, budget.mode())),
+                                )?;
+                                returned = Some(FrameResult::unannotated(value));
+                                return Ok(());
+                            }
+                            HostStart::Pending { task, request } => {
+                                // Register before validating either the token or request;
+                                // every reachable identity is now owned by cleanup.
+                                tasks.arm(task)?;
+                                frame.task = Some(task);
+                                frame.request(request)?;
+                            }
+                        }
+                    } else if let Some(index) = frame.ready.take() {
+                        budget.charge()?;
+                        budget.storage(retained.saturating_add(int_storage_bytes(1)))?;
+                        let task = frame.task.expect("resuming a registered task");
+                        let step = if let Some(failure) = tasks.take_result_failure(task) {
+                            tasks.host()?.resume_error(ctx, &task, failure)?
+                        } else if frame.prepared.is_windowed() {
+                            tasks
+                                .host()?
+                                .resume_window(ctx, &task, frame.window_reply(index))?
+                        } else {
+                            tasks.host()?.resume(ctx, &task, frame.reply(index))?
+                        };
+                        match step {
+                            HostStep::NeedArg(request) => frame.request(request)?,
+                            HostStep::NeedArgRow { index, position } => {
+                                frame.request_row(index, position, budget, retained)?;
+                            }
+                            HostStep::Ready(value) => {
+                                // Keep cleanup armed through validation/normalization,
+                                // even when the provider has already completed its task.
+                                let value = frame.finish(value, budget, retained)?;
+                                budget.storage(
+                                    frames_storage(&frames, frames.capacity(), budget.mode())
+                                        .saturating_add(tasks.storage())
+                                        .saturating_add(node_storage(&value, budget.mode())),
+                                )?;
+                                tasks.complete(task)?;
+                                returned = Some(FrameResult::unannotated(value));
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    let request = frame.request.take().expect("host requested an argument");
+                    budget.charge()?; // Reuse hits are not a free/infinite host loop.
+                    if frame.scoped.is_none() && request.mode != ArgMode::Reuse {
+                        // Discard the old value before restarting; a failure cannot
+                        // accidentally fall back to a previous successful reply.
+                        frame.cache[request.index] = None;
+                    }
+                    if frame.scoped.is_none() && frame.cache[request.index].is_some() {
+                        frame.ready = Some(request.index);
+                        push_frame(&mut frames, EvalFrame::Host(frame), budget, tasks.storage())?;
                     } else {
-                        frame.rows.clone()
-                    };
-                    push_frame(&mut frames, EvalFrame::Host(frame), budget, tasks.storage())?;
-                    push_frame(
-                        &mut frames,
-                        EvalFrame::Program(ProgramFrame::new(child, rows)),
-                        budget,
-                        tasks.storage(),
-                    )?;
+                        frame.awaiting = Some(request.index);
+                        if request.mode == ArgMode::FreshResult {
+                            tasks.await_result(
+                                frame.task.expect("pending Result host"),
+                                request.index,
+                                budget,
+                                &mut retained,
+                            )?;
+                        }
+                        let child = &frame.args[request.index];
+                        budget.storage(retained.saturating_add(frame.rows.storage()))?;
+                        let rows = if let Some(scope) = &frame.scoped {
+                            FrameRows::Scoped(
+                                [frame.rows.physical()[scope.position]],
+                                frame.rows.occurrence(scope.position, 0),
+                            )
+                        } else {
+                            frame.rows.clone()
+                        };
+                        push_frame(&mut frames, EvalFrame::Host(frame), budget, tasks.storage())?;
+                        push_frame(
+                            &mut frames,
+                            EvalFrame::Program(ProgramFrame::new(child, rows)),
+                            budget,
+                            tasks.storage(),
+                        )?;
+                    }
                 }
             }
+            Ok(())
+        })();
+        if let Err(error) = step_result {
+            let Some(barrier) = frames.iter().rposition(|frame| match frame {
+                EvalFrame::Host(host) => matches!((host.task,host.awaiting),(Some(task),Some(index)) if tasks.result_checkpoint(task,index).is_some()),
+                _ => false,
+            }) else {
+                return Err(error);
+            };
+            let EvalFrame::Host(host) = &frames[barrier] else {
+                unreachable!()
+            };
+            let task = host.task.expect("Result host task");
+            let checkpoint = tasks
+                .result_checkpoint(task, host.awaiting.unwrap())
+                .unwrap();
+            // Preserve the primary cause if its provider is no longer reachable.
+            if !tasks.cancel_descendants(checkpoint) {
+                return Err(error);
+            }
+            frames.truncate(barrier + 1);
+            returned = None;
+            let EvalFrame::Host(host) = &mut frames[barrier] else {
+                unreachable!()
+            };
+            let index = host.awaiting.take().unwrap();
+            host.cache[index] = None;
+            tasks.fail_result(task, index, error);
+            host.ready = Some(index);
         }
     }
     Ok(returned.expect("root RPN frame returned a value"))
@@ -5224,6 +5421,7 @@ mod tests {
                 input: &mut input,
                 catalog: None,
                 live: Vec::new(),
+                results: Vec::new(),
             };
             assert_eq!(guard.storage(), capacity);
             assert!(guard.host().is_err());

@@ -691,6 +691,10 @@ impl PreparedHostCall {
 pub enum ArgMode {
     /// Evaluate the requested argument for this occurrence again.
     Fresh,
+    /// Fresh row demand whose failure is delivered to `resume_error` after
+    /// descendant tasks are cancelled. No previous success is reused and no
+    /// error becomes a SQL NULL. Global execution budgets remain in force.
+    FreshResult,
     /// Reuse the last successful value for this argument and invocation; a
     /// cache miss evaluates the child once and retains that successful result.
     Reuse,
@@ -718,6 +722,40 @@ pub struct HostArgReply<'a> {
     pub index: usize,
     pub field_type: &'a FieldType,
     pub values: &'a VectorValue,
+}
+
+/// One actual demanded child failure, moved by the official driver only.
+/// The receipt owns its cause, never a borrowed reply, synthesized SQL error,
+/// or a cached successful argument. It is intentionally neither Clone nor Copy.
+#[derive(Debug)]
+pub struct HostArgFailure {
+    index: usize,
+    error: LocalError,
+}
+impl HostArgFailure {
+    pub(crate) fn new(index: usize, error: LocalError) -> Self {
+        Self { index, error }
+    }
+    /// The actual argument requested by the suspended parent host.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+    /// Move the original owned cause without cloning or translating it.
+    pub fn into_error(self) -> LocalError {
+        self.error
+    }
+    pub(crate) fn retained_bytes(&self) -> usize {
+        match &self.error {
+            LocalError::InvalidSpec(s)
+            | LocalError::InvalidBatch(s)
+            | LocalError::BindingContract(s)
+            | LocalError::HostContract(s)
+            | LocalError::ResourceLimit(s) => s.capacity(),
+            // The foreign error payload is opaque and externally allocated,
+            // like existing runtime/adapter causes; this is no total-heap cap.
+            LocalError::Evaluation(_) => 0,
+        }
+    }
 }
 
 /// The caller's complete checked occurrence window. Physical rows may repeat;
@@ -817,6 +855,18 @@ pub trait LocalHostServices {
         task: &HostTaskId,
         reply: HostArgReply<'_>,
     ) -> LocalResult<HostStep>;
+
+    /// Owned error reply for an explicit FreshResult row request. Descendant
+    /// tasks are already cancelled. Default providers retain immediate failure.
+    /// Do not retain invocation/reply references or reset execution budgets.
+    fn resume_error(
+        &mut self,
+        _ctx: &mut EvalContext,
+        _task: &HostTaskId,
+        failure: HostArgFailure,
+    ) -> LocalResult<HostStep> {
+        Err(failure.into_error())
+    }
 
     /// Whole-window counterpart of start, only for registered window
     /// operations. An unimplemented protocol is a contract error, never a
