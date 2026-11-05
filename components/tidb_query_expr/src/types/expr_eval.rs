@@ -3225,12 +3225,19 @@ impl<'a> HostFrame<'a> {
                 "host argument carrier differs from its catalog".into(),
             ));
         }
-        // Cache only successful, bounded compact results for this invocation.
-        let copied = copy_host_rows(&value, self.argument_rows())?;
+        // Generated values already own their logical rows. Borrowed inputs
+        // still need a copy to apply selection and scalar broadcasting.
+        let owned = match value {
+            RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Generated { physical_value },
+                ..
+            } => physical_value,
+            value => copy_host_rows(&value, self.argument_rows())?,
+        };
         if let Some(scope) = &mut self.scoped {
-            scope.value = Some(copied);
+            scope.value = Some(owned);
         } else {
-            self.cache[index] = Some(copied);
+            self.cache[index] = Some(owned);
         }
         self.ready = Some(index);
         Ok(())
@@ -3256,18 +3263,10 @@ impl<'a> HostFrame<'a> {
                 "host Ready must match its registered carrier and occurrence count".into(),
             ));
         }
-        // The provider's transient allocations are outside this retained-scratch
-        // budget. Do not keep arbitrary capacity or a borrow from the callback.
-        let node = RpnStackNode::Vector {
+        Ok(RpnStackNode::Vector {
             value: RpnStackNodeVectorValue::Generated {
                 physical_value: value,
             },
-            field_type: self.prepared.return_type(),
-        };
-
-        let physical_value = copy_host_rows(&node, self.rows.len())?;
-        Ok(RpnStackNode::Vector {
-            value: RpnStackNodeVectorValue::Generated { physical_value },
             field_type: self.prepared.return_type(),
         })
     }
@@ -4718,6 +4717,86 @@ mod tests {
 
     use super::*;
     use crate::{RpnExpressionBuilder, RpnFnMeta, impl_arithmetic::*, impl_compare::*};
+
+    #[test]
+    fn host_owned_argument_and_ready_move_the_same_storage() {
+        use crate::local::{HostCatalog, HostSignature, SqlBatchHostOperation};
+
+        let field_type: FieldType = FieldTypeTp::VarString.into();
+        let catalog = HostCatalog::for_sql_batch(vec![(
+            SqlBatchHostOperation::EagerValuesWindowNative,
+            HostSignature {
+                arg_types: vec![field_type.clone()].into_boxed_slice(),
+                return_type: field_type.clone(),
+            },
+        )])
+        .unwrap();
+        let prepared = PreparedHostCall::prepare(
+            &catalog,
+            catalog.slot(0).unwrap(),
+            &[field_type.clone()],
+            &field_type,
+        )
+        .unwrap();
+        let args = [RpnExpression::from(vec![])];
+        let make = |rows| {
+            let mut bytes = ChunkedVecBytes::try_with_capacities(rows, 4096).unwrap();
+            for i in 0..rows {
+                bytes.push_ref(if i == 1 {
+                    None
+                } else {
+                    Some(&b"native owner"[..])
+                });
+            }
+            bytes
+        };
+        for rows in [1, 3] {
+            let selection = vec![2; rows];
+            let mut frame = HostFrame::new(
+                &prepared,
+                &args,
+                FrameRows::Borrowed(&selection, rows),
+                EvalExecution::SqlBatch,
+            )
+            .unwrap();
+            let bytes = make(rows);
+            let address = bytes.get(0).unwrap().as_ptr();
+            frame.awaiting = Some(0);
+            frame
+                .accept(RpnStackNode::Vector {
+                    value: RpnStackNodeVectorValue::Generated {
+                        physical_value: VectorValue::Bytes(bytes),
+                    },
+                    field_type: &field_type,
+                })
+                .unwrap();
+            let VectorValue::Bytes(cached) = frame.cache[0].as_ref().unwrap() else {
+                panic!("bytes argument")
+            };
+            assert_eq!(
+                cached.get(0).unwrap().as_ptr(),
+                address,
+                "move the owned argument"
+            );
+            assert_eq!(cached.len(), rows);
+            if rows == 3 {
+                assert_eq!(cached.get(1), None);
+            }
+
+            let owned = frame.cache[0].take().unwrap();
+            let result = frame.finish(owned).unwrap();
+            let ScalarValueRef::Bytes(Some(value)) = result.get_logical_scalar_ref(0) else {
+                panic!("bytes result")
+            };
+            assert_eq!(value.as_ptr(), address, "move the owned Ready result");
+            if rows == 3 {
+                assert_eq!(
+                    result.get_logical_scalar_ref(1),
+                    ScalarValueRef::Bytes(None)
+                );
+            }
+        }
+    }
 
     #[test]
     fn host_temporal_copies_keep_null_raw_fields_fsp_and_compact_capacity() {
