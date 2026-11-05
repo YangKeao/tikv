@@ -286,6 +286,11 @@ impl LocalHostServices for Service {
             self.read_failure = Some((0, 1));
         }
         if self.loop_reuse {
+            if task.phase == 8 {
+                return Err(LocalError::HostContract(
+                    "injected finite repeated-demand failure".into(),
+                ));
+            }
             return Ok(HostStep::NeedArg(request(0, ArgMode::Reuse)));
         }
         if task.phase < self.requests.len() {
@@ -496,7 +501,7 @@ fn window_host_fresh_reuse_cache_is_vector_sized_and_invocation_local() {
 }
 
 #[test]
-fn window_host_protocol_failures_and_limits_cancel_without_retry() {
+fn window_host_protocol_failures_cancel_without_retry_and_limits_do_not_refuse() {
     let selection = [2, 0, 2];
     for fault in 0..3 {
         let mut service = Service::new();
@@ -540,10 +545,11 @@ fn window_host_protocol_failures_and_limits_cancel_without_retry() {
         },
     )
     .0;
-    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+    assert!(matches!(result, Err(LocalError::HostContract(_))));
     assert_eq!(service.reads(), rows(0, &selection));
     assert!(service.live.is_empty());
     service.events.clear();
+    service.loop_reuse = false;
     let result = evaluate(
         &mut program,
         &mut service,
@@ -554,8 +560,8 @@ fn window_host_protocol_failures_and_limits_cancel_without_retry() {
         },
     )
     .0;
-    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-    assert!(service.events.is_empty());
+    assert!(result.is_ok());
+    assert!(!service.events.is_empty());
     let mut service = Service::new();
     let root = host(
         &service.catalog,
@@ -576,8 +582,8 @@ fn window_host_protocol_failures_and_limits_cancel_without_retry() {
         },
     )
     .0;
-    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-    assert!(service.reads().is_empty());
+    assert!(result.is_ok());
+    assert!(!service.reads().is_empty());
     assert!(service.live.is_empty());
 }
 
@@ -861,8 +867,8 @@ fn window_host_row_operand_fresh_restarts_each_row_and_limits_still_cancel() {
         },
     )
     .0;
-    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-    assert!(service.reads().is_empty());
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(service.reads(), expected);
     assert!(service.live.is_empty());
     service.events.clear();
     let result = evaluate(
@@ -875,8 +881,9 @@ fn window_host_row_operand_fresh_restarts_each_row_and_limits_still_cancel() {
         },
     )
     .0;
-    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-    assert!(service.events.is_empty());
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(service.reads(), expected);
+    assert!(service.live.is_empty());
 }
 
 fn unary_bytes(signature: tipb::ScalarFuncSig, value: LocalExpr) -> LocalExpr {
@@ -1028,7 +1035,7 @@ fn window_host_whole_selection_runs_generated_kernels_and_scalar_broadcast_witho
         },
     )
     .0;
-    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+    assert!(result.is_ok(), "{result:?}");
     assert!(service.reads().is_empty());
     assert!(service.live.is_empty());
     service.events.clear();
@@ -1042,8 +1049,9 @@ fn window_host_whole_selection_runs_generated_kernels_and_scalar_broadcast_witho
         },
     )
     .0;
-    assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-    assert!(service.events.is_empty());
+    assert!(result.is_ok(), "{result:?}");
+    assert!(service.reads().is_empty());
+    assert!(service.live.is_empty());
 }
 #[test]
 fn window_host_whole_selection_does_not_widen_a_legacy_ordinary_root() {
@@ -1164,8 +1172,11 @@ fn unary_window_descriptors_keep_full_fresh_reuse_and_terminal_cleanup() {
                 ..ExecutionLimits::default()
             },
         );
-        assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-        assert!(service.reads().is_empty());
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            service.reads(),
+            [rows(0, &selection), rows(0, &selection)].concat()
+        );
         assert!(service.live.is_empty());
         service.events.clear();
         let (result, _) = evaluate(
@@ -1344,12 +1355,13 @@ fn window_host_typed_control_fresh_failure_and_resource_limits_are_terminal() {
     ] {
         service.events.clear();
         service.read_failure = None;
-        assert!(matches!(
-            evaluate(&mut program, &mut service, &selection, limits).0,
-            Err(LocalError::ResourceLimit(_))
-        ));
+        assert!(
+            evaluate(&mut program, &mut service, &selection, limits)
+                .0
+                .is_ok()
+        );
         assert!(service.live.is_empty());
-        assert!(service.reads().iter().all(|(slot, _)| *slot != 2));
+        assert_eq!(service.reads(), expected);
     }
     service.events.clear();
     evaluate(
@@ -1509,8 +1521,8 @@ fn window_raw_value_operands_keep_row_domain_inside_whole_parent() {
                 ..ExecutionLimits::default()
             },
         );
-        assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-        assert!(service.reads().is_empty());
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(service.reads(), expected);
         assert!(service.live.is_empty());
     }
 }
@@ -1601,8 +1613,8 @@ fn window_unary_sign_rows_keep_original_occurrences_across_parent_fresh_and_reus
                 ..ExecutionLimits::default()
             },
         );
-        assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-        assert!(service.reads().is_empty());
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(service.reads(), expected);
         assert!(service.live.is_empty());
     }
 }
@@ -1711,8 +1723,8 @@ fn quotient_window_and_row_descriptors_keep_occurrences_reuse_primary_errors_and
                 ..ExecutionLimits::default()
             },
         );
-        assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-        assert!(service.reads().is_empty());
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(service.reads(), expected);
         assert!(service.live.is_empty());
         service.events.clear();
         service.read_failure = Some((0, 17));
@@ -1751,6 +1763,7 @@ fn quotient_window_and_row_descriptors_keep_occurrences_reuse_primary_errors_and
         let (result, _) = evaluate(&mut program, &mut service, &[], ExecutionLimits::default());
         assert_eq!(result.unwrap().len(), 0);
         assert!(service.events.is_empty());
+        assert!(service.live.is_empty());
     }
 }
 
@@ -2030,6 +2043,11 @@ impl LocalHostServices for RowDemandService {
             });
         }
         if self.mode == 6 {
+            if phase == 8 {
+                return Err(LocalError::HostContract(
+                    "injected finite scoped-demand failure".into(),
+                ));
+            }
             return Ok(HostStep::NeedArgRow {
                 index: 1,
                 position: 0,
@@ -2167,10 +2185,7 @@ fn window_scoped_row_rejects_bad_demand_and_preserves_failures_cleanup_and_reuse
                 assert_eq!(Some(error.0.as_ref() as *const _ as usize), service.primary);
             }
             4 => assert!(outcome.is_err()),
-            6 => assert!(matches!(
-                outcome.unwrap(),
-                Err(LocalError::ResourceLimit(_))
-            )),
+            6 => assert!(matches!(outcome.unwrap(), Err(LocalError::HostContract(_)))),
             _ => assert!(outcome.unwrap().is_err()),
         }
         assert!(service.live.is_empty(), "mode={mode}");
@@ -2279,16 +2294,14 @@ fn genuine_cursor_preserves_max_coordinate_and_bounded_selection_contract() {
         max_retained_bytes: 0,
         ..ExecutionLimits::default()
     };
-    assert!(matches!(
-        program.eval_cursor_with_bindings(
-            tiny,
-            &mut EvalContext::default(),
-            usize::MAX,
-            &mut service
-        ),
-        Err(LocalError::ResourceLimit(_))
-    ));
-    assert!(service.events.is_empty());
+    assert!(
+        program
+            .eval_cursor_with_bindings(tiny, &mut EvalContext::default(), usize::MAX, &mut service)
+            .is_ok()
+    );
+    assert_eq!(service.reads(), rows(0, &[usize::MAX]));
+    assert!(service.live.is_empty());
+    service.events.clear();
     program
         .eval_cursor_with_bindings(
             ExecutionLimits::default(),
@@ -2423,16 +2436,21 @@ fn genuine_coordinate_batch_keeps_duplicates_max_and_bounded_api_checks() {
         } else {
             ExecutionLimits::default()
         };
-        assert!(matches!(
-            program.eval_coordinates_with_bindings(
-                limits,
-                &mut EvalContext::default(),
-                &coordinates,
-                &mut service
-            ),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert!(service.events.is_empty());
+        let result = program.eval_coordinates_with_bindings(
+            limits,
+            &mut EvalContext::default(),
+            &coordinates,
+            &mut service,
+        );
+        if coordinates.len() == 1 {
+            assert_eq!(result.unwrap().len(), 1);
+            assert_eq!(service.reads(), rows(0, &coordinates));
+            assert!(service.live.is_empty());
+            service.events.clear();
+        } else {
+            assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+            assert!(service.events.is_empty());
+        }
     }
     let result = program
         .eval_coordinates_with_bindings(

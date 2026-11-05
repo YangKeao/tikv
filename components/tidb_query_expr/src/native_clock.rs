@@ -65,7 +65,7 @@ pub fn native_clock_values(
     maximum: usize,
 ) -> Result<String, NativeClockValueError> {
     use NativeClockOperation as Op;
-    if maximum == usize::MAX || maximum < 1024 {
+    if maximum < 1024 {
         return Err(NativeClockValueError::Resource);
     }
     let valid = match operation {
@@ -381,7 +381,11 @@ mod actual_value_tests {
             native_clock_values(NativeClockOperation::UtcTime, c, Some(6), 4096).unwrap(),
             "23:59:59.999999"
         );
-        for max in [0, usize::MAX] {
+        assert_eq!(
+            native_clock_values(NativeClockOperation::Now, c, Some(0), usize::MAX),
+            native_clock_values(NativeClockOperation::Now, c, Some(0), 4096)
+        );
+        for max in [0] {
             assert_eq!(
                 native_clock_values(NativeClockOperation::Now, c, Some(0), max),
                 Err(NativeClockValueError::Resource)

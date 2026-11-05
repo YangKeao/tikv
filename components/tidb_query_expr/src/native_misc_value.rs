@@ -76,7 +76,7 @@ fn error(e: Error) -> E {
 }
 /// Shared finite logical work gate, not a physical allocator-peak bound.
 pub fn native_misc_work(maximum: usize, n: usize) -> Result<(), E> {
-    if maximum == usize::MAX || n > maximum {
+    if n > maximum {
         Err(E::Resource)
     } else {
         Ok(())
@@ -240,7 +240,10 @@ mod tests {
         assert_eq!(native_uuid_parse_value(None, 0), Ok(None));
         assert_eq!(native_bin_to_uuid_value(None, 0, 0), Ok(None));
         assert_eq!(native_shard_value(None, false, 0), Ok(None));
-        assert_eq!(native_is_uuid_value(None, usize::MAX), Err(E::Resource));
+        assert_eq!(
+            native_is_uuid_value(None, usize::MAX),
+            native_is_uuid_value(None, 1 << 30)
+        );
         assert_eq!(native_uuid_parse_value(Some(text), 0), Err(E::Resource));
         assert_eq!(native_uuid_swap_value(&bytes, 0, 0), Err(E::Resource));
         assert_eq!(

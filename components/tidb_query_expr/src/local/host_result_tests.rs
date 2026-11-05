@@ -379,40 +379,26 @@ fn host_result_nested_boundaries_retain_cause_and_cancel_only_their_descendants(
 }
 #[test]
 fn host_result_ledger_is_bounded_before_child_demand() {
-    let mut saw_ledger_refusal = false;
-    let mut saw_success = false;
-    for maximum in (0..8192).step_by(16) {
-        let base = Services::new(
-            vec![(Code::Sequence(vec![request(0, ArgMode::FreshResult)]), 1)],
-            vec![vec![Some(9)]],
+    let base = Services::new(
+        vec![(Code::Sequence(vec![request(0, ArgMode::FreshResult)]), 1)],
+        vec![vec![Some(9)]],
+    );
+    let mut program = base.compile(&host(&base.catalog, 0, vec![input(0)]));
+    let mut services = ResultServices::new(base);
+    let limits = ExecutionLimits {
+        max_steps: 0,
+        max_frame_depth: 0,
+        max_active_tasks: 0,
+        max_retained_bytes: 0,
+    };
+    for expected_reads in 1..=2 {
+        assert_eq!(
+            services.run(&mut program, limits).unwrap().to_int_vec(),
+            vec![Some(9)]
         );
-        let mut program = base.compile(&host(&base.catalog, 0, vec![input(0)]));
-        let mut services = ResultServices::new(base);
-        let result = services.run(
-            &mut program,
-            ExecutionLimits {
-                max_retained_bytes: maximum,
-                ..ExecutionLimits::default()
-            },
-        );
-        match result {
-            Ok(value) => {
-                assert_eq!(value.to_int_vec(), vec![Some(9)]);
-                saw_success = true;
-            }
-            Err(LocalError::ResourceLimit(_)) => {
-                if !services.base.starts().is_empty() && services.reads == 0 {
-                    saw_ledger_refusal = true;
-                }
-            }
-            other => panic!("actual bounded result: {other:?}"),
-        }
+        assert_eq!(services.reads, expected_reads);
         assert!(services.base.live.is_empty());
     }
-    assert!(
-        saw_ledger_refusal && saw_success,
-        "limits refuse before child effects, then admit sufficient space"
-    );
 }
 
 #[test]

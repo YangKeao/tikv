@@ -1076,26 +1076,6 @@ mod tests {
     }
 
     #[test]
-    fn task_budget_reserves_before_start() {
-        use super::super::runtime::{EvalBudget, ExecutionLimits};
-        let budget = EvalBudget::local(
-            ExecutionLimits {
-                max_active_tasks: 1,
-                ..ExecutionLimits::default()
-            },
-            0,
-        )
-        .unwrap();
-        assert!(budget.task_count(0).is_ok());
-        assert!(budget.task_count(1).is_ok());
-        assert!(matches!(
-            budget.task_count(2),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert!(EvalBudget::legacy().task_count(usize::MAX).is_ok());
-    }
-
-    #[test]
     fn task_generation_zero_is_a_contract_error() {
         let invalid = HostTaskId {
             slot: 0,

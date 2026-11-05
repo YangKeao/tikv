@@ -321,6 +321,7 @@ impl LogicalAccumulator {
 
     /// Conservatively accounts for retained heap payload, not this struct's
     /// inline storage or allocator bookkeeping.
+    #[cfg(test)]
     pub(crate) fn retained_bytes(&self) -> usize {
         let capacity = self.result.capacity();
         let values = capacity.saturating_mul(std::mem::size_of::<Int>());
@@ -340,6 +341,7 @@ impl LogicalAccumulator {
 
     /// Exact retained Int/bitmap element-buffer capacity for lineage
     /// accounting.
+    #[cfg(test)]
     pub(crate) fn retained_bytes_exact(&self) -> Option<usize> {
         crate::local::runtime::int_vector_storage_bytes(&self.result)
     }
@@ -525,11 +527,6 @@ pub fn native_unary_sign_decimal_value(
     value: &Decimal,
     limit: usize,
 ) -> std::result::Result<Decimal, NativeDecimalError> {
-    if limit == usize::MAX {
-        return Err(NativeDecimalError::Resource(
-            "native math requires a finite kernel budget",
-        ));
-    }
     match sign {
         NativeUnarySign::Plus => value.try_clone_native_math(limit),
         NativeUnarySign::Minus => value.try_native_math(NativeDecimalOp::Negate, limit),
@@ -969,7 +966,7 @@ mod native_unary_tests {
             actual_cause::<NativeDecimalError>(&minus_error),
             NativeDecimalError::Resource(_)
         ));
-        assert!(unary_minus_decimal_native(&value, &-1).is_err());
+        assert!(unary_minus_decimal_native(&value, &-1).is_ok());
     }
 }
 

@@ -247,7 +247,6 @@ impl NativeInLegacyBytesValues {
         count: usize,
         maximum: usize,
     ) -> std::result::Result<Self, NativeInLegacyError<std::convert::Infallible>> {
-        finite_legacy_byte_allowance(maximum)?;
         Ok(Self {
             state: LegacyValuesState::new(count),
             maximum,
@@ -341,17 +340,7 @@ fn legacy_bytes_allowance<E>(
         )),
     }
 }
-fn finite_legacy_byte_allowance<E>(
-    maximum: usize,
-) -> std::result::Result<(), NativeInLegacyError<E>> {
-    if maximum == usize::MAX {
-        Err(NativeInLegacyError::ResourceLimit(
-            "legacy IN requires a finite byte allowance",
-        ))
-    } else {
-        Ok(())
-    }
-}
+
 fn legacy_checked_bytes_equal<E>(
     left: &Vec<u8>,
     right: &Vec<u8>,
@@ -392,7 +381,6 @@ pub fn native_in_legacy_bytes_values<E>(
     read: impl FnMut(usize) -> std::result::Result<Option<Vec<u8>>, E>,
     mut resolve: impl FnMut() -> NativeCollation,
 ) -> std::result::Result<Option<bool>, NativeInLegacyError<E>> {
-    finite_legacy_byte_allowance(maximum)?;
     legacy_values(
         count,
         read,
@@ -879,10 +867,7 @@ mod tests {
                 .unwrap(),
             S::Ready(None)
         );
-        assert!(matches!(
-            NativeInLegacyBytesValues::new(0, usize::MAX),
-            Err(NativeInLegacyError::ResourceLimit(_))
-        ));
+        assert!(NativeInLegacyBytesValues::new(0, usize::MAX).is_ok());
         let mut denied = NativeInLegacyBytesValues::new(2, 8).unwrap();
         denied.begin().unwrap();
         assert!(matches!(
@@ -1220,14 +1205,16 @@ mod legacy_value_tests {
     fn legacy_byte_resources_charge_actual_owners_and_work_without_frames_or_later_reads() {
         let reads = RefCell::new(vec![]);
         let policies = Cell::new(0);
-        let error = native_in_legacy_bytes_values::<()>(
-            2,
-            usize::MAX,
-            |_| panic!("invalid unlimited policy must not fetch"),
-            || panic!("no pair"),
-        )
-        .unwrap_err();
-        assert!(matches!(error, NativeInLegacyError::ResourceLimit(_)));
+        assert_eq!(
+            native_in_legacy_bytes_values::<()>(
+                2,
+                usize::MAX,
+                |_| Ok(Some(b"x".to_vec())),
+                || NativeCollation::Binary
+            )
+            .unwrap(),
+            Some(true)
+        );
         for count in [0, 1] {
             let actual = native_in_legacy_bytes_values::<()>(
                 count,

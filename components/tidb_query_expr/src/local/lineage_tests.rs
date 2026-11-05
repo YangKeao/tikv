@@ -680,14 +680,10 @@ fn lineage_limits_recheck_current_tree_and_official_ids_do_not_prove_pb() {
             max_depth: 1,
         },
     ] {
-        assert!(matches!(
-            checked.revalidate(&expr, &[], limits),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert!(matches!(
-            ControlLineageFacts::sql_typed_row(&expr, &[], source_facts(&expr), limits),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        assert!(checked.revalidate(&expr, &[], limits).is_ok());
+        assert!(
+            ControlLineageFacts::sql_typed_row(&expr, &[], source_facts(&expr), limits).is_ok()
+        );
     }
     let exact = CompileLimits {
         max_nodes: 3,
@@ -785,22 +781,20 @@ fn run(
         )
         .unwrap()
 }
-fn resource_run(
+fn run_with_limit(
     program: &mut LocalControlProgram,
     services: &mut Bindings,
     selection: &[usize],
     bytes: usize,
     ctx: &mut EvalContext,
-) -> LocalError {
+) -> LineagedBatch {
     let state = ExecutionLimits {
         max_retained_bytes: bytes,
         ..ExecutionLimits::default()
     };
-    let report = program
+    program
         .eval_with_bindings(state, ctx, 1, selection, services)
-        .unwrap_err();
-    assert!(matches!(report, LocalError::ResourceLimit(_)));
-    report
+        .unwrap()
 }
 
 #[test]
@@ -1227,33 +1221,39 @@ fn lineage_malformed_replies_and_preflight_failures_remain_raw() {
 }
 
 #[test]
-fn lineage_empty_bytes_sentinel_and_fixed_scaffolding_obey_resource_limits() {
+fn lineage_empty_bytes_sentinel_and_fixed_scaffolding_ignore_cancelled_limits() {
     let ft = bytes_type(63);
     let mut program = compile(&slot(0, &ft), &[ft.clone()]);
     let mut services = Bindings::new(&[ft], vec![vec![ScalarValue::Bytes(None)]]);
-    // Empty Bytes still owns an offset sentinel; refusal may occur without a
-    // callback. No hard allocator-peak or zero-allocation claim is made here.
-    resource_run(
-        &mut program,
-        &mut services,
+    assert_batch(
+        &run_with_limit(
+            &mut program,
+            &mut services,
+            &[],
+            0,
+            &mut EvalContext::default(),
+        ),
         &[],
-        0,
-        &mut EvalContext::default(),
+        &[],
     );
     assert!(services.reads.is_empty());
-    resource_run(
-        &mut program,
-        &mut services,
-        &[0],
-        0,
-        &mut EvalContext::default(),
+    assert_batch(
+        &run_with_limit(
+            &mut program,
+            &mut services,
+            &[0],
+            0,
+            &mut EvalContext::default(),
+        ),
+        &[ScalarValue::Bytes(None)],
+        &[id(0)],
     );
-    assert!(services.reads.is_empty());
+    assert_eq!(services.reads.len(), 1);
     assert_batch(&run(&mut program, &mut services, 1, &[]), &[], &[]);
 }
 
 #[test]
-fn lineage_oversized_provider_capacity_is_rejected_after_that_read_not_before() {
+fn lineage_provider_spare_capacity_preserves_results_and_later_reads() {
     let ft = bytes_type(63);
     let mut program = compile(&slot(0, &ft), &[ft.clone()]);
     let mut services = Bindings::new(&[ft], vec![vec![ScalarValue::Bytes(None)]]);
@@ -1263,44 +1263,29 @@ fn lineage_oversized_provider_capacity_is_rejected_after_that_read_not_before() 
     services.reply_at = Some((1, Reply::Value(VectorValue::Bytes(oversized))));
     services.warn = true;
     let mut ctx = EvalContext::default();
-    resource_run(&mut program, &mut services, &[0, 0], 64 * 1024, &mut ctx);
-    assert_eq!(
-        services.reads,
-        vec![(
-            0,
-            InputRow {
-                occurrence: 0,
-                input_row: 0
-            }
-        )]
+    let output = run_with_limit(&mut program, &mut services, &[0, 0], 0, &mut ctx);
+    assert_batch(
+        &output,
+        &[ScalarValue::Bytes(Some(vec![])), ScalarValue::Bytes(None)],
+        &[id(0); 2],
     );
-    assert_eq!(ctx.warnings.warning_cnt, 1);
-    assert_eq!(ctx.warnings.warnings.len(), 1);
+    assert_eq!(services.reads.len(), 2);
+    assert_eq!(ctx.warnings.warning_cnt, 2);
+    assert_eq!(ctx.warnings.warnings.len(), 2);
 }
 
 #[test]
-fn lineage_output_payload_growth_stops_later_occurrences_and_final_publication() {
+fn lineage_output_payload_growth_preserves_all_occurrences_and_reuse() {
     let ft = bytes_type(63);
     let mut program = compile(&slot(0, &ft), &[ft.clone()]);
-    let mut services = Bindings::new(
-        &[ft],
-        vec![vec![ScalarValue::Bytes(Some(vec![0xff; 4096]))]],
-    );
+    let value = ScalarValue::Bytes(Some(vec![0xff; 4096]));
+    let mut services = Bindings::new(&[ft], vec![vec![value.clone()]]);
     services.warn = true;
     let mut ctx = EvalContext::default();
-    resource_run(
-        &mut program,
-        &mut services,
-        &vec![0; 128],
-        64 * 1024,
-        &mut ctx,
-    );
-    let reads = services.reads.len();
-    assert!(
-        reads > 1 && reads < 128,
-        "output growth, not initial scaffolding, must stop this prefix"
-    );
-    assert_eq!(ctx.warnings.warning_cnt, reads);
+    let output = run_with_limit(&mut program, &mut services, &vec![0; 128], 0, &mut ctx);
+    assert_batch(&output, &vec![value.clone(); 128], &vec![id(0); 128]);
+    assert_eq!(services.reads.len(), 128);
+    assert_eq!(ctx.warnings.warning_cnt, 128);
     for (occurrence, &(slot, row)) in services.reads.iter().enumerate() {
         assert_eq!(slot, 0);
         assert_eq!(
@@ -1311,57 +1296,38 @@ fn lineage_output_payload_growth_stops_later_occurrences_and_final_publication()
             }
         );
     }
-    // The same denied growth on the final selected occurrence must not publish
-    // a successful partial result. The incoming callback itself already ran.
     services.reads.clear();
-    resource_run(
+    let output = run_with_limit(
         &mut program,
         &mut services,
-        &vec![0; reads],
-        64 * 1024,
+        &[0, 0],
+        0,
         &mut EvalContext::default(),
     );
-    assert_eq!(services.reads.len(), reads);
+    assert_batch(&output, &[value.clone(), value], &[id(0); 2]);
+    assert_eq!(services.reads.len(), 2);
 }
 
 #[test]
-fn lineage_empty_and_null_bytes_still_charge_offsets_bitmap_and_id_capacity() {
+fn lineage_empty_and_null_bytes_keep_offsets_bitmap_and_ids_without_quota() {
     for payload in [None, Some(Vec::new())] {
         let ft = bytes_type(63);
         let mut program = compile(&slot(0, &ft), &[ft.clone()]);
-        let mut services = Bindings::new(&[ft], vec![vec![ScalarValue::Bytes(payload)]]);
-        let rows = 16_384usize;
-        let ids = rows * std::mem::size_of::<ResultMetaId>();
-        let offsets = (rows + 1) * std::mem::size_of::<usize>();
-        let bitmap = rows.div_ceil(64) * std::mem::size_of::<u64>();
-        // Full-N scaffolding precedes effects. IDs alone exceed128KiB; the
-        // other caps independently exercise the offset and bitmap minima.
-        // These are required layout lower bounds, NOT exact Vec capacities.
-        for cap in [128 * 1024, ids + offsets - 1, ids + offsets + bitmap - 1] {
-            resource_run(
+        let value = ScalarValue::Bytes(payload);
+        let mut services = Bindings::new(&[ft], vec![vec![value.clone()]]);
+        let rows = 16_384;
+        for cap in [0, 128 * 1024] {
+            services.reads.clear();
+            let output = run_with_limit(
                 &mut program,
                 &mut services,
                 &vec![0; rows],
                 cap,
                 &mut EvalContext::default(),
             );
-            assert!(services.reads.is_empty());
+            assert_batch(&output, &vec![value.clone(); rows], &vec![id(0); rows]);
+            assert_eq!(services.reads.len(), rows);
         }
-        let output = program
-            .eval_with_bindings(
-                ExecutionLimits {
-                    max_retained_bytes: 1024 * 1024,
-                    ..ExecutionLimits::default()
-                },
-                &mut EvalContext::default(),
-                1,
-                &vec![0; rows],
-                &mut services,
-            )
-            .unwrap();
-        assert_eq!(output.values().len(), rows);
-        assert_eq!(output.result_metadata().len(), rows);
-        assert_eq!(services.reads.len(), rows);
     }
 }
 
@@ -1396,14 +1362,22 @@ fn lineage_unselected_large_constant_is_not_materialized_or_reinterpreted() {
     assert_eq!(services.reads.len(), 1);
     services.reads.clear();
     services.columns[0][0] = ScalarValue::Int(Some(1));
-    resource_run(
+    let output = run_with_limit(
         &mut program,
         &mut services,
         &[0, 0],
         64 * 1024,
         &mut EvalContext::default(),
     );
-    assert_eq!(services.reads.len(), 1);
+    assert_batch(
+        &output,
+        &[
+            ScalarValue::Bytes(Some(huge.clone())),
+            ScalarValue::Bytes(Some(huge)),
+        ],
+        &[id(2); 2],
+    );
+    assert_eq!(services.reads.len(), 2);
 }
 
 #[test]

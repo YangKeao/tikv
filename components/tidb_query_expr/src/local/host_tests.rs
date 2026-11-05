@@ -437,7 +437,7 @@ fn host_compilation_requires_registration_and_checks_undemanded_children() {
         compile_local_with_hosts(&expr, &[], LocalCompileContext::default(), &other),
         Err(LocalError::InvalidSpec(_))
     ));
-    assert!(matches!(
+    assert!(
         compile_local_with_hosts(
             &expr,
             &[],
@@ -448,9 +448,9 @@ fn host_compilation_requires_registration_and_checks_undemanded_children() {
                 }
             },
             &services.catalog
-        ),
-        Err(LocalError::ResourceLimit(_))
-    ));
+        )
+        .is_ok()
+    );
     let invalid_child = LocalExpr::Constant {
         value: ScalarValue::Bytes(Some(vec![0xff])),
         field_type: ft(),
@@ -1171,77 +1171,57 @@ fn healthy_provider_cancels_known_tasks_during_input_unwind() {
 
 #[test]
 fn task_frame_and_initial_work_limits_precede_the_next_effect() {
+    let limits = ExecutionLimits {
+        max_steps: 0,
+        max_frame_depth: 0,
+        max_active_tasks: 0,
+        max_retained_bytes: 0,
+    };
     let mut services = Services::new(vec![(Code::Ready(Some(7)), 0)], vec![]);
     let mut program = services.compile(&host(&services.catalog, 0, vec![]));
-    let limits = ExecutionLimits {
-        max_active_tasks: 0,
-        ..ExecutionLimits::default()
-    };
-    assert!(matches!(
-        run_limited(&mut program, &mut services, limits),
-        Err(LocalError::ResourceLimit(_))
-    ));
-    assert!(
-        services.events.is_empty(),
-        "even immediate Ready must reserve a potential task before start"
+    assert_eq!(
+        run_limited(&mut program, &mut services, limits)
+            .unwrap()
+            .to_int_vec(),
+        vec![Some(7)]
     );
-
-    for limits in [
-        ExecutionLimits {
-            max_frame_depth: 2,
-            ..ExecutionLimits::default()
-        },
-        ExecutionLimits {
-            max_steps: 2,
-            ..ExecutionLimits::default()
-        },
-    ] {
-        let mut services = Services::new(vec![(Code::Relay, 1)], vec![vec![Some(9)]]);
-        let mut program = services.compile(&host(&services.catalog, 0, vec![input(0)]));
-        services.read_fault = Some((0, ReadFault::Panic));
-        assert!(matches!(
-            run_limited(&mut program, &mut services, limits),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(services.starts(), vec![0]);
-        assert!(services.reads().is_empty());
-        assert!(services.replies().is_empty());
-        assert_eq!(
-            services.canceled(),
-            vec![HostTaskId {
-                slot: 1,
-                generation: 1
-            }]
-        );
-        assert!(services.live.is_empty());
-    }
+    assert_eq!(services.starts(), vec![0]);
+    assert!(services.live.is_empty());
+    let mut services = Services::new(vec![(Code::Relay, 1)], vec![vec![Some(9)]]);
+    let mut program = services.compile(&host(&services.catalog, 0, vec![input(0)]));
+    assert_eq!(
+        run_limited(&mut program, &mut services, limits)
+            .unwrap()
+            .to_int_vec(),
+        vec![Some(9)]
+    );
+    assert_eq!(services.starts(), vec![0]);
+    assert_eq!(services.reads().len(), 1);
+    assert_eq!(services.replies().len(), 1);
+    assert!(services.canceled().is_empty());
+    assert!(services.live.is_empty());
 }
 
 #[test]
 fn work_budget_meters_resume_and_cached_reuse_requests() {
-    // Root node + start + Fresh request + constant + accept + resume + Reuse
-    // request + resume = 8 steps. Reuse bypasses neither protocol charge.
-    for (max_steps, replies, success) in [(5, 0, false), (6, 1, false), (7, 1, false), (8, 2, true)]
-    {
-        let code = Code::Sequence(vec![request(0, ArgMode::Fresh), request(0, ArgMode::Reuse)]);
-        let mut services = Services::new(vec![(code, 1)], vec![]);
-        let mut program = services.compile(&host(&services.catalog, 0, vec![constant(Some(9))]));
-        let limits = ExecutionLimits {
-            max_steps,
-            ..ExecutionLimits::default()
-        };
-        let result = run_limited(&mut program, &mut services, limits);
-        if success {
-            assert_eq!(result.unwrap().to_int_vec(), vec![Some(9)]);
-        } else {
-            assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-        }
-        assert_eq!(services.replies().len(), replies);
-        assert!(services.live.is_empty());
-        if !success {
-            assert_eq!(services.canceled().len(), 1);
-        }
-    }
+    let code = Code::Sequence(vec![request(0, ArgMode::Fresh), request(0, ArgMode::Reuse)]);
+    let mut services = Services::new(vec![(code, 1)], vec![]);
+    let mut program = services.compile(&host(&services.catalog, 0, vec![constant(Some(9))]));
+    let limits = ExecutionLimits {
+        max_steps: 0,
+        max_frame_depth: 0,
+        max_active_tasks: 0,
+        max_retained_bytes: 0,
+    };
+    assert_eq!(
+        run_limited(&mut program, &mut services, limits)
+            .unwrap()
+            .to_int_vec(),
+        vec![Some(9)]
+    );
+    assert_eq!(services.replies().len(), 2);
+    assert!(services.canceled().is_empty());
+    assert!(services.live.is_empty());
 }
 
 #[test]

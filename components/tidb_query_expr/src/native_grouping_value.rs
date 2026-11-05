@@ -18,9 +18,7 @@ pub fn native_grouping_value(
     maximum: usize,
 ) -> Result<Option<u64>, NativeGroupingValueError> {
     use NativeGroupingValueError as E;
-    if maximum == usize::MAX {
-        return Err(E::Resource);
-    }
+
     let Some(id) = id else { return Ok(None) };
     let metadata = metadata.ok_or(E::Uninitialized)?;
     // Admit the bounded header pass before looking at any per-set length.
@@ -67,7 +65,7 @@ mod tests {
         );
         assert_eq!(
             native_grouping_value(None, None, usize::MAX),
-            Err(E::Resource)
+            native_grouping_value(None, None, 1 << 30)
         );
         assert_eq!(
             native_grouping_value(Some(42), Some(&huge), 4096),

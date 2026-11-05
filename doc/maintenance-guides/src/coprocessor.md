@@ -135,6 +135,25 @@ collection and finalization are in `src/coprocessor/batch.rs`.
 
 ### In-process expression-library consumers
 
+The local expression graph no longer enforces the experimental Demo compile,
+frame, step, task, retained-storage or conversion-work allowances. `CompileLimits`
+and `ExecutionLimits` remain source-compatible inputs, but their fields are inert;
+`local::value_work` retains compatibility entrypoints without a thread-local work
+counter. This does not change coprocessor request deadlines, request memory
+tracking, resource groups, or the explicit contracts of independent native-value
+and transport helpers.
+
+Immutable cache-slot, diagnostic and numeric-parent facts are checked at program
+preparation. Each actual batch still requires its schema, selected physical rows
+and input lengths to be checked, and each newly received callback result still
+requires its declared carrier and shape to be checked. Removing Demo accounting
+must not remove these trust-boundary checks, change left-to-right lazy demand,
+retry a consumed host task, or introduce a fallback evaluator. The shared driver
+uses inline storage for common small frame/argument stacks and grows normally
+when those buffers spill; inline capacity is not an execution limit. Test-only
+storage observations are explicit snapshots rather than runtime enforcement.
+
+
 `NativeContextCache` can reserve an initializer with `begin_initialization`.
 A hit returns the existing `Arc`; a miss returns a non-cloneable
 `NativeCacheInitialization` before any constructor inputs are demanded. Keep that

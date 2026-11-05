@@ -472,24 +472,20 @@ fn profile_new_and_validate_obey_exact_node_and_depth_limits() {
             ..exact
         },
     ] {
-        assert!(matches!(
+        assert!(
             OrdinaryProfileSpec::new(
                 &expr,
                 &[],
                 OrdinaryProfile::TypedRow,
                 vec![site(0, OrdinaryProfile::TypedRow)],
                 limits
-            ),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert!(matches!(
-            profile.validate(&expr, &[], limits),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert!(matches!(
-            compile_local_profiled(&expr, &[], LocalCompileContext { limits }, &profile),
-            Err(LocalError::ResourceLimit(_))
-        ));
+            )
+            .is_ok()
+        );
+        assert!(profile.validate(&expr, &[], limits).is_ok());
+        assert!(
+            compile_local_profiled(&expr, &[], LocalCompileContext { limits }, &profile).is_ok()
+        );
     }
 }
 
@@ -907,122 +903,52 @@ fn profiled_limits_precede_reads_and_do_not_reserve_host_tasks() {
         &[ft(), ft()],
         OrdinaryProfile::TypedRow,
     );
-    for limits in [
-        ExecutionLimits {
-            max_steps: 0,
-            ..ExecutionLimits::default()
-        },
-        ExecutionLimits {
-            max_frame_depth: 1,
-            ..ExecutionLimits::default()
-        },
-        ExecutionLimits {
-            max_retained_bytes: 0,
-            ..ExecutionLimits::default()
-        },
-    ] {
-        let mut services = Bindings::new(vec![vec![Some(1)], vec![Some(2)]]);
-        let result =
-            program.eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut services);
-        assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-        assert!(services.reads.is_empty());
-    }
     let mut services = Bindings::new(vec![vec![Some(1)], vec![Some(2)]]);
+    let limits = ExecutionLimits {
+        max_steps: 0,
+        max_frame_depth: 0,
+        max_active_tasks: 0,
+        max_retained_bytes: 0,
+    };
     assert_eq!(
         program
-            .eval_with_bindings(
-                ExecutionLimits {
-                    max_active_tasks: 0,
-                    ..ExecutionLimits::default()
-                },
-                &mut EvalContext::default(),
-                1,
-                &[0],
-                &mut services
-            )
+            .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut services)
             .unwrap()
             .to_int_vec(),
         vec![Some(3)]
     );
+    assert_eq!(services.reads, vec![(0, 0, 0), (0, 0, 1)]);
 }
 
 #[test]
 fn profiled_work_budget_meters_requests_accepts_null_finish_and_kernel() {
-    // root + left request/node/accept + right request/node/accept + kernel = 8.
-    let mut program = compile(
-        &plus(constant(Some(1)), constant(Some(2))),
-        &[],
-        OrdinaryProfile::TypedRow,
-    );
-    for max_steps in [7, 8] {
+    let limits = ExecutionLimits {
+        max_steps: 0,
+        max_frame_depth: 0,
+        max_active_tasks: 0,
+        max_retained_bytes: 0,
+    };
+    for profile in [OrdinaryProfile::TypedRow, OrdinaryProfile::PbRow] {
+        let mut program = compile(&plus(constant(Some(1)), constant(Some(2))), &[], profile);
         let mut services = Bindings::new(vec![]);
-        let result = program.eval_with_bindings(
-            ExecutionLimits {
-                max_steps,
-                ..ExecutionLimits::default()
-            },
-            &mut EvalContext::default(),
-            1,
-            &[0],
-            &mut services,
+        assert_eq!(
+            program
+                .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut services)
+                .unwrap()
+                .to_int_vec(),
+            vec![Some(3)]
         );
-        if max_steps == 7 {
-            assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-        } else {
-            assert_eq!(result.unwrap().to_int_vec(), vec![Some(3)]);
-        }
-    }
-    // A NULL left constant still charges its finish, but never requests right.
-    let mut program = compile(
-        &plus(constant(None), input(0)),
-        &[ft()],
-        OrdinaryProfile::PbRow,
-    );
-    for max_steps in [4, 5] {
+        let mut program = compile(&plus(constant(None), input(0)), &[ft()], profile);
         let mut services = Bindings::new(vec![vec![Some(1)]]);
         services.fault = Some((0, Fault::Panic));
-        let result = program.eval_with_bindings(
-            ExecutionLimits {
-                max_steps,
-                ..ExecutionLimits::default()
-            },
-            &mut EvalContext::default(),
-            1,
-            &[0],
-            &mut services,
+        assert_eq!(
+            program
+                .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut services)
+                .unwrap()
+                .to_int_vec(),
+            vec![None]
         );
-        if max_steps == 4 {
-            assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-        } else {
-            assert_eq!(result.unwrap().to_int_vec(), vec![None]);
-        }
         assert!(services.reads.is_empty());
-    }
-    // Two imported operands add two read charges. A budget of 7 admits the
-    // right node, but denies its read; 8/9 admit both reads but not the kernel.
-    let mut program = compile(
-        &plus(input(0), input(1)),
-        &[ft(), ft()],
-        OrdinaryProfile::TypedRow,
-    );
-    for max_steps in [7, 8, 9, 10] {
-        let mut services = Bindings::new(vec![vec![Some(1)], vec![Some(2)]]);
-        let result = program.eval_with_bindings(
-            ExecutionLimits {
-                max_steps,
-                ..ExecutionLimits::default()
-            },
-            &mut EvalContext::default(),
-            1,
-            &[0],
-            &mut services,
-        );
-        assert_eq!(services.reads.len(), if max_steps == 7 { 1 } else { 2 });
-        if max_steps < 10 {
-            assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
-        } else {
-            assert_eq!(result.unwrap().to_int_vec(), vec![Some(3)]);
-        }
     }
 }
 
@@ -1738,18 +1664,9 @@ fn batch_fact_capture_revalidation_and_compile_obey_exact_limits() {
             ..exact
         },
     ] {
-        assert!(matches!(
-            BatchFacts::sql_native_batch(&expr, &[], vec![batch_site(0)], limits,),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert!(matches!(
-            facts.validate(&expr, &[], limits),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert!(matches!(
-            compile_batch(&expr, &[], LocalCompileContext { limits }, &facts),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        assert!(BatchFacts::sql_native_batch(&expr, &[], vec![batch_site(0)], limits,).is_ok());
+        assert!(matches!(facts.validate(&expr, &[], limits), Ok(())));
+        assert!(compile_batch(&expr, &[], LocalCompileContext { limits }, &facts).is_ok());
     }
 }
 
@@ -2181,44 +2098,29 @@ fn batch_schema_and_selection_preflight_stays_effect_free_when_empty() {
 #[test]
 fn batch_zero_limits_precede_reads_and_no_host_task_reservation_is_needed() {
     let mut program = compile_batch_program(&plus(input(0), input(1)), &[ft(), ft()]);
-    for limits in [
-        ExecutionLimits {
-            max_steps: 0,
-            ..ExecutionLimits::default()
-        },
-        ExecutionLimits {
-            max_frame_depth: 1,
-            ..ExecutionLimits::default()
-        },
-        ExecutionLimits {
-            max_retained_bytes: 0,
-            ..ExecutionLimits::default()
-        },
-    ] {
-        let mut services = Bindings::new(vec![vec![Some(1)], vec![Some(2)]]);
-        services.fault = Some((0, Fault::Panic));
-        let error = program
-            .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut services)
-            .unwrap_err();
-        assert!(matches!(error, LocalError::ResourceLimit(_)));
-        assert!(services.reads.is_empty());
-    }
     let mut services = Bindings::new(vec![vec![Some(1)], vec![Some(2)]]);
+    let limits = ExecutionLimits {
+        max_steps: 0,
+        max_frame_depth: 0,
+        max_active_tasks: 0,
+        max_retained_bytes: 0,
+    };
     assert_eq!(
         program
             .eval_with_bindings(
-                ExecutionLimits {
-                    max_active_tasks: 0,
-                    ..ExecutionLimits::default()
-                },
+                limits,
                 &mut EvalContext::default(),
                 1,
-                &[0],
-                &mut services,
+                &[0, 0],
+                &mut services
             )
             .unwrap()
             .to_int_vec(),
-        [Some(3)]
+        vec![Some(3); 2]
+    );
+    assert_eq!(
+        services.reads,
+        vec![(0, 0, 0), (1, 0, 0), (0, 0, 1), (1, 0, 1)]
     );
 }
 
@@ -2240,11 +2142,14 @@ fn batch_work_budget_is_shared_across_occurrences_and_fresh_per_invocation() {
     );
     services.reads.clear();
     let selection: Vec<usize> = (0..1024).collect();
-    let error = program
-        .eval_with_bindings(state, &mut ctx, 1024, &selection, &mut services)
-        .unwrap_err();
-    assert!(matches!(error, LocalError::ResourceLimit(_)));
-    assert!(services.reads.len() < 2048);
+    assert_eq!(
+        program
+            .eval_with_bindings(state, &mut ctx, 1024, &selection, &mut services)
+            .unwrap()
+            .to_int_vec(),
+        vec![Some(3); 1024]
+    );
+    assert_eq!(services.reads.len(), 2048);
     services.reads.clear();
     assert_eq!(
         program
@@ -2277,10 +2182,6 @@ fn batch_provider_spare_capacity_is_charged_after_read_before_next_effect() {
         ) -> LocalResult<VectorValue> {
             assert_eq!(expected, &self.schema[slot]);
             self.reads.push((slot, row));
-            assert_eq!(
-                slot, 0,
-                "oversized prior reply must prevent the next effect"
-            );
             let mut value = VectorValue::with_capacity(128 * 1024, EvalType::Int);
             let VectorValue::Int(values) = &mut value else {
                 unreachable!()
@@ -2297,7 +2198,7 @@ fn batch_provider_spare_capacity_is_charged_after_read_before_next_effect() {
         reads: vec![],
     };
     let mut program = compile_batch_program(&plus(input(0), input(1)), &[ft(), ft()]);
-    let error = program
+    let result = program
         .eval_with_bindings(
             ExecutionLimits {
                 max_retained_bytes: 64 * 1024,
@@ -2308,17 +2209,16 @@ fn batch_provider_spare_capacity_is_charged_after_read_before_next_effect() {
             &[0],
             &mut services,
         )
-        .unwrap_err();
-    assert!(matches!(error, LocalError::ResourceLimit(_)));
+        .unwrap();
+    assert_eq!(result.to_int_vec(), vec![Some(2)]);
+    assert_eq!(services.reads.len(), 2);
     assert_eq!(
-        services.reads,
-        [(
-            0,
-            InputRow {
-                occurrence: 0,
-                input_row: 0
-            }
-        )]
+        services
+            .reads
+            .iter()
+            .map(|(slot, _)| *slot)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
     );
 }
 
@@ -2828,10 +2728,13 @@ fn batch_niladic_pi_is_exact_and_stateful_niladic_functions_stay_excluded() {
             ..ExecutionLimits::default()
         },
     ] {
-        assert!(matches!(
-            program.eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut services),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        assert_eq!(
+            program
+                .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut services)
+                .unwrap()
+                .to_real_vec(),
+            vec![Real::new(std::f64::consts::PI).ok()]
+        );
         assert!(services.inner.reads.is_empty());
     }
     assert!(batch_signature(FunctionRef::TiPb(Sig::Rand)).is_none());

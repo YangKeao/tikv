@@ -178,14 +178,11 @@ impl<'a> NativeDateArithmeticValues<'a> {
         config: NativeDateArithmeticValueConfig,
         maximum: usize,
     ) -> Result<Self> {
-        if maximum == usize::MAX {
-            return Err(Error::ResourceLimit);
-        }
         Ok(Self::from_values(
             inputs.map(ValueInput::from),
             unit,
             config,
-            Some(maximum),
+            (maximum != usize::MAX).then_some(maximum),
         ))
     }
     pub(super) fn from_values(
@@ -838,7 +835,7 @@ mod tests {
                 NativeDateArithmeticValueConfig::calendar(1, None),
                 usize::MAX
             )
-            .is_err()
+            .is_ok()
         );
         let mut wrong = NativeDateArithmeticValues::new(
             [Input::String(b"2020-01-01"), Input::Int(1)],

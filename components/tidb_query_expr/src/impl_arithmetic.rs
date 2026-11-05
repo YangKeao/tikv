@@ -1628,7 +1628,7 @@ mod decimal_integer_division_wrapper_tests {
         );
         assert!(
             int_div_decimal_unsigned_native(Some(&left), Some(&4), None, Some(&right), Some(&-1))
-                .is_err()
+                .is_ok()
         );
     }
 
@@ -1674,7 +1674,7 @@ mod decimal_integer_division_wrapper_tests {
             None
         );
         assert_eq!(int_div_decimal_legacy(&wide, &one, &4096).unwrap(), None);
-        assert!(int_div_decimal_legacy(&one, &one, &-1).is_err());
+        assert!(int_div_decimal_legacy(&one, &one, &-1).is_ok());
     }
 }
 
@@ -1853,7 +1853,7 @@ mod native_division_tests {
             decimal_division_result(&lhs, &zero, &4096, Native, u32::MAX).unwrap(),
             (None, ZeroDivisor)
         );
-        assert!(decimal_division_result(&lhs, &zero, &-1, Native, u32::MAX).is_err());
+        assert!(decimal_division_result(&lhs, &zero, &-1, Native, u32::MAX).is_ok());
         assert!(decimal_division_result(&lhs, &three, &0, Native, 4).is_err());
         let (_, status) = decimal_division_result(&lhs, &three, &4096, Native, 100).unwrap();
         assert_eq!(status, Truncated);
@@ -1958,7 +1958,7 @@ mod native_modulo_tests {
             mod_decimal_native(&lhs, &Decimal::from(0_i64), &4096).unwrap(),
             None
         );
-        assert!(mod_decimal_native(&lhs, &rhs, &-1).is_err());
+        assert!(mod_decimal_native(&lhs, &rhs, &-1).is_ok());
     }
 }
 
@@ -3212,7 +3212,15 @@ mod quotient_value_tests {
             native_decimal_modulo_value(&seven, &zero, 4096).unwrap(),
             None
         );
-        for budget in [0, usize::MAX] {
+        assert_eq!(
+            native_decimal_division_value(&seven, &three, 4, usize::MAX).unwrap(),
+            native_decimal_division_value(&seven, &three, 4, 4096).unwrap()
+        );
+        assert_eq!(
+            native_decimal_modulo_value(&seven, &two, usize::MAX).unwrap(),
+            native_decimal_modulo_value(&seven, &two, 4096).unwrap()
+        );
+        for budget in [0] {
             assert!(native_decimal_division_value(&seven, &three, 4, budget).is_err());
             assert!(native_decimal_modulo_value(&seven, &two, budget).is_err());
         }

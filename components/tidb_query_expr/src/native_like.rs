@@ -201,9 +201,6 @@ struct LikeWork {
 }
 impl LikeWork {
     fn new(maximum: usize) -> Result<Self, NativeLikeValueError> {
-        if maximum == usize::MAX {
-            return Err(NativeLikeValueError::Resource);
-        }
         Ok(Self { remaining: maximum })
     }
     fn take(&mut self, bytes: usize, factor: usize) -> Result<(), NativeLikeValueError> {
@@ -574,7 +571,7 @@ mod tests {
         assert_eq!(uncached.evaluate_bounded(b"", b"", 92, 0), Ok(true));
         assert_eq!(
             uncached.evaluate_bounded(b"a", b"%", 92, usize::MAX),
-            Err(Resource)
+            uncached.evaluate_bounded(b"a", b"%", 92, 1 << 30)
         );
         let cache = NativeContextCache::new();
         let invocation = NativeLikeInvocation::like(policy, Some((&cache, 7)));

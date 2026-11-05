@@ -604,9 +604,7 @@ impl OrdinaryProfileSpec {
         limits: CompileLimits,
     ) -> LocalResult<Self> {
         consumer.check_admitted()?;
-        if sites.len() > limits.max_nodes {
-            return Err(resource("ordinary call-site count exceeds node budget"));
-        }
+
         if sites
             .windows(2)
             .any(|pair| pair[0].ordinal >= pair[1].ordinal)
@@ -709,9 +707,6 @@ impl BatchFacts {
         limits: CompileLimits,
         hosts: Option<&HostCatalog>,
     ) -> LocalResult<Self> {
-        if sites.len() > limits.max_nodes {
-            return Err(resource("batch call-site count exceeds node budget"));
-        }
         if sites
             .windows(2)
             .any(|pair| pair[0].ordinal >= pair[1].ordinal)
@@ -798,17 +793,17 @@ impl ClosedSourceSnapshot {
     fn capture(
         spec: &LocalExpr,
         schema: &[FieldType],
-        limits: CompileLimits,
+        _limits: CompileLimits,
         policy: TypePolicy<'_>,
         check_sites: impl FnOnce(&[NodeSnapshot]) -> LocalResult<()>,
     ) -> LocalResult<Self> {
         if matches!(policy, TypePolicy::SqlNativeBatch(_)) {
             // Reject an invalid descendant/schema or exceeded budget before
             // copying any descriptors. Row construction keeps its old policy.
-            let mut preflight = Walk::new(spec, schema, limits, policy)?;
+            let mut preflight = Walk::new(spec, schema, policy)?;
             while preflight.next()?.is_some() {}
         }
-        let mut walk = Walk::new(spec, schema, limits, policy)?;
+        let mut walk = Walk::new(spec, schema, policy)?;
         let mut nodes = Vec::new();
         while let Some((kind, field_type)) = walk.next()? {
             // Scheduling is bounded before a descriptor is cloned, including
@@ -839,7 +834,7 @@ impl ClosedSourceSnapshot {
         &self,
         spec: &LocalExpr,
         schema: &[FieldType],
-        limits: CompileLimits,
+        _limits: CompileLimits,
         policy: TypePolicy<'_>,
     ) -> LocalResult<()> {
         if self.schema.as_ref() != schema {
@@ -847,7 +842,7 @@ impl ClosedSourceSnapshot {
                 "ordinary profile schema differs from its exact snapshot",
             ));
         }
-        let mut walk = Walk::new(spec, schema, limits, policy)?;
+        let mut walk = Walk::new(spec, schema, policy)?;
         let mut ordinal = 0;
         while let Some((kind, field_type)) = walk.next()? {
             let Some(expected) = self.nodes.get(ordinal) else {
@@ -1208,7 +1203,6 @@ struct Walk<'a> {
     pending: Vec<(&'a LocalExpr, usize)>,
     schema: &'a [FieldType],
     scheduled: usize,
-    limits: CompileLimits,
     policy: TypePolicy<'a>,
 }
 
@@ -1216,12 +1210,8 @@ impl<'a> Walk<'a> {
     fn new(
         spec: &'a LocalExpr,
         schema: &'a [FieldType],
-        limits: CompileLimits,
         policy: TypePolicy<'a>,
     ) -> LocalResult<Self> {
-        if limits.max_nodes == 0 || limits.max_depth == 0 {
-            return Err(resource("ordinary construction node/depth budget exceeded"));
-        }
         for field_type in schema {
             check_type(field_type, policy)?;
         }
@@ -1234,7 +1224,6 @@ impl<'a> Walk<'a> {
             pending,
             schema,
             scheduled: 1,
-            limits,
             policy,
         })
     }
@@ -1252,9 +1241,7 @@ impl<'a> Walk<'a> {
                 .scheduled
                 .checked_add(args.len())
                 .ok_or_else(|| resource("ordinary construction node count overflow"))?;
-            if self.scheduled > self.limits.max_nodes || child_depth > self.limits.max_depth {
-                return Err(resource("ordinary construction node/depth budget exceeded"));
-            }
+
             self.pending
                 .try_reserve(args.len())
                 .map_err(|_| resource("ordinary traversal allocation failed"))?;

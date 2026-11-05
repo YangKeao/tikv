@@ -395,58 +395,39 @@ fn local_controls_validate_arity_before_execution() {
 fn local_execution_defaults_and_small_refusals_are_explicit() {
     let defaults = ExecutionLimits::default();
     assert_eq!(defaults.max_steps, u64::MAX);
-    assert_eq!(defaults.max_frame_depth, 1024);
-    assert_eq!(defaults.max_active_tasks, 256);
-    assert_eq!(defaults.max_retained_bytes, 64 * 1024 * 1024);
+    assert_eq!(defaults.max_frame_depth, usize::MAX);
+    assert_eq!(defaults.max_active_tasks, usize::MAX);
+    assert_eq!(defaults.max_retained_bytes, usize::MAX);
     let mut program = compile(
         &call(Sig::IfInt, vec![constant(Some(1)), input(0), input(1)]),
         2,
     );
-    for limits in [
-        ExecutionLimits {
-            max_steps: 0,
-            ..defaults
-        },
-        ExecutionLimits {
-            max_frame_depth: 1,
-            ..defaults
-        },
-        ExecutionLimits {
-            max_retained_bytes: 0,
-            ..defaults
-        },
-    ] {
-        let mut bindings = Bindings::new(vec![vec![Some(8)], vec![]]);
-        assert!(matches!(
-            program.eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut bindings),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert!(bindings.trace.is_empty());
-        assert!(
-            program
-                .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[], &mut bindings)
-                .unwrap()
-                .is_empty()
-        );
-    }
-    // Tasks are not implemented in C2a; zero task capacity does not invent a
-    // HostCall restriction or a cancellation guarantee for ordinary evaluation.
+    let limits = ExecutionLimits {
+        max_steps: 0,
+        max_frame_depth: 0,
+        max_active_tasks: 0,
+        max_retained_bytes: 0,
+    };
     let mut bindings = Bindings::new(vec![vec![Some(8)], vec![]]);
     assert_eq!(
         program
             .eval_with_bindings(
-                ExecutionLimits {
-                    max_active_tasks: 0,
-                    ..defaults
-                },
+                limits,
                 &mut EvalContext::default(),
                 1,
-                &[0],
+                &[0, 0],
                 &mut bindings
             )
             .unwrap()
             .to_int_vec(),
-        vec![Some(8)]
+        vec![Some(8); 2]
+    );
+    assert_eq!(bindings.trace, vec![(0, 0, 0), (1, 0, 0)]);
+    assert!(
+        program
+            .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[], &mut bindings)
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -458,17 +439,20 @@ fn local_work_limit_is_shared_across_occurrences_and_fresh_per_invocation() {
         max_steps: 2,
         ..ExecutionLimits::default()
     }; // one node plus one demanded read
-    assert!(matches!(
-        program.eval_with_bindings(
-            limits,
-            &mut EvalContext::default(),
-            1,
-            &[0, 0],
-            &mut bindings
-        ),
-        Err(LocalError::ResourceLimit(_))
-    ));
-    assert_eq!(bindings.trace, vec![(0, 0, 0)]);
+    assert_eq!(
+        program
+            .eval_with_bindings(
+                limits,
+                &mut EvalContext::default(),
+                1,
+                &[0, 0],
+                &mut bindings
+            )
+            .unwrap()
+            .to_int_vec(),
+        vec![Some(8); 2]
+    );
+    assert_eq!(bindings.trace, vec![(0, 0, 0), (1, 0, 0)]);
     assert_eq!(
         program
             .eval_with_bindings(limits, &mut EvalContext::default(), 1, &[0], &mut bindings)

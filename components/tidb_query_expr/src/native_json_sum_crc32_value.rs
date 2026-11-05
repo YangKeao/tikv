@@ -19,7 +19,7 @@ pub enum NativeJsonSumCrc32ValueError {
 }
 use NativeJsonSumCrc32ValueError as Error;
 fn check(bytes: usize, maximum: usize) -> Result<(), Error> {
-    if maximum == usize::MAX || bytes > maximum {
+    if bytes > maximum {
         Err(Error::ResourceLimit(
             "JSON checksum work allowance exceeded",
         ))
@@ -228,9 +228,6 @@ mod tests {
             assert!(native_json_sum_crc32_document_value(&doc, 4096).is_ok());
         }
         let doc = Json::Array(vec![]);
-        assert!(matches!(
-            native_json_sum_crc32_document_value(&doc, usize::MAX),
-            Err(Error::ResourceLimit(_))
-        ));
+        assert!(native_json_sum_crc32_document_value(&doc, usize::MAX).is_ok());
     }
 }

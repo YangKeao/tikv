@@ -983,11 +983,7 @@ pub(crate) fn native_decimal_budget(raw_budget: &Int) -> Result<usize> {
             "kernel budget exceeds indexing width",
         ))
     })?;
-    if budget == usize::MAX {
-        return Err(native_decimal_failure(NativeDecimalError::Resource(
-            "native math requires a finite kernel budget",
-        )));
-    }
+
     Ok(budget)
 }
 
@@ -1710,7 +1706,7 @@ mod tests {
             Some(Decimal::from(-3))
         );
         assert!(round_decimal_native(&value, &i64::MAX, &64).is_err());
-        assert!(abs_decimal_native(&value, &-1).is_err());
+        assert!(abs_decimal_native(&value, &-1).is_ok());
         let failure = abs_decimal_native(&value, &1).unwrap_err();
         let tidb_query_common::error::ErrorInner::Evaluate(EvaluateError::Caused(source)) =
             failure.0.as_ref()

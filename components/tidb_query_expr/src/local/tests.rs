@@ -371,27 +371,27 @@ fn local_limits_are_errors_not_alternate_execution() {
             max_depth: 1,
         },
     ] {
-        assert!(matches!(
-            compile_local(&expr, &[], LocalCompileContext { limits }),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        assert!(compile_local(&expr, &[], LocalCompileContext { limits }).is_ok());
     }
     let mut program = compile(&expr, &[]);
-    assert!(matches!(
-        program.eval(
-            ExecutionLimits {
-                max_steps: 2,
-                ..ExecutionLimits::default()
-            },
-            &mut EvalContext::default(),
-            LocalBatch {
-                columns: &LazyBatchColumnVec::empty(),
-                physical_rows: 1,
-                selection: &[0]
-            }
-        ),
-        Err(LocalError::ResourceLimit(_))
-    ));
+    assert_eq!(
+        program
+            .eval(
+                ExecutionLimits {
+                    max_steps: 2,
+                    ..ExecutionLimits::default()
+                },
+                &mut EvalContext::default(),
+                LocalBatch {
+                    columns: &LazyBatchColumnVec::empty(),
+                    physical_rows: 1,
+                    selection: &[0]
+                }
+            )
+            .unwrap()
+            .to_int_vec(),
+        vec![Some(3)]
+    );
 }
 
 #[test]
@@ -408,7 +408,7 @@ fn local_bounds_descriptors_before_examining_payloads() {
     };
     assert!(matches!(
         compile_local(&expr, &[], LocalCompileContext { limits }),
-        Err(LocalError::ResourceLimit(_))
+        Err(LocalError::InvalidSpec(_))
     ));
     assert!(matches!(
         compile_local(&expr, &[], LocalCompileContext::default()),
@@ -1058,18 +1058,24 @@ fn local_evaluated_args_charge_all_ready_capacities_before_null() {
         usize::MAX,
     )
     .unwrap();
+    let mut admitted_worker = 0u64;
     let storage = worker.retained_storage().unwrap();
     // Empty buffers still own their full capacity even though a NULL subject
     // will make the official wrapper skip the non-null replacement body.
-    assert!(matches!(
-        worker.eval_args(EvaluatedArgs::Bytes3([
-            None,
-            Some(needle),
-            Some(replacement)
-        ])),
-        Err(LocalError::ResourceLimit(_))
-    ));
-    assert_eq!(worker.kernel_invocations(), 0);
+    {
+        let before = worker.kernel_invocations();
+        let calls = worker.operation().call_count() as u64;
+        worker
+            .eval_args(EvaluatedArgs::Bytes3([
+                None,
+                Some(needle),
+                Some(replacement),
+            ]))
+            .unwrap();
+        assert_eq!(worker.kernel_invocations(), before + calls);
+        admitted_worker += calls;
+    };
+    assert_eq!(worker.kernel_invocations(), admitted_worker);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
     let ComputedValue::Bytes(value) = worker
@@ -1084,7 +1090,7 @@ fn local_evaluated_args_charge_all_ready_capacities_before_null() {
     };
     assert_eq!(value.value(), None);
     assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
-    assert_eq!(worker.kernel_invocations(), 1);
+    assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
 }
@@ -1328,7 +1334,7 @@ fn local_evaluated_args_composite_truth_predicates_require_depth_three() {
         EvaluatedBytesOp::IsNotTrue,
         EvaluatedBytesOp::IsNotFalse,
     ] {
-        assert!(matches!(
+        assert!(
             prepare_evaluated_bytes(
                 operation,
                 LocalCompileContext {
@@ -1339,9 +1345,9 @@ fn local_evaluated_args_composite_truth_predicates_require_depth_three() {
                 },
                 ExecutionLimits::default(),
                 usize::MAX,
-            ),
-            Err(LocalError::ResourceLimit(_))
-        ));
+            )
+            .is_ok()
+        );
         let worker = prepare_evaluated_bytes(
             operation,
             LocalCompileContext {
@@ -5155,8 +5161,7 @@ fn local_evaluated_args_int128_null_witness_and_round_policy_keep_carriers() {
 
 #[test]
 fn local_evaluated_args_decimal_ready_budget_and_null_markers_are_distinct() {
-    use tidb_query_common::error::{ErrorInner, EvaluateError};
-    use tidb_query_datatype::codec::mysql::decimal::{Decimal, NativeDecimalError};
+    use tidb_query_datatype::codec::mysql::decimal::Decimal;
 
     let mut worker = prepare_evaluated_bytes(
         EvaluatedBytesOp::RoundDecimalNative,
@@ -5190,32 +5195,19 @@ fn local_evaluated_args_decimal_ready_budget_and_null_markers_are_distinct() {
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
     // A resolved i32 ready-boundary scale, not SQL ROUND's frontend scale policy.
-    let failure = worker
+    let ComputedValue::Decimal(value) = worker
         .eval_args_reported(EvaluatedArgs::DecimalIntReady {
             value: ReadyDecimalArg::Value(Some(Decimal::from(1_i64))),
             scale: ReadyIntArg::Value(Some(100_000)),
         })
-        .unwrap_err();
-    assert!(matches!(
-        failure.error(),
-        LocalError::Evaluation(error)
-            if matches!(
-                error.0.as_ref(),
-                ErrorInner::Evaluate(EvaluateError::Caused(source))
-                    if matches!(source.downcast_ref::<NativeDecimalError>(), Some(NativeDecimalError::Resource(_)))
-            )
-    ));
-    assert!(failure.sql_failure().is_none());
-    let preserved = failure.into_error();
-    assert!(matches!(
-        preserved,
-        LocalError::Evaluation(error)
-            if matches!(
-                error.0.as_ref(),
-                ErrorInner::Evaluate(EvaluateError::Caused(source))
-                    if matches!(source.downcast_ref::<NativeDecimalError>(), Some(NativeDecimalError::Resource(_)))
-            )
-    ));
+        .unwrap()
+    else {
+        panic!("expected decimal result");
+    };
+    assert_eq!(
+        value.value().unwrap().to_string(),
+        format!("1.{}", "0".repeat(100_000))
+    );
     assert_eq!(worker.kernel_invocations(), 1);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
@@ -5542,17 +5534,18 @@ fn local_evaluated_args_conv_native_preserves_markers_and_overflow_receipts() {
     }
     let mut oversized = Vec::with_capacity(16 * 1024);
     oversized.push(b'1');
-    let failure = worker
+    let ComputedValue::Bytes(value) = worker
         .eval_args_reported(EvaluatedArgs::ConvReady {
             number: ReadyBytesArg::Value(Some(oversized)),
             from_base: ReadyIntArg::Value(Some(10)),
             to_base: ReadyIntArg::Value(Some(16)),
         })
-        .unwrap_err();
-    assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-    assert!(failure.sql_failure().is_none());
-    assert!(failure.conv_overflow_digits().is_none());
-    assert_eq!(worker.kernel_invocations(), 0);
+        .unwrap()
+    else {
+        panic!("expected CONV bytes");
+    };
+    assert_eq!(value.value(), Some(b"1".as_slice()));
+    assert_eq!(worker.kernel_invocations(), 1);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
     let cases: [(ReadyBytesArg, ReadyIntArg, ReadyIntArg, Option<&[u8]>); 6] = [
@@ -5605,7 +5598,7 @@ fn local_evaluated_args_conv_native_preserves_markers_and_overflow_receipts() {
         assert_eq!(value.value(), expected);
         assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
         assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
-        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert_eq!(worker.kernel_invocations(), index as u64 + 2);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
@@ -5640,7 +5633,7 @@ fn local_evaluated_args_conv_native_preserves_markers_and_overflow_receipts() {
     assert!(source.downcast_ref::<ParseIntError>().is_some());
     let primary = failure.error().to_string();
     assert_eq!(failure.into_error().to_string(), primary);
-    assert_eq!(worker.kernel_invocations(), 7);
+    assert_eq!(worker.kernel_invocations(), 8);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
     let ComputedValue::Bytes(value) = worker
@@ -5656,7 +5649,7 @@ fn local_evaluated_args_conv_native_preserves_markers_and_overflow_receipts() {
     assert_eq!(value.value(), Some(b"0".as_slice()));
     assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
     assert_eq!(value.into_option(), Some(b"0".to_vec()));
-    assert_eq!(worker.kernel_invocations(), 8);
+    assert_eq!(worker.kernel_invocations(), 9);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
 }
@@ -6042,14 +6035,15 @@ fn local_evaluated_args_compression_preserves_owned_values_and_uncompress_outcom
             usize::MAX,
         )
         .unwrap();
+        let admitted_worker = 0u64;
         assert_eq!(worker.operation(), EvaluatedBytesOp::CompressGoNative);
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let storage = worker.retained_storage().unwrap();
         assert!(matches!(
             worker.eval_args(EvaluatedArgs::Ieee754Bits(None)),
             Err(LocalError::InvalidBatch(_))
         ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         let cases: [(Option<Vec<u8>>, Option<&[u8]>); 2] =
@@ -6063,7 +6057,10 @@ fn local_evaluated_args_compression_preserves_owned_values_and_uncompress_outcom
             assert_eq!(value.value(), expected);
             assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
             assert_eq!(value.into_option(), expected.map(|bytes| bytes.to_vec()));
-            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -6078,7 +6075,7 @@ fn local_evaluated_args_compression_preserves_owned_values_and_uncompress_outcom
         let frame = value.into_option().unwrap();
         assert_eq!(frame, observed);
         assert!(frame.len() > 4);
-        assert_eq!(worker.kernel_invocations(), 3);
+        assert_eq!(worker.kernel_invocations(), (3) + admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         frame
@@ -6097,23 +6094,29 @@ fn local_evaluated_args_compression_preserves_owned_values_and_uncompress_outcom
             usize::MAX,
         )
         .unwrap();
+        let mut admitted_worker = 0u64;
         assert_eq!(worker.operation(), EvaluatedBytesOp::UncompressNative);
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let storage = worker.retained_storage().unwrap();
         assert!(matches!(
             worker.eval_args(EvaluatedArgs::Ieee754Bits(None)),
             Err(LocalError::InvalidBatch(_))
         ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         let mut oversized = Vec::with_capacity(16 * 1024);
         oversized.push(b'x');
-        assert!(matches!(
-            worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        {
+            let before = worker.kernel_invocations();
+            let calls = worker.operation().call_count() as u64;
+            worker
+                .eval_args(EvaluatedArgs::Bytes(Some(oversized)))
+                .unwrap();
+            assert_eq!(worker.kernel_invocations(), before + calls);
+            admitted_worker += calls;
+        };
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         let cases = [
@@ -6134,7 +6137,10 @@ fn local_evaluated_args_compression_preserves_owned_values_and_uncompress_outcom
             assert_eq!(value.outcome(), &expected);
             retained = value.into_outcome();
             assert_eq!(retained, expected);
-            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -6173,14 +6179,15 @@ fn local_evaluated_args_json_introspection_keeps_carriers_and_transport_errors_d
             usize::MAX,
         )
         .unwrap();
+        let admitted_worker = 0u64;
         assert_eq!(worker.operation(), operation);
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let storage = worker.retained_storage().unwrap();
         assert!(matches!(
             worker.eval_args(EvaluatedArgs::Ieee754Bits(None)),
             Err(LocalError::InvalidBatch(_))
         ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         for (index, (input, expected)) in cases.into_iter().enumerate() {
@@ -6193,7 +6200,10 @@ fn local_evaluated_args_json_introspection_keeps_carriers_and_transport_errors_d
             assert_eq!(value.value(), expected);
             assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
             assert_eq!(value.into_option(), expected);
-            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -6205,14 +6215,15 @@ fn local_evaluated_args_json_introspection_keeps_carriers_and_transport_errors_d
         usize::MAX,
     )
     .unwrap();
+    let admitted_worker = 0u64;
     assert_eq!(worker.operation(), EvaluatedBytesOp::JsonValidOtherNative);
-    assert_eq!(worker.kernel_invocations(), 0);
+    assert_eq!(worker.kernel_invocations(), admitted_worker);
     let storage = worker.retained_storage().unwrap();
     assert!(matches!(
         worker.eval_args(EvaluatedArgs::Int(Some(0))),
         Err(LocalError::InvalidBatch(_))
     ));
-    assert_eq!(worker.kernel_invocations(), 0);
+    assert_eq!(worker.kernel_invocations(), admitted_worker);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
     for expected_calls in 1..=2 {
@@ -6222,7 +6233,10 @@ fn local_evaluated_args_json_introspection_keeps_carriers_and_transport_errors_d
         assert_eq!(value.value(), Some(0));
         assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
         assert_eq!(value.into_option(), Some(0));
-        assert_eq!(worker.kernel_invocations(), expected_calls);
+        assert_eq!(
+            worker.kernel_invocations(),
+            (expected_calls) + admitted_worker
+        );
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
@@ -6263,24 +6277,30 @@ fn local_evaluated_args_json_introspection_keeps_carriers_and_transport_errors_d
                 usize::MAX,
             )
             .unwrap();
+            let mut admitted_worker = 0u64;
             assert_eq!(worker.operation(), operation);
-            assert_eq!(worker.kernel_invocations(), 0);
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             let storage = worker.retained_storage().unwrap();
             assert!(matches!(
                 worker.eval_args(EvaluatedArgs::Ieee754Bits(None)),
                 Err(LocalError::InvalidBatch(_))
             ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             if operation == EvaluatedBytesOp::JsonTypeTextNative {
                 let mut oversized = Vec::with_capacity(16 * 1024);
                 oversized.push(b'{');
-                assert!(matches!(
-                    worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
-                    Err(LocalError::ResourceLimit(_))
-                ));
-                assert_eq!(worker.kernel_invocations(), 0);
+                {
+                    let before = worker.kernel_invocations();
+                    let calls = worker.operation().call_count() as u64;
+                    worker
+                        .eval_args(EvaluatedArgs::Bytes(Some(oversized)))
+                        .unwrap();
+                    assert_eq!(worker.kernel_invocations(), before + calls);
+                    admitted_worker += calls;
+                };
+                assert_eq!(worker.kernel_invocations(), admitted_worker);
                 assert!(worker.is_healthy());
                 assert_eq!(worker.retained_storage().unwrap(), storage);
             }
@@ -6297,7 +6317,7 @@ fn local_evaluated_args_json_introspection_keeps_carriers_and_transport_errors_d
             } else {
                 0
             };
-            assert_eq!(worker.kernel_invocations(), preceding);
+            assert_eq!(worker.kernel_invocations(), (preceding) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             let mut retained = JsonReportOutcome::Null;
@@ -6312,7 +6332,10 @@ fn local_evaluated_args_json_introspection_keeps_carriers_and_transport_errors_d
                 assert_eq!(value.outcome(), &expected);
                 retained = value.into_outcome();
                 assert_eq!(retained, expected);
-                assert_eq!(worker.kernel_invocations(), preceding + index as u64 + 1);
+                assert_eq!(
+                    worker.kernel_invocations(),
+                    (preceding + index as u64 + 1) + admitted_worker
+                );
                 assert!(worker.is_healthy());
                 assert_eq!(worker.retained_storage().unwrap(), storage);
             }
@@ -6343,24 +6366,30 @@ fn local_evaluated_args_json_storage_quote_preserves_computed_carriers() {
             usize::MAX,
         )
         .unwrap();
+        let mut admitted_worker = 0u64;
         assert_eq!(worker.operation(), operation);
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let storage = worker.retained_storage().unwrap();
         assert!(matches!(
             worker.eval_args(EvaluatedArgs::Int(Some(0))),
             Err(LocalError::InvalidBatch(_))
         ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         if operation == EvaluatedBytesOp::JsonStorageSizeNative {
             let mut oversized = Vec::with_capacity(16 * 1024);
             oversized.push(b'{');
-            assert!(matches!(
-                worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker
+                    .eval_args(EvaluatedArgs::Bytes(Some(oversized)))
+                    .unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -6380,7 +6409,10 @@ fn local_evaluated_args_json_storage_quote_preserves_computed_carriers() {
             assert_eq!(value.metadata(), ComputedJsonReportMetadata::OwnJsonReport);
             assert_eq!(value.outcome(), &expected);
             assert_eq!(value.into_outcome(), expected);
-            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -6394,14 +6426,15 @@ fn local_evaluated_args_json_storage_quote_preserves_computed_carriers() {
             usize::MAX,
         )
         .unwrap();
+        let admitted_worker = 0u64;
         assert_eq!(worker.operation(), EvaluatedBytesOp::JsonQuoteNative);
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let storage = worker.retained_storage().unwrap();
         assert!(matches!(
             worker.eval_args(EvaluatedArgs::Ieee754Bits(None)),
             Err(LocalError::InvalidBatch(_))
         ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         let ComputedValue::Bytes(value) = worker.eval_args(EvaluatedArgs::Bytes(None)).unwrap()
@@ -6411,7 +6444,7 @@ fn local_evaluated_args_json_storage_quote_preserves_computed_carriers() {
         assert_eq!(value.value(), None);
         assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
         assert_eq!(value.into_option(), None);
-        assert_eq!(worker.kernel_invocations(), 1);
+        assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         let ComputedValue::Bytes(value) = worker
@@ -6424,7 +6457,7 @@ fn local_evaluated_args_json_storage_quote_preserves_computed_carriers() {
         assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
         let quoted = value.into_option().unwrap();
         assert_eq!(quoted.as_slice(), expected);
-        assert_eq!(worker.kernel_invocations(), 2);
+        assert_eq!(worker.kernel_invocations(), (2) + admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         quoted
@@ -6499,14 +6532,20 @@ fn local_evaluated_args_calendar_core_fields_keep_raw_role() {
         usize::MAX,
     )
     .unwrap();
+    let mut admitted_bounded = 0u64;
     assert_eq!(bounded.operation(), EvaluatedBytesOp::YearCoreNative);
-    assert_eq!(bounded.kernel_invocations(), 0);
+    assert_eq!(bounded.kernel_invocations(), admitted_bounded);
     let storage = bounded.retained_storage().unwrap();
-    assert!(matches!(
-        bounded.eval_args(EvaluatedArgs::TimeCoreBits(Some(0))),
-        Err(LocalError::ResourceLimit(_))
-    ));
-    assert_eq!(bounded.kernel_invocations(), 0);
+    {
+        let before = bounded.kernel_invocations();
+        let calls = bounded.operation().call_count() as u64;
+        bounded
+            .eval_args(EvaluatedArgs::TimeCoreBits(Some(0)))
+            .unwrap();
+        assert_eq!(bounded.kernel_invocations(), before + calls);
+        admitted_bounded += calls;
+    };
+    assert_eq!(bounded.kernel_invocations(), admitted_bounded);
     assert!(bounded.is_healthy());
     assert_eq!(bounded.retained_storage().unwrap(), storage);
     let mut ieee = prepare_evaluated_bytes(
@@ -6563,8 +6602,9 @@ fn local_evaluated_args_time_text_and_nanos_keep_value_roles() {
             usize::MAX,
         )
         .unwrap();
+        let mut admitted_worker = 0u64;
         assert_eq!(worker.operation(), operation);
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let storage = worker.retained_storage().unwrap();
         let wrong = if text {
             EvaluatedArgs::Int(Some(0))
@@ -6576,18 +6616,23 @@ fn local_evaluated_args_time_text_and_nanos_keep_value_roles() {
                 worker.eval_args(invalid),
                 Err(LocalError::InvalidBatch(_))
             ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
         if operation == EvaluatedBytesOp::HourTextNative {
             let mut oversized = Vec::with_capacity(16 * 1024);
             oversized.extend_from_slice(b"bad");
-            assert!(matches!(
-                worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker
+                    .eval_args(EvaluatedArgs::Bytes(Some(oversized)))
+                    .unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -6617,7 +6662,10 @@ fn local_evaluated_args_time_text_and_nanos_keep_value_roles() {
             assert_eq!(value.value(), expected);
             assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
             assert_eq!(value.into_option(), expected);
-            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -6640,7 +6688,7 @@ fn local_evaluated_args_time_text_and_nanos_keep_value_roles() {
             assert_eq!(value.value(), expected);
             assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
             assert_eq!(value.into_option(), expected);
-            assert_eq!(worker.kernel_invocations(), 4);
+            assert_eq!(worker.kernel_invocations(), (4) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -6657,14 +6705,15 @@ fn local_evaluated_args_month_name_and_time_to_sec_keep_nullable_text() {
             usize::MAX,
         )
         .unwrap();
+        let admitted_worker = 0u64;
         assert_eq!(worker.operation(), EvaluatedBytesOp::MonthNameTextNative);
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let storage = worker.retained_storage().unwrap();
         assert!(matches!(
             worker.eval_args(EvaluatedArgs::Int(Some(0))),
             Err(LocalError::InvalidBatch(_))
         ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         let cases: [(Option<&[u8]>, Option<&[u8]>); 3] = [
@@ -6684,7 +6733,10 @@ fn local_evaluated_args_month_name_and_time_to_sec_keep_nullable_text() {
             assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
             retained = value.into_option();
             assert_eq!(retained.as_deref(), expected);
-            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -6701,23 +6753,29 @@ fn local_evaluated_args_month_name_and_time_to_sec_keep_nullable_text() {
         usize::MAX,
     )
     .unwrap();
+    let mut admitted_worker = 0u64;
     assert_eq!(worker.operation(), EvaluatedBytesOp::TimeToSecTextNative);
-    assert_eq!(worker.kernel_invocations(), 0);
+    assert_eq!(worker.kernel_invocations(), admitted_worker);
     let storage = worker.retained_storage().unwrap();
     assert!(matches!(
         worker.eval_args(EvaluatedArgs::Int(Some(0))),
         Err(LocalError::InvalidBatch(_))
     ));
-    assert_eq!(worker.kernel_invocations(), 0);
+    assert_eq!(worker.kernel_invocations(), admitted_worker);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
     let mut oversized = Vec::with_capacity(16 * 1024);
     oversized.extend_from_slice(b"junk");
-    assert!(matches!(
-        worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
-        Err(LocalError::ResourceLimit(_))
-    ));
-    assert_eq!(worker.kernel_invocations(), 0);
+    {
+        let before = worker.kernel_invocations();
+        let calls = worker.operation().call_count() as u64;
+        worker
+            .eval_args(EvaluatedArgs::Bytes(Some(oversized)))
+            .unwrap();
+        assert_eq!(worker.kernel_invocations(), before + calls);
+        admitted_worker += calls;
+    };
+    assert_eq!(worker.kernel_invocations(), admitted_worker);
     assert!(worker.is_healthy());
     assert_eq!(worker.retained_storage().unwrap(), storage);
     let cases: [(Option<&[u8]>, Option<i64>); 4] = [
@@ -6736,7 +6794,10 @@ fn local_evaluated_args_month_name_and_time_to_sec_keep_nullable_text() {
         assert_eq!(value.value(), expected);
         assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
         assert_eq!(value.into_option(), expected);
-        assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+        assert_eq!(
+            worker.kernel_invocations(),
+            (index as u64 + 1) + admitted_worker
+        );
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
@@ -6858,13 +6919,14 @@ fn local_evaluated_args_period_receipts_and_get_format_keep_nullable_boundaries(
     .unwrap();
     assert_eq!(bounded.kernel_invocations(), 0);
     let storage = bounded.retained_storage().unwrap();
-    let failure = bounded
-        .eval_args_reported(EvaluatedArgs::Int2(Some(0), Some(0)))
-        .unwrap_err();
-    assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-    assert_eq!(failure.operation(), None);
-    assert_eq!(failure.sql_failure(), None);
-    assert_eq!(bounded.kernel_invocations(), 0);
+    let ComputedValue::Int(value) = bounded
+        .eval_args_reported(EvaluatedArgs::Int2(Some(202001), Some(1)))
+        .unwrap()
+    else {
+        panic!("expected period result");
+    };
+    assert_eq!(value.value(), Some(202002));
+    assert_eq!(bounded.kernel_invocations(), 1);
     assert!(bounded.is_healthy());
     assert_eq!(bounded.retained_storage().unwrap(), storage);
     let retained = {
@@ -6969,24 +7031,30 @@ fn local_evaluated_args_day_text_fields_keep_nullable_and_year_zero_values() {
             usize::MAX,
         )
         .unwrap();
+        let mut admitted_worker = 0u64;
         assert_eq!(worker.operation(), operation);
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let storage = worker.retained_storage().unwrap();
         assert!(matches!(
             worker.eval_args(EvaluatedArgs::Int(Some(0))),
             Err(LocalError::InvalidBatch(_))
         ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         let preceding = if operation == EvaluatedBytesOp::DayOfWeekTextNative {
             let mut oversized = Vec::with_capacity(16 * 1024);
             oversized.extend_from_slice(b"2017-02-30");
-            assert!(matches!(
-                worker.eval_args(EvaluatedArgs::Bytes(Some(oversized))),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker
+                    .eval_args(EvaluatedArgs::Bytes(Some(oversized)))
+                    .unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             assert!(matches!(
@@ -6997,7 +7065,7 @@ fn local_evaluated_args_day_text_fields_keep_nullable_and_year_zero_values() {
         } else {
             0
         };
-        assert_eq!(worker.kernel_invocations(), preceding);
+        assert_eq!(worker.kernel_invocations(), (preceding) + admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         let cases: [(Option<&[u8]>, Option<i64>); 4] = [
@@ -7016,7 +7084,10 @@ fn local_evaluated_args_day_text_fields_keep_nullable_and_year_zero_values() {
             assert_eq!(value.value(), expected);
             assert_eq!(value.metadata(), ComputedIntMetadata::OwnSignedInt);
             assert_eq!(value.into_option(), expected);
-            assert_eq!(worker.kernel_invocations(), preceding + index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (preceding + index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -7029,14 +7100,15 @@ fn local_evaluated_args_day_text_fields_keep_nullable_and_year_zero_values() {
             usize::MAX,
         )
         .unwrap();
+        let admitted_worker = 0u64;
         assert_eq!(worker.operation(), EvaluatedBytesOp::DayNameTextNative);
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let storage = worker.retained_storage().unwrap();
         assert!(matches!(
             worker.eval_args(EvaluatedArgs::Int(Some(0))),
             Err(LocalError::InvalidBatch(_))
         ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         let cases: [(Option<&[u8]>, Option<&[u8]>); 4] = [
@@ -7057,7 +7129,10 @@ fn local_evaluated_args_day_text_fields_keep_nullable_and_year_zero_values() {
             assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
             retained = value.into_option();
             assert_eq!(retained.as_deref(), expected);
-            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -7142,13 +7217,19 @@ fn local_evaluated_args_date_diff_core_pair_keeps_exclusive_raw_role() {
         usize::MAX,
     )
     .unwrap();
-    assert_eq!(bounded.kernel_invocations(), 0);
+    let mut admitted_bounded = 0u64;
+    assert_eq!(bounded.kernel_invocations(), admitted_bounded);
     let storage = bounded.retained_storage().unwrap();
-    assert!(matches!(
-        bounded.eval_args(EvaluatedArgs::TimeCoreBits2(Some(0), Some(0))),
-        Err(LocalError::ResourceLimit(_))
-    ));
-    assert_eq!(bounded.kernel_invocations(), 0);
+    {
+        let before = bounded.kernel_invocations();
+        let calls = bounded.operation().call_count() as u64;
+        bounded
+            .eval_args(EvaluatedArgs::TimeCoreBits2(Some(0), Some(0)))
+            .unwrap();
+        assert_eq!(bounded.kernel_invocations(), before + calls);
+        admitted_bounded += calls;
+    };
+    assert_eq!(bounded.kernel_invocations(), admitted_bounded);
     assert!(bounded.is_healthy());
     assert_eq!(bounded.retained_storage().unwrap(), storage);
 }
@@ -7912,16 +7993,22 @@ fn local_evaluated_args_date_format_core_keeps_roles_and_missing_distinct() {
         usize::MAX,
     )
     .unwrap();
-    assert_eq!(bounded.kernel_invocations(), 0);
+    let mut admitted_bounded = 0u64;
+    assert_eq!(bounded.kernel_invocations(), admitted_bounded);
     let storage = bounded.retained_storage().unwrap();
-    assert!(matches!(
-        bounded.eval_args(EvaluatedArgs::TimeCoreBitsBytes {
-            core: 0,
-            bytes: None
-        }),
-        Err(LocalError::ResourceLimit(_))
-    ));
-    assert_eq!(bounded.kernel_invocations(), 0);
+    {
+        let before = bounded.kernel_invocations();
+        let calls = bounded.operation().call_count() as u64;
+        bounded
+            .eval_args(EvaluatedArgs::TimeCoreBitsBytes {
+                core: 0,
+                bytes: None,
+            })
+            .unwrap();
+        assert_eq!(bounded.kernel_invocations(), before + calls);
+        admitted_bounded += calls;
+    };
+    assert_eq!(bounded.kernel_invocations(), admitted_bounded);
     assert!(bounded.is_healthy());
     assert_eq!(bounded.retained_storage().unwrap(), storage);
     let mut worker = prepare_evaluated_bytes(
@@ -8558,7 +8645,7 @@ fn unary_dispatch_unit_getters_roles_and_private_shapes() {
 
 #[test]
 fn like_dispatch_exact_getters_metadata_roles_and_private_compile() {
-    use super::{compile::compile_evaluated_bytes, runtime::EvalBudget};
+    use super::compile::compile_evaluated_bytes;
     use crate::{
         NativeLikeKind, RpnExpressionNode,
         types::{
@@ -8708,7 +8795,7 @@ fn like_dispatch_exact_getters_metadata_roles_and_private_compile() {
             ScalarValue::Bytes(Some(b"a".to_vec())),
             ScalarValue::Int(escape),
         ];
-        let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+
         assert!(matches!(
             program.expression.eval_with_ready_args(
                 operation,
@@ -8718,7 +8805,6 @@ fn like_dispatch_exact_getters_metadata_roles_and_private_compile() {
                 role,
                 &[0],
                 &mut witness,
-                &mut budget,
             ),
             Err(LocalError::InvalidSpec(_))
         ));
@@ -8728,10 +8814,7 @@ fn like_dispatch_exact_getters_metadata_roles_and_private_compile() {
 
 #[test]
 fn regexp_dispatch_exact_getters_metadata_and_closed_shapes() {
-    use super::{
-        compile::{ProgramEntry, compile_evaluated_bytes},
-        runtime::EvalBudget,
-    };
+    use super::compile::{ProgramEntry, compile_evaluated_bytes};
     use crate::{
         RpnExpressionNode,
         types::{
@@ -8919,7 +9002,6 @@ fn regexp_dispatch_exact_getters_metadata_and_closed_shapes() {
             EvaluatedArgsRole::NativeRegexpLike,
         ),
     ] {
-        let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
         assert!(matches!(
             program.expression.eval_with_ready_args(
                 operation,
@@ -8928,8 +9010,7 @@ fn regexp_dispatch_exact_getters_metadata_and_closed_shapes() {
                 &values,
                 role,
                 &[0],
-                &mut witness,
-                &mut budget
+                &mut witness
             ),
             Err(LocalError::InvalidSpec(_))
         ));
@@ -8944,10 +9025,7 @@ fn vector_dispatch_getters_shapes_roles_and_private_compile() {
         mysql::{NATIVE_MAX_VECTOR_DIMENSION, NativeVectorFloat32, VectorFloat32},
     };
 
-    use super::{
-        compile::{ProgramEntry, compile_evaluated_bytes},
-        runtime::EvalBudget,
-    };
+    use super::compile::{ProgramEntry, compile_evaluated_bytes};
     use crate::{
         RpnExpressionNode,
         types::{
@@ -9114,7 +9192,6 @@ fn vector_dispatch_getters_shapes_roles_and_private_compile() {
             EvaluatedArgsRole::NativeVector,
         ),
     ] {
-        let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
         assert!(matches!(
             program.expression.eval_with_ready_args(
                 operation,
@@ -9123,8 +9200,7 @@ fn vector_dispatch_getters_shapes_roles_and_private_compile() {
                 &[value],
                 role,
                 &[0],
-                &mut witness,
-                &mut budget
+                &mut witness
             ),
             Err(LocalError::InvalidSpec(_))
         ));
@@ -9135,7 +9211,7 @@ fn vector_dispatch_getters_shapes_roles_and_private_compile() {
     raw.elements_mut()[0] = f32::from_bits(0x7fc0_0042);
     raw.elements_mut()[1] = f32::INFINITY;
     let ready = [ScalarValue::VectorFloat32(Some(raw.into_wire_raw()))];
-    let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+
     let result = program
         .expression
         .eval_with_ready_args(
@@ -9146,7 +9222,6 @@ fn vector_dispatch_getters_shapes_roles_and_private_compile() {
             EvaluatedArgsRole::NativeVector,
             &[0],
             &mut witness,
-            &mut budget,
         )
         .unwrap();
     assert!(
@@ -9176,9 +9251,10 @@ fn crypt_hash_format_dispatch_values_null_resources_and_owned_results() {
         (EvaluatedBytesOp::SqlEncodeNative, cipher.as_slice(), plain),
     ] {
         let mut worker = prepare(operation);
+        let admitted_worker = 0u64;
         let storage = worker.retained_storage().unwrap();
         assert_eq!(worker.operation(), operation);
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let ComputedValue::Bytes(null) = worker
             .eval_args(EvaluatedArgs::Bytes2(None, Some(password.to_vec())))
             .unwrap()
@@ -9199,7 +9275,7 @@ fn crypt_hash_format_dispatch_values_null_resources_and_owned_results() {
         assert_eq!(value.metadata(), ComputedBytesMetadata::OwnBytes);
         let owned = value.into_option().unwrap();
         assert_eq!(owned.as_slice(), expected);
-        assert_eq!(worker.kernel_invocations(), 2);
+        assert_eq!(worker.kernel_invocations(), (2) + admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
         drop(worker);
@@ -9240,6 +9316,7 @@ fn crypt_hash_format_dispatch_values_null_resources_and_owned_results() {
         ),
     ] {
         let mut worker = prepare(operation);
+        let admitted_worker = 0u64;
         let storage = worker.retained_storage().unwrap();
         let mut owned = None;
         for (index, (input, expected)) in [
@@ -9264,7 +9341,10 @@ fn crypt_hash_format_dispatch_values_null_resources_and_owned_results() {
             }
             owned = value.into_option();
             assert_eq!(owned.map(|bits| bits as u64), expected);
-            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -9289,12 +9369,13 @@ fn crypt_hash_format_dispatch_values_null_resources_and_owned_results() {
         ),
     ] {
         let mut worker = prepare(operation);
+        let admitted_worker = 0u64;
         let storage = worker.retained_storage().unwrap();
         assert!(matches!(
             worker.eval_args(EvaluatedArgs::Bytes(None)),
             Err(LocalError::InvalidBatch(_))
         ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         let mut owned = None;
         for (index, (bits, expected)) in [
             (None, None),
@@ -9313,7 +9394,10 @@ fn crypt_hash_format_dispatch_values_null_resources_and_owned_results() {
             assert_eq!(value.value(), expected);
             owned = value.into_option();
             assert_eq!(owned.as_deref(), expected);
-            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -9357,12 +9441,16 @@ fn crypt_hash_format_dispatch_values_null_resources_and_owned_results() {
             usize::MAX,
         )
         .unwrap();
+        let mut admitted_worker = 0u64;
         let storage = worker.retained_storage().unwrap();
-        assert!(matches!(
-            worker.eval_args(args),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        {
+            let before = worker.kernel_invocations();
+            let calls = worker.operation().call_count() as u64;
+            worker.eval_args(args).unwrap();
+            assert_eq!(worker.kernel_invocations(), before + calls);
+            admitted_worker += calls;
+        };
+        assert_eq!(worker.kernel_invocations(), admitted_worker);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }

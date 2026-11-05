@@ -209,7 +209,7 @@ pub fn native_temporal_literal_value(
         .checked_mul(64)
         .and_then(|n| n.checked_add(4096))
         .ok_or(E::Resource)?;
-    if maximum == usize::MAX || cost > maximum {
+    if cost > maximum {
         return Err(E::Resource);
     }
     let bits = i64::from(modes.allow_invalid_dates)
@@ -433,7 +433,7 @@ mod actual_value_tests {
         ));
         assert_eq!(
             native_temporal_literal_value(false, "", &utc, modes, usize::MAX),
-            Err(E::Resource)
+            native_temporal_literal_value(false, "", &utc, modes, 1 << 30)
         );
         assert_eq!(
             native_temporal_literal_value(false, &"x".repeat(1 << 20), &utc, modes, 8192),

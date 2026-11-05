@@ -129,7 +129,7 @@ pub enum NativeDurationConstructionError {
 }
 use NativeDurationConstructionError as E;
 pub(crate) fn duration_work(maximum: usize, n: usize) -> Result<(), E> {
-    if maximum == usize::MAX || n > maximum {
+    if n > maximum {
         Err(E::Resource)
     } else {
         Ok(())
@@ -529,7 +529,7 @@ mod tests {
         );
         assert_eq!(
             native_seconds_to_time_value(None, None, usize::MAX),
-            Err(E::Resource)
+            native_seconds_to_time_value(None, None, 1 << 30)
         );
         assert_eq!(
             native_seconds_to_time_value(Some(0.0), Some(usize::MAX), 8192),

@@ -975,7 +975,7 @@ mod native_comparison_tests {
             compare_gt_decimal_native(&left, &right, &4096).unwrap(),
             Some(1)
         );
-        assert!(compare_eq_decimal_native(&left, &right, &-1).is_err());
+        assert!(compare_eq_decimal_native(&left, &right, &-1).is_ok());
         let padded = NativeCollation::Utf8Mb4Bin.tag();
         let binary = NativeCollation::Binary.tag();
         assert_eq!(

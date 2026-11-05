@@ -11,7 +11,7 @@ use tidb_query_datatype::codec::{
 
 use crate::{NativeStringCoercionError as Error, native_coerce_string_bounded};
 fn check(held: usize, work: usize, maximum: usize) -> Result<(), Error> {
-    if maximum == usize::MAX || held.checked_add(work).is_none_or(|n| n > maximum) {
+    if held.checked_add(work).is_none_or(|n| n > maximum) {
         Err(Error::ResourceLimit)
     } else {
         Ok(())

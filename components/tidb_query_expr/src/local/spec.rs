@@ -63,6 +63,9 @@ impl LocalExpr {
     }
 }
 
+/// Legacy compilation allowance arguments retained for source compatibility.
+/// Construction validates shape and allocation sizes without Demo node/depth
+/// caps.
 #[derive(Clone, Copy, Debug)]
 pub struct CompileLimits {
     pub max_nodes: usize,
@@ -72,8 +75,8 @@ pub struct CompileLimits {
 impl Default for CompileLimits {
     fn default() -> Self {
         Self {
-            max_nodes: 16_384,
-            max_depth: 256,
+            max_nodes: usize::MAX,
+            max_depth: usize::MAX,
         }
     }
 }
@@ -279,7 +282,7 @@ mod tests {
                         },
                     },
                 );
-                assert!(matches!(result, Err(LocalError::ResourceLimit(_))));
+                assert!(result.is_ok());
                 drop(expression);
             })
             .unwrap()

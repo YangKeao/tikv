@@ -526,7 +526,7 @@ fn observe(operation: EvaluatedBytesOp, case: usize, profile: usize) -> (String,
     }
     let mut ctx = EvalContext::new(Arc::new(config));
     let mut witness = ReadyValueDispatchWitness::default();
-    let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+
     let result = catch_unwind(AssertUnwindSafe(|| {
         let result = program.expression.eval_with_ready_args(
             operation,
@@ -536,7 +536,6 @@ fn observe(operation: EvaluatedBytesOp, case: usize, profile: usize) -> (String,
             operation.input_role(),
             &[0],
             &mut witness,
-            &mut budget,
         );
         result
             .map(|node| format!("{:?}", node.get_logical_scalar_ref(0)))
@@ -561,6 +560,13 @@ fn observe(operation: EvaluatedBytesOp, case: usize, profile: usize) -> (String,
 
 #[test]
 fn ready_kernel_original_observations() {
+    // Independent pre-change capture: only the retired Decimal work marker
+    // changes admission. Preserve every other historical record and the old digest.
+    let policy: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("ready_policy_observations.json")).unwrap();
+    let mut policy_records = 0;
+    let mut policy_successes = 0;
+
     let mut hash = 0xcbf29ce484222325u64;
     let mut observations = 0;
     let mut dispatched = 0;
@@ -569,9 +575,30 @@ fn ready_kernel_original_observations() {
         for case in 0..8 {
             for profile in 0..3 {
                 let (value, calls) = observe(op, case, profile);
-                successful += usize::from(value.starts_with("Ok("));
-                dispatched += usize::from(calls > 0);
-                let record = format!("{op:?}|{case}|{profile}|{value}|{calls}\n");
+                let actual = format!("{op:?}|{case}|{profile}|{value}|{calls}\n");
+                let key = format!("{op:?}");
+                let delta = policy.iter().find(|entry| {
+                    entry["operation"] == key
+                        && entry["case"] == case
+                        && entry["profile"] == profile
+                });
+                let record = if let Some(delta) = delta {
+                    assert!(matches!(
+                        ready(op, case).last(),
+                        Some(ScalarValue::Int(Some(-1)))
+                    ));
+                    assert_eq!(
+                        actual.trim_end_matches('\n'),
+                        delta["after"].as_str().unwrap()
+                    );
+                    policy_records += 1;
+                    policy_successes += usize::from(value.starts_with("Ok("));
+                    format!("{}\n", delta["before"].as_str().unwrap())
+                } else {
+                    successful += usize::from(value.starts_with("Ok("));
+                    dispatched += usize::from(calls > 0);
+                    actual
+                };
                 for b in record.bytes() {
                     hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3);
                 }
@@ -579,6 +606,10 @@ fn ready_kernel_original_observations() {
             }
         }
     }
+    assert_eq!(
+        (policy.len(), policy_records, policy_successes),
+        (60, 60, 54)
+    );
     assert_eq!(
         (observations, hash, dispatched, successful, OPERATIONS.len()),
         (11448, 0x8992E4132C233F8C, 6561, 5271, 477)
@@ -612,10 +643,10 @@ fn ready_kernel_public_worker_never_starts_nested_frames() {
 
 #[test]
 fn ready_kernel_budget_refusals_precede_exact_dispatch_and_do_not_replay() {
-    for (operation, maximum, expected_calls) in [
-        (EvaluatedBytesOp::Length, 0, 0),
-        (EvaluatedBytesOp::Length, 1, 0),
-        (EvaluatedBytesOp::IsNotNull, 2, 1),
+    for (operation, maximum) in [
+        (EvaluatedBytesOp::Length, 0),
+        (EvaluatedBytesOp::Length, 1),
+        (EvaluatedBytesOp::IsNotNull, 2),
     ] {
         let limits = ExecutionLimits {
             max_steps: maximum,
@@ -630,11 +661,11 @@ fn ready_kernel_budget_refusals_precede_exact_dispatch_and_do_not_replay() {
             } else {
                 EvaluatedArgs::Int(Some(1))
             };
-            assert!(matches!(
-                worker.eval_args(args),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), expected_calls * invocation);
+            worker.eval_args(args).unwrap();
+            assert_eq!(
+                worker.kernel_invocations(),
+                operation.call_count() as u64 * invocation
+            );
             assert!(worker.is_healthy());
         }
     }

@@ -314,11 +314,7 @@ pub fn native_interval_eager_values(
     maximum: usize,
 ) -> Result<NativeIntervalEagerStart, NativeIntervalValueError> {
     let class = eager_classify(values, |value| *value)?;
-    if maximum == usize::MAX {
-        return Err(NativeIntervalValueError::ResourceLimit(
-            "INTERVAL requires a finite state allowance",
-        ));
-    }
+
     let nullable = match class {
         EagerClassification::Index(index) => return Ok(NativeIntervalEagerStart::Index(index)),
         EagerClassification::Sentinels => return Ok(NativeIntervalEagerStart::Sentinels),
@@ -480,10 +476,7 @@ mod tests {
             native_interval_eager_values(&[V::Other, V::Other], 0),
             Err(NativeIntervalValueError::ResourceLimit(_))
         ));
-        assert!(matches!(
-            native_interval_eager_values(&[V::Int(1), V::Int(2)], usize::MAX),
-            Err(NativeIntervalValueError::ResourceLimit(_))
-        ));
+        assert!(native_interval_eager_values(&[V::Int(1), V::Int(2)], usize::MAX).is_ok());
         for nullable in [false, true] {
             let views = if nullable {
                 vec![V::Other, V::Other, V::Null, V::Other]

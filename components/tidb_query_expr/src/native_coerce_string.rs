@@ -76,7 +76,7 @@ fn resource() -> NativeStringCoercionError {
     NativeStringCoercionError::ResourceLimit
 }
 fn check(bytes: usize, maximum: usize) -> Result<(), NativeStringCoercionError> {
-    if maximum == usize::MAX || bytes > maximum {
+    if bytes > maximum {
         Err(resource())
     } else {
         Ok(())

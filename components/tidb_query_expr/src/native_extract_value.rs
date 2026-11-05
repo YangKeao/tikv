@@ -27,11 +27,7 @@ type Result<T> = std::result::Result<T, NativeExtractWorkError>;
 struct Budget(Option<usize>);
 impl Budget {
     fn finite(n: usize) -> Result<Self> {
-        if n == usize::MAX {
-            Err(NativeExtractWorkError)
-        } else {
-            Ok(Self(Some(n)))
-        }
+        Ok(Self((n != usize::MAX).then_some(n)))
     }
     fn extent(self, n: usize, m: usize, extra: usize) -> Result<()> {
         if let Some(max) = self.0 {
@@ -477,7 +473,7 @@ mod tests {
             native_extract_composite_values(&"X".repeat(8192), None, 0).unwrap(),
             NativeExtractValue::Null
         );
-        assert!(native_extract_composite_values("DAY", None, usize::MAX).is_err());
+        assert!(native_extract_composite_values("DAY", None, usize::MAX).is_ok());
         assert!(native_extract_mixed_work("DAY_SECOND", "2020-01-02", 128).is_err());
         assert!(
             native_extract_mixed_duration_values("DAY_SECOND", "2020-01-02", true, 128).is_err()

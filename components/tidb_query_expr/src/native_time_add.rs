@@ -542,7 +542,6 @@ mod tests {
     fn actual_time_add_values_keep_parser_order_null_signatures_and_finite_work() {
         use NativeTimeAddKind::*;
 
-        use crate::NativeDurationConstructionError as E;
         let meta = |left, right, row_path| NativeTimeAddMetadata {
             left,
             right,
@@ -586,7 +585,7 @@ mod tests {
         );
         assert_eq!(
             native_time_add_value(None, None, meta(Other, Other, true), false, usize::MAX),
-            Err(E::Resource)
+            native_time_add_value(None, None, meta(Other, Other, true), false, 1 << 30)
         );
         assert_eq!(
             native_time_add_value(

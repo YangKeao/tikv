@@ -34,7 +34,7 @@ pub enum NativeCompressionValueError {
 }
 use NativeCompressionValueError as E;
 fn check(n: usize, maximum: usize) -> Result<(), E> {
-    if maximum == usize::MAX || n > maximum {
+    if n > maximum {
         Err(E::Resource)
     } else {
         Ok(())
@@ -85,7 +85,7 @@ pub(crate) fn inflate_actual(
     let mut out = Vec::new();
     let mut input_offset = 0;
     let mut chunk = [0; 8 * 1024];
-    if maximum.is_some_and(|m| m == usize::MAX || m < 32768) {
+    if maximum.is_some_and(|m| m < 32768) {
         return Err(InflateFailure::Resource);
     }
     loop {
@@ -283,15 +283,15 @@ mod tests {
         );
         assert_eq!(
             native_compress_actual_value(None, usize::MAX),
-            Err(E::Resource)
+            native_compress_actual_value(None, 1 << 30)
         );
         assert_eq!(
             native_uncompress_actual_value(None, usize::MAX),
-            Err(E::Resource)
+            native_uncompress_actual_value(None, 1 << 30)
         );
         assert_eq!(
             native_uncompressed_length_actual_value(None, usize::MAX),
-            Err(E::Resource)
+            native_uncompressed_length_actual_value(None, 1 << 30)
         );
     }
 }

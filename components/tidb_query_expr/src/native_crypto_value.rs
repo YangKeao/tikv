@@ -53,7 +53,7 @@ pub enum NativeCryptoValueError {
 }
 use NativeCryptoValueError as E;
 fn work(n: usize, maximum: usize) -> Result<(), E> {
-    if maximum == usize::MAX || n > maximum {
+    if n > maximum {
         Err(E::Resource)
     } else {
         Ok(())
@@ -144,7 +144,7 @@ mod tests {
             assert_eq!(native_crypto_unary_actual_value(op, None, 0), Ok(None));
             assert_eq!(
                 native_crypto_unary_actual_value(op, None, usize::MAX),
-                Err(E::Resource)
+                native_crypto_unary_actual_value(op, None, 1 << 30)
             );
             assert_eq!(
                 native_crypto_unary_actual_value(op, Some(&vec![255; 1 << 20]), 8192),
@@ -229,7 +229,7 @@ mod digest_tests {
             assert_eq!(native_crypto_unary_actual_value(op, None, 0), Ok(None));
             assert_eq!(
                 native_crypto_unary_actual_value(op, None, usize::MAX),
-                Err(E::Resource)
+                native_crypto_unary_actual_value(op, None, 1 << 30)
             );
             assert_eq!(
                 native_crypto_unary_actual_value(op, Some(&vec![255; 1 << 20]), 8192),
@@ -268,7 +268,7 @@ mod digest_tests {
             assert_eq!(native_sha2_actual_value(&big, bits, 0), Ok(None));
             assert_eq!(
                 native_sha2_actual_value(&big, bits, usize::MAX),
-                Err(E::Resource)
+                native_sha2_actual_value(&big, bits, 1 << 30)
             );
         }
         assert_eq!(native_sha2_actual_value(&big, 256, 8192), Err(E::Resource));

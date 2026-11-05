@@ -71,7 +71,7 @@ impl NativeExtremumSequence {
         if count == 0 || domain == NativeExtremumDomain::Numeric {
             return Err(NativeExtremumValueError::Invalid);
         }
-        finite(maximum)?;
+
         Ok(Self {
             domain,
             want,
@@ -169,17 +169,8 @@ impl NativeExtremumSequence {
         Ok(Some(value))
     }
 }
-fn finite(maximum: usize) -> Result<(), NativeExtremumValueError> {
-    if maximum == usize::MAX {
-        Err(NativeExtremumValueError::ResourceLimit(
-            "extremum requires a finite value allowance",
-        ))
-    } else {
-        Ok(())
-    }
-}
+
 fn check(bytes: usize, maximum: usize) -> Result<(), NativeExtremumValueError> {
-    finite(maximum)?;
     if bytes > maximum {
         Err(NativeExtremumValueError::ResourceLimit(
             "extremum actual value/work allowance exceeded",
@@ -387,7 +378,7 @@ mod tests {
                 1,
                 usize::MAX
             )
-            .is_err()
+            .is_ok()
         );
         let mut reducer = NativeExtremumSequence::new(
             NativeExtremumDomain::DirectString,

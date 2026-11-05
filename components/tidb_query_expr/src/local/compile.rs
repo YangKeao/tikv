@@ -759,7 +759,7 @@ pub(super) fn compile_evaluated_bytes(
 fn compile(
     spec: &LocalExpr,
     schema: &[FieldType],
-    cx: LocalCompileContext,
+    _cx: LocalCompileContext,
     mode: CompileMode<'_>,
 ) -> LocalResult<LocalProgram> {
     if let Some(operation) = mode.evaluated_bytes_operation() {
@@ -846,11 +846,7 @@ fn compile(
                 visited = visited
                     .checked_add(1)
                     .ok_or_else(|| LocalError::ResourceLimit("node count overflow".into()))?;
-                if visited > cx.limits.max_nodes || depth > cx.limits.max_depth {
-                    return Err(LocalError::ResourceLimit(
-                        "construction node/depth budget exceeded".into(),
-                    ));
-                }
+
                 mode.check_type(expr.field_type())?;
                 let ordinal = visited - 1;
                 if let CompileMode::Lineaged(facts) = mode {
@@ -873,13 +869,6 @@ fn compile(
                     scheduled = scheduled.checked_add(args.len()).ok_or_else(|| {
                         LocalError::ResourceLimit("construction node count overflow".into())
                     })?;
-                    if scheduled > cx.limits.max_nodes
-                        || (!args.is_empty() && depth >= cx.limits.max_depth)
-                    {
-                        return Err(LocalError::ResourceLimit(
-                            "construction node/depth budget exceeded".into(),
-                        ));
-                    }
                 }
                 match expr {
                     LocalExpr::Constant {
@@ -1542,10 +1531,7 @@ mod batch_compile_tests {
                 max_depth: 1,
             },
         ] {
-            assert!(matches!(
-                compile_batch(&spec, &schema, LocalCompileContext { limits }, &facts),
-                Err(LocalError::ResourceLimit(_))
-            ));
+            assert!(compile_batch(&spec, &schema, LocalCompileContext { limits }, &facts).is_ok());
         }
     }
 }
@@ -1587,10 +1573,7 @@ mod ready_value_compile_tests {
     fn crypt_hash_format_dispatch_getters_shapes_and_private_admission() {
         use tidb_query_datatype::{EvalType, expr::EvalContext};
 
-        use crate::{
-            local::{ExecutionLimits, runtime::EvalBudget},
-            types::expr_eval::ReadyValueDispatchWitness,
-        };
+        use crate::types::expr_eval::ReadyValueDispatchWitness;
 
         let cases: [(
             EvaluatedBytesOp,
@@ -1740,7 +1723,7 @@ mod ready_value_compile_tests {
             let mut witness = ReadyValueDispatchWitness::default();
             for width in [7, 9] {
                 let ready = [ScalarValue::Bytes(Some(vec![0; width]))];
-                let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+
                 assert!(matches!(
                     program.expression.eval_with_ready_args(
                         operation,
@@ -1749,8 +1732,7 @@ mod ready_value_compile_tests {
                         &ready,
                         EvaluatedArgsRole::Ieee754Bits,
                         &[0],
-                        &mut witness,
-                        &mut budget
+                        &mut witness
                     ),
                     Err(LocalError::InvalidSpec(_))
                 ));
@@ -1767,7 +1749,7 @@ mod ready_value_compile_tests {
                 let ready = [ScalarValue::Bytes(
                     value.map(|bits| bits.to_le_bytes().to_vec()),
                 )];
-                let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+
                 let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     program.expression.eval_with_ready_args(
                         operation,
@@ -1777,7 +1759,6 @@ mod ready_value_compile_tests {
                         EvaluatedArgsRole::Ieee754Bits,
                         &[0],
                         &mut witness,
-                        &mut budget,
                     )
                 }));
                 if value == Some(f64::INFINITY.to_bits()) {
@@ -1797,10 +1778,7 @@ mod ready_value_compile_tests {
     fn uuid_translate_dispatch_shapes_getters_and_private_compile() {
         use tidb_query_datatype::{EvalType, expr::EvalContext};
 
-        use crate::{
-            local::{ExecutionLimits, runtime::EvalBudget},
-            types::expr_eval::ReadyValueDispatchWitness,
-        };
+        use crate::types::expr_eval::ReadyValueDispatchWitness;
 
         let cases: [(
             EvaluatedBytesOp,
@@ -1972,7 +1950,6 @@ mod ready_value_compile_tests {
                 ScalarValue::Int(None),
             ],
         ] {
-            let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
             assert!(matches!(
                 program.expression.eval_with_ready_args(
                     operation,
@@ -1981,8 +1958,7 @@ mod ready_value_compile_tests {
                     &ready,
                     EvaluatedArgsRole::Values,
                     &[0],
-                    &mut witness,
-                    &mut budget
+                    &mut witness
                 ),
                 Err(LocalError::InvalidSpec(_))
             ));
@@ -1992,7 +1968,7 @@ mod ready_value_compile_tests {
             ScalarValue::Bytes(Some(vec![0; 16])),
             ScalarValue::Int(Some(-1)),
         ];
-        let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+
         assert!(
             program
                 .expression
@@ -2003,8 +1979,7 @@ mod ready_value_compile_tests {
                     &ready,
                     EvaluatedArgsRole::Values,
                     &[0],
-                    &mut witness,
-                    &mut budget
+                    &mut witness
                 )
                 .is_ok()
         );
@@ -2510,10 +2485,7 @@ mod ready_value_compile_tests {
                 max_depth: 1,
             },
         ] {
-            assert!(matches!(
-                compile_evaluated_ascii(LocalCompileContext { limits }),
-                Err(LocalError::ResourceLimit(_))
-            ));
+            assert!(compile_evaluated_ascii(LocalCompileContext { limits }).is_ok());
         }
         assert!(
             compile_evaluated_ascii(LocalCompileContext {

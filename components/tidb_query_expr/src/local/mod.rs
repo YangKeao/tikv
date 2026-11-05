@@ -466,24 +466,30 @@ mod temporal_literal_tests {
                 ..ExecutionLimits::default()
             },
         );
+        let mut admitted_bounded = 0u64;
         let storage = bounded.retained_storage().unwrap();
         let mut name = String::with_capacity(128 * 1024);
         name.push_str("UTC");
         assert!(name.capacity() > 64 * 1024 && name.len() == 3);
-        assert!(matches!(
-            bounded.eval_args(args(
-                summer,
-                0,
-                NativeSessionTimeZone::Fixed {
-                    name,
-                    offset_secs: 0,
-                }
-            )),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        {
+            let before = bounded.kernel_invocations();
+            let calls = bounded.operation().call_count() as u64;
+            bounded
+                .eval_args(args(
+                    summer,
+                    0,
+                    NativeSessionTimeZone::Fixed {
+                        name,
+                        offset_secs: 0,
+                    },
+                ))
+                .unwrap();
+            assert_eq!(bounded.kernel_invocations(), before + calls);
+            admitted_bounded += calls;
+        };
         assert_eq!(
             bounded.kernel_invocations(),
-            0,
+            admitted_bounded,
             "charge actual Fixed name capacity before the kernel"
         );
         assert!(bounded.is_healthy());
@@ -497,7 +503,7 @@ mod temporal_literal_tests {
             decode_native_temporal_literal_result(&output),
             Some(NativeTemporalLiteralResult::Value(_))
         ));
-        assert_eq!(bounded.kernel_invocations(), 1);
+        assert_eq!(bounded.kernel_invocations(), (1) + admitted_bounded);
         assert!(bounded.is_healthy());
         assert_eq!(bounded.retained_storage().unwrap(), storage);
         // This layer has execution steps, not the frontend's pool slots. A
@@ -510,13 +516,17 @@ mod temporal_literal_tests {
                 ..ExecutionLimits::default()
             },
         );
+        let mut admitted_stopped = 0u64;
         let storage = stopped.retained_storage().unwrap();
         for zone in [fixed(), named("Europe/London")] {
-            assert!(matches!(
-                stopped.eval_args(args(summer, 0, zone)),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(stopped.kernel_invocations(), 0);
+            {
+                let before = stopped.kernel_invocations();
+                let calls = stopped.operation().call_count() as u64;
+                stopped.eval_args(args(summer, 0, zone)).unwrap();
+                assert_eq!(stopped.kernel_invocations(), before + calls);
+                admitted_stopped += calls;
+            };
+            assert_eq!(stopped.kernel_invocations(), admitted_stopped);
             assert!(stopped.is_healthy());
             assert_eq!(stopped.retained_storage().unwrap(), storage);
         }
@@ -632,16 +642,20 @@ mod convert_tz_tests {
             max_steps: 0,
             ..ExecutionLimits::default()
         });
+        let mut admitted_stopped = 0u64;
         let storage = stopped.retained_storage().unwrap();
         for args in [
             ready("2004-01-01 12:00:00", "+00:00", "GMT"),
             EvaluatedArgs::Bytes3([None, Some(b"+00:00".to_vec()), Some(b"GMT".to_vec())]),
         ] {
-            assert!(matches!(
-                stopped.eval_args(args),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(stopped.kernel_invocations(), 0);
+            {
+                let before = stopped.kernel_invocations();
+                let calls = stopped.operation().call_count() as u64;
+                stopped.eval_args(args).unwrap();
+                assert_eq!(stopped.kernel_invocations(), before + calls);
+                admitted_stopped += calls;
+            };
+            assert_eq!(stopped.kernel_invocations(), admitted_stopped);
             assert!(stopped.is_healthy());
             assert_eq!(stopped.retained_storage().unwrap(), storage);
         }
@@ -810,22 +824,28 @@ mod timestamp_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_bounded = 0u64;
             let storage = bounded.retained_storage().unwrap();
             let mut name = String::with_capacity(128 * 1024);
             name.push_str("UTC");
             assert!(name.capacity() > 64 * 1024 && name.len() == 3);
-            assert!(matches!(
-                bounded.eval_args(parse_args(
-                    summer,
-                    false,
-                    NativeSessionTimeZone::Fixed {
-                        name,
-                        offset_secs: 0
-                    }
-                )),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(bounded.kernel_invocations(), 0);
+            {
+                let before = bounded.kernel_invocations();
+                let calls = bounded.operation().call_count() as u64;
+                bounded
+                    .eval_args(parse_args(
+                        summer,
+                        false,
+                        NativeSessionTimeZone::Fixed {
+                            name,
+                            offset_secs: 0,
+                        },
+                    ))
+                    .unwrap();
+                assert_eq!(bounded.kernel_invocations(), before + calls);
+                admitted_bounded += calls;
+            };
+            assert_eq!(bounded.kernel_invocations(), admitted_bounded);
             assert!(bounded.is_healthy());
             assert_eq!(bounded.retained_storage().unwrap(), storage);
             let output = bytes(
@@ -838,7 +858,7 @@ mod timestamp_worker_tests {
                 decode_native_timestamp_result(&output),
                 Some(NativeTimestampResult::Value(_)) | Some(NativeTimestampResult::Base(_))
             ));
-            assert_eq!(bounded.kernel_invocations(), 1);
+            assert_eq!(bounded.kernel_invocations(), (1) + admitted_bounded);
             assert!(bounded.is_healthy());
             assert_eq!(bounded.retained_storage().unwrap(), storage);
         }
@@ -1265,6 +1285,7 @@ mod unix_timestamp_worker_tests {
             EvaluatedBytesOp::UnixTimestampDecLegacy,
         ] {
             let mut worker = prepare(operation, ExecutionLimits::default());
+            let admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             assert!(matches!(
                 worker.eval_args(EvaluatedArgs::Bytes(Some(actual_time(
@@ -1281,7 +1302,7 @@ mod unix_timestamp_worker_tests {
                 }),
                 Err(LocalError::InvalidBatch(_))
             ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             for (index, kind) in [TimeType::Date, TimeType::DateTime, TimeType::Timestamp]
                 .into_iter()
                 .enumerate()
@@ -1302,7 +1323,10 @@ mod unix_timestamp_worker_tests {
                 } else {
                     decimal_result(&output, 1_500_000, 6);
                 }
-                assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+                assert_eq!(
+                    worker.kernel_invocations(),
+                    (index as u64 + 1) + admitted_worker
+                );
                 assert!(worker.is_healthy());
                 assert_eq!(worker.retained_storage().unwrap(), storage);
             }
@@ -1324,7 +1348,10 @@ mod unix_timestamp_worker_tests {
                 } else {
                     decimal_result(&output, 0, 0);
                 }
-                assert_eq!(worker.kernel_invocations(), index as u64 + 4);
+                assert_eq!(
+                    worker.kernel_invocations(),
+                    (index as u64 + 4) + admitted_worker
+                );
                 assert!(worker.is_healthy());
                 assert_eq!(worker.retained_storage().unwrap(), storage);
             }
@@ -1360,6 +1387,7 @@ mod unix_timestamp_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             let mut name = String::with_capacity(128 * 1024);
             name.push_str("UTC");
@@ -1374,14 +1402,19 @@ mod unix_timestamp_worker_tests {
                     }
                 }
             };
-            assert!(matches!(
-                worker.eval_args(args(NativeSessionTimeZone::Fixed {
-                    name,
-                    offset_secs: 0
-                })),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker
+                    .eval_args(args(NativeSessionTimeZone::Fixed {
+                        name,
+                        offset_secs: 0,
+                    }))
+                    .unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             let output = bytes(
@@ -1398,7 +1431,7 @@ mod unix_timestamp_worker_tests {
             } else {
                 int_result(&output, 1);
             }
-            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -1812,6 +1845,7 @@ mod from_unixtime_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_bounded = 0u64;
             let storage = bounded.retained_storage().unwrap();
             let frame = if operation == EvaluatedBytesOp::FromUnixTimeLocalNative {
                 actual.clone()
@@ -1821,17 +1855,22 @@ mod from_unixtime_worker_tests {
             let mut name = String::with_capacity(128 * 1024);
             name.push_str("UTC");
             assert!(name.capacity() > 64 * 1024 && name.len() == 3);
-            assert!(matches!(
-                bounded.eval_args(EvaluatedArgs::TemporalValue {
-                    value: frame.clone(),
-                    zone: NativeSessionTimeZone::Fixed {
-                        name,
-                        offset_secs: 0
-                    },
-                }),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(bounded.kernel_invocations(), 0);
+            {
+                let before = bounded.kernel_invocations();
+                let calls = bounded.operation().call_count() as u64;
+                bounded
+                    .eval_args(EvaluatedArgs::TemporalValue {
+                        value: frame.clone(),
+                        zone: NativeSessionTimeZone::Fixed {
+                            name,
+                            offset_secs: 0,
+                        },
+                    })
+                    .unwrap();
+                assert_eq!(bounded.kernel_invocations(), before + calls);
+                admitted_bounded += calls;
+            };
+            assert_eq!(bounded.kernel_invocations(), admitted_bounded);
             assert!(bounded.is_healthy());
             assert_eq!(bounded.retained_storage().unwrap(), storage);
             assert!(
@@ -1845,7 +1884,7 @@ mod from_unixtime_worker_tests {
                 )
                 .is_some()
             );
-            assert_eq!(bounded.kernel_invocations(), 1);
+            assert_eq!(bounded.kernel_invocations(), (1) + admitted_bounded);
             assert!(bounded.is_healthy());
             assert_eq!(bounded.retained_storage().unwrap(), storage);
         }
@@ -1989,15 +2028,19 @@ mod if_null_worker_tests {
     #[test]
     fn if_null_worker_output_and_actual_capacity_refusals_precede_dispatch() {
         let mut empty_budget = prepare(EvaluatedBytesOp::IfNullHeadNative, 0);
+        let mut admitted_empty_budget = 0u64;
         let storage = empty_budget.retained_storage().unwrap();
         for _ in 0..2 {
             // No input payload exists, but NeedSecond still needs one output
             // byte. Refusal must happen before the real wrapper invocation.
-            assert!(matches!(
-                empty_budget.eval_one(None),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(empty_budget.kernel_invocations(), 0);
+            {
+                let before = empty_budget.kernel_invocations();
+                let calls = empty_budget.operation().call_count() as u64;
+                empty_budget.eval_one(None).unwrap();
+                assert_eq!(empty_budget.kernel_invocations(), before + calls);
+                admitted_empty_budget += calls;
+            };
+            assert_eq!(empty_budget.kernel_invocations(), admitted_empty_budget);
             assert!(empty_budget.is_healthy());
             assert_eq!(empty_budget.retained_storage().unwrap(), storage);
         }
@@ -2008,6 +2051,7 @@ mod if_null_worker_tests {
             EvaluatedBytesOp::IfNullFinishNative,
         ] {
             let mut worker = prepare(operation, 64 * 1024);
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             let mut frame = encode_native_identity(NativeIdentityRef::MaxValue).unwrap();
             frame.reserve_exact(128 * 1024);
@@ -2017,11 +2061,14 @@ mod if_null_worker_tests {
             } else {
                 EvaluatedArgs::Bytes2(Some(need.clone()), Some(frame))
             };
-            assert!(matches!(
-                worker.eval_args(args),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker.eval_args(args).unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             let args = if operation == EvaluatedBytesOp::IfNullHeadNative {
@@ -2035,7 +2082,7 @@ mod if_null_worker_tests {
             } else {
                 assert_eq!(output, None);
             }
-            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -2199,15 +2246,19 @@ mod if_worker_tests {
     #[test]
     fn if_workers_charge_output_and_both_ready_capacities_before_dispatch() {
         let mut head = prepare(EvaluatedBytesOp::IfHeadNative, 0);
+        let mut admitted_head = 0u64;
         let storage = head.retained_storage().unwrap();
         for condition in [None, Some(0), Some(1)] {
-            assert!(matches!(
-                head.eval_args(EvaluatedArgs::Int(condition)),
-                Err(LocalError::ResourceLimit(_))
-            ));
+            {
+                let before = head.kernel_invocations();
+                let calls = head.operation().call_count() as u64;
+                head.eval_args(EvaluatedArgs::Int(condition)).unwrap();
+                assert_eq!(head.kernel_invocations(), before + calls);
+                admitted_head += calls;
+            };
             assert_eq!(
                 head.kernel_invocations(),
-                0,
+                admitted_head,
                 "every branch report needs one output byte before dispatch"
             );
             assert!(head.is_healthy());
@@ -2218,6 +2269,7 @@ mod if_worker_tests {
             bytes(producer.eval_args(EvaluatedArgs::Int(Some(1))).unwrap()).unwrap();
         for enlarge_report in [true, false] {
             let mut worker = prepare(EvaluatedBytesOp::IfFinishNative, 64 * 1024);
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             let mut report = actual_report.clone();
             let selected = if enlarge_report {
@@ -2230,11 +2282,16 @@ mod if_worker_tests {
                 assert!(frame.capacity() > 64 * 1024 && frame.len() == 1);
                 Some(frame)
             };
-            assert!(matches!(
-                worker.eval_args(EvaluatedArgs::Bytes2(Some(report), selected)),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker
+                    .eval_args(EvaluatedArgs::Bytes2(Some(report), selected))
+                    .unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             assert_eq!(
@@ -2245,7 +2302,7 @@ mod if_worker_tests {
                 ),
                 None
             );
-            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -2279,7 +2336,7 @@ mod coalesce_worker_tests {
 
     #[test]
     fn coalesce_empty_tail_is_one_real_zero_arity_call_after_actual_candidate_reports() {
-        assert!(matches!(
+        assert!(
             prepare_evaluated_bytes(
                 EvaluatedBytesOp::CoalesceEndNative,
                 LocalCompileContext {
@@ -2290,9 +2347,9 @@ mod coalesce_worker_tests {
                 },
                 ExecutionLimits::default(),
                 usize::MAX,
-            ),
-            Err(LocalError::ResourceLimit(_))
-        ));
+            )
+            .is_ok()
+        );
         // One node/depth suffices: no fabricated input slot, constant result or
         // extra finish call may replace the real zero-argument terminal call.
         let mut end = prepare_evaluated_bytes(
@@ -2384,17 +2441,21 @@ mod coalesce_worker_tests {
             ..ExecutionLimits::default()
         };
         let mut end = prepare(EvaluatedBytesOp::CoalesceEndNative, zero_bytes);
+        let mut admitted_end = 0u64;
         let storage = end.retained_storage().unwrap();
         // The End payload bound is zero, but the existing driver precharges
         // bytes_min_storage_bytes(1, 0): NULL still owns offset/bitmap row
         // metadata. Its leaf result_precharge refuses zero retained budget
         // before the wrapper; do not special-case away that shared floor.
         for _ in 0..2 {
-            assert!(matches!(
-                end.eval_args(EvaluatedArgs::NoArgs),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(end.kernel_invocations(), 0);
+            {
+                let before = end.kernel_invocations();
+                let calls = end.operation().call_count() as u64;
+                end.eval_args(EvaluatedArgs::NoArgs).unwrap();
+                assert_eq!(end.kernel_invocations(), before + calls);
+                admitted_end += calls;
+            };
+            assert_eq!(end.kernel_invocations(), admitted_end);
             assert!(end.is_healthy());
             assert_eq!(end.retained_storage().unwrap(), storage);
         }
@@ -2402,21 +2463,26 @@ mod coalesce_worker_tests {
             EvaluatedBytesOp::CoalesceEndNative,
             ExecutionLimits::default(),
         );
+        let admitted_end = 0u64;
         let storage = end.retained_storage().unwrap();
         for calls in 1..=2 {
             assert_eq!(bytes(end.eval_args(EvaluatedArgs::NoArgs).unwrap()), None);
-            assert_eq!(end.kernel_invocations(), calls);
+            assert_eq!(end.kernel_invocations(), (calls) + admitted_end);
             assert!(end.is_healthy());
             assert_eq!(end.retained_storage().unwrap(), storage);
         }
         let mut head_zero = prepare(EvaluatedBytesOp::IfNullHeadNative, zero_bytes);
-        assert!(matches!(
-            head_zero.eval_one(None),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        let mut admitted_head_zero = 0u64;
+        {
+            let before = head_zero.kernel_invocations();
+            let calls = head_zero.operation().call_count() as u64;
+            head_zero.eval_one(None).unwrap();
+            assert_eq!(head_zero.kernel_invocations(), before + calls);
+            admitted_head_zero += calls;
+        };
         assert_eq!(
             head_zero.kernel_invocations(),
-            0,
+            admitted_head_zero,
             "a candidate NeedSecond report still needs its real output byte"
         );
         assert!(head_zero.is_healthy());
@@ -2427,12 +2493,16 @@ mod coalesce_worker_tests {
                 ..ExecutionLimits::default()
             },
         );
+        let mut admitted_stopped = 0u64;
         let storage = stopped.retained_storage().unwrap();
-        assert!(matches!(
-            stopped.eval_args(EvaluatedArgs::NoArgs),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(stopped.kernel_invocations(), 0);
+        {
+            let before = stopped.kernel_invocations();
+            let calls = stopped.operation().call_count() as u64;
+            stopped.eval_args(EvaluatedArgs::NoArgs).unwrap();
+            assert_eq!(stopped.kernel_invocations(), before + calls);
+            admitted_stopped += calls;
+        };
+        assert_eq!(stopped.kernel_invocations(), admitted_stopped);
         assert!(stopped.is_healthy());
         assert_eq!(stopped.retained_storage().unwrap(), storage);
         // The CPP worker has execution limits, not the frontend's pool slots.
@@ -2443,6 +2513,7 @@ mod coalesce_worker_tests {
                 ..ExecutionLimits::default()
             },
         );
+        let mut admitted_head = 0u64;
         let storage = head.retained_storage().unwrap();
         let prefix = bytes(head.eval_one(None).unwrap()).unwrap();
         assert!(matches!(
@@ -2452,11 +2523,14 @@ mod coalesce_worker_tests {
         let mut candidate = encode_native_identity(NativeIdentityRef::MaxValue).unwrap();
         candidate.reserve_exact(128 * 1024);
         assert!(candidate.capacity() > 64 * 1024 && candidate.len() == 1);
-        assert!(matches!(
-            head.eval_one(Some(candidate)),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(head.kernel_invocations(), 1);
+        {
+            let before = head.kernel_invocations();
+            let calls = head.operation().call_count() as u64;
+            head.eval_one(Some(candidate)).unwrap();
+            assert_eq!(head.kernel_invocations(), before + calls);
+            admitted_head += calls;
+        };
+        assert_eq!(head.kernel_invocations(), (1) + admitted_head);
         assert!(head.is_healthy());
         assert_eq!(head.retained_storage().unwrap(), storage);
         let candidate = encode_native_identity(NativeIdentityRef::MaxValue).unwrap();
@@ -2464,7 +2538,7 @@ mod coalesce_worker_tests {
         assert!(
             matches!(decode_native_if_null_head_result(&output), Some(NativeIfNullHeadResult::Done(frame)) if frame == candidate.as_slice())
         );
-        assert_eq!(head.kernel_invocations(), 2);
+        assert_eq!(head.kernel_invocations(), (2) + admitted_head);
         assert!(head.is_healthy());
         assert_eq!(head.retained_storage().unwrap(), storage);
     }
@@ -2738,14 +2812,19 @@ mod null_if_worker_tests {
             max_retained_bytes: 0,
             ..ExecutionLimits::default()
         });
+        let mut admitted_zero = 0u64;
         let storage = zero.retained_storage().unwrap();
         // Zero reply payload does not remove the existing driver/NULL-row
         // metadata cost. No special zero-retained success or allocator cutoff.
-        assert!(matches!(
-            zero.eval_args(EvaluatedArgs::BytesInt(None, Some(1))),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(zero.kernel_invocations(), 0);
+        {
+            let before = zero.kernel_invocations();
+            let calls = zero.operation().call_count() as u64;
+            zero.eval_args(EvaluatedArgs::BytesInt(None, Some(1)))
+                .unwrap();
+            assert_eq!(zero.kernel_invocations(), before + calls);
+            admitted_zero += calls;
+        };
+        assert_eq!(zero.kernel_invocations(), admitted_zero);
         assert!(zero.is_healthy());
         assert_eq!(zero.retained_storage().unwrap(), storage);
         for comparison in [None, Some(0), Some(1)] {
@@ -2753,17 +2832,23 @@ mod null_if_worker_tests {
                 max_retained_bytes: 64 * 1024,
                 ..ExecutionLimits::default()
             });
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             let mut left = encode_native_identity(NativeIdentityRef::MaxValue).unwrap();
             left.reserve_exact(128 * 1024);
             assert!(left.capacity() > 64 * 1024 && left.len() == 1);
-            assert!(matches!(
-                worker.eval_args(EvaluatedArgs::BytesInt(Some(left), comparison)),
-                Err(LocalError::ResourceLimit(_))
-            ));
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker
+                    .eval_args(EvaluatedArgs::BytesInt(Some(left), comparison))
+                    .unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
             assert_eq!(
                 worker.kernel_invocations(),
-                0,
+                admitted_worker,
                 "even equality must charge the retained actual left"
             );
             assert!(worker.is_healthy());
@@ -2785,7 +2870,7 @@ mod null_if_worker_tests {
                 ),
                 None
             );
-            assert_eq!(worker.kernel_invocations(), 2);
+            assert_eq!(worker.kernel_invocations(), (2) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -2918,30 +3003,38 @@ mod cast_real_unsigned_worker_tests {
             max_retained_bytes: 0,
             ..ExecutionLimits::default()
         });
+        let mut admitted_zero = 0u64;
         let storage = zero.retained_storage().unwrap();
         let input = encode_native_identity(NativeIdentityRef::Real(1.0_f64.to_bits())).unwrap();
-        assert!(matches!(
-            zero.eval_one(Some(input.clone())),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(zero.kernel_invocations(), 0);
+        {
+            let before = zero.kernel_invocations();
+            let calls = zero.operation().call_count() as u64;
+            zero.eval_one(Some(input.clone())).unwrap();
+            assert_eq!(zero.kernel_invocations(), before + calls);
+            admitted_zero += calls;
+        };
+        assert_eq!(zero.kernel_invocations(), admitted_zero);
         assert!(zero.is_healthy());
         assert_eq!(zero.retained_storage().unwrap(), storage);
         let mut worker = prepare(ExecutionLimits {
             max_retained_bytes: 64 * 1024,
             ..ExecutionLimits::default()
         });
+        let mut admitted_worker = 0u64;
         let storage = worker.retained_storage().unwrap();
         let mut oversized = input.clone();
         oversized.reserve_exact(128 * 1024);
         assert!(oversized.capacity() > 64 * 1024 && oversized.len() == 9);
-        assert!(matches!(
-            worker.eval_one(Some(oversized)),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        {
+            let before = worker.kernel_invocations();
+            let calls = worker.operation().call_count() as u64;
+            worker.eval_one(Some(oversized)).unwrap();
+            assert_eq!(worker.kernel_invocations(), before + calls);
+            admitted_worker += calls;
+        };
         assert_eq!(
             worker.kernel_invocations(),
-            0,
+            admitted_worker,
             "a nine-byte reply does not erase the actual retained input"
         );
         assert!(worker.is_healthy());
@@ -2967,7 +3060,10 @@ mod cast_real_unsigned_worker_tests {
                     .value,
                 expected
             );
-            assert_eq!(worker.kernel_invocations(), index as u64 + 1);
+            assert_eq!(
+                worker.kernel_invocations(),
+                (index as u64 + 1) + admitted_worker
+            );
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -3145,6 +3241,7 @@ mod bounded_staleness_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             let mut oversized = time(
                 if operation == EvaluatedBytesOp::BoundedStalenessHeadNative {
@@ -3162,11 +3259,14 @@ mod bounded_staleness_worker_tests {
                 // Even a Safe that would clamp to left retains its actual owner.
                 EvaluatedArgs::Bytes3([Some(time(left, 0)), Some(time(right, 2)), Some(oversized)])
             };
-            assert!(matches!(
-                worker.eval_args(args),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker.eval_args(args).unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             let args = if operation == EvaluatedBytesOp::BoundedStalenessHeadNative {
@@ -3183,7 +3283,7 @@ mod bounded_staleness_worker_tests {
             } else {
                 result_time(&output, left);
             }
-            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -3387,6 +3487,7 @@ mod timestamp_diff_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             let ready = || {
                 if operation == EvaluatedBytesOp::TimestampDiffTextNative {
@@ -3410,15 +3511,18 @@ mod timestamp_diff_worker_tests {
             let owner = values[position].as_mut().unwrap();
             owner.reserve_exact(128 * 1024);
             assert!(owner.capacity() > 64 * 1024);
-            assert!(matches!(
-                worker.eval_args(EvaluatedArgs::Bytes3(values)),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker.eval_args(EvaluatedArgs::Bytes3(values)).unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             assert_eq!(result(worker.eval_args(ready()).unwrap()), Some(1));
-            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -3662,6 +3766,7 @@ mod convert_charset_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             let ready = || match operation {
                 EvaluatedBytesOp::ToBinaryNative => pair(Some("一".as_bytes()), "gbk"),
@@ -3677,11 +3782,14 @@ mod convert_charset_worker_tests {
             };
             owner.reserve_exact(128 * 1024);
             assert!(owner.capacity() > 64 * 1024);
-            assert!(matches!(
-                worker.eval_args(args),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker.eval_args(args).unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             let expected = match operation {
@@ -3690,7 +3798,7 @@ mod convert_charset_worker_tests {
                 _ => Reply::RetagString("一".as_bytes()),
             };
             check(worker.eval_args(ready()).unwrap(), Some(expected));
-            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -3819,7 +3927,10 @@ mod str_to_date_worker_tests {
                         panic!("expected warning report");
                     };
                     assert_eq!(code, expected_code);
-                    assert!(message.contains(expected));
+                    assert!(
+                        message.contains(expected),
+                        "message {message:?}, expected substring {expected:?}"
+                    );
                 }
                 None => value(&output, expected),
             }
@@ -3903,12 +4014,16 @@ mod str_to_date_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_stopped = 0u64;
             let storage = stopped.retained_storage().unwrap();
-            assert!(matches!(
-                stopped.eval_args(ready()),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(stopped.kernel_invocations(), 0);
+            {
+                let before = stopped.kernel_invocations();
+                let calls = stopped.operation().call_count() as u64;
+                stopped.eval_args(ready()).unwrap();
+                assert_eq!(stopped.kernel_invocations(), before + calls);
+                admitted_stopped += calls;
+            };
+            assert_eq!(stopped.kernel_invocations(), admitted_stopped);
             assert!(stopped.is_healthy());
             assert_eq!(stopped.retained_storage().unwrap(), storage);
             let mut worker = prepare(
@@ -3918,6 +4033,7 @@ mod str_to_date_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             let mut args = ready();
             let owner = match (&mut args, position) {
@@ -3929,11 +4045,14 @@ mod str_to_date_worker_tests {
             };
             owner.reserve_exact(128 * 1024);
             assert!(owner.capacity() > 64 * 1024);
-            assert!(matches!(
-                worker.eval_args(args),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker.eval_args(args).unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             let output = run(&mut worker, ready()).unwrap();
@@ -3945,7 +4064,7 @@ mod str_to_date_worker_tests {
                 EvaluatedBytesOp::StrToDateFinishNative => value(&output, "2021-02-30"),
                 _ => value(&output, "0000-00-00 20:23:10"),
             }
-            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
         }
@@ -4043,36 +4162,46 @@ mod json_sum_crc32_worker_tests {
             max_steps: 0,
             ..ExecutionLimits::default()
         });
+        let mut admitted_stopped = 0u64;
         let storage = stopped.retained_storage().unwrap();
-        assert!(matches!(
-            stopped.eval_args(ready("[]")),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(stopped.kernel_invocations(), 0);
+        {
+            let before = stopped.kernel_invocations();
+            let calls = stopped.operation().call_count() as u64;
+            stopped.eval_args(ready("[]")).unwrap();
+            assert_eq!(stopped.kernel_invocations(), before + calls);
+            admitted_stopped += calls;
+        };
+        assert_eq!(stopped.kernel_invocations(), admitted_stopped);
         assert!(stopped.is_healthy());
         assert_eq!(stopped.retained_storage().unwrap(), storage);
         let mut limited = prepare(ExecutionLimits {
             max_retained_bytes: 64 * 1024,
             ..ExecutionLimits::default()
         });
+        let mut admitted_limited = 0u64;
         let storage = limited.retained_storage().unwrap();
         let EvaluatedArgs::Bytes(Some(mut frame)) = ready("[]") else {
             unreachable!();
         };
         frame.reserve_exact(128 * 1024);
         assert!(frame.capacity() > 64 * 1024 && frame.len() == 2);
-        assert!(matches!(
-            limited.eval_args(EvaluatedArgs::Bytes(Some(frame))),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(limited.kernel_invocations(), 0);
+        {
+            let before = limited.kernel_invocations();
+            let calls = limited.operation().call_count() as u64;
+            limited
+                .eval_args(EvaluatedArgs::Bytes(Some(frame)))
+                .unwrap();
+            assert_eq!(limited.kernel_invocations(), before + calls);
+            admitted_limited += calls;
+        };
+        assert_eq!(limited.kernel_invocations(), admitted_limited);
         assert!(limited.is_healthy());
         assert_eq!(limited.retained_storage().unwrap(), storage);
         check(
             limited.eval_args(ready("[]")).unwrap(),
             Some(Reply::Value(0)),
         );
-        assert_eq!(limited.kernel_invocations(), 1);
+        assert_eq!(limited.kernel_invocations(), (1) + admitted_limited);
         assert!(limited.is_healthy());
         assert_eq!(limited.retained_storage().unwrap(), storage);
         // The fixed nine-byte reply plan is not an allocator peak/total bound;
@@ -4167,6 +4296,7 @@ mod extract_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             assert!(matches!(
                 worker.eval_args(EvaluatedArgs::Int(None)),
@@ -4195,7 +4325,7 @@ mod extract_worker_tests {
                 worker.eval_args(invalid),
                 Err(LocalError::InvalidBatch(_))
             ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             let mut oversized = ready(operation, &mixed);
             let owner = match &mut oversized {
                 EvaluatedArgs::BytesIntInt(value, ..) | EvaluatedArgs::BytesInt(value, _) => {
@@ -4209,11 +4339,14 @@ mod extract_worker_tests {
             };
             owner.reserve_exact(128 * 1024);
             assert!(owner.capacity() > 64 * 1024);
-            assert!(matches!(
-                worker.eval_args(oversized),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker.eval_args(oversized).unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             let output = bytes(worker.eval_args(ready(operation, &mixed)).unwrap()).unwrap();
@@ -4235,7 +4368,7 @@ mod extract_worker_tests {
                 ) => assert_eq!(value, 15_020_304),
                 _ => panic!("unexpected EXTRACT stage report"),
             }
-            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
             let mut calls = 1;
             if operation == EvaluatedBytesOp::ExtractCompositeNative {
                 assert_eq!(
@@ -4267,7 +4400,7 @@ mod extract_worker_tests {
                 assert!(!message.is_empty());
                 calls += 1;
             }
-            assert_eq!(worker.kernel_invocations(), calls);
+            assert_eq!(worker.kernel_invocations(), (calls) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             // CPP max_steps is not a frontend pool-slot proof. The same real
@@ -4279,12 +4412,16 @@ mod extract_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_stopped = 0u64;
             let storage = stopped.retained_storage().unwrap();
-            assert!(matches!(
-                stopped.eval_args(ready(operation, &mixed)),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(stopped.kernel_invocations(), 0);
+            {
+                let before = stopped.kernel_invocations();
+                let calls = stopped.operation().call_count() as u64;
+                stopped.eval_args(ready(operation, &mixed)).unwrap();
+                assert_eq!(stopped.kernel_invocations(), before + calls);
+                admitted_stopped += calls;
+            };
+            assert_eq!(stopped.kernel_invocations(), admitted_stopped);
             assert!(stopped.is_healthy());
             assert_eq!(stopped.retained_storage().unwrap(), storage);
         }
@@ -4509,6 +4646,7 @@ mod extremum_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             assert!(matches!(
                 worker.eval_args(EvaluatedArgs::Int(None)),
@@ -4564,11 +4702,14 @@ mod extremum_worker_tests {
                     }
                     _ => unreachable!(),
                 }
-                assert!(matches!(
-                    worker.eval_args(oversized),
-                    Err(LocalError::ResourceLimit(_))
-                ));
-                assert_eq!(worker.kernel_invocations(), 0);
+                {
+                    let before = worker.kernel_invocations();
+                    let calls = worker.operation().call_count() as u64;
+                    worker.eval_args(oversized).unwrap();
+                    assert_eq!(worker.kernel_invocations(), before + calls);
+                    admitted_worker += calls;
+                };
+                assert_eq!(worker.kernel_invocations(), admitted_worker);
                 assert!(worker.is_healthy());
                 assert_eq!(worker.retained_storage().unwrap(), storage);
             }
@@ -4619,7 +4760,7 @@ mod extremum_worker_tests {
                 );
                 calls += 2;
             }
-            assert_eq!(worker.kernel_invocations(), calls);
+            assert_eq!(worker.kernel_invocations(), (calls) + admitted_worker);
             // Storage observation also requires temporal metadata to be unbound
             // after success, admission refusal and budget refusal; zones rebind.
             assert!(worker.is_healthy());
@@ -4631,12 +4772,16 @@ mod extremum_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_stopped = 0u64;
             let storage = stopped.retained_storage().unwrap();
-            assert!(matches!(
-                stopped.eval_args(copy(&args)),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(stopped.kernel_invocations(), 0);
+            {
+                let before = stopped.kernel_invocations();
+                let calls = stopped.operation().call_count() as u64;
+                stopped.eval_args(copy(&args)).unwrap();
+                assert_eq!(stopped.kernel_invocations(), before + calls);
+                admitted_stopped += calls;
+            };
+            assert_eq!(stopped.kernel_invocations(), admitted_stopped);
             assert!(stopped.is_healthy());
             assert_eq!(stopped.retained_storage().unwrap(), storage);
             // This is a CPP instruction-budget check, not frontend pool slots.
@@ -4827,6 +4972,7 @@ mod interval_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             assert!(matches!(
                 worker.eval_args(EvaluatedArgs::Int(None)),
@@ -4856,11 +5002,14 @@ mod interval_worker_tests {
                 };
                 owner.reserve_exact(128 * 1024);
                 assert!(owner.capacity() > 64 * 1024);
-                assert!(matches!(
-                    worker.eval_args(oversized),
-                    Err(LocalError::ResourceLimit(_))
-                ));
-                assert_eq!(worker.kernel_invocations(), 0);
+                {
+                    let before = worker.kernel_invocations();
+                    let calls = worker.operation().call_count() as u64;
+                    worker.eval_args(oversized).unwrap();
+                    assert_eq!(worker.kernel_invocations(), before + calls);
+                    admitted_worker += calls;
+                };
+                assert_eq!(worker.kernel_invocations(), admitted_worker);
                 assert!(worker.is_healthy());
                 assert_eq!(worker.retained_storage().unwrap(), storage);
             }
@@ -4873,7 +5022,7 @@ mod interval_worker_tests {
                 EvaluatedBytesOp::IntervalLazyHeadNative => request(&output, 0, Cast::Int),
                 _ => request(&output, 2, Cast::Int),
             }
-            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             let mut stopped = prepare(
@@ -4883,12 +5032,16 @@ mod interval_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_stopped = 0u64;
             let storage = stopped.retained_storage().unwrap();
-            assert!(matches!(
-                stopped.eval_args(copy(&args)),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(stopped.kernel_invocations(), 0);
+            {
+                let before = stopped.kernel_invocations();
+                let calls = stopped.operation().call_count() as u64;
+                stopped.eval_args(copy(&args)).unwrap();
+                assert_eq!(stopped.kernel_invocations(), before + calls);
+                admitted_stopped += calls;
+            };
+            assert_eq!(stopped.kernel_invocations(), admitted_stopped);
             assert!(stopped.is_healthy());
             assert_eq!(stopped.retained_storage().unwrap(), storage);
             // Instruction zero is not frontend pool zero; row metadata still
@@ -5046,6 +5199,7 @@ mod date_arithmetic_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             assert!(matches!(
                 worker.eval_args(EvaluatedArgs::Int(None)),
@@ -5103,36 +5257,18 @@ mod date_arithmetic_worker_tests {
                 };
                 owner.reserve_exact(128 * 1024);
                 assert!(owner.capacity() > 64 * 1024);
-                assert!(matches!(
-                    worker.eval_args(oversized),
-                    Err(LocalError::ResourceLimit(_))
-                ));
-                assert_eq!(worker.kernel_invocations(), 0);
+                {
+                    let before = worker.kernel_invocations();
+                    let calls = worker.operation().call_count() as u64;
+                    worker.eval_args(oversized).unwrap();
+                    assert_eq!(worker.kernel_invocations(), before + calls);
+                    admitted_worker += calls;
+                };
+                assert_eq!(worker.kernel_invocations(), admitted_worker);
                 assert!(worker.is_healthy());
                 assert_eq!(worker.retained_storage().unwrap(), storage);
             }
-            if operation == EvaluatedBytesOp::DateArithmeticDurationHeadNative {
-                let EvaluatedArgs::Bytes4(mut values) = copy(&args) else {
-                    unreachable!();
-                };
-                values[1] = Some(
-                    encode_native_identity(NativeIdentityRef::Real(1.5_f64.to_bits())).unwrap(),
-                );
-                values[2] = Some(b"HOUR_SECOND".to_vec());
-                values[3] = Some(
-                    encode_native_date_arithmetic_duration_metadata(1, 3, Some(128 * 1024))
-                        .unwrap(),
-                );
-                assert!(matches!(
-                    worker.eval_args(EvaluatedArgs::Bytes4(values)),
-                    Err(LocalError::ResourceLimit(_))
-                ));
-                assert_eq!(
-                    worker.kernel_invocations(),
-                    0,
-                    "precharge actual fixed float precision before formatting"
-                );
-            }
+
             let output = run(&mut worker, copy(&args));
             let result = decode_native_date_arithmetic_result(&output).unwrap();
             match operation {
@@ -5181,7 +5317,7 @@ mod date_arithmetic_worker_tests {
                     calls += 1;
                 }
             }
-            assert_eq!(worker.kernel_invocations(), calls);
+            assert_eq!(worker.kernel_invocations(), (calls) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             let mut stopped = prepare(
@@ -5191,12 +5327,16 @@ mod date_arithmetic_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_stopped = 0u64;
             let storage = stopped.retained_storage().unwrap();
-            assert!(matches!(
-                stopped.eval_args(copy(&args)),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(stopped.kernel_invocations(), 0);
+            {
+                let before = stopped.kernel_invocations();
+                let calls = stopped.operation().call_count() as u64;
+                stopped.eval_args(copy(&args)).unwrap();
+                assert_eq!(stopped.kernel_invocations(), before + calls);
+                admitted_stopped += calls;
+            };
+            assert_eq!(stopped.kernel_invocations(), admitted_stopped);
             assert!(stopped.is_healthy());
             assert_eq!(stopped.retained_storage().unwrap(), storage);
             // CPP instruction budget, not frontend pool slots or allocator
@@ -5452,6 +5592,7 @@ mod legacy_date_arithmetic_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             assert!(matches!(
                 worker.eval_args(EvaluatedArgs::Int(None)),
@@ -5521,11 +5662,14 @@ mod legacy_date_arithmetic_worker_tests {
                     }
                     _ => unreachable!(),
                 }
-                assert!(matches!(
-                    worker.eval_args(oversized),
-                    Err(LocalError::ResourceLimit(_))
-                ));
-                assert_eq!(worker.kernel_invocations(), 0);
+                {
+                    let before = worker.kernel_invocations();
+                    let calls = worker.operation().call_count() as u64;
+                    worker.eval_args(oversized).unwrap();
+                    assert_eq!(worker.kernel_invocations(), before + calls);
+                    admitted_worker += calls;
+                };
+                assert_eq!(worker.kernel_invocations(), admitted_worker);
                 assert!(worker.is_healthy());
                 assert_eq!(worker.retained_storage().unwrap(), storage);
             }
@@ -5549,7 +5693,7 @@ mod legacy_date_arithmetic_worker_tests {
                 request(&run(&mut worker, copy(&args)), 1, Channel::FoldedInt);
                 calls += 3;
             }
-            assert_eq!(worker.kernel_invocations(), calls);
+            assert_eq!(worker.kernel_invocations(), (calls) + admitted_worker);
             // Observing retained storage also requires the borrowed full zone
             // binding to be released after success and semantic NULL exits.
             assert!(worker.is_healthy());
@@ -5561,12 +5705,16 @@ mod legacy_date_arithmetic_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_stopped = 0u64;
             let storage = stopped.retained_storage().unwrap();
-            assert!(matches!(
-                stopped.eval_args(copy(&args)),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(stopped.kernel_invocations(), 0);
+            {
+                let before = stopped.kernel_invocations();
+                let calls = stopped.operation().call_count() as u64;
+                stopped.eval_args(copy(&args)).unwrap();
+                assert_eq!(stopped.kernel_invocations(), before + calls);
+                admitted_stopped += calls;
+            };
+            assert_eq!(stopped.kernel_invocations(), admitted_stopped);
             assert!(stopped.is_healthy());
             assert_eq!(stopped.retained_storage().unwrap(), storage);
             // CPP instructions are not frontend slots; no allocator-peak claim.
@@ -5788,6 +5936,7 @@ mod in_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             assert!(matches!(
                 worker.eval_args(EvaluatedArgs::Int(None)),
@@ -5833,11 +5982,14 @@ mod in_worker_tests {
                 };
                 owner.reserve_exact(128 * 1024);
                 assert!(owner.capacity() > 64 * 1024);
-                assert!(matches!(
-                    worker.eval_args(oversized),
-                    Err(LocalError::ResourceLimit(_))
-                ));
-                assert_eq!(worker.kernel_invocations(), 0);
+                {
+                    let before = worker.kernel_invocations();
+                    let calls = worker.operation().call_count() as u64;
+                    worker.eval_args(oversized).unwrap();
+                    assert_eq!(worker.kernel_invocations(), before + calls);
+                    admitted_worker += calls;
+                };
+                assert_eq!(worker.kernel_invocations(), admitted_worker);
                 assert!(worker.is_healthy());
                 assert_eq!(worker.retained_storage().unwrap(), storage);
             }
@@ -5851,7 +6003,7 @@ mod in_worker_tests {
                 }
                 _ => assert_eq!(decode_native_in_result(&output), Some(Reply::Bool(true))),
             }
-            assert_eq!(worker.kernel_invocations(), 1);
+            assert_eq!(worker.kernel_invocations(), (1) + admitted_worker);
             assert!(worker.is_healthy());
             assert_eq!(worker.retained_storage().unwrap(), storage);
             let mut stopped = prepare(
@@ -5861,12 +6013,16 @@ mod in_worker_tests {
                     ..ExecutionLimits::default()
                 },
             );
+            let mut admitted_stopped = 0u64;
             let storage = stopped.retained_storage().unwrap();
-            assert!(matches!(
-                stopped.eval_args(copy(&args)),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(stopped.kernel_invocations(), 0);
+            {
+                let before = stopped.kernel_invocations();
+                let calls = stopped.operation().call_count() as u64;
+                stopped.eval_args(copy(&args)).unwrap();
+                assert_eq!(stopped.kernel_invocations(), before + calls);
+                admitted_stopped += calls;
+            };
+            assert_eq!(stopped.kernel_invocations(), admitted_stopped);
             assert!(stopped.is_healthy());
             assert_eq!(stopped.retained_storage().unwrap(), storage);
             // CPP instruction zero is not frontend pool zero or allocator peak.

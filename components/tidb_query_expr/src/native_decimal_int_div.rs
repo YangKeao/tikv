@@ -214,13 +214,6 @@ fn actual_error(error: impl std::error::Error + Send + Sync + 'static) -> tidb_q
     EvaluateError::Caused(Box::new(error)).into()
 }
 
-fn finite_budget(budget: usize) -> Result<()> {
-    if budget == usize::MAX {
-        return Err(resource("native Decimal DIV requires a finite budget"));
-    }
-    Ok(())
-}
-
 fn shared(value: RawDecimal<'_>, budget: usize) -> Result<Decimal> {
     // The old native bridge reaches DecimalDigits::as_bytes through its str
     // dereference before the shared digit constructor. Keep that panic/order.
@@ -327,7 +320,6 @@ pub fn native_decimal_integer_division_value(
     unsigned: bool,
     budget: usize,
 ) -> Result<NativeIntDivValue> {
-    finite_budget(budget)?;
     let (Some(left), Some(right)) = (raw_decimal(left), raw_decimal(right)) else {
         return Err(invalid(
             "native Decimal DIV requires two actual Decimal values",
@@ -422,7 +414,6 @@ pub(crate) fn evaluate_native_intdiv(
     unsigned: bool,
     budget: usize,
 ) -> Result<Vec<u8>> {
-    finite_budget(budget)?;
     let (Some(left), Some(right)) = (
         left.and_then(|bytes| decode_native_identity(bytes).ok())
             .filter(|value| raw_decimal(*value).is_some()),
@@ -447,7 +438,6 @@ pub(crate) fn evaluate_legacy_decimal_intdiv(
     right: &[u8],
     budget: usize,
 ) -> Result<Option<i64>> {
-    finite_budget(budget)?;
     let (Some(left), Some(right)) = (framed_decimal(Some(left)), framed_decimal(Some(right)))
     else {
         return Err(invalid(
@@ -623,7 +613,7 @@ mod tests {
         assert!(evaluate_native_intdiv(Some(&left), Some(4), None, Some(&right), true, 9).is_err());
         assert!(
             evaluate_native_intdiv(Some(&left), Some(4), None, Some(&right), true, usize::MAX)
-                .is_err()
+                .is_ok()
         );
         assert!(
             std::panic::catch_unwind(|| native_intdiv_needs_probe(
@@ -844,7 +834,7 @@ mod direct_value_tests {
         );
         assert!(
             native_decimal_integer_division_value(seven, two, Some(4), None, false, usize::MAX)
-                .is_err()
+                .is_ok()
         );
         let one = decimal(b"10000", false, 4, 4);
         let three = decimal(b"30000", false, 4, 4);

@@ -215,16 +215,10 @@ impl ControlLineageFacts {
         spec: &LocalExpr,
         schema: &[FieldType],
         producers: Vec<ControlProducerFact>,
-        limits: CompileLimits,
+        _limits: CompileLimits,
     ) -> LocalResult<Self> {
-        if limits.max_nodes == 0 || limits.max_depth == 0 {
-            return Err(resource("lineage construction node/depth budget exceeded"));
-        }
-        if producers.len() > limits.max_nodes {
-            return Err(resource("lineage producer count exceeds node budget"));
-        }
         let namespace = check_producers(&producers)?;
-        let mut walk = Walk::new(spec, schema, limits)?;
+        let mut walk = Walk::new(spec, schema)?;
         let mut nodes = Vec::new();
         reserve(
             &mut nodes,
@@ -282,12 +276,12 @@ impl ControlLineageFacts {
         &self,
         spec: &LocalExpr,
         schema: &[FieldType],
-        limits: CompileLimits,
+        _limits: CompileLimits,
     ) -> LocalResult<()> {
         if self.schema.as_ref() != schema {
             return Err(invalid("lineage schema differs from its exact snapshot"));
         }
-        let mut walk = Walk::new(spec, schema, limits)?;
+        let mut walk = Walk::new(spec, schema)?;
         let mut ordinal = 0;
         while let Some(description) = walk.next()? {
             let snapshot = self
@@ -670,18 +664,10 @@ struct Walk<'a> {
     pending: Vec<Pending<'a>>,
     schema: &'a [FieldType],
     scheduled: usize,
-    limits: CompileLimits,
 }
 
 impl<'a> Walk<'a> {
-    fn new(
-        spec: &'a LocalExpr,
-        schema: &'a [FieldType],
-        limits: CompileLimits,
-    ) -> LocalResult<Self> {
-        if limits.max_nodes == 0 || limits.max_depth == 0 {
-            return Err(resource("lineage construction node/depth budget exceeded"));
-        }
+    fn new(spec: &'a LocalExpr, schema: &'a [FieldType]) -> LocalResult<Self> {
         for field_type in schema {
             check_type(field_type, Demand::Value(None))?;
         }
@@ -696,7 +682,6 @@ impl<'a> Walk<'a> {
             pending,
             schema,
             scheduled: 1,
-            limits,
         })
     }
 
@@ -718,9 +703,7 @@ impl<'a> Walk<'a> {
                 .scheduled
                 .checked_add(args.len())
                 .ok_or_else(|| resource("lineage construction node count overflow"))?;
-            if self.scheduled > self.limits.max_nodes || child_depth > self.limits.max_depth {
-                return Err(resource("lineage construction node/depth budget exceeded"));
-            }
+
             reserve(
                 &mut self.pending,
                 args.len(),

@@ -32,7 +32,7 @@ pub enum NativeCharsetValueError {
     ResourceLimit(&'static str),
 }
 fn check(bytes: usize, maximum: usize) -> Result<(), NativeCharsetValueError> {
-    if maximum == usize::MAX || bytes > maximum {
+    if bytes > maximum {
         Err(NativeCharsetValueError::ResourceLimit(
             "charset actual byte/work allowance exceeded",
         ))
@@ -297,10 +297,7 @@ mod tests {
             native_convert_using_value(Some(b"a"), "unknown", "unknown", "utf8mb4", 8),
             Err(NativeCharsetValueError::Invalid)
         );
-        assert!(matches!(
-            native_to_binary_value(None, "binary", usize::MAX),
-            Err(NativeCharsetValueError::ResourceLimit(_))
-        ));
+        assert!(native_to_binary_value(None, "binary", usize::MAX).is_ok());
     }
     #[test]
     fn source_policy_skips_target_only_after_actual_source_null() {

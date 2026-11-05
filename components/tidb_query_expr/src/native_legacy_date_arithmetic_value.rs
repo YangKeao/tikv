@@ -164,10 +164,10 @@ pub struct NativeLegacyDateArithmeticValues {
 impl NativeLegacyDateArithmeticValues {
     /// Construct a finite continuation without reading any source.
     pub fn new(meta: Metadata, maximum: usize) -> Result<Self> {
-        if maximum == usize::MAX {
-            return Err(Error::ResourceLimit);
-        }
-        Ok(Self::initial(meta, Some(maximum)))
+        Ok(Self::initial(
+            meta,
+            (maximum != usize::MAX).then_some(maximum),
+        ))
     }
     fn initial(meta: Metadata, maximum: Option<usize>) -> Self {
         Self {
@@ -824,7 +824,7 @@ mod tests {
                 presence: 0
             }
         );
-        assert!(NativeLegacyDateArithmeticValues::new(meta, usize::MAX).is_err());
+        assert!(NativeLegacyDateArithmeticValues::new(meta, usize::MAX).is_ok());
         let mut state = NativeLegacyDateArithmeticValues::new(meta, 32).unwrap();
         state.begin().unwrap();
         assert!(matches!(

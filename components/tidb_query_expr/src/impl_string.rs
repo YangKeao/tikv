@@ -6884,29 +6884,19 @@ mod tests {
     }
 
     #[test]
-    fn test_prepared_find_in_set_encoded_growth_uses_current_work_allowance() {
-        crate::local::with_value_kernel_work_limit(1024, || {
-            assert!(matches!(
+    fn test_prepared_find_in_set_ignores_cancelled_work_policy_but_keeps_explicit_byte_bound() {
+        crate::local::with_value_kernel_work_limit(0, || {
+            assert!(
                 prepare_find_in_set_keys(
                     Some(&vec![b','; 256]),
                     NativeCollation::Binary,
                     usize::MAX
-                ),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert!(crate::local::value_kernel_work_status().is_err());
-        });
-        assert!(crate::local::value_kernel_work_remaining().is_none());
-        crate::local::with_value_kernel_work_limit(8, || {
-            let keys = prepare_find_in_set_keys(None, NativeCollation::Binary, usize::MAX).unwrap();
-            assert!(keys.is_null());
-            assert_eq!(crate::local::value_kernel_work_remaining(), Some(8));
-        });
-        // Existing unscoped and explicit byte-cap contracts stay independent.
-        assert!(
-            prepare_find_in_set_keys(Some(&vec![b','; 256]), NativeCollation::Binary, usize::MAX)
+                )
                 .is_ok()
-        );
+            );
+            assert!(crate::local::value_kernel_work_status().is_ok());
+            assert!(crate::local::value_kernel_work_remaining().is_none());
+        });
         assert!(
             prepare_find_in_set_keys(Some(&vec![b','; 256]), NativeCollation::Binary, 1024)
                 .is_err()

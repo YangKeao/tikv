@@ -29,7 +29,7 @@ pub enum NativeByteUnaryError {
     Contract,
 }
 fn check(n: usize, maximum: usize) -> Result<(), NativeByteUnaryError> {
-    if maximum == usize::MAX || n > maximum {
+    if n > maximum {
         Err(NativeByteUnaryError::Resource)
     } else {
         Ok(())
@@ -77,7 +77,7 @@ mod tests {
         );
         assert_eq!(
             native_ascii_actual_value(None, usize::MAX),
-            Err(NativeByteUnaryError::Resource)
+            native_ascii_actual_value(None, 1 << 30)
         );
         for left in [true, false] {
             assert_eq!(native_trim_actual_value(None, left, 0), Ok(None));

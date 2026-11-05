@@ -49,7 +49,7 @@ impl Allowance {
 }
 fn check(bytes: usize, maximum: impl Into<Allowance>) -> Result<(), Error> {
     if let Some(maximum) = maximum.into().0 {
-        if maximum == usize::MAX || bytes > maximum {
+        if bytes > maximum {
             return Err(resource());
         }
     }

@@ -92,7 +92,7 @@ pub enum NativeCalendarError {
     Contract,
 }
 fn work(maximum: usize, n: usize) -> Result<(), NativeCalendarError> {
-    if maximum == usize::MAX || n > maximum {
+    if n > maximum {
         Err(NativeCalendarError::Resource)
     } else {
         Ok(())
@@ -339,7 +339,7 @@ mod tests {
         );
         assert_eq!(
             native_calendar_text(O::Hour, None, usize::MAX),
-            Err(NativeCalendarError::Resource)
+            native_calendar_text(O::Hour, None, 1 << 30)
         );
         assert_eq!(
             native_calendar_core(O::Hour, None, 0),

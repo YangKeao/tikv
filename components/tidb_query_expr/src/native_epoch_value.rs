@@ -33,11 +33,7 @@ type Result<T> = std::result::Result<T, NativeEpochValueError>;
 pub(super) struct Budget(pub(super) Option<usize>);
 impl Budget {
     fn finite(n: usize) -> Result<Self> {
-        if n == usize::MAX {
-            Err(NativeEpochValueError::Resource)
-        } else {
-            Ok(Self(Some(n)))
-        }
+        Ok(Self((n != usize::MAX).then_some(n)))
     }
 }
 fn work(n: usize, m: usize, extra: usize, max: Budget) -> Result<()> {
@@ -629,7 +625,16 @@ mod actual_tests {
     #[test]
     fn actual_epoch_finite_work_precedes_parser_formatter_and_consumes_failed_states() {
         let utc = NativeSessionTimeZone::utc();
-        for max in [0, 128, usize::MAX] {
+        let NativeUnixTimestampValue::NeedZone(state) =
+            native_unix_timestamp_parse_values("2020-01-02", false, &utc, usize::MAX).unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            state.finish(&utc, usize::MAX).unwrap(),
+            NativeUnixTimestampValue::Int(1_577_923_200)
+        ));
+        for max in [0, 128] {
             assert!(matches!(
                 native_unix_timestamp_parse_values("2020-01-02", false, &utc, max),
                 Err(NativeEpochValueError::Resource)

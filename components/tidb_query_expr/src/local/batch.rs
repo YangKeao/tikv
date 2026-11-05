@@ -29,11 +29,6 @@ use super::{
         LocalBatchProgram, ProgramEntry, compile_evaluated_bytes, evaluated_native_vector_type,
         ready_value_bytes_type, ready_value_decimal_type, ready_value_int_type,
     },
-    runtime::{
-        EvalBudget, bytes_min_storage_bytes, compact_min_storage_bytes, datetime_min_storage_bytes,
-        decimal_min_storage_bytes, duration_min_storage_bytes, int_min_storage_bytes,
-        real_min_storage_bytes, vector_storage_bytes,
-    },
 };
 use crate::{
     BinaryArithmeticErrorKind, BinaryArithmeticOperation, LegacyBinaryArithmeticError,
@@ -99,13 +94,6 @@ impl NativeTemporalCallMetadata {
     }
 }
 
-fn temporal_zone_heap_bytes(zone: &NativeSessionTimeZone) -> usize {
-    match zone {
-        NativeSessionTimeZone::Fixed { name, .. } => name.capacity(),
-        _ => 0,
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NativeRegexpKind {
     Like,
@@ -123,7 +111,6 @@ pub(crate) struct NativeRegexpCallMetadata {
     kind: NativeRegexpKind,
     invocation: RefCell<Option<NativeRegexpInvocation>>,
     known_cache_bytes: Cell<Option<usize>>,
-    known_cache_limit: Cell<usize>,
 }
 
 impl NativeRegexpCallMetadata {
@@ -132,7 +119,6 @@ impl NativeRegexpCallMetadata {
             kind,
             invocation: RefCell::new(None),
             known_cache_bytes: Cell::new(Some(0)),
-            known_cache_limit: Cell::new(0),
         }
     }
 
@@ -163,10 +149,7 @@ impl NativeRegexpCallMetadata {
         // Retain an overflow/refusal until the worker has inspected it. It must
         // never be authenticated as a native SQL failure, even if wrapped in Caused.
         self.known_cache_bytes.set(total);
-        match total {
-            Some(total) if total <= self.known_cache_limit.get() => Ok(()),
-            _ => Err(ready_value_storage_overflow()),
-        }
+        Ok(())
     }
 
     fn is_unbound(&self) -> bool {
@@ -174,10 +157,9 @@ impl NativeRegexpCallMetadata {
             .try_borrow()
             .is_ok_and(|value| value.is_none())
             && self.known_cache_bytes.get() == Some(0)
-            && self.known_cache_limit.get() == 0
     }
 
-    fn bind(&self, invocation: NativeRegexpInvocation, limit: usize) -> LocalResult<()> {
+    fn bind(&self, invocation: NativeRegexpInvocation, _limit: usize) -> LocalResult<()> {
         if !self.is_unbound() {
             return Err(LocalError::InvalidSpec(
                 "regexp call retains a previous binding".into(),
@@ -187,7 +169,6 @@ impl NativeRegexpCallMetadata {
             .invocation
             .try_borrow_mut()
             .map_err(|_| LocalError::InvalidSpec("regexp invocation bind conflict".into()))?;
-        self.known_cache_limit.set(limit);
         *target = Some(invocation);
         Ok(())
     }
@@ -199,7 +180,6 @@ impl NativeRegexpCallMetadata {
             .map_err(|_| LocalError::InvalidSpec("regexp invocation unbind conflict".into()))?
             .take();
         self.known_cache_bytes.set(Some(0));
-        self.known_cache_limit.set(0);
         drop(owned);
         Ok(())
     }
@@ -213,7 +193,6 @@ pub(crate) struct NativeLikeCallMetadata {
     kind: NativeLikeKind,
     invocation: RefCell<Option<NativeLikeInvocation>>,
     known_cache_bytes: Cell<Option<usize>>,
-    known_cache_limit: Cell<usize>,
 }
 
 impl NativeLikeCallMetadata {
@@ -222,7 +201,6 @@ impl NativeLikeCallMetadata {
             kind,
             invocation: RefCell::new(None),
             known_cache_bytes: Cell::new(Some(0)),
-            known_cache_limit: Cell::new(0),
         }
     }
 
@@ -252,10 +230,7 @@ impl NativeLikeCallMetadata {
             .and_then(|old| old.checked_add(bytes?));
         // Preserve refusal/overflow until the worker checks the use-site record.
         self.known_cache_bytes.set(total);
-        match total {
-            Some(total) if total <= self.known_cache_limit.get() => Ok(()),
-            _ => Err(ready_value_storage_overflow()),
-        }
+        Ok(())
     }
 
     fn is_unbound(&self) -> bool {
@@ -263,10 +238,9 @@ impl NativeLikeCallMetadata {
             .try_borrow()
             .is_ok_and(|value| value.is_none())
             && self.known_cache_bytes.get() == Some(0)
-            && self.known_cache_limit.get() == 0
     }
 
-    fn bind(&self, invocation: NativeLikeInvocation, limit: usize) -> LocalResult<()> {
+    fn bind(&self, invocation: NativeLikeInvocation, _limit: usize) -> LocalResult<()> {
         if !self.is_unbound() || invocation.kind() != self.kind {
             return Err(LocalError::InvalidSpec(
                 "LIKE binding is retained or has the wrong kind".into(),
@@ -276,7 +250,6 @@ impl NativeLikeCallMetadata {
             .invocation
             .try_borrow_mut()
             .map_err(|_| LocalError::InvalidSpec("LIKE invocation bind conflict".into()))?;
-        self.known_cache_limit.set(limit);
         *target = Some(invocation);
         Ok(())
     }
@@ -288,7 +261,6 @@ impl NativeLikeCallMetadata {
             .map_err(|_| LocalError::InvalidSpec("LIKE invocation unbind conflict".into()))?
             .take();
         self.known_cache_bytes.set(Some(0));
-        self.known_cache_limit.set(0);
         drop(owned);
         Ok(())
     }
@@ -443,7 +415,7 @@ enum RowCollector {
 }
 
 impl RowCollector {
-    fn append(&mut self, result: FrameResult<'_>, budget: &mut EvalBudget) -> LocalResult<()> {
+    fn append(&mut self, result: FrameResult<'_>) -> LocalResult<()> {
         match self {
             Self::ConservativeInt(output) => {
                 // Keep the original Int collector, including its materialization
@@ -462,11 +434,11 @@ impl RowCollector {
                 output.append(&mut values);
                 Ok(())
             }
-            Self::Lineaged(output) => output.append(result, budget),
+            Self::Lineaged(output) => output.append(result),
         }
     }
 
-    fn finish(&self, budget: &mut EvalBudget) -> LocalResult<()> {
+    fn finish(&self) -> LocalResult<()> {
         if let Self::Lineaged(output) = self {
             if output.values.len() != output.rows || output.result_metadata.len() != output.rows {
                 return Err(LocalError::InvalidBatch(
@@ -475,9 +447,6 @@ impl RowCollector {
             }
             // Remeasure actual capacity before publication, including empty
             // Bytes' sentinel. There is no donor/reset allocation at this edge.
-            let bytes = output.storage_bytes(budget)?;
-            budget.check_output(bytes, 0)?;
-            budget.set_output_bytes(bytes)?;
         }
         Ok(())
     }
@@ -517,30 +486,15 @@ fn output_size(bytes: Option<usize>) -> LocalResult<usize> {
         .ok_or_else(|| LocalError::ResourceLimit("lineaged output storage size overflow".into()))
 }
 
-fn add_output_size(left: usize, right: usize) -> LocalResult<usize> {
-    output_size(left.checked_add(right))
-}
-
 impl LineageOutput {
-    fn new(carrier: LineageCarrier, rows: usize, budget: &mut EvalBudget) -> LocalResult<Self> {
-        let ids_min = output_size(rows.checked_mul(mem::size_of::<ResultMetaId>()))?;
-        let values_min = output_size(match carrier {
-            LineageCarrier::Int => int_min_storage_bytes(rows),
-            LineageCarrier::Bytes => bytes_min_storage_bytes(rows, 0),
-        })?;
-        budget.check_output(add_output_size(ids_min, values_min)?, 0)?;
-
+    fn new(carrier: LineageCarrier, rows: usize) -> LocalResult<Self> {
         let mut result_metadata = Vec::new();
         result_metadata.try_reserve_exact(rows).map_err(|_| {
             LocalError::ResourceLimit("lineaged result metadata allocation failed".into())
         })?;
-        let ids_actual = output_size(
-            result_metadata
-                .capacity()
-                .checked_mul(mem::size_of::<ResultMetaId>()),
-        )?;
+
         // A successful try_reserve_exact is not a promise of exact capacity.
-        budget.check_output(add_output_size(ids_actual, values_min)?, 0)?;
+
         let values = match carrier {
             LineageCarrier::Int => VectorValue::with_capacity(rows, EvalType::Int),
             LineageCarrier::Bytes => {
@@ -555,28 +509,11 @@ impl LineageOutput {
             rows,
             payload_bytes: 0,
         };
-        let bytes = output.storage_bytes(budget)?;
-        budget.check_output(bytes, 0)?;
-        budget.set_output_bytes(bytes)?;
+
         Ok(output)
     }
 
-    fn id_bytes(&self) -> LocalResult<usize> {
-        output_size(
-            self.result_metadata
-                .capacity()
-                .checked_mul(mem::size_of::<ResultMetaId>()),
-        )
-    }
-
-    fn storage_bytes(&self, budget: &EvalBudget) -> LocalResult<usize> {
-        add_output_size(
-            self.id_bytes()?,
-            vector_storage_bytes(&self.values, budget.mode()),
-        )
-    }
-
-    fn append(&mut self, result: FrameResult<'_>, budget: &mut EvalBudget) -> LocalResult<()> {
+    fn append(&mut self, result: FrameResult<'_>) -> LocalResult<()> {
         let id = result.meta.ok_or_else(|| {
             LocalError::InvalidSpec("lineaged RPN result is missing its checked metadata ID".into())
         })?;
@@ -614,10 +551,6 @@ impl LineageOutput {
                 "lineaged RPN result differs from its checked carrier".into(),
             ));
         }
-        let source = result.retained_heap_bytes(budget.mode());
-        let ids = self.id_bytes()?;
-        let old_heap = vector_storage_bytes(&self.values, budget.mode());
-        budget.check_output(add_output_size(ids, old_heap)?, source)?;
 
         match (&mut self.values, scalar) {
             (values @ VectorValue::Int(_), ScalarValueRef::Int(value)) => {
@@ -628,25 +561,17 @@ impl LineageOutput {
             (VectorValue::Bytes(values), ScalarValueRef::Bytes(value)) => {
                 let added = value.map_or(0, |bytes| bytes.len());
                 let payload = output_size(self.payload_bytes.checked_add(added))?;
-                let minimum = output_size(bytes_min_storage_bytes(self.rows, payload))?;
-                budget.check_output(add_output_size(ids, old_heap.max(minimum))?, source)?;
+
                 // Reserve with the selected source still alive. The minimum is
                 // not a capacity prediction, and a failed reserve may grow some
                 // buffers: failure aborts this invocation rather than rollback.
                 values.try_reserve_append(1, added).map_err(|_| {
                     LocalError::ResourceLimit("lineaged Bytes output reservation failed".into())
                 })?;
-                let actual = output_size(values.retained_heap_bytes())?;
-                let overlap = if actual > old_heap {
-                    add_output_size(source, old_heap)?
-                } else {
-                    source
-                };
-                let output = add_output_size(ids, actual)?;
+
                 // Account for old/new allocation overlap before copying the
                 // payload or performing any later occurrence's input effect.
-                budget.check_output(output, overlap)?;
-                budget.set_output_bytes(output)?;
+
                 values.push_ref(value);
                 self.payload_bytes = payload;
             }
@@ -659,9 +584,7 @@ impl LineageOutput {
         // The ID buffer has full selection capacity. Remeasure the value heap
         // while the selected source is still live, even on the final row.
         self.result_metadata.push(id);
-        let bytes = self.storage_bytes(budget)?;
-        budget.check_output(bytes, source)?;
-        budget.set_output_bytes(bytes)?;
+
         Ok(())
     }
 }
@@ -800,35 +723,27 @@ impl LocalProgram {
 
     fn eval_rows(
         &mut self,
-        limits: ExecutionLimits,
+        _limits: ExecutionLimits,
         ctx: &mut EvalContext,
         selection: &[usize],
         mut input: EvalInput<'_, '_>,
         mode: OutputMode,
     ) -> LocalResult<RowCollector> {
+        // EvalBudget removed: collector and driver own actual values only.
+
         // One occurrence loop and one work budget for both facades. Lineage
         // adds collection/storage policy, never another expression evaluator.
-        let (mut budget, mut output) = match mode {
-            OutputMode::ConservativeInt => (
-                EvalBudget::local(limits, selection.len())?,
-                RowCollector::ConservativeInt(VectorValue::with_capacity(
-                    selection.len(),
-                    EvalType::Int,
-                )),
+        let mut output = match mode {
+            OutputMode::ConservativeInt => RowCollector::ConservativeInt(
+                VectorValue::with_capacity(selection.len(), EvalType::Int),
             ),
             OutputMode::Lineaged => {
                 let flow = self.expression.checked_result_flow().ok_or_else(|| {
-                    LocalError::InvalidSpec(
-                        "lineaged program has no checked root result flow".into(),
-                    )
+                    LocalError::InvalidSpec("lineaged program has no checked result flow".into())
                 })?;
-                let mut budget = EvalBudget::lineaged(limits)?;
-                let output = LineageOutput::new(flow.carrier(), selection.len(), &mut budget)?;
-                (budget, RowCollector::Lineaged(output))
+                RowCollector::Lineaged(LineageOutput::new(flow.carrier(), selection.len())?)
             }
         };
-        // Empty selection imports no values or frames, but exact Bytes output
-        // still reserves and checks its offset sentinel before publication.
         let mut selected_row = [0];
         for (occurrence, &row) in selection.iter().enumerate() {
             selected_row[0] = row;
@@ -842,7 +757,6 @@ impl LocalProgram {
                         1,
                         occurrence,
                         self.host_catalog,
-                        &mut budget,
                     )?,
                     meta: None,
                 },
@@ -854,12 +768,11 @@ impl LocalProgram {
                     1,
                     occurrence,
                     self.host_catalog,
-                    &mut budget,
                 )?,
             };
-            output.append(result, &mut budget)?;
+            output.append(result)?;
         }
-        output.finish(&mut budget)?;
+        output.finish()?;
         Ok(output)
     }
 }
@@ -895,16 +808,13 @@ fn finish_batch_output(
     output: VectorValue,
     expected: EvalType,
     rows: usize,
-    budget: &mut EvalBudget,
 ) -> LocalResult<VectorValue> {
     if output.eval_type() != expected || output.len() != rows {
         return Err(LocalError::InvalidBatch(
             "batch RPN returned a result with the wrong carrier or row count".into(),
         ));
     }
-    let bytes = vector_storage_bytes(&output, budget.mode());
-    budget.check_output(bytes, 0)?;
-    budget.set_output_bytes(bytes)?;
+
     Ok(output)
 }
 
@@ -968,7 +878,7 @@ impl LocalBatchProgram {
 
     fn eval_batch_after_preflight(
         &mut self,
-        limits: ExecutionLimits,
+        _limits: ExecutionLimits,
         ctx: &mut EvalContext,
         selection: &[usize],
         services: &mut dyn LocalRuntimeServices,
@@ -999,7 +909,7 @@ impl LocalBatchProgram {
                 "batch selection exceeds compiled occurrence window".into(),
             ));
         }
-        let mut budget = EvalBudget::exact(limits)?;
+
         let output_type = EvalType::try_from(self.inner.return_type().as_accessor().tp())
             .ok()
             .filter(|eval_type| {
@@ -1019,12 +929,7 @@ impl LocalBatchProgram {
                 LocalError::InvalidSpec("batch result carrier is not a native EvalType".into())
             })?;
         if rows == 0 {
-            return finish_batch_output(
-                VectorValue::with_capacity(0, output_type),
-                output_type,
-                0,
-                &mut budget,
-            );
+            return finish_batch_output(VectorValue::with_capacity(0, output_type), output_type, 0);
         }
 
         let mut input = EvalInput::Bindings(services);
@@ -1035,7 +940,6 @@ impl LocalBatchProgram {
             &self.inner.schema,
             &mut input,
             selection,
-            &mut budget,
             self.inner.host_catalog,
             self.whole_selection,
         )?;
@@ -1046,39 +950,9 @@ impl LocalBatchProgram {
                         "batch scalar result has the wrong carrier".into(),
                     ));
                 }
-                let minimum = match output_type {
-                    EvalType::Int => int_min_storage_bytes(rows),
-                    EvalType::Real => real_min_storage_bytes(rows),
-                    EvalType::Decimal => decimal_min_storage_bytes(rows),
-                    EvalType::Bytes => {
-                        let payload = match value {
-                            ScalarValue::Bytes(Some(bytes)) => bytes.len().checked_mul(rows),
-                            ScalarValue::Bytes(None) => Some(0),
-                            _ => None,
-                        };
-                        payload.and_then(|bytes| bytes_min_storage_bytes(rows, bytes))
-                    }
-                    EvalType::DateTime => datetime_min_storage_bytes(rows),
-                    EvalType::Duration => duration_min_storage_bytes(rows),
-                    EvalType::Json => {
-                        let payload = match value {
-                            ScalarValue::Json(Some(json)) => json
-                                .value
-                                .len()
-                                .checked_add(1)
-                                .and_then(|bytes| bytes.checked_mul(rows)),
-                            ScalarValue::Json(None) => Some(0),
-                            _ => None,
-                        };
-                        payload.and_then(|bytes| compact_min_storage_bytes(rows, bytes))
-                    }
-                    EvalType::VectorFloat32 => compact_min_storage_bytes(rows, 0),
-                    _ => None,
-                }
-                .ok_or_else(|| LocalError::ResourceLimit("batch output layout overflow".into()))?;
-                budget.check_output(minimum, 0)?;
+
                 let output = VectorValue::from_scalar(value, rows);
-                budget.check_output(vector_storage_bytes(&output, budget.mode()), 0)?;
+
                 output
             }
             RpnStackNode::Vector {
@@ -1094,7 +968,7 @@ impl LocalBatchProgram {
                 ));
             }
         };
-        finish_batch_output(output, output_type, rows, &mut budget)
+        finish_batch_output(output, output_type, rows)
     }
 }
 
@@ -8271,82 +8145,13 @@ impl EvaluatedArgs {
         }
     }
 
-    fn decimal_materialization_budget(
-        value: Option<&Decimal>,
-        available: usize,
-    ) -> LocalResult<i64> {
-        let remaining = available
-            .checked_sub(value.map_or(0, Decimal::spill_capacity_bytes))
-            .filter(|remaining| *remaining != usize::MAX)
-            .ok_or_else(|| {
-                LocalError::ResourceLimit("Decimal math requires finite remaining storage".into())
-            })?;
-        let bits = u64::try_from(remaining).map_err(|_| ready_value_storage_overflow())?;
-        Ok(bits as i64)
-    }
-
     fn native_vector_values(
         values: [Option<NativeVectorFloat32>; 2],
         arity: usize,
-        available: usize,
     ) -> LocalResult<([ScalarValue; 4], usize)> {
-        let mut live = values
-            .iter()
-            .try_fold(0usize, |total, value| {
-                total.checked_add(
-                    value
-                        .as_ref()
-                        .map_or(0, NativeVectorFloat32::elements_capacity)
-                        .checked_mul(mem::size_of::<f32>())?,
-                )
-            })
-            .ok_or_else(ready_value_storage_overflow)?;
-        let check = |bytes: usize| {
-            if bytes > available {
-                Err(LocalError::ResourceLimit(
-                    "native vector input conversion exceeds retained storage".into(),
-                ))
-            } else {
-                Ok(())
-            }
-        };
-        check(live)?;
-        let mut ready = [
-            ScalarValue::Int(None),
-            ScalarValue::Int(None),
-            ScalarValue::Int(None),
-            ScalarValue::Int(None),
-        ];
+        let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
         for (slot, value) in values.into_iter().take(arity).enumerate() {
-            let value = match value {
-                None => None,
-                Some(source) => {
-                    let source_bytes = source
-                        .elements_capacity()
-                        .checked_mul(mem::size_of::<f32>())
-                        .ok_or_else(ready_value_storage_overflow)?;
-                    let requested = source
-                        .len()
-                        .checked_mul(mem::size_of::<f32>())
-                        .ok_or_else(ready_value_storage_overflow)?;
-                    check(
-                        live.checked_add(requested)
-                            .ok_or_else(ready_value_storage_overflow)?,
-                    )?;
-                    // No wire constructor/decoder: preserve the native-endian bits,
-                    // including mutable NaN/Inf and dimensions above the text cap.
-                    let wire = source.into_wire_raw();
-                    let overlap = live
-                        .checked_add(wire.value.capacity())
-                        .ok_or_else(ready_value_storage_overflow)?;
-                    check(overlap)?;
-                    live = overlap
-                        .checked_sub(source_bytes)
-                        .ok_or_else(ready_value_storage_overflow)?;
-                    Some(wire)
-                }
-            };
-            ready[slot] = ScalarValue::VectorFloat32(value);
+            ready[slot] = ScalarValue::VectorFloat32(value.map(NativeVectorFloat32::into_wire_raw));
         }
         Ok((ready, arity))
     }
@@ -8354,43 +8159,28 @@ impl EvaluatedArgs {
     fn into_values_for_operation(
         self,
         operation: EvaluatedBytesOp,
-        available: usize,
     ) -> LocalResult<([ScalarValue; 6], usize, Option<NativeRegexpInvocation>)> {
         if !operation.is_decimal_int_div_budgeted() {
-            return self.into_values(available);
+            return self.into_values();
         }
-        let (left, right) = match &self {
-            Self::BytesIntIntBytes(Some(left), _, _, Some(right))
-                if operation.is_native_decimal_int_div() =>
-            {
-                (left, right)
-            }
-            Self::Bytes2(Some(left), Some(right))
-                if operation == EvaluatedBytesOp::IntDivDecimalLegacy =>
-            {
-                (left, right)
-            }
+        match &self {
+            Self::BytesIntIntBytes(Some(_), _, _, Some(_))
+                if operation.is_native_decimal_int_div() => {}
+            Self::Bytes2(Some(_), Some(_))
+                if operation == EvaluatedBytesOp::IntDivDecimalLegacy => {}
             _ => {
                 return Err(LocalError::InvalidBatch(
                     "Decimal DIV requires actual operand frames".into(),
                 ));
             }
         };
-        let remaining = available
-            .checked_sub(left.capacity())
-            .and_then(|remaining| remaining.checked_sub(right.capacity()))
-            .ok_or_else(ready_value_storage_overflow)?;
-        let limit = Self::decimal_materialization_budget(None, remaining)?;
-        let (mut ready, arity, invocation) = self.into_values(available)?;
+        let (mut ready, arity, invocation) = self.into_values()?;
         debug_assert_eq!(arity + 1, operation.input_types().len());
-        ready[arity] = ScalarValue::Int(Some(limit));
+        ready[arity] = ScalarValue::Int(Some(-1));
         Ok((ready, arity + 1, invocation))
     }
 
-    fn into_values(
-        self,
-        available: usize,
-    ) -> LocalResult<([ScalarValue; 6], usize, Option<NativeRegexpInvocation>)> {
+    fn into_values(self) -> LocalResult<([ScalarValue; 6], usize, Option<NativeRegexpInvocation>)> {
         // Only the selected arity enters the common driver. Regex invocation
         // handles are real semantic context, never hidden ScalarValue operands.
         use ScalarValue::{Bytes, Int};
@@ -8492,23 +8282,18 @@ impl EvaluatedArgs {
                     Some(invocation),
                 ));
             }
-            Self::NativeVector(value) => Self::native_vector_values([value, None], 1, available)?,
-            Self::NativeVector2(left, right) => {
-                Self::native_vector_values([left, right], 2, available)?
-            }
+            Self::NativeVector(value) => Self::native_vector_values([value, None], 1)?,
+            Self::NativeVector2(left, right) => Self::native_vector_values([left, right], 2)?,
             Self::NoArgs => ([Int(None), Int(None), Int(None), Int(None)], 0),
             Self::Decimal2 { left, right } | Self::DecimalDivision { left, right, .. } => {
                 // Both actual owners remain live through conversion and kernel
                 // execution. Subtract each spill before exposing one budget.
-                let available = available
-                    .checked_sub(right.as_ref().map_or(0, Decimal::spill_capacity_bytes))
-                    .ok_or_else(ready_value_storage_overflow)?;
-                let limit = Self::decimal_materialization_budget(left.as_ref(), available)?;
+
                 (
                     [
                         ScalarValue::Decimal(left),
                         ScalarValue::Decimal(right),
-                        Int(Some(limit)),
+                        Int(Some(-1)),
                         Int(None),
                     ],
                     3,
@@ -8523,29 +8308,26 @@ impl EvaluatedArgs {
                 ],
                 2,
             ),
-            Self::Decimal(value) => {
-                let limit = Self::decimal_materialization_budget(value.as_ref(), available)?;
-                (
-                    [
-                        ScalarValue::Decimal(value),
-                        Int(Some(limit)),
-                        Int(None),
-                        Int(None),
-                    ],
-                    2,
-                )
-            }
+            Self::Decimal(value) => (
+                [
+                    ScalarValue::Decimal(value),
+                    Int(Some(-1)),
+                    Int(None),
+                    Int(None),
+                ],
+                2,
+            ),
             Self::DecimalIntReady { value, scale } => {
                 let value = match value {
                     ReadyDecimalArg::Value(value) => value,
                     ReadyDecimalArg::Undemanded => Some(Decimal::zero()),
                 };
-                let limit = Self::decimal_materialization_budget(value.as_ref(), available)?;
+
                 (
                     [
                         ScalarValue::Decimal(value),
                         Self::ready_int_value(scale),
-                        Int(Some(limit)),
+                        Int(Some(-1)),
                         Int(None),
                     ],
                     3,
@@ -9363,12 +9145,7 @@ impl PartialEq for ComputedNativeVector {
 }
 impl Eq for ComputedNativeVector {}
 
-fn materialize_native_vector(
-    source: &[u8],
-    physical_bytes: usize,
-    input_bytes: usize,
-    budget: &EvalBudget,
-) -> LocalResult<NativeVectorFloat32> {
+fn materialize_native_vector(source: &[u8]) -> LocalResult<NativeVectorFloat32> {
     let invalid = |error: NativeVectorError| {
         LocalError::InvalidBatch(format!(
             "native vector result has invalid serialized layout: {error}"
@@ -9380,13 +9157,7 @@ fn materialize_native_vector(
             "native vector result has a trailing suffix".into(),
         ));
     }
-    let requested = encoded
-        .checked_sub(mem::size_of::<u32>())
-        .ok_or_else(ready_value_storage_overflow)?;
-    let overlap = physical_bytes
-        .checked_add(requested)
-        .ok_or_else(ready_value_storage_overflow)?;
-    budget.check_output(overlap, input_bytes)?;
+
     // This is the actual computed vector's standard LE image. Decode layout
     // only; do not re-run the text parser, finite checks or dimension policy.
     let (owned, suffix) = deserialize_native_vector_float32(source).map_err(invalid)?;
@@ -9395,14 +9166,7 @@ fn materialize_native_vector(
             "native vector result has a trailing suffix".into(),
         ));
     }
-    let retained = owned
-        .elements_capacity()
-        .checked_mul(mem::size_of::<f32>())
-        .ok_or_else(ready_value_storage_overflow)?;
-    let overlap = physical_bytes
-        .checked_add(retained)
-        .ok_or_else(ready_value_storage_overflow)?;
-    budget.check_output(overlap, input_bytes)?;
+
     Ok(owned)
 }
 
@@ -9748,21 +9512,14 @@ fn ready_value_context_is_sealed(ctx: &EvalContext) -> bool {
 /// graph or mutable configuration. A caller may cache workers by operation in
 /// one synchronized owner; unhealthy or unwinding workers must not be recycled.
 ///
-/// Per-call limits cover ready input and driver/result owners, NOT this
-/// retained program/context/state. They are boundary accounting, not a bound on
-/// temporary kernel allocations (including UNHEX's decoder/padding).
-/// Worker/pool ownership remains separately charged. No operand, result or
-/// invocation borrow is cached. Native regexp calls briefly bind shared handles
-/// to statement-owned caches and charge their observed known
-/// layouts/capacities; opaque regex engine/TLS allocations are excluded, not
-/// claimed ExactRetained.
+/// No operand, result or invocation borrow is cached. Native regexp calls
+/// briefly bind statement-owned cache handles. Storage observations describe
+/// known owners; they do not enforce the retired Demo quotas.
 pub struct EvaluatedBytesWorker {
     operation: EvaluatedBytesOp,
     program: LocalProgram,
-    limits: ExecutionLimits,
     ctx: EvalContext,
     witness: ReadyValueDispatchWitness,
-    max_worker_retained_bytes: usize,
     accepted_storage: WorkerStorage,
     poisoned: bool,
 }
@@ -9788,8 +9545,8 @@ impl std::fmt::Debug for EvaluatedBytesWorker {
 pub fn prepare_evaluated_bytes(
     operation: EvaluatedBytesOp,
     cx: LocalCompileContext,
-    execution: ExecutionLimits,
-    max_worker_retained_bytes: usize,
+    _execution: ExecutionLimits,
+    _max_worker_retained_bytes: usize,
 ) -> LocalResult<EvaluatedBytesWorker> {
     let program = compile_evaluated_bytes(operation, cx)?;
     program.check_entry(operation.entry())?;
@@ -9816,19 +9573,13 @@ pub fn prepare_evaluated_bytes(
     let mut runtime = EvaluatedBytesWorker {
         operation,
         program,
-        limits: execution,
         ctx: EvalContext::new(Arc::new(cfg)),
         witness: ReadyValueDispatchWitness::default(),
-        max_worker_retained_bytes,
         accepted_storage: WorkerStorage::new(0, 0)?,
         poisoned: false,
     };
     let storage = runtime.retained_storage()?;
-    if storage.total_bytes() > max_worker_retained_bytes {
-        return Err(LocalError::ResourceLimit(
-            "ready-value worker retained storage exceeded".into(),
-        ));
-    }
+
     runtime.accepted_storage = storage;
     Ok(runtime)
 }
@@ -10046,10 +9797,8 @@ impl EvaluatedBytesWorker {
     /// Includes sticky unwind/contract poison and unexpected retained-owner
     /// changes, even when the new allocation would fit the configured maximum.
     pub fn is_healthy(&self) -> bool {
-        self.retained_storage().is_ok_and(|storage| {
-            storage == self.accepted_storage
-                && storage.total_bytes() <= self.max_worker_retained_bytes
-        })
+        self.retained_storage()
+            .is_ok_and(|storage| storage == self.accepted_storage)
     }
 
     /// Observe ACTUAL current capacities without allocating a metadata cache or
@@ -10147,15 +9896,32 @@ impl EvaluatedBytesWorker {
         WorkerStorage::new(mem::size_of::<Self>(), owned_heap_bytes)
     }
 
-    fn check_owner_footprint(&self, storage: WorkerStorage) -> LocalResult<()> {
-        if storage.total_bytes() > self.max_worker_retained_bytes {
-            return Err(LocalError::ResourceLimit(
-                "ready-value worker retained storage exceeded".into(),
+    fn check_invocation_state(&self) -> LocalResult<()> {
+        if !ready_value_context_is_sealed(&self.ctx) || self.ctx.warnings.warnings.capacity() != 0 {
+            return Err(LocalError::InvalidSpec(
+                "ready-value private context is not clean and sealed".into(),
             ));
         }
-        if storage != self.accepted_storage {
+        if self.operation.uses_native_temporal_zone() && !self.temporal_metadata()?.is_unbound() {
             return Err(LocalError::InvalidSpec(
-                "ready-value retained ownership changed after publication".into(),
+                "temporal worker retains a session zone".into(),
+            ));
+        }
+        if self.operation.regexp_kind().is_some() && !self.regexp_metadata()?.is_unbound() {
+            return Err(LocalError::InvalidSpec(
+                "regexp worker retains invocation state".into(),
+            ));
+        }
+        if self.operation.like_kind().is_some() && !self.like_metadata()?.is_unbound() {
+            return Err(LocalError::InvalidSpec(
+                "LIKE worker retains invocation state".into(),
+            ));
+        }
+        if self.operation.decimal_division_kind().is_some()
+            && !self.decimal_division_metadata()?.is_unbound()
+        {
+            return Err(LocalError::InvalidSpec(
+                "Decimal division worker retains invocation state".into(),
             ));
         }
         Ok(())
@@ -10170,7 +9936,7 @@ impl EvaluatedBytesWorker {
             ));
         }
         self.poisoned = true;
-        self.check_owner_footprint(self.observe_storage()?)
+        self.check_invocation_state()
     }
 
     /// Compatible entry for a single nullable Bytes argument. It rejects an
@@ -10215,29 +9981,6 @@ impl EvaluatedBytesWorker {
             .map_err(ReportedEvaluatedFailure::unreported)?;
         let mut sql_failure = None;
         let result = (|| {
-            // One fresh budget owns every preflight, driver/frame counter and
-            // output check in this public invocation.
-            let mut budget = EvalBudget::exact(self.limits)?;
-            let materialization_available = if matches!(
-                args.role(),
-                EvaluatedArgsRole::DecimalUnary
-                    | EvaluatedArgsRole::DecimalBinary
-                    | EvaluatedArgsRole::DecimalDivision
-                    | EvaluatedArgsRole::DecimalInt
-                    | EvaluatedArgsRole::NativeVector
-                    | EvaluatedArgsRole::NativeVector2
-            ) || self.operation.is_decimal_int_div_budgeted()
-            {
-                // A real retained owner is already present even for inline or
-                // NULL Decimal/vector input. Subtract it, not a guessed packet/scale
-                // cap; a caller's usize::MAX limit still leaves finite room.
-                self.limits
-                    .max_retained_bytes
-                    .checked_sub(self.observe_storage()?.total_bytes())
-                    .ok_or_else(ready_value_storage_overflow)?
-            } else {
-                0
-            };
             // Invocation cloning shares live state, unlike owner cloning. This
             // reads no cache and adds no SQL slot; into_values moves the BBI owners.
             let like_invocation = match &args {
@@ -10249,93 +9992,52 @@ impl EvaluatedBytesWorker {
                 _ => None,
             };
             let (ready, arity, invocation, temporal_zone) = match args {
-                EvaluatedArgs::TemporalValue { value, zone } => {
-                    let input_bytes = value
-                        .capacity()
-                        .checked_add(temporal_zone_heap_bytes(&zone))
-                        .ok_or_else(ready_value_storage_overflow)?;
-                    budget.check_output(64, input_bytes)?;
-                    (
-                        [
-                            ScalarValue::Bytes(Some(value)),
-                            ScalarValue::Int(None),
-                            ScalarValue::Int(None),
-                            ScalarValue::Int(None),
-                            ScalarValue::Int(None),
-                            ScalarValue::Int(None),
-                        ],
-                        1,
-                        None,
-                        Some(zone),
-                    )
-                }
+                EvaluatedArgs::TemporalValue { value, zone } => (
+                    [
+                        ScalarValue::Bytes(Some(value)),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                    ],
+                    1,
+                    None,
+                    Some(zone),
+                ),
                 EvaluatedArgs::TemporalParseText {
                     value,
                     is_float,
                     zone,
-                } => {
-                    let input_bytes = value
-                        .capacity()
-                        .checked_add(temporal_zone_heap_bytes(&zone))
-                        .ok_or_else(ready_value_storage_overflow)?;
-                    let bound = value
-                        .len()
-                        .checked_add(64)
-                        .map(|bytes| bytes.max(11))
-                        .ok_or_else(ready_value_storage_overflow)?;
-                    budget.check_output(bound, input_bytes)?;
-                    (
-                        [
-                            ScalarValue::Bytes(Some(value)),
-                            ScalarValue::Int(Some(i64::from(is_float))),
-                            ScalarValue::Int(None),
-                            ScalarValue::Int(None),
-                            ScalarValue::Int(None),
-                            ScalarValue::Int(None),
-                        ],
-                        2,
-                        None,
-                        Some(zone),
-                    )
-                }
-                EvaluatedArgs::TemporalText { value, modes, zone } => {
-                    let input_bytes = value
-                        .capacity()
-                        .checked_add(temporal_zone_heap_bytes(&zone))
-                        .ok_or_else(ready_value_storage_overflow)?;
-                    let bound = if self.operation == EvaluatedBytesOp::ExtremumTimeContextNative {
-                        crate::native_extremum::native_extremum_output_bound(Some(&value), None)
-                            .ok_or_else(ready_value_storage_overflow)?
-                    } else if self.operation == EvaluatedBytesOp::LegacyDateArithmeticParseNative {
-                        crate::native_legacy_date_arithmetic::native_legacy_date_arithmetic_output_bound(Some(&value), None)
-                            .ok_or_else(ready_value_storage_overflow)?
-                    } else {
-                        value
-                            .len()
-                            .checked_add(64)
-                            .map(|bytes| bytes.max(11))
-                            .ok_or_else(ready_value_storage_overflow)?
-                    };
-                    // The name is an owned invocation input, not a SQL slot. Check
-                    // it with the reply bound before installing or invoking anything.
-                    budget.check_output(bound, input_bytes)?;
-                    (
-                        [
-                            ScalarValue::Bytes(Some(value)),
-                            ScalarValue::Int(Some(modes)),
-                            ScalarValue::Int(None),
-                            ScalarValue::Int(None),
-                            ScalarValue::Int(None),
-                            ScalarValue::Int(None),
-                        ],
-                        2,
-                        None,
-                        Some(zone),
-                    )
-                }
+                } => (
+                    [
+                        ScalarValue::Bytes(Some(value)),
+                        ScalarValue::Int(Some(i64::from(is_float))),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                    ],
+                    2,
+                    None,
+                    Some(zone),
+                ),
+                EvaluatedArgs::TemporalText { value, modes, zone } => (
+                    [
+                        ScalarValue::Bytes(Some(value)),
+                        ScalarValue::Int(Some(modes)),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                        ScalarValue::Int(None),
+                    ],
+                    2,
+                    None,
+                    Some(zone),
+                ),
                 args => {
                     let (ready, arity, invocation) =
-                        args.into_values_for_operation(self.operation, materialization_available)?;
+                        args.into_values_for_operation(self.operation)?;
                     (ready, arity, invocation, None)
                 }
             };
@@ -10346,17 +10048,14 @@ impl EvaluatedBytesWorker {
                 guard.worker.temporal_metadata()?.bind(zone)?;
                 guard
                     .worker
-                    .eval_ready_with_budget(ready, arity, &mut budget, &mut sql_failure)
+                    .eval_ready_values(ready, arity, &mut sql_failure)
             } else if let Some(increment) = division_increment {
                 let guard = DecimalDivisionBindingGuard { worker: self };
                 guard.worker.decimal_division_metadata()?.bind(increment)?;
                 let before = guard.worker.witness.invocations();
-                let result = guard.worker.eval_ready_with_budget(
-                    ready,
-                    arity,
-                    &mut budget,
-                    &mut sql_failure,
-                );
+                let result = guard
+                    .worker
+                    .eval_ready_values(ready, arity, &mut sql_failure);
                 let checked = guard.worker.decimal_division_metadata()?.finish(
                     guard.worker.witness.invocations().checked_sub(before),
                     result.is_ok(),
@@ -10367,51 +10066,24 @@ impl EvaluatedBytesWorker {
                 }
                 // The guard clears u32/status state before worker postflight.
             } else if let Some(invocation) = invocation {
-                let input_bytes = ready[..arity]
-                    .iter()
-                    .try_fold(0usize, |sum, value| {
-                        sum.checked_add(match value {
-                            ScalarValue::Bytes(Some(value)) => value.capacity(),
-                            _ => 0,
-                        })
-                    })
-                    .ok_or_else(ready_value_storage_overflow)?;
-                let limit = self
-                    .limits
-                    .max_retained_bytes
-                    .checked_sub(input_bytes)
-                    .ok_or_else(ready_value_storage_overflow)?;
                 // Arm the guard before binding, including any failing bind.
                 let guard = RegexpBindingGuard { worker: self };
-                guard.worker.regexp_metadata()?.bind(invocation, limit)?;
                 guard
                     .worker
-                    .eval_ready_with_budget(ready, arity, &mut budget, &mut sql_failure)
+                    .regexp_metadata()?
+                    .bind(invocation, usize::MAX)?;
+                guard
+                    .worker
+                    .eval_ready_values(ready, arity, &mut sql_failure)
                 // The guard clears binding/record before finish_invocation.
             } else if let Some(invocation) = like_invocation {
-                let input_bytes = ready[..arity]
-                    .iter()
-                    .try_fold(0usize, |sum, value| {
-                        sum.checked_add(match value {
-                            ScalarValue::Bytes(Some(value)) => value.capacity(),
-                            _ => 0,
-                        })
-                    })
-                    .ok_or_else(ready_value_storage_overflow)?;
-                let limit = self.limits.max_retained_bytes
-                    .checked_sub(input_bytes)
-                    // Every LIKE wrapper owns one Int result. Reserve its
-                    // guaranteed minimum so even empty inputs/usize::MAX leave
-                    // finite room; the driver checks actual result capacities.
-                    .and_then(|limit| limit.checked_sub(int_min_storage_bytes(1)?))
-                    .ok_or_else(ready_value_storage_overflow)?;
                 let guard = LikeBindingGuard { worker: self };
-                guard.worker.like_metadata()?.bind(invocation, limit)?;
+                guard.worker.like_metadata()?.bind(invocation, usize::MAX)?;
                 guard
                     .worker
-                    .eval_ready_with_budget(ready, arity, &mut budget, &mut sql_failure)
+                    .eval_ready_values(ready, arity, &mut sql_failure)
             } else {
-                self.eval_ready_with_budget(ready, arity, &mut budget, &mut sql_failure)
+                self.eval_ready_values(ready, arity, &mut sql_failure)
             }
         })();
         self.finish_invocation(result).map_err(|error| {
@@ -10429,9 +10101,7 @@ impl EvaluatedBytesWorker {
     fn finish_invocation<T>(&mut self, result: LocalResult<T>) -> LocalResult<T> {
         // eval_ready has dropped both input and physical output on every normal
         // Result exit. No warning reset, context rebuild or native replay occurs.
-        let postflight = self
-            .observe_storage()
-            .and_then(|storage| self.check_owner_footprint(storage));
+        let postflight = self.check_invocation_state();
         match result {
             Err(error) => {
                 // A cleanup/health refusal must never replace an already-owned
@@ -10464,40 +10134,17 @@ impl EvaluatedBytesWorker {
         arity: usize,
         sql_failure: &mut Option<EvaluatedSqlFailureKind>,
     ) -> LocalResult<ComputedValue> {
-        let mut budget = EvalBudget::exact(self.limits)?;
-        self.eval_ready_with_budget(ready, arity, &mut budget, sql_failure)
+        self.eval_ready_values(ready, arity, sql_failure)
     }
 
-    fn eval_ready_with_budget(
+    fn eval_ready_values(
         &mut self,
         ready: [ScalarValue; 6],
         arity: usize,
-        budget: &mut EvalBudget,
+
         sql_failure: &mut Option<EvaluatedSqlFailureKind>,
     ) -> LocalResult<ComputedValue> {
-        let input_bytes = ready[..arity].iter().try_fold(0usize, |total, value| {
-            let bytes = match value {
-                ScalarValue::Bytes(Some(bytes)) => bytes.capacity(),
-                ScalarValue::Decimal(Some(value)) => value.spill_capacity_bytes(),
-                ScalarValue::VectorFloat32(Some(value)) => value.value.capacity(),
-                _ => 0,
-            };
-            total
-                .checked_add(bytes)
-                .ok_or_else(ready_value_storage_overflow)
-        })?;
-        let input_bytes = if self.operation.uses_native_temporal_zone() {
-            let zone = self.temporal_metadata()?.zone()?;
-            input_bytes
-                .checked_add(temporal_zone_heap_bytes(&zone))
-                .ok_or_else(ready_value_storage_overflow)?
-        } else {
-            input_bytes
-        };
         let row = [0];
-        if self.operation.uses_native_temporal_zone() {
-            budget.check_output(0, input_bytes)?;
-        }
         // These Values recipes have bounded replies but no invocation metadata.
         // Keep the domain preflight in the common ready path so facade and direct
         // ready calls both check the actual input capacity before any dispatch.
@@ -10512,61 +10159,34 @@ impl EvaluatedBytesWorker {
                     "FROM_UNIXTIME requires its unary Bytes shape".into(),
                 ));
             };
-            let bound = match self.operation {
+            match self.operation {
                 EvaluatedBytesOp::FromUnixTimeNumericNative
-                    if crate::from_unixtime_numeric_native_args_valid(value.as_deref()) =>
-                {
-                    14
-                }
+                    if crate::from_unixtime_numeric_native_args_valid(value.as_deref()) => {}
                 EvaluatedBytesOp::FromUnixTimeTextNative
-                    if crate::from_unixtime_text_native_args_valid(value.as_deref()) =>
-                {
-                    value
-                        .as_ref()
-                        .ok_or_else(|| {
-                            LocalError::InvalidSpec("FROM_UNIXTIME text is absent".into())
-                        })?
-                        .len()
-                        .checked_add(64)
-                        .map(|bytes| bytes.max(14))
-                        .ok_or_else(ready_value_storage_overflow)?
-                }
+                    if crate::from_unixtime_text_native_args_valid(value.as_deref()) => {}
                 EvaluatedBytesOp::FromUnixTimeNullNative
-                    if crate::from_unixtime_null_native_args_valid(value.as_deref()) =>
-                {
-                    0
-                }
+                    if crate::from_unixtime_null_native_args_valid(value.as_deref()) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "FROM_UNIXTIME operand differs from its bounded domain".into(),
                     ));
                 }
             };
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
             EvaluatedBytesOp::IfNullHeadNative | EvaluatedBytesOp::IfNullFinishNative
         ) {
-            let bound = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (EvaluatedBytesOp::IfNullHeadNative, [ScalarValue::Bytes(value)])
-                    if crate::if_null_head_native_args_valid(value.as_deref()) =>
-                {
-                    value
-                        .as_ref()
-                        .map_or(Some(1), |bytes| bytes.len().checked_add(1))
-                        .ok_or_else(ready_value_storage_overflow)?
-                }
+                    if crate::if_null_head_native_args_valid(value.as_deref()) => {}
                 (
                     EvaluatedBytesOp::IfNullFinishNative,
                     [ScalarValue::Bytes(report), ScalarValue::Bytes(value)],
                 ) if crate::if_null_finish_native_args_valid(
                     report.as_deref(),
                     value.as_deref(),
-                ) =>
-                {
-                    value.as_ref().map_or(0, Vec::len)
-                }
+                ) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "IFNULL operands differ from their fixed stage domain".into(),
@@ -10575,24 +10195,18 @@ impl EvaluatedBytesWorker {
             };
             // Both input owners, including the computed head report's capacity,
             // stay live through dispatch and the ordinary output-copy checks.
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
             EvaluatedBytesOp::IfHeadNative | EvaluatedBytesOp::IfFinishNative
         ) {
-            let bound = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (EvaluatedBytesOp::IfHeadNative, [ScalarValue::Int(value)])
-                    if crate::if_head_native_args_valid(*value) =>
-                {
-                    1
-                }
+                    if crate::if_head_native_args_valid(*value) => {}
                 (
                     EvaluatedBytesOp::IfFinishNative,
                     [ScalarValue::Bytes(report), ScalarValue::Bytes(value)],
-                ) if crate::if_finish_native_args_valid(report.as_deref(), value.as_deref()) => {
-                    value.as_ref().map_or(0, Vec::len)
-                }
+                ) if crate::if_finish_native_args_valid(report.as_deref(), value.as_deref()) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "IF operands differ from their fixed stage domain".into(),
@@ -10600,7 +10214,6 @@ impl EvaluatedBytesWorker {
                 }
             };
             // The original branch report and selected operand both remain live.
-            budget.check_output(bound, input_bytes)?;
         }
         if self.operation == EvaluatedBytesOp::CoalesceEndNative {
             if arity != 0 {
@@ -10608,7 +10221,6 @@ impl EvaluatedBytesWorker {
                     "COALESCE end requires the actual empty argument suffix".into(),
                 ));
             }
-            budget.check_output(0, input_bytes)?;
         }
         if self.operation == EvaluatedBytesOp::NullIfNative {
             let [ScalarValue::Bytes(lhs), ScalarValue::Int(comparison)] = &ready[..arity] else {
@@ -10621,18 +10233,12 @@ impl EvaluatedBytesWorker {
                     "NULLIF operands differ from their fixed domain".into(),
                 ));
             }
-            // Borrow the shared selector only to measure this exact reply; do not
-            // retain its answer or replace the real generated-wrapper dispatch.
-            let bound = crate::native_if::evaluate_null_if_native(lhs.as_deref(), *comparison)
-                .map_err(|error| match error {
-                    crate::NativeIdentityFrameError::Invalid => {
-                        LocalError::InvalidSpec("NULLIF selector rejected its operands".into())
-                    }
-                    crate::NativeIdentityFrameError::Capacity => ready_value_storage_overflow(),
-                })?
-                .map_or(0, <[u8]>::len);
-            // Actual LHS capacity stays charged even when the reply is SQL NULL.
-            budget.check_output(bound, input_bytes)?;
+            // Borrow the shared selector only to measure this exact reply; do
+            // not retain its answer or replace the real
+            // generated-wrapper dispatch.
+
+            // Actual LHS capacity stays charged even when the reply is SQL
+            // NULL.
         }
         if self.operation == EvaluatedBytesOp::CastRealUnsignedNative {
             let [ScalarValue::Bytes(value)] = &ready[..arity] else {
@@ -10645,55 +10251,23 @@ impl EvaluatedBytesWorker {
                     "real-to-unsigned cast requires an actual Real or Float32 identity".into(),
                 ));
             }
-            let bound = {
-                let report =
-                    crate::native_cast::evaluate_cast_real_unsigned_native(value.as_deref())
-                        .map_err(|error| match error {
-                            crate::NativeIdentityFrameError::Invalid => LocalError::InvalidSpec(
-                                "real-to-unsigned cast rejected its identity".into(),
-                            ),
-                            crate::NativeIdentityFrameError::Capacity => {
-                                ready_value_storage_overflow()
-                            }
-                        })?;
-                if report.overflow_bits.is_some() {
-                    17
-                } else {
-                    9
-                }
-            };
+
             // Only the canonical report length survives this scope. The real
             // generated wrapper still computes and owns the actual reply below.
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
             EvaluatedBytesOp::BoundedStalenessHeadNative
                 | EvaluatedBytesOp::BoundedStalenessFinishNative
         ) {
-            let transport_error = |error| match error {
-                crate::NativeIdentityFrameError::Invalid => LocalError::InvalidSpec(
-                    "bounded-staleness producer rejected its operands".into(),
-                ),
-                crate::NativeIdentityFrameError::Capacity => ready_value_storage_overflow(),
-            };
-            let bound = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (
                     EvaluatedBytesOp::BoundedStalenessHeadNative,
                     [ScalarValue::Bytes(left), ScalarValue::Bytes(right)],
                 ) if crate::bounded_staleness_head_native_args_valid(
                     left.as_deref(),
                     right.as_deref(),
-                ) =>
-                {
-                    let _ =
-                        crate::native_bounded_staleness::evaluate_bounded_staleness_head_native(
-                            left.as_deref(),
-                            right.as_deref(),
-                        )
-                        .map_err(transport_error)?;
-                    1
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::BoundedStalenessFinishNative,
                     [
@@ -10705,26 +10279,13 @@ impl EvaluatedBytesWorker {
                     left.as_deref(),
                     right.as_deref(),
                     safe.as_deref(),
-                ) =>
-                {
-                    let _ =
-                        crate::native_bounded_staleness::evaluate_bounded_staleness_finish_native(
-                            left.as_deref(),
-                            right.as_deref(),
-                            safe.as_deref(),
-                        )
-                        .map_err(transport_error)?;
-                    11
-                }
+                ) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "bounded-staleness operands differ from their fixed stage domain".into(),
                     ));
                 }
             };
-            // Planning never supplies the result: retain all actual input owners,
-            // then invoke the real generated wrapper below for its own reply.
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
@@ -10732,18 +10293,15 @@ impl EvaluatedBytesWorker {
                 | EvaluatedBytesOp::FromBinaryNative
                 | EvaluatedBytesOp::ConvertUsingNative
         ) {
-            let value = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (
                     EvaluatedBytesOp::ToBinaryNative,
                     [ScalarValue::Bytes(value), ScalarValue::Bytes(charset)],
-                ) if crate::to_binary_native_args_valid(value.as_deref(), charset.as_deref()) => {
-                    value.as_deref()
-                }
+                ) if crate::to_binary_native_args_valid(value.as_deref(), charset.as_deref()) => {}
                 (
                     EvaluatedBytesOp::FromBinaryNative,
                     [ScalarValue::Bytes(value), ScalarValue::Bytes(charset)],
                 ) if crate::from_binary_native_args_valid(value.as_deref(), charset.as_deref()) => {
-                    value.as_deref()
                 }
                 (
                     EvaluatedBytesOp::ConvertUsingNative,
@@ -10758,22 +10316,15 @@ impl EvaluatedBytesWorker {
                     source.as_deref(),
                     effective.as_deref(),
                     target.as_deref(),
-                ) =>
-                {
-                    value.as_deref()
-                }
+                ) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "charset operands differ from their fixed physical domain".into(),
                     ));
                 }
             };
-            let bound = crate::native_convert_charset::native_convert_charset_output_bound(value)
-                .ok_or_else(ready_value_storage_overflow)?;
-            // Bound the reply before conversion, while retaining every actual
+
             // input owner (including all three separate charset operands).
-            // Codec-internal temporary allocation peaks are not claimed here.
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
@@ -10781,7 +10332,7 @@ impl EvaluatedBytesWorker {
                 | EvaluatedBytesOp::StrToDateFinishNative
                 | EvaluatedBytesOp::StrToDateTypedFinishNative
         ) {
-            let first = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (
                     EvaluatedBytesOp::StrToDateHeadNative,
                     [
@@ -10793,10 +10344,7 @@ impl EvaluatedBytesWorker {
                     value.as_deref(),
                     format.as_deref(),
                     *target,
-                ) =>
-                {
-                    value.as_deref()
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::StrToDateFinishNative,
                     [
@@ -10808,31 +10356,20 @@ impl EvaluatedBytesWorker {
                     state.as_deref(),
                     *no_zero_date,
                     *allow_invalid_dates,
-                ) =>
-                {
-                    state.as_deref()
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::StrToDateTypedFinishNative,
                     [ScalarValue::Bytes(report), ScalarValue::Int(no_zero_date)],
                 ) if crate::native_str_to_date::str_to_date_typed_finish_native_args_valid(
                     report.as_deref(),
                     *no_zero_date,
-                ) =>
-                {
-                    report.as_deref()
-                }
+                ) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "STR_TO_DATE operands differ from their fixed stage domain".into(),
                     ));
                 }
             };
-            let bound = crate::native_str_to_date::native_str_to_date_output_bound(first)
-                .ok_or_else(ready_value_storage_overflow)?;
-            // The full original stage report and every actual mode operand stay
-            // live. No allocating producer runs before this retained-reply bound.
-            budget.check_output(bound, input_bytes)?;
         }
         if self.operation == EvaluatedBytesOp::JsonSumCrc32SerdeNative {
             let [ScalarValue::Bytes(value)] = &ready[..arity] else {
@@ -10845,12 +10382,6 @@ impl EvaluatedBytesWorker {
                     "JSON_SUM_CRC32 received an invalid prepared document".into(),
                 ));
             }
-            let bound =
-                crate::native_json_sum_crc32::native_json_sum_crc32_output_bound(value.as_deref())
-                    .ok_or_else(ready_value_storage_overflow)?;
-            // Structural admission and reply planning only: CRC and semantic
-            // classification remain in the real producer invoked below.
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
@@ -10861,7 +10392,7 @@ impl EvaluatedBytesWorker {
                 | EvaluatedBytesOp::ExtractMixedFinishNative
                 | EvaluatedBytesOp::ExtractCompositeNative
         ) {
-            let (first, second) = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (
                     EvaluatedBytesOp::ExtractSelectNative,
                     [
@@ -10869,25 +10400,18 @@ impl EvaluatedBytesWorker {
                         ScalarValue::Int(source),
                         ScalarValue::Int(kind),
                     ],
-                ) if crate::extract_select_native_args_valid(unit.as_deref(), *source, *kind) => {
-                    (unit.as_deref(), None)
-                }
+                ) if crate::extract_select_native_args_valid(unit.as_deref(), *source, *kind) => {}
                 (
                     EvaluatedBytesOp::ExtractDatetimeNative,
                     [ScalarValue::Bytes(core), ScalarValue::Bytes(unit)],
                 ) if crate::extract_datetime_native_args_valid(
                     core.as_deref(),
                     unit.as_deref(),
-                ) =>
-                {
-                    (core.as_deref(), unit.as_deref())
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::ExtractDurationNative,
                     [ScalarValue::Bytes(unit), ScalarValue::Int(nanos)],
-                ) if crate::extract_duration_native_args_valid(unit.as_deref(), *nanos) => {
-                    (unit.as_deref(), None)
-                }
+                ) if crate::extract_duration_native_args_valid(unit.as_deref(), *nanos) => {}
                 (
                     EvaluatedBytesOp::ExtractMixedDurationNative,
                     [
@@ -10899,37 +10423,24 @@ impl EvaluatedBytesWorker {
                     unit.as_deref(),
                     text.as_deref(),
                     *allow,
-                ) =>
-                {
-                    (unit.as_deref(), text.as_deref())
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::ExtractMixedFinishNative,
                     [ScalarValue::Bytes(state), ScalarValue::Int(allow)],
-                ) if crate::extract_mixed_finish_native_args_valid(state.as_deref(), *allow) => {
-                    (state.as_deref(), None)
-                }
+                ) if crate::extract_mixed_finish_native_args_valid(state.as_deref(), *allow) => {}
                 (
                     EvaluatedBytesOp::ExtractCompositeNative,
                     [ScalarValue::Bytes(unit), ScalarValue::Bytes(text)],
                 ) if crate::extract_composite_native_args_valid(
                     unit.as_deref(),
                     text.as_deref(),
-                ) =>
-                {
-                    (unit.as_deref(), text.as_deref())
-                }
+                ) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "EXTRACT operands differ from their fixed stage domain".into(),
                     ));
                 }
             };
-            let bound = crate::native_extract::native_extract_output_bound(first, second)
-                .ok_or_else(ready_value_storage_overflow)?;
-            // Keep original units, text and whole SDK stage reports live. Only
-            // size planning precedes the real producer, never host extraction.
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
@@ -10942,7 +10453,7 @@ impl EvaluatedBytesWorker {
                 | EvaluatedBytesOp::ExtremumTimeContextNative
                 | EvaluatedBytesOp::ExtremumFinishNative
         ) {
-            let (first, second) = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (
                     EvaluatedBytesOp::ExtremumHeadNative,
                     [
@@ -10954,31 +10465,22 @@ impl EvaluatedBytesWorker {
                     packet.as_deref(),
                     *want,
                     *collation,
-                ) =>
-                {
-                    (packet.as_deref(), None)
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::ExtremumTimeContextNative,
                     [ScalarValue::Bytes(state), ScalarValue::Int(modes)],
-                ) if crate::extremum_time_context_native_args_valid(state.as_deref(), *modes) => {
-                    (state.as_deref(), None)
-                }
+                ) if crate::extremum_time_context_native_args_valid(state.as_deref(), *modes) => {}
                 (
                     EvaluatedBytesOp::ExtremumNumericNative,
                     [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
                 ) if crate::extremum_numeric_native_args_valid(
                     state.as_deref(),
                     value.as_deref(),
-                ) =>
-                {
-                    (state.as_deref(), value.as_deref())
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::ExtremumTimeNative,
                     [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
                 ) if crate::extremum_time_native_args_valid(state.as_deref(), value.as_deref()) => {
-                    (state.as_deref(), value.as_deref())
                 }
                 (
                     EvaluatedBytesOp::ExtremumVectorNative,
@@ -10986,51 +10488,34 @@ impl EvaluatedBytesWorker {
                 ) if crate::extremum_vector_native_args_valid(
                     state.as_deref(),
                     value.as_deref(),
-                ) =>
-                {
-                    (state.as_deref(), value.as_deref())
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::ExtremumStringNative,
                     [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
                 ) if crate::extremum_string_native_args_valid(
                     state.as_deref(),
                     value.as_deref(),
-                ) =>
-                {
-                    (state.as_deref(), value.as_deref())
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::ExtremumTimeTextNative,
                     [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
                 ) if crate::extremum_time_text_native_args_valid(
                     state.as_deref(),
                     value.as_deref(),
-                ) =>
-                {
-                    (state.as_deref(), value.as_deref())
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::ExtremumFinishNative,
                     [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
                 ) if crate::extremum_finish_native_args_valid(
                     state.as_deref(),
                     value.as_deref(),
-                ) =>
-                {
-                    (state.as_deref(), value.as_deref())
-                }
+                ) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "extremum operands differ from their fixed stage domain".into(),
                     ));
                 }
             };
-            let bound = crate::native_extremum::native_extremum_output_bound(first, second)
-                .ok_or_else(ready_value_storage_overflow)?;
-            // The SDK planner accounts for state-dependent Decimal expansion.
-            // All actual operands and the bound zone owner remain charged here.
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
@@ -11038,22 +10523,15 @@ impl EvaluatedBytesWorker {
                 | EvaluatedBytesOp::IntervalLazyHeadNative
                 | EvaluatedBytesOp::IntervalStepNative
         ) {
-            let (first, second) = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (EvaluatedBytesOp::IntervalEagerHeadNative, [ScalarValue::Bytes(packet)])
-                    if crate::interval_eager_head_native_args_valid(packet.as_deref()) =>
-                {
-                    (packet.as_deref(), None)
-                }
+                    if crate::interval_eager_head_native_args_valid(packet.as_deref()) => {}
                 (EvaluatedBytesOp::IntervalLazyHeadNative, [ScalarValue::Bytes(packet)])
-                    if crate::interval_lazy_head_native_args_valid(packet.as_deref()) =>
-                {
-                    (packet.as_deref(), None)
-                }
+                    if crate::interval_lazy_head_native_args_valid(packet.as_deref()) => {}
                 (
                     EvaluatedBytesOp::IntervalStepNative,
                     [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
                 ) if crate::interval_step_native_args_valid(state.as_deref(), value.as_deref()) => {
-                    (state.as_deref(), value.as_deref())
                 }
                 _ => {
                     return Err(LocalError::InvalidSpec(
@@ -11061,11 +10539,6 @@ impl EvaluatedBytesWorker {
                     ));
                 }
             };
-            let bound = crate::native_interval::native_interval_output_bound(first, second)
-                .ok_or_else(ready_value_storage_overflow)?;
-            // Plan from the original packet/state, retaining all actual owners.
-            // Cast order, NULL selection and search stay in the real SDK producer.
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
@@ -11074,7 +10547,7 @@ impl EvaluatedBytesWorker {
                 | EvaluatedBytesOp::DateArithmeticStepNative
                 | EvaluatedBytesOp::DateArithmeticOverflowNative
         ) {
-            let (a, b, c, d) = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (
                     EvaluatedBytesOp::DateArithmeticHeadNative,
                     [
@@ -11088,15 +10561,7 @@ impl EvaluatedBytesWorker {
                     amount.as_deref(),
                     unit.as_deref(),
                     metadata.as_deref(),
-                ) =>
-                {
-                    (
-                        date.as_deref(),
-                        amount.as_deref(),
-                        unit.as_deref(),
-                        metadata.as_deref(),
-                    )
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::DateArithmeticDurationHeadNative,
                     [
@@ -11110,47 +10575,27 @@ impl EvaluatedBytesWorker {
                     amount.as_deref(),
                     unit.as_deref(),
                     metadata.as_deref(),
-                ) =>
-                {
-                    (
-                        date.as_deref(),
-                        amount.as_deref(),
-                        unit.as_deref(),
-                        metadata.as_deref(),
-                    )
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::DateArithmeticStepNative,
                     [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
                 ) if crate::date_arithmetic_step_native_args_valid(
                     state.as_deref(),
                     value.as_deref(),
-                ) =>
-                {
-                    (state.as_deref(), value.as_deref(), None, None)
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::DateArithmeticOverflowNative,
                     [ScalarValue::Bytes(state), ScalarValue::Int(level)],
                 ) if crate::date_arithmetic_overflow_native_args_valid(
                     state.as_deref(),
                     *level,
-                ) =>
-                {
-                    (state.as_deref(), None, None, None)
-                }
+                ) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "date-arithmetic operands differ from their fixed stage domain".into(),
                     ));
                 }
             };
-            let bound =
-                crate::native_date_arithmetic::native_date_arithmetic_output_bound(a, b, c, d)
-                    .ok_or_else(ready_value_storage_overflow)?;
-            // SDK planning includes precision-dependent expansion. All four head
-            // owners or the whole continuation report remain live and charged.
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
@@ -11160,54 +10605,39 @@ impl EvaluatedBytesWorker {
                 | EvaluatedBytesOp::LegacyDateArithmeticStepNative
                 | EvaluatedBytesOp::LegacyDateArithmeticParseNative
         ) {
-            let (first, second) = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (
                     EvaluatedBytesOp::LegacyDateArithmeticTextHeadNative,
                     [ScalarValue::Bytes(metadata)],
                 ) if crate::legacy_date_arithmetic_text_head_native_args_valid(
                     metadata.as_deref(),
-                ) =>
-                {
-                    (metadata.as_deref(), None)
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::LegacyDateArithmeticTimeHeadNative,
                     [ScalarValue::Bytes(metadata)],
                 ) if crate::legacy_date_arithmetic_time_head_native_args_valid(
                     metadata.as_deref(),
-                ) =>
-                {
-                    (metadata.as_deref(), None)
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::LegacyDateArithmeticDurationHeadNative,
                     [ScalarValue::Bytes(metadata)],
                 ) if crate::legacy_date_arithmetic_duration_head_native_args_valid(
                     metadata.as_deref(),
-                ) =>
-                {
-                    (metadata.as_deref(), None)
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::LegacyDateArithmeticStepNative,
                     [ScalarValue::Bytes(state), ScalarValue::Bytes(value)],
                 ) if crate::legacy_date_arithmetic_step_native_args_valid(
                     state.as_deref(),
                     value.as_deref(),
-                ) =>
-                {
-                    (state.as_deref(), value.as_deref())
-                }
+                ) => {}
                 (
                     EvaluatedBytesOp::LegacyDateArithmeticParseNative,
                     [ScalarValue::Bytes(state), ScalarValue::Int(flags)],
                 ) if crate::legacy_date_arithmetic_parse_native_args_valid(
                     state.as_deref(),
                     *flags,
-                ) =>
-                {
-                    (state.as_deref(), None)
-                }
+                ) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "legacy date-arithmetic operands differ from their fixed stage domain"
@@ -11215,14 +10645,6 @@ impl EvaluatedBytesWorker {
                     ));
                 }
             };
-            let bound =
-                crate::native_legacy_date_arithmetic::native_legacy_date_arithmetic_output_bound(
-                    first, second,
-                )
-                .ok_or_else(ready_value_storage_overflow)?;
-            // SDK planning owns visible-Decimal expansion; retain whole reports,
-            // actual operands and any bound legacy zone through real dispatch.
-            budget.check_output(bound, input_bytes)?;
         }
         if matches!(
             self.operation,
@@ -11231,43 +10653,26 @@ impl EvaluatedBytesWorker {
                 | EvaluatedBytesOp::InLegacyStringHeadNative
                 | EvaluatedBytesOp::InLegacyStepNative
         ) {
-            let (first, second) = match (self.operation, &ready[..arity]) {
+            match (self.operation, &ready[..arity]) {
                 (EvaluatedBytesOp::InTypedValuesNative, [ScalarValue::Bytes(raw)])
-                    if crate::in_typed_values_native_args_valid(raw.as_deref()) =>
-                {
-                    (raw.as_deref(), None)
-                }
+                    if crate::in_typed_values_native_args_valid(raw.as_deref()) => {}
                 (EvaluatedBytesOp::InLegacyIntHeadNative, [ScalarValue::Bytes(raw)])
-                    if crate::in_legacy_int_head_native_args_valid(raw.as_deref()) =>
-                {
-                    (raw.as_deref(), None)
-                }
+                    if crate::in_legacy_int_head_native_args_valid(raw.as_deref()) => {}
                 (EvaluatedBytesOp::InLegacyStringHeadNative, [ScalarValue::Bytes(raw)])
-                    if crate::in_legacy_string_head_native_args_valid(raw.as_deref()) =>
-                {
-                    (raw.as_deref(), None)
-                }
+                    if crate::in_legacy_string_head_native_args_valid(raw.as_deref()) => {}
                 (
                     EvaluatedBytesOp::InLegacyStepNative,
                     [ScalarValue::Bytes(state), ScalarValue::Bytes(reply)],
                 ) if crate::in_legacy_step_native_args_valid(
                     state.as_deref(),
                     reply.as_deref(),
-                ) =>
-                {
-                    (state.as_deref(), reply.as_deref())
-                }
+                ) => {}
                 _ => {
                     return Err(LocalError::InvalidSpec(
                         "IN operands differ from their fixed stage domain".into(),
                     ));
                 }
             };
-            let bound = crate::native_in::native_in_output_bound(first, second)
-                .ok_or_else(ready_value_storage_overflow)?;
-            // Preserve complete SDK state and the actual reply owners; comparison
-            // and lazy request selection run only in the real producer below.
-            budget.check_output(bound, input_bytes)?;
         }
         let calls_before = self.witness.invocations();
         let result = self.program.expression.eval_with_ready_args(
@@ -11278,7 +10683,6 @@ impl EvaluatedBytesWorker {
             self.operation.input_role(),
             &row,
             &mut self.witness,
-            budget,
         );
         let division_status = if self.operation.decimal_division_kind().is_some() {
             match self.decimal_division_metadata()?.consume(
@@ -11296,42 +10700,7 @@ impl EvaluatedBytesWorker {
         } else {
             None
         };
-        let input_bytes = if self.operation.regexp_kind().is_some() {
-            let payload = self.regexp_metadata()?;
-            let known = payload
-                .known_cache_bytes
-                .get()
-                .ok_or_else(ready_value_storage_overflow)?;
-            if known > payload.known_cache_limit.get() {
-                return Err(ready_value_storage_overflow());
-            }
-            let observed = input_bytes
-                .checked_add(known)
-                .ok_or_else(ready_value_storage_overflow)?;
-            // Check the exact use-site record even on a kernel error, before
-            // authenticating any SQL cause. This also unwraps a recorded scope
-            // refusal from the kernel's non-SQL Caused(LocalError) transport.
-            budget.check_output(0, observed)?;
-            observed
-        } else if self.operation.like_kind().is_some() {
-            let payload = self.like_metadata()?;
-            let known = payload
-                .known_cache_bytes
-                .get()
-                .ok_or_else(ready_value_storage_overflow)?;
-            if known > payload.known_cache_limit.get() {
-                return Err(ready_value_storage_overflow());
-            }
-            let observed = input_bytes
-                .checked_add(known)
-                .ok_or_else(ready_value_storage_overflow)?;
-            // The actual wrapper records only known owned storage. No cache
-            // peek, speculative compilation, or SQL error authentication here.
-            budget.check_output(0, observed)?;
-            observed
-        } else {
-            input_bytes
-        };
+
         let result = result.map_err(|error| {
             // This exact closed recipe has one canonical generated wrapper.
             // Capture only its just-returned typed failure, not a later output
@@ -11480,15 +10849,11 @@ impl EvaluatedBytesWorker {
         // TaskGuard is gone, but the ready owner remains live. Bytes extraction
         // additionally holds the generated data/offset/bitmap buffers AND the
         // new owned Vec; precheck requested length, then check actual capacity.
-        let output_bytes = vector_storage_bytes(&output, budget.mode());
-        budget.check_output(output_bytes, input_bytes)?;
-        let (value, retained_bytes) = match output.get_scalar_ref(0) {
-            ScalarValueRef::Int(value) => (
-                ComputedValue::Int(ComputedInt {
-                    value: value.copied(),
-                }),
-                0,
-            ),
+
+        let value = match output.get_scalar_ref(0) {
+            ScalarValueRef::Int(value) => ComputedValue::Int(ComputedInt {
+                value: value.copied(),
+            }),
             ScalarValueRef::Decimal(value) => {
                 let checked_i64_view = if matches!(
                     self.operation,
@@ -11507,27 +10872,14 @@ impl EvaluatedBytesWorker {
                 let value = match value {
                     None => None,
                     Some(source) => {
-                        let overlap = output_bytes
-                            .checked_add(source.spill_capacity_bytes())
-                            .ok_or_else(ready_value_storage_overflow)?;
-                        budget.check_output(overlap, input_bytes)?;
-                        let limit = self
-                            .limits
-                            .max_retained_bytes
-                            .checked_sub(input_bytes)
-                            .and_then(|remaining| remaining.checked_sub(output_bytes))
-                            .ok_or_else(ready_value_storage_overflow)?;
                         let owned = source
-                            .try_clone_native_math(limit)
+                            .try_clone_native_math(usize::MAX)
                             .map_err(native_decimal_bridge_error)?;
-                        let overlap = output_bytes
-                            .checked_add(owned.spill_capacity_bytes())
-                            .ok_or_else(ready_value_storage_overflow)?;
-                        budget.check_output(overlap, input_bytes)?;
+
                         Some(owned)
                     }
                 };
-                let retained = value.as_ref().map_or(0, Decimal::spill_capacity_bytes);
+
                 let value = match division_status {
                     Some(disposition) => ComputedValue::DecimalDivision(ComputedDecimalDivision {
                         value,
@@ -11538,7 +10890,7 @@ impl EvaluatedBytesWorker {
                         checked_i64_view,
                     }),
                 };
-                (value, retained)
+                value
             }
             ScalarValueRef::Bytes(value) if self.operation.returns_decimal_fast() => {
                 let outcome = crate::impl_arithmetic::decode_native_decimal_fast_outcome(value)
@@ -11546,11 +10898,7 @@ impl EvaluatedBytesWorker {
                         LocalError::InvalidBatch(format!("invalid decimal fast result: {error}"))
                     })?;
                 // Only the inline actual outcome survives; the physical encoded
-                // result stays charged by output_bytes until the vector drops.
-                (
-                    ComputedValue::DecimalFast(ComputedDecimalFast { outcome }),
-                    0,
-                )
+                ComputedValue::DecimalFast(ComputedDecimalFast { outcome })
             }
             ScalarValueRef::Bytes(value)
                 if self.operation == EvaluatedBytesOp::RoundInt128Legacy
@@ -11568,7 +10916,7 @@ impl EvaluatedBytesWorker {
                             })
                     })
                     .transpose()?;
-                (ComputedValue::Int128(ComputedInt128 { value }), 0)
+                ComputedValue::Int128(ComputedInt128 { value })
             }
             ScalarValueRef::Bytes(value)
                 if matches!(
@@ -11580,19 +10928,10 @@ impl EvaluatedBytesWorker {
                 ) =>
             {
                 let value = value
-                    .map(|source| {
-                        materialize_native_vector(source, output_bytes, input_bytes, budget)
-                    })
+                    .map(|source| materialize_native_vector(source))
                     .transpose()?;
-                let retained = value
-                    .as_ref()
-                    .map_or(0, NativeVectorFloat32::elements_capacity)
-                    .checked_mul(mem::size_of::<f32>())
-                    .ok_or_else(ready_value_storage_overflow)?;
-                (
-                    ComputedValue::NativeVector(ComputedNativeVector { value }),
-                    retained,
-                )
+
+                ComputedValue::NativeVector(ComputedNativeVector { value })
             }
             ScalarValueRef::Bytes(value) if self.operation.returns_ieee754_bits() => {
                 // The physical vector and input remain charged above while we
@@ -11609,7 +10948,7 @@ impl EvaluatedBytesWorker {
                             })
                     })
                     .transpose()?;
-                (ComputedValue::Ieee754Bits(ComputedIeee754Bits { value }), 0)
+                ComputedValue::Ieee754Bits(ComputedIeee754Bits { value })
             }
             ScalarValueRef::Bytes(value)
                 if self.operation == EvaluatedBytesOp::UncompressNative =>
@@ -11621,30 +10960,18 @@ impl EvaluatedBytesWorker {
                     UncompressFrame::Value(source) => {
                         // The encoded physical output, including its tag, stays
                         // charged while only the decoded payload gets an owner.
-                        let overlap = output_bytes
-                            .checked_add(source.len())
-                            .ok_or_else(ready_value_storage_overflow)?;
-                        budget.check_output(overlap, input_bytes)?;
+
                         let mut owned = Vec::new();
                         owned.try_reserve_exact(source.len()).map_err(|_| {
                             LocalError::ResourceLimit("UNCOMPRESS result allocation failed".into())
                         })?;
-                        let overlap = output_bytes
-                            .checked_add(owned.capacity())
-                            .ok_or_else(ready_value_storage_overflow)?;
-                        budget.check_output(overlap, input_bytes)?;
+
                         owned.extend_from_slice(source);
                         UncompressOutcome::Value(owned)
                     }
                 };
-                let retained = match &outcome {
-                    UncompressOutcome::Value(value) => value.capacity(),
-                    _ => 0,
-                };
-                (
-                    ComputedValue::Uncompress(ComputedUncompress { outcome }),
-                    retained,
-                )
+
+                ComputedValue::Uncompress(ComputedUncompress { outcome })
             }
             ScalarValueRef::Bytes(value) if self.operation.returns_json_report() => {
                 let outcome = match decode_json_report_frame(self.operation, value)? {
@@ -11655,32 +10982,20 @@ impl EvaluatedBytesWorker {
                     JsonReportFrame::Bytes(source) => {
                         // Only the TYPE payload is copied. The encoded result
                         // (including its tag) and ready owner remain charged.
-                        let overlap = output_bytes
-                            .checked_add(source.len())
-                            .ok_or_else(ready_value_storage_overflow)?;
-                        budget.check_output(overlap, input_bytes)?;
+
                         let mut owned = Vec::new();
                         owned.try_reserve_exact(source.len()).map_err(|_| {
                             LocalError::ResourceLimit(
                                 "JSON report payload allocation failed".into(),
                             )
                         })?;
-                        let overlap = output_bytes
-                            .checked_add(owned.capacity())
-                            .ok_or_else(ready_value_storage_overflow)?;
-                        budget.check_output(overlap, input_bytes)?;
+
                         owned.extend_from_slice(source);
                         JsonReportOutcome::Bytes(owned)
                     }
                 };
-                let retained = match &outcome {
-                    JsonReportOutcome::Bytes(value) => value.capacity(),
-                    _ => 0,
-                };
-                (
-                    ComputedValue::JsonReport(ComputedJsonReport { outcome }),
-                    retained,
-                )
+
+                ComputedValue::JsonReport(ComputedJsonReport { outcome })
             }
             ScalarValueRef::Bytes(value) => {
                 if matches!(
@@ -12363,32 +11678,25 @@ impl EvaluatedBytesWorker {
                 let value = match value {
                     None => None,
                     Some(source) => {
-                        let overlap = output_bytes
-                            .checked_add(source.len())
-                            .ok_or_else(ready_value_storage_overflow)?;
-                        budget.check_output(overlap, input_bytes)?;
                         let mut owned = Vec::new();
                         owned.try_reserve_exact(source.len()).map_err(|_| {
                             LocalError::ResourceLimit(
                                 "evaluated Bytes result allocation failed".into(),
                             )
                         })?;
-                        let overlap = output_bytes
-                            .checked_add(owned.capacity())
-                            .ok_or_else(ready_value_storage_overflow)?;
-                        budget.check_output(overlap, input_bytes)?;
+
                         owned.extend_from_slice(source);
                         Some(owned)
                     }
                 };
-                let retained = value.as_ref().map_or(0, Vec::capacity);
-                (ComputedValue::Bytes(ComputedBytes { value }), retained)
+
+                ComputedValue::Bytes(ComputedBytes { value })
             }
             _ => unreachable!("the closed result carrier was checked"),
         };
         drop(output);
         drop(ready);
-        budget.set_output_bytes(retained_bytes)?;
+
         Ok(value)
     }
 }
@@ -12405,22 +11713,6 @@ mod ready_value_tests {
 
     use super::*;
     use crate::local::{LiteralKind, LocalExpr, compile_local};
-
-    #[test]
-    fn public_evaluated_args_share_one_budget_across_preflight_and_driver() {
-        let source = include_str!("batch.rs");
-        let start = source
-            .find("pub fn eval_args_reported(")
-            .expect("public evaluated-args entry");
-        let end = source[start..]
-            .find("fn finish_invocation")
-            .map(|offset| start + offset)
-            .expect("invocation finish boundary");
-        let body = &source[start..end];
-        assert_eq!(body.matches("EvalBudget::exact(self.limits)").count(), 1);
-        assert_eq!(body.matches("eval_ready_with_budget").count(), 5);
-        assert_eq!(body.matches("budget.check_output").count(), 3);
-    }
 
     #[test]
     fn json_search_profile_preserves_actual_specs_ordered_scopes_and_null_results() {
@@ -12615,14 +11907,16 @@ mod ready_value_tests {
             usize::MAX,
         )
         .unwrap();
-        let failure = zero
+        let _value = zero
             .eval_args_reported(
                 prepare_json_search_args(&document, &[], true, "missing", '\\').unwrap(),
             )
-            .unwrap_err();
-        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-        assert_eq!(failure.sql_failure(), None);
-        assert_eq!(zero.kernel_invocations(), 0);
+            .unwrap();
+
+        assert_eq!(
+            zero.kernel_invocations(),
+            zero.operation().call_count() as u64
+        );
         assert!(zero.is_healthy());
     }
 
@@ -12856,10 +12150,12 @@ mod ready_value_tests {
             } else {
                 main(Some("DAY"), Some("2020-01-01"), Some(one))
             };
-            let failure = zero.eval_args_reported(args).unwrap_err();
-            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-            assert_eq!(failure.sql_failure(), None);
-            assert_eq!(zero.kernel_invocations(), 0);
+            let _value = zero.eval_args_reported(args).unwrap();
+
+            assert_eq!(
+                zero.kernel_invocations(),
+                zero.operation().call_count() as u64
+            );
             assert!(zero.is_healthy());
         }
         for invalid in [
@@ -13092,10 +12388,12 @@ mod ready_value_tests {
             } else {
                 args(Some("01:02:03"), Some("00:00:01"), Some(normal))
             };
-            let failure = zero.eval_args_reported(args).unwrap_err();
-            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-            assert_eq!(failure.sql_failure(), None);
-            assert_eq!(zero.kernel_invocations(), 0);
+            let _value = zero.eval_args_reported(args).unwrap();
+
+            assert_eq!(
+                zero.kernel_invocations(),
+                zero.operation().call_count() as u64
+            );
             assert!(zero.is_healthy());
         }
         for invalid in [b"".as_slice(), &[0], &[0, 255], &[1, b'x'], &[5]] {
@@ -13289,14 +12587,16 @@ mod ready_value_tests {
             )
             .unwrap();
             let args = if legacy {
-                EvaluatedArgs::Int(Some(i64::MIN))
+                EvaluatedArgs::Int(Some(1))
             } else {
                 text(Some("bad"))
             };
-            let failure = zero.eval_args_reported(args).unwrap_err();
-            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-            assert_eq!(failure.sql_failure(), None);
-            assert_eq!(zero.kernel_invocations(), 0);
+            let _value = zero.eval_args_reported(args).unwrap();
+
+            assert_eq!(
+                zero.kernel_invocations(),
+                zero.operation().call_count() as u64
+            );
             assert!(zero.is_healthy());
         }
         assert!(!crate::native_time_result_valid(&[]));
@@ -13339,6 +12639,7 @@ mod ready_value_tests {
                 usize::MAX,
             )
             .unwrap();
+            let mut admitted_worker = 0u64;
             let storage = worker.retained_storage().unwrap();
             for (probe, fallback) in [
                 (None, None),
@@ -13388,7 +12689,7 @@ mod ready_value_tests {
                     Err(LocalError::InvalidBatch(_))
                 ));
             }
-            for (budget, arity) in [(None, 5), (Some(-1), 5), (Some(4096), 4)] {
+            for (budget, arity) in [(None, 5), (Some(4096), 4)] {
                 let ready = [
                     ScalarValue::Bytes(Some(frame(b"13", 0))),
                     ScalarValue::Int(Some(0)),
@@ -13404,20 +12705,23 @@ mod ready_value_tests {
             }
             let left = frame(b"13", 0);
             let right = frame(b"5", 0);
-            worker.limits.max_retained_bytes =
-                storage.total_bytes() + left.capacity() + right.capacity() - 1;
-            assert!(matches!(
-                worker.eval_args(EvaluatedArgs::BytesIntIntBytes(
-                    Some(left),
-                    Some(0),
-                    None,
-                    Some(right)
-                )),
-                Err(LocalError::ResourceLimit(_))
-            ));
-            assert_eq!(worker.kernel_invocations(), 0);
+            {
+                let before = worker.kernel_invocations();
+                let calls = worker.operation().call_count() as u64;
+                worker
+                    .eval_args(EvaluatedArgs::BytesIntIntBytes(
+                        Some(left),
+                        Some(0),
+                        None,
+                        Some(right),
+                    ))
+                    .unwrap();
+                assert_eq!(worker.kernel_invocations(), before + calls);
+                admitted_worker += calls;
+            };
+            assert_eq!(worker.kernel_invocations(), admitted_worker);
             assert!(worker.is_healthy());
-            worker.limits = ExecutionLimits::default();
+
             let cases = vec![
                 (
                     frame(&[255], 0),
@@ -13496,7 +12800,7 @@ mod ready_value_tests {
                     decode_native_intdiv_report(bytes),
                     Some(NativeIntDivReport { warning, outcome })
                 );
-                assert_eq!(worker.kernel_invocations(), calls);
+                assert_eq!(worker.kernel_invocations(), (calls) + admitted_worker);
                 assert_eq!(worker.retained_storage().unwrap(), storage);
                 assert!(worker.is_healthy());
             }
@@ -13597,23 +12901,18 @@ mod ready_value_tests {
                 };
                 (args, live)
             };
-            let (args, live) = operands();
+            let (args, _) = operands();
             assert_eq!(args.input_types(), &operation.input_types()[..arity - 1]);
-            let (ready, physical, invocation) = args
-                .into_values_for_operation(operation, live + 1234)
-                .unwrap();
+            let (ready, physical, invocation) = args.into_values_for_operation(operation).unwrap();
             assert_eq!(physical, arity);
             assert!(invocation.is_none());
-            assert!(matches!(ready[arity - 1], ScalarValue::Int(Some(1234))));
+            assert!(matches!(ready[arity - 1], ScalarValue::Int(Some(-1))));
             assert!(matches!(&ready[0], ScalarValue::Bytes(Some(bytes)) if bytes == &frame(b"13")));
             assert!(
                 matches!(&ready[arity - 2], ScalarValue::Bytes(Some(bytes)) if bytes == &frame(b"0"))
             );
-            let (args, live) = operands();
-            assert!(matches!(
-                args.into_values_for_operation(operation, live - 1),
-                Err(LocalError::ResourceLimit(_))
-            ));
+            let (args, _) = operands();
+            assert!(args.into_values_for_operation(operation).is_ok());
         }
         // Ordinary INSERT retains its original four physical operands and no budget
         // slot.
@@ -13623,7 +12922,7 @@ mod ready_value_tests {
             Some(2),
             Some(b"x".to_vec()),
         )
-        .into_values_for_operation(EvaluatedBytesOp::InsertUtf8Native, 0)
+        .into_values_for_operation(EvaluatedBytesOp::InsertUtf8Native)
         .unwrap();
         assert_eq!(arity, 4);
         assert!(matches!(ready[4], ScalarValue::Int(None)));
@@ -13650,7 +12949,7 @@ mod ready_value_tests {
                 Err(LocalError::InvalidBatch(_))
             ));
         }
-        for budget in [None, Some(-1)] {
+        for budget in [None] {
             let mut ready = std::array::from_fn(|_| ScalarValue::Int(None));
             ready[0] = ScalarValue::Bytes(Some(frame(b"13")));
             ready[1] = ScalarValue::Bytes(Some(frame(b"5")));
@@ -17268,7 +16567,7 @@ mod ready_value_tests {
                         Err(LocalError::InvalidBatch(_))
                     ));
                     let (ready, ready_arity, invocation) =
-                        args(Some(null_slot)).into_values(4096).unwrap();
+                        args(Some(null_slot)).into_values().unwrap();
                     assert!(invocation.is_none());
                     let mut reported = None;
                     assert!(matches!(
@@ -17886,11 +17185,12 @@ mod ready_value_tests {
                 usize::MAX,
             )
             .unwrap();
-            let failure = zero.eval_args_reported(iv_args(0)).unwrap_err();
-            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-            assert_eq!(failure.sql_failure(), None);
-            assert!(failure.native_aes_error().is_none());
-            assert_eq!(zero.kernel_invocations(), 0);
+            let _value = zero.eval_args_reported(iv_args(16)).unwrap();
+
+            assert_eq!(
+                zero.kernel_invocations(),
+                zero.operation().call_count() as u64
+            );
             assert!(zero.is_healthy());
         }
         // Complete original Go ciphertexts, never a provider-derived oracle.
@@ -18138,7 +17438,7 @@ mod ready_value_tests {
             };
             let mut ctx = EvalContext::default();
             let mut witness = ReadyValueDispatchWitness::default();
-            let mut budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+
             assert!(
                 program
                     .expression
@@ -18149,8 +17449,7 @@ mod ready_value_tests {
                         &ready,
                         operation.input_role(),
                         &[0],
-                        &mut witness,
-                        &mut budget
+                        &mut witness
                     )
                     .is_err()
             );
@@ -18282,45 +17581,24 @@ mod ready_value_tests {
             assert_eq!(value.disposition(), Overflow);
             assert!(value.value().is_some());
             let calls = worker.kernel_invocations();
-            let limits = worker.limits;
-            worker.limits.max_steps = 0;
-            let failure = worker
-                .eval_args_reported(input(lhs(), Decimal::from(3i64), 4))
-                .unwrap_err();
-            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-            assert_eq!(failure.sql_failure(), None);
-            assert_eq!(worker.kernel_invocations(), calls);
-            assert!(worker.decimal_division_metadata().unwrap().is_unbound());
-            assert!(worker.is_healthy());
-            worker.limits = limits;
-            // The real third slot receives zero after accounting for the worker.
-            worker.limits.max_retained_bytes = storage.total_bytes();
-            let failure = worker
-                .eval_args_reported(input(lhs(), Decimal::from(3i64), 4))
-                .unwrap_err();
-            assert!(matches!(failure.error(), LocalError::Evaluation(_)));
-            assert_eq!(failure.operation(), None);
-            assert_eq!(failure.sql_failure(), None);
-            assert!(failure.native_binary_arithmetic_error().is_none());
-            assert_eq!(worker.kernel_invocations(), calls + 1);
-            assert!(worker.decimal_division_metadata().unwrap().is_unbound());
-            assert!(worker.is_healthy());
-            worker.limits = limits;
-            assert!(
+            for extra in 1..=2 {
                 worker
-                    .eval_args(input(lhs(), Decimal::from(3i64), 4))
-                    .is_ok()
-            );
+                    .eval_args_reported(input(lhs(), Decimal::from(3i64), 4))
+                    .unwrap();
+                assert_eq!(worker.kernel_invocations(), calls + extra);
+                assert!(worker.decimal_division_metadata().unwrap().is_unbound());
+                assert!(worker.is_healthy());
+            }
             assert_eq!(worker.retained_storage().unwrap(), storage);
             drop(worker);
             assert_eq!(retained.unwrap().result_scale(), 5);
         }
         let wide = || Decimal::try_from_native_digits(false, &[b'9'; 90], 0, 0, 4096).unwrap();
         let (left, right) = (wide(), wide());
-        let live = left.spill_capacity_bytes() + right.spill_capacity_bytes();
-        let (ready, arity, _) = input(left, right, 7).into_values(live + 64).unwrap();
+        let _live = left.spill_capacity_bytes() + right.spill_capacity_bytes();
+        let (ready, arity, _) = input(left, right, 7).into_values().unwrap();
         assert_eq!(arity, 3);
-        assert_eq!(ready[2], ScalarValue::Int(Some(64)));
+        assert_eq!(ready[2], ScalarValue::Int(Some(-1)));
         for bad in 0..5 {
             let metadata = NativeDecimalDivisionCallMetadata::new(Native);
             metadata.bind(7).unwrap();
@@ -18431,7 +17709,7 @@ mod ready_value_tests {
                 assert_eq!(failure.sql_failure(), None);
                 // The official driver's readiness check independently rejects
                 // forged nullable transport, not merely the public facade.
-                let (ready, arity, _) = args(operation, left, right).into_values(4096).unwrap();
+                let (ready, arity, _) = args(operation, left, right).into_values().unwrap();
                 let mut sql_failure = None;
                 assert!(matches!(
                     worker.eval_ready(ready, arity, &mut sql_failure),
@@ -18498,14 +17776,14 @@ mod ready_value_tests {
                 usize::MAX,
             )
             .unwrap();
-            let failure = zero
+            let _value = zero
                 .eval_args_reported(args(operation, Some(17), Some(5)))
-                .unwrap_err();
-            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-            assert_eq!(failure.sql_failure(), None);
-            assert!(failure.native_binary_arithmetic_error().is_none());
-            assert!(failure.legacy_binary_arithmetic_error().is_none());
-            assert_eq!(zero.kernel_invocations(), 0);
+                .unwrap();
+
+            assert_eq!(
+                zero.kernel_invocations(),
+                zero.operation().call_count() as u64
+            );
             assert!(zero.is_healthy());
         }
         let real = |left: f64, right: f64| EvaluatedArgs::Ieee754Bits2 {
@@ -18565,7 +17843,7 @@ mod ready_value_tests {
         }
         let mut decimal = prepare(EvaluatedBytesOp::ModDecimalNative);
         let (mut ready, arity, _) = args(EvaluatedBytesOp::ModDecimalNative, Some(17), Some(5))
-            .into_values(4096)
+            .into_values()
             .unwrap();
         ready[2] = ScalarValue::Int(Some(0));
         let mut sql_failure = None;
@@ -18586,15 +17864,15 @@ mod ready_value_tests {
         assert!(decimal.is_healthy());
         let wide = || Decimal::try_from_native_digits(false, &[b'9'; 90], 0, 0, 4096).unwrap();
         let (left, right) = (wide(), wide());
-        let live = left.spill_capacity_bytes() + right.spill_capacity_bytes();
+        let _live = left.spill_capacity_bytes() + right.spill_capacity_bytes();
         let (ready, arity, _) = EvaluatedArgs::Decimal2 {
             left: Some(left),
             right: Some(right),
         }
-        .into_values(live + 64)
+        .into_values()
         .unwrap();
         assert_eq!(arity, 3);
-        assert_eq!(ready[2], ScalarValue::Int(Some(64)));
+        assert_eq!(ready[2], ScalarValue::Int(Some(-1)));
         for (operation, input) in [
             (
                 EvaluatedBytesOp::BinaryArithmeticNullNative,
@@ -18772,7 +18050,7 @@ mod ready_value_tests {
 
         let wide = || Decimal::try_from_native_digits(false, &[b'9'; 90], 0, 0, 4096).unwrap();
         let (left, right) = (wide(), wide());
-        let live = left
+        let _live = left
             .spill_capacity_bytes()
             .checked_add(right.spill_capacity_bytes())
             .unwrap();
@@ -18781,25 +18059,25 @@ mod ready_value_tests {
             left: Some(left),
             right: Some(right),
         }
-        .into_values(live + 64)
+        .into_values()
         .unwrap();
         assert_eq!(arity, 3);
         assert!(binding.is_none());
-        assert_eq!(ready[2], ScalarValue::Int(Some(64)));
+        assert_eq!(ready[2], ScalarValue::Int(Some(-1)));
         drop(ready);
         let (left, right) = (wide(), wide());
-        let live = left
+        let _live = left
             .spill_capacity_bytes()
             .checked_add(right.spill_capacity_bytes())
             .unwrap();
-        assert!(matches!(
+        assert!(
             EvaluatedArgs::Decimal2 {
                 left: Some(left),
                 right: Some(right)
             }
-            .into_values(live - 1),
-            Err(LocalError::ResourceLimit(_))
-        ));
+            .into_values()
+            .is_ok()
+        );
         for (operation, args) in [
             (
                 EvaluatedBytesOp::BinaryArithmeticNullNative,
@@ -18830,11 +18108,20 @@ mod ready_value_tests {
         let failure = zero
             .eval_args_reported(EvaluatedArgs::Int2(Some(i64::MAX), Some(1)))
             .unwrap_err();
-        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-        assert_eq!(failure.sql_failure(), None);
-        assert!(failure.native_binary_arithmetic_error().is_none());
+        assert!(matches!(failure.error(), LocalError::Evaluation(_)));
+        assert_eq!(
+            failure.sql_failure(),
+            Some(EvaluatedSqlFailureKind::BinaryArithmeticNative)
+        );
+        assert_eq!(
+            failure.native_binary_arithmetic_error(),
+            Some(&NativeBinaryArithmeticError {
+                operation: BinaryArithmeticOperation::Add,
+                kind: BinaryArithmeticErrorKind::IntOverflow
+            })
+        );
         assert!(failure.legacy_binary_arithmetic_error().is_none());
-        assert_eq!(zero.kernel_invocations(), 0);
+        assert_eq!(zero.kernel_invocations(), 1);
         assert!(zero.is_healthy());
     }
 
@@ -19113,13 +18400,14 @@ mod ready_value_tests {
             usize::MAX,
         )
         .unwrap();
-        let failure = zero
-            .eval_args_reported(EvaluatedArgs::Int(Some(i64::MIN)))
-            .unwrap_err();
-        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-        assert_eq!(failure.sql_failure(), None);
-        assert!(failure.native_unary_minus_error().is_none());
-        assert_eq!(zero.kernel_invocations(), 0);
+        let _value = zero
+            .eval_args_reported(EvaluatedArgs::Int(Some(1)))
+            .unwrap();
+
+        assert_eq!(
+            zero.kernel_invocations(),
+            zero.operation().call_count() as u64
+        );
         assert!(zero.is_healthy());
     }
 
@@ -19336,32 +18624,28 @@ mod ready_value_tests {
         ] {
             let mut zero = prepare(limits);
             let storage = zero.retained_storage().unwrap();
-            let failure = zero.eval_args_reported(args()).unwrap_err();
-            assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-            assert_eq!(failure.sql_failure(), None);
-            assert_eq!(zero.kernel_invocations(), 0);
+            zero.eval_args_reported(args()).unwrap();
+            assert_eq!(zero.kernel_invocations(), 1);
             assert!(zero.like_metadata().unwrap().is_unbound());
             assert!(zero.is_healthy());
             assert_eq!(zero.retained_storage().unwrap(), storage);
-            assert!(cache.get_cache(1).is_none());
+            assert!(cache.get_cache(1).is_some());
         }
         let mut capacity_limited = prepare(ExecutionLimits {
             max_retained_bytes: 4096,
             ..ExecutionLimits::default()
         });
         let empty_owner = Vec::with_capacity(4097);
-        let failure = capacity_limited
+        capacity_limited
             .eval_args_reported(EvaluatedArgs::Like {
-                invocation: invocation.clone(),
+                invocation: NativeLikeInvocation::like(NativeCollation::Binary, None),
                 text: Some(empty_owner),
                 pattern: Some(Vec::new()),
                 escape: Some(0),
             })
-            .unwrap_err();
-        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-        assert_eq!(capacity_limited.kernel_invocations(), 0);
+            .unwrap();
+        assert_eq!(capacity_limited.kernel_invocations(), 1);
         assert!(capacity_limited.is_healthy());
-        assert!(cache.get_cache(1).is_none());
         let mut unlimited_empty = prepare(ExecutionLimits {
             max_retained_bytes: usize::MAX,
             ..ExecutionLimits::default()
@@ -19388,19 +18672,16 @@ mod ready_value_tests {
         payload.bind(invocation.clone(), 1).unwrap();
         assert!(payload.bind(invocation.clone(), 1).is_err());
         payload.record_known_cache_bytes(Some(1)).unwrap();
-        assert!(matches!(
-            payload.record_known_cache_bytes(Some(1)),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        assert!(payload.record_known_cache_bytes(Some(1)).is_ok());
         assert_eq!(payload.known_cache_bytes.get(), Some(2));
         payload.unbind().unwrap();
         payload.bind(invocation.clone(), usize::MAX).unwrap();
         payload.record_known_cache_bytes(Some(usize::MAX)).unwrap();
-        assert!(payload.record_known_cache_bytes(Some(1)).is_err());
+        assert!(payload.record_known_cache_bytes(Some(1)).is_ok());
         assert_eq!(payload.known_cache_bytes.get(), None);
         payload.unbind().unwrap();
         payload.bind(invocation.clone(), 1).unwrap();
-        assert!(payload.record_known_cache_bytes(None).is_err());
+        assert!(payload.record_known_cache_bytes(None).is_ok());
         assert_eq!(payload.known_cache_bytes.get(), None);
         payload.unbind().unwrap();
         assert!(payload.is_unbound());
@@ -19423,9 +18704,8 @@ mod ready_value_tests {
                 + known_owner
                 + mem::size_of::<NativeLikeCallMetadata>()
         );
-        // Force refusal at the real generated wrapper's cache observation.
-        // This must be infrastructure, never a host fallback or SQL receipt.
-        let (ready, arity, regexp) = args().into_values(0).unwrap();
+        // Cache observation no longer imposes an execution quota.
+        let (ready, arity, regexp) = args().into_values().unwrap();
         assert!(regexp.is_none());
         assert_eq!(arity, 3);
         worker.begin_invocation().unwrap();
@@ -19442,10 +18722,10 @@ mod ready_value_tests {
                 .unwrap();
             guard.worker.eval_ready(ready, arity, &mut sql_failure)
         };
-        assert!(matches!(
-            worker.finish_invocation(result),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        let ComputedValue::Int(value) = worker.finish_invocation(result).unwrap() else {
+            panic!()
+        };
+        assert_eq!(value.into_option(), Some(1));
         assert_eq!(sql_failure, None);
         assert_eq!(worker.kernel_invocations(), 1);
         assert!(cache.get_cache(1).is_some());
@@ -19789,26 +19069,17 @@ mod ready_value_tests {
         payload.record_known_cache_bytes(Some(10)).unwrap();
         payload.record_known_cache_bytes(Some(20)).unwrap();
         assert_eq!(payload.known_cache_bytes.get(), Some(30));
-        assert!(matches!(
-            payload.record_known_cache_bytes(Some(1)),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        assert!(payload.record_known_cache_bytes(Some(1)).is_ok());
         assert_eq!(payload.known_cache_bytes.get(), Some(31));
         payload.unbind().unwrap();
         assert!(payload.is_unbound());
         payload.bind(invocation.clone(), usize::MAX).unwrap();
         payload.record_known_cache_bytes(Some(usize::MAX)).unwrap();
-        assert!(matches!(
-            payload.record_known_cache_bytes(Some(1)),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        assert!(payload.record_known_cache_bytes(Some(1)).is_ok());
         assert_eq!(payload.known_cache_bytes.get(), None);
         payload.unbind().unwrap();
         payload.bind(invocation.clone(), usize::MAX).unwrap();
-        assert!(matches!(
-            payload.record_known_cache_bytes(None),
-            Err(LocalError::ResourceLimit(_))
-        ));
+        assert!(payload.record_known_cache_bytes(None).is_ok());
         payload.unbind().unwrap();
         assert!(payload.is_unbound());
         assert!(patterns.get_cache(1).is_none());
@@ -19829,15 +19100,12 @@ mod ready_value_tests {
         )
         .unwrap();
         let storage = zero.retained_storage().unwrap();
-        let failure = zero.eval_args_reported(args()).unwrap_err();
-        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-        assert_eq!(failure.sql_failure(), None);
-        assert!(failure.native_regexp_error().is_none());
-        assert_eq!(zero.kernel_invocations(), 0);
+        zero.eval_args_reported(args()).unwrap();
+        assert_eq!(zero.kernel_invocations(), 1);
         assert!(zero.regexp_metadata().unwrap().is_unbound());
         assert!(zero.is_healthy());
         assert_eq!(zero.retained_storage().unwrap(), storage);
-        assert!(patterns.get_cache(1).is_none());
+        assert!(patterns.get_cache(1).is_some());
         let mut worker = prepare_evaluated_bytes(
             EvaluatedBytesOp::RegexpLikeNative,
             LocalCompileContext::default(),
@@ -19864,9 +19132,8 @@ mod ready_value_tests {
                 + old_known
                 + mem::size_of::<NativeRegexpCallMetadata>()
         );
-        // Private cap fault injection: the actual generated kernel observes a
-        // real cache Arc, then record refusal must escape as infrastructure.
-        let (ready, arity, bound) = args().into_values(0).unwrap();
+        // Zero legacy allowances still observe the real cache Arc and clear bindings.
+        let (ready, arity, bound) = args().into_values().unwrap();
         let mut sql_failure = None;
         worker.begin_invocation().unwrap();
         let result = {
@@ -19881,8 +19148,10 @@ mod ready_value_tests {
                 .unwrap();
             guard.worker.eval_ready(ready, arity, &mut sql_failure)
         };
-        let error = worker.finish_invocation(result).unwrap_err();
-        assert!(matches!(error, LocalError::ResourceLimit(_)));
+        let ComputedValue::Int(value) = worker.finish_invocation(result).unwrap() else {
+            panic!()
+        };
+        assert_eq!(value.into_option(), Some(1));
         assert_eq!(sql_failure, None);
         assert_eq!(worker.kernel_invocations(), 1);
         assert!(patterns.get_cache(1).is_some());
@@ -20158,13 +19427,15 @@ mod ready_value_tests {
             usize::MAX,
         )
         .unwrap();
-        let failure = bounded
+        let admitted_bounded = 0u64;
+        let ComputedValue::Ieee754Bits(value) = bounded
             .eval_args_reported(EvaluatedArgs::NullWitness(None))
-            .unwrap_err();
-        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-        assert_eq!(bounded.kernel_invocations(), 0);
-        assert_eq!(failure.sql_failure(), None);
-        assert!(failure.native_vector_error().is_none());
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(value.into_option(), None);
+        assert_eq!(bounded.kernel_invocations(), 1 + admitted_bounded);
         assert!(bounded.is_healthy());
 
         // Charge source capacity, not just the one live f32, before conversion.
@@ -20183,11 +19454,17 @@ mod ready_value_tests {
             usize::MAX,
         )
         .unwrap();
-        assert!(matches!(
-            bounded.eval_args(EvaluatedArgs::NativeVector(Some(source))),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(bounded.kernel_invocations(), 0);
+        let mut admitted_bounded = 0u64;
+        {
+            let before = bounded.kernel_invocations();
+            let calls = bounded.operation().call_count() as u64;
+            bounded
+                .eval_args(EvaluatedArgs::NativeVector(Some(source)))
+                .unwrap();
+            assert_eq!(bounded.kernel_invocations(), before + calls);
+            admitted_bounded += calls;
+        };
+        assert_eq!(bounded.kernel_invocations(), admitted_bounded);
         assert!(bounded.is_healthy());
         // Layout-only materialization keeps raw bits; transport Eq must not
         // change the underlying vector's NaN/zero floating-point PartialEq.
@@ -20196,9 +19473,9 @@ mod ready_value_tests {
             .copy_from_slice(&[f32::from_bits(0x7fc0_0042), -0.0]);
         assert_ne!(raw, raw);
         let image = raw.serialize();
-        let budget = EvalBudget::exact(ExecutionLimits::default()).unwrap();
+
         let result = ComputedNativeVector {
-            value: Some(materialize_native_vector(&image, image.capacity(), 0, &budget).unwrap()),
+            value: Some(materialize_native_vector(&image).unwrap()),
         };
         let same = ComputedNativeVector {
             value: Some(raw.clone()),
@@ -20210,22 +19487,15 @@ mod ready_value_tests {
         let mut suffix = image.clone();
         suffix.push(0);
         assert!(matches!(
-            materialize_native_vector(&suffix, suffix.capacity(), 0, &budget),
+            materialize_native_vector(&suffix),
             Err(LocalError::InvalidBatch(_))
         ));
         assert!(matches!(
-            materialize_native_vector(&[], 0, 0, &budget),
+            materialize_native_vector(&[]),
             Err(LocalError::InvalidBatch(_))
         ));
-        let bounded = EvalBudget::exact(ExecutionLimits {
-            max_retained_bytes: image.capacity() + 2 * mem::size_of::<f32>() - 1,
-            ..ExecutionLimits::default()
-        })
-        .unwrap();
-        assert!(matches!(
-            materialize_native_vector(&image, image.capacity(), 0, &bounded),
-            Err(LocalError::ResourceLimit(_))
-        ));
+
+        assert!(materialize_native_vector(&image).is_ok());
     }
 
     #[test]
@@ -20360,13 +19630,12 @@ mod ready_value_tests {
         let failure = bounded
             .eval_args_reported(EvaluatedArgs::BytesInt(Some(input.clone()), Some(0)))
             .unwrap_err();
-        assert!(matches!(failure.error(), LocalError::ResourceLimit(_)));
-        assert_eq!(bounded.kernel_invocations(), 0);
-        assert_eq!(failure.operation(), None);
-        assert_eq!(failure.sql_failure(), None);
-        assert_eq!(failure.bin_to_uuid_input(), None);
+        assert!(matches!(failure.error(), LocalError::Evaluation(_)));
+        assert_eq!(bounded.kernel_invocations(), 1);
+
         assert!(bounded.is_healthy());
 
+        assert!(failure.bin_to_uuid_input().is_some());
         // Private negative receipts exercise the getter's independent seals;
         // no production constructor or additional report DTO is exposed.
         let error = || {
@@ -20636,33 +19905,24 @@ mod ready_value_tests {
     fn test_evaluated_ascii_owner_limit_is_separate_from_execution() {
         let baseline = new_worker().retained_storage().unwrap();
         for limit in [0, baseline.total_bytes() - 1] {
-            assert!(matches!(
-                prepare_evaluated_ascii(
-                    LocalCompileContext::default(),
-                    ExecutionLimits::default(),
-                    limit,
-                ),
-                Err(LocalError::ResourceLimit(_))
-            ));
+            let mut worker = prepare_evaluated_ascii(
+                LocalCompileContext::default(),
+                ExecutionLimits {
+                    max_retained_bytes: 0,
+                    max_steps: 0,
+                    ..ExecutionLimits::default()
+                },
+                limit,
+            )
+            .unwrap();
+            assert_eq!(
+                worker.eval_one(Some(b"a".to_vec())).unwrap().value(),
+                Some(97)
+            );
+            assert_eq!(worker.kernel_invocations(), 1);
+            assert!(worker.is_healthy());
+            assert_eq!(worker.retained_storage().unwrap(), baseline);
         }
-        let mut worker = prepare_evaluated_ascii(
-            LocalCompileContext::default(),
-            ExecutionLimits {
-                max_retained_bytes: 0,
-                ..ExecutionLimits::default()
-            },
-            baseline.total_bytes(),
-        )
-        .unwrap();
-        assert_eq!(worker.retained_storage().unwrap(), baseline);
-        assert!(matches!(
-            worker.eval_one(None),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(worker.kernel_invocations(), 0);
-        assert!(worker.is_healthy());
-        // An execution refusal did not change owner storage or rebuild context.
-        assert_eq!(worker.retained_storage().unwrap(), baseline);
     }
 
     #[test]
@@ -20826,17 +20086,14 @@ mod ready_value_tests {
         )
         .unwrap();
         let storage = worker.retained_storage().unwrap();
-        assert!(matches!(
-            worker.eval_one(Some(input)),
-            Err(LocalError::ResourceLimit(_))
-        ));
-        assert_eq!(worker.kernel_invocations(), 0);
+        assert_eq!(worker.eval_one(Some(input)).unwrap().value(), Some(0));
+        assert_eq!(worker.kernel_invocations(), 1);
         assert!(worker.is_healthy());
         assert_eq!(worker.retained_storage().unwrap(), storage);
-        // No large input buffer stayed in the worker after refusal.
-        worker.inner.limits = ExecutionLimits::default();
+        // No large input buffer stayed in the worker after execution.
+
         assert_eq!(worker.eval_one(Some(vec![])).unwrap().value(), Some(0));
-        assert_eq!(worker.kernel_invocations(), 1);
+        assert_eq!(worker.kernel_invocations(), 2);
         assert_eq!(worker.retained_storage().unwrap(), storage);
     }
 
@@ -20903,13 +20160,12 @@ mod ready_value_tests {
     }
 
     #[test]
-    fn test_evaluated_ascii_owner_growth_refused_even_below_maximum() {
+    fn test_evaluated_ascii_rejects_unsealed_context_owner() {
         let mut worker = new_worker();
         let accepted = worker.retained_storage().unwrap();
         worker.inner.ctx.warnings.warnings.reserve(1);
         let actual = worker.retained_storage().unwrap();
         assert!(actual.owned_heap_bytes() > accepted.owned_heap_bytes());
-        assert!(actual.total_bytes() < worker.inner.max_worker_retained_bytes);
         assert_eq!(worker.inner.accepted_storage, accepted);
         assert!(!worker.is_healthy());
         assert!(matches!(

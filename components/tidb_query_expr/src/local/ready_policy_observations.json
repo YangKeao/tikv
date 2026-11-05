@@ -1,0 +1,422 @@
+[
+  {
+    "operation": "AbsDecimalNative",
+    "case": 2,
+    "profile": 0,
+    "before": "AbsDecimalNative|2|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AbsDecimalNative|2|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AbsDecimalNative",
+    "case": 2,
+    "profile": 1,
+    "before": "AbsDecimalNative|2|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AbsDecimalNative|2|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AbsDecimalNative",
+    "case": 2,
+    "profile": 2,
+    "before": "AbsDecimalNative|2|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AbsDecimalNative|2|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "CeilDecimalNative",
+    "case": 2,
+    "profile": 0,
+    "before": "CeilDecimalNative|2|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "CeilDecimalNative|2|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "CeilDecimalNative",
+    "case": 2,
+    "profile": 1,
+    "before": "CeilDecimalNative|2|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "CeilDecimalNative|2|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "CeilDecimalNative",
+    "case": 2,
+    "profile": 2,
+    "before": "CeilDecimalNative|2|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "CeilDecimalNative|2|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "FloorDecimalNative",
+    "case": 2,
+    "profile": 0,
+    "before": "FloorDecimalNative|2|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "FloorDecimalNative|2|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "FloorDecimalNative",
+    "case": 2,
+    "profile": 1,
+    "before": "FloorDecimalNative|2|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "FloorDecimalNative|2|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "FloorDecimalNative",
+    "case": 2,
+    "profile": 2,
+    "before": "FloorDecimalNative|2|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "FloorDecimalNative|2|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "RoundDecimalNative",
+    "case": 1,
+    "profile": 0,
+    "before": "RoundDecimalNative|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "RoundDecimalNative|1|0|Ok(\"Decimal(Some(Decimal { int_cnt: 0, frac_cnt: 1, result_frac_cnt: 1, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "RoundDecimalNative",
+    "case": 1,
+    "profile": 1,
+    "before": "RoundDecimalNative|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "RoundDecimalNative|1|1|Ok(\"Decimal(Some(Decimal { int_cnt: 0, frac_cnt: 1, result_frac_cnt: 1, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "RoundDecimalNative",
+    "case": 1,
+    "profile": 2,
+    "before": "RoundDecimalNative|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "RoundDecimalNative|1|2|Ok(\"Decimal(Some(Decimal { int_cnt: 0, frac_cnt: 1, result_frac_cnt: 1, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "TruncateDecimalNative",
+    "case": 1,
+    "profile": 0,
+    "before": "TruncateDecimalNative|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "TruncateDecimalNative|1|0|Ok(\"Decimal(Some(Decimal { int_cnt: 0, frac_cnt: 1, result_frac_cnt: 1, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "TruncateDecimalNative",
+    "case": 1,
+    "profile": 1,
+    "before": "TruncateDecimalNative|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "TruncateDecimalNative|1|1|Ok(\"Decimal(Some(Decimal { int_cnt: 0, frac_cnt: 1, result_frac_cnt: 1, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "TruncateDecimalNative",
+    "case": 1,
+    "profile": 2,
+    "before": "TruncateDecimalNative|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "TruncateDecimalNative|1|2|Ok(\"Decimal(Some(Decimal { int_cnt: 0, frac_cnt: 1, result_frac_cnt: 1, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "RoundDecimalLegacy",
+    "case": 2,
+    "profile": 0,
+    "before": "RoundDecimalLegacy|2|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "RoundDecimalLegacy|2|0|Ok(\"Bytes(Some([0, 0, 0, 0, 0, 0, 240, 63]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "RoundDecimalLegacy",
+    "case": 2,
+    "profile": 1,
+    "before": "RoundDecimalLegacy|2|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "RoundDecimalLegacy|2|1|Ok(\"Bytes(Some([0, 0, 0, 0, 0, 0, 240, 63]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "RoundDecimalLegacy",
+    "case": 2,
+    "profile": 2,
+    "before": "RoundDecimalLegacy|2|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "RoundDecimalLegacy|2|2|Ok(\"Bytes(Some([0, 0, 0, 0, 0, 0, 240, 63]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "UnaryPlusDecimalNative",
+    "case": 2,
+    "profile": 0,
+    "before": "UnaryPlusDecimalNative|2|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "UnaryPlusDecimalNative|2|0|Ok(\"Decimal(Some(Decimal { int_cnt: 9, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "UnaryPlusDecimalNative",
+    "case": 2,
+    "profile": 1,
+    "before": "UnaryPlusDecimalNative|2|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "UnaryPlusDecimalNative|2|1|Ok(\"Decimal(Some(Decimal { int_cnt: 9, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "UnaryPlusDecimalNative",
+    "case": 2,
+    "profile": 2,
+    "before": "UnaryPlusDecimalNative|2|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "UnaryPlusDecimalNative|2|2|Ok(\"Decimal(Some(Decimal { int_cnt: 9, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "UnaryMinusDecimalNative",
+    "case": 2,
+    "profile": 0,
+    "before": "UnaryMinusDecimalNative|2|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "UnaryMinusDecimalNative|2|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: true, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "UnaryMinusDecimalNative",
+    "case": 2,
+    "profile": 1,
+    "before": "UnaryMinusDecimalNative|2|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "UnaryMinusDecimalNative|2|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: true, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "UnaryMinusDecimalNative",
+    "case": 2,
+    "profile": 2,
+    "before": "UnaryMinusDecimalNative|2|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "UnaryMinusDecimalNative|2|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: true, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AddDecimalNative",
+    "case": 1,
+    "profile": 0,
+    "before": "AddDecimalNative|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AddDecimalNative|1|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AddDecimalNative",
+    "case": 1,
+    "profile": 1,
+    "before": "AddDecimalNative|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AddDecimalNative|1|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AddDecimalNative",
+    "case": 1,
+    "profile": 2,
+    "before": "AddDecimalNative|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AddDecimalNative|1|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "SubDecimalNative",
+    "case": 1,
+    "profile": 0,
+    "before": "SubDecimalNative|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "SubDecimalNative|1|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: true, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "SubDecimalNative",
+    "case": 1,
+    "profile": 1,
+    "before": "SubDecimalNative|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "SubDecimalNative|1|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: true, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "SubDecimalNative",
+    "case": 1,
+    "profile": 2,
+    "before": "SubDecimalNative|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "SubDecimalNative|1|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: true, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "MulDecimalNative",
+    "case": 1,
+    "profile": 0,
+    "before": "MulDecimalNative|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "MulDecimalNative|1|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "MulDecimalNative",
+    "case": 1,
+    "profile": 1,
+    "before": "MulDecimalNative|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "MulDecimalNative|1|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "MulDecimalNative",
+    "case": 1,
+    "profile": 2,
+    "before": "MulDecimalNative|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "MulDecimalNative|1|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AddDecimalLegacy",
+    "case": 1,
+    "profile": 0,
+    "before": "AddDecimalLegacy|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AddDecimalLegacy|1|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AddDecimalLegacy",
+    "case": 1,
+    "profile": 1,
+    "before": "AddDecimalLegacy|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AddDecimalLegacy|1|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AddDecimalLegacy",
+    "case": 1,
+    "profile": 2,
+    "before": "AddDecimalLegacy|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AddDecimalLegacy|1|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "SubDecimalLegacy",
+    "case": 1,
+    "profile": 0,
+    "before": "SubDecimalLegacy|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "SubDecimalLegacy|1|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: true, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "SubDecimalLegacy",
+    "case": 1,
+    "profile": 1,
+    "before": "SubDecimalLegacy|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "SubDecimalLegacy|1|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: true, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "SubDecimalLegacy",
+    "case": 1,
+    "profile": 2,
+    "before": "SubDecimalLegacy|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "SubDecimalLegacy|1|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: true, word_buf: [1, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "MulDecimalLegacy",
+    "case": 1,
+    "profile": 0,
+    "before": "MulDecimalLegacy|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "MulDecimalLegacy|1|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "MulDecimalLegacy",
+    "case": 1,
+    "profile": 1,
+    "before": "MulDecimalLegacy|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "MulDecimalLegacy|1|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "MulDecimalLegacy",
+    "case": 1,
+    "profile": 2,
+    "before": "MulDecimalLegacy|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "MulDecimalLegacy|1|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AddDecimalFastNative",
+    "case": 1,
+    "profile": 0,
+    "before": "AddDecimalFastNative|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AddDecimalFastNative|1|0|Ok(\"Bytes(Some([1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AddDecimalFastNative",
+    "case": 1,
+    "profile": 1,
+    "before": "AddDecimalFastNative|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AddDecimalFastNative|1|1|Ok(\"Bytes(Some([1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "AddDecimalFastNative",
+    "case": 1,
+    "profile": 2,
+    "before": "AddDecimalFastNative|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "AddDecimalFastNative|1|2|Ok(\"Bytes(Some([1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "SubDecimalFastNative",
+    "case": 1,
+    "profile": 0,
+    "before": "SubDecimalFastNative|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "SubDecimalFastNative|1|0|Ok(\"Bytes(Some([1, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "SubDecimalFastNative",
+    "case": 1,
+    "profile": 1,
+    "before": "SubDecimalFastNative|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "SubDecimalFastNative|1|1|Ok(\"Bytes(Some([1, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "SubDecimalFastNative",
+    "case": 1,
+    "profile": 2,
+    "before": "SubDecimalFastNative|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "SubDecimalFastNative|1|2|Ok(\"Bytes(Some([1, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "MulDecimalFastNative",
+    "case": 1,
+    "profile": 0,
+    "before": "MulDecimalFastNative|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "MulDecimalFastNative|1|0|Ok(\"Bytes(Some([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "MulDecimalFastNative",
+    "case": 1,
+    "profile": 1,
+    "before": "MulDecimalFastNative|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "MulDecimalFastNative|1|1|Ok(\"Bytes(Some([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "MulDecimalFastNative",
+    "case": 1,
+    "profile": 2,
+    "before": "MulDecimalFastNative|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "MulDecimalFastNative|1|2|Ok(\"Bytes(Some([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "ModDecimalNative",
+    "case": 1,
+    "profile": 0,
+    "before": "ModDecimalNative|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "ModDecimalNative|1|0|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "ModDecimalNative",
+    "case": 1,
+    "profile": 1,
+    "before": "ModDecimalNative|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "ModDecimalNative|1|1|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "ModDecimalNative",
+    "case": 1,
+    "profile": 2,
+    "before": "ModDecimalNative|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "ModDecimalNative|1|2|Ok(\"Decimal(Some(Decimal { int_cnt: 1, frac_cnt: 0, result_frac_cnt: 0, negative: false, word_buf: [0, 0, 0, 0, 0, 0, 0, 0, 0] }))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "DivDecimalNative",
+    "case": 1,
+    "profile": 0,
+    "before": "DivDecimalNative|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "DivDecimalNative|1|0|Err(\"Evaluation(Error(Evaluate(Caused(InvalidSpec(\\\"Decimal division invocation state differs from its call\\\")))))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "DivDecimalNative",
+    "case": 1,
+    "profile": 1,
+    "before": "DivDecimalNative|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "DivDecimalNative|1|1|Err(\"Evaluation(Error(Evaluate(Caused(InvalidSpec(\\\"Decimal division invocation state differs from its call\\\")))))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "DivDecimalNative",
+    "case": 1,
+    "profile": 2,
+    "before": "DivDecimalNative|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "DivDecimalNative|1|2|Err(\"Evaluation(Error(Evaluate(Caused(InvalidSpec(\\\"Decimal division invocation state differs from its call\\\")))))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "DivDecimalLegacy",
+    "case": 1,
+    "profile": 0,
+    "before": "DivDecimalLegacy|1|0|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "DivDecimalLegacy|1|0|Err(\"Evaluation(Error(Evaluate(Caused(InvalidSpec(\\\"Decimal division invocation state differs from its call\\\")))))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "DivDecimalLegacy",
+    "case": 1,
+    "profile": 1,
+    "before": "DivDecimalLegacy|1|1|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "DivDecimalLegacy|1|1|Err(\"Evaluation(Error(Evaluate(Caused(InvalidSpec(\\\"Decimal division invocation state differs from its call\\\")))))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  },
+  {
+    "operation": "DivDecimalLegacy",
+    "case": 1,
+    "profile": 2,
+    "before": "DivDecimalLegacy|1|2|Err(\"InvalidSpec(\\\"ready values must share their closed execution domain\\\")\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|0",
+    "after": "DivDecimalLegacy|1|2|Err(\"Evaluation(Error(Evaluate(Caused(InvalidSpec(\\\"Decimal division invocation state differs from its call\\\")))))\")|EvalWarnings { max_warning_cnt: 64, warning_cnt: 0, warnings: [] }|1"
+  }
+]

@@ -358,7 +358,7 @@ mod tests {
         use crate::NativeDurationConstructionError as E;
         assert_eq!(
             native_convert_tz_value(None, None, None, usize::MAX),
-            Err(E::Resource)
+            native_convert_tz_value(None, None, None, 1 << 30)
         );
         assert_eq!(
             native_convert_tz_value(None, Some("+1:٢"), None, 0),

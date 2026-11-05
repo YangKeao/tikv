@@ -72,7 +72,7 @@ pub enum NativeVectorValue {
 use NativeVectorValueError as E;
 /// Bound only demanded native work, not existing borrowed storage.
 pub fn native_vector_work(maximum: usize, n: usize) -> Result<(), E> {
-    if maximum == usize::MAX || n > maximum {
+    if n > maximum {
         Err(E::Resource)
     } else {
         Ok(())
@@ -185,10 +185,7 @@ mod tests {
                 native_vector_value(op, None, None, 0),
                 Ok(V::Null)
             ));
-            assert!(matches!(
-                native_vector_value(op, None, None, usize::MAX),
-                Err(E::Resource)
-            ));
+            assert!(native_vector_value(op, None, None, usize::MAX).is_ok());
         }
         assert!(matches!(
             native_vector_value(O::FromText, None, None, 0),

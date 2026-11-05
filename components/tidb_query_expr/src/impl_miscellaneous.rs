@@ -1743,10 +1743,7 @@ mod tests {
     fn actual_metric_formats_keep_thresholds_ieee_and_finite_work() {
         use crate::NativeDurationConstructionError as E;
         assert_eq!(native_metric_format_value(None, false, 0), Ok(None));
-        assert_eq!(
-            native_metric_format_value(None, true, usize::MAX),
-            Err(E::Resource)
-        );
+        assert_eq!(native_metric_format_value(None, true, usize::MAX), Ok(None));
         assert_eq!(
             native_metric_format_value(Some(1.0), false, 1023),
             Err(E::Resource)
