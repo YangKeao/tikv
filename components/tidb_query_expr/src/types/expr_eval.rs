@@ -2639,9 +2639,9 @@ impl<'a> ControlFrame<'a> {
         Some((&self.args[index], rows))
     }
 
-    fn finish(self) -> LocalResult<FrameResult<'a>> {
+    fn finish(&mut self) -> LocalResult<FrameResult<'a>> {
         if self.batch_selection && self.logical.is_none() {
-            if let Some(selected) = self.selected {
+            if let Some(selected) = self.selected.take() {
                 return Ok(selected.with_field_type(self.field_type));
             }
             let ty = batch_eval_type(self.field_type).ok_or_else(|| {
@@ -2671,7 +2671,7 @@ impl<'a> ControlFrame<'a> {
             }));
         }
         if let Some(flow) = self.flow {
-            if let Some(logical) = self.logical {
+            if let Some(logical) = self.logical.take() {
                 return Ok(FrameResult {
                     node: RpnStackNode::Vector {
                         value: RpnStackNodeVectorValue::Generated {
@@ -2682,7 +2682,7 @@ impl<'a> ControlFrame<'a> {
                     meta: Some(flow.own_id()),
                 });
             }
-            if let Some(selected) = self.selected {
+            if let Some(selected) = self.selected.take() {
                 return Ok(selected.with_field_type(self.field_type));
             }
             let physical_value = match flow.carrier() {
@@ -2702,7 +2702,7 @@ impl<'a> ControlFrame<'a> {
                 meta: Some(flow.own_id()),
             });
         }
-        let value = self.logical.map_or_else(
+        let value = self.logical.take().map_or_else(
             || VectorValue::from_scalar(&ScalarValue::Int(self.value), 1),
             LogicalAccumulator::into_vector,
         );
@@ -3246,7 +3246,7 @@ impl<'a> HostFrame<'a> {
         }
     }
 
-    fn finish(self, value: VectorValue) -> LocalResult<RpnStackNode<'a>> {
+    fn finish(&self, value: VectorValue) -> LocalResult<RpnStackNode<'a>> {
         if Some(value.eval_type())
             != EvalType::try_from(self.prepared.return_type().as_accessor().tp()).ok()
             || value.len() != self.rows.len()
@@ -3642,6 +3642,7 @@ fn reserve<A: smallvec::Array>(values: &mut SmallVec<A>, additional: usize) -> L
         .map_err(|_| LocalError::ResourceLimit("cannot reserve evaluation storage".into()))
 }
 
+#[inline]
 fn push_frame<'a>(
     frames: &mut SmallVec<[EvalFrame<'a>; 4]>,
     frame: EvalFrame<'a>,
@@ -3754,10 +3755,13 @@ fn eval_frames<'a, 'data: 'a>(
     let mut frames: SmallVec<[EvalFrame<'a>; 4]> = SmallVec::new();
     push_frame(&mut frames, first)?;
     let mut returned: Option<FrameResult<'a>> = None;
+    // Suspended parents stay in place while a child runs; moving the whole
+    // frame on every instruction also copies its inline operand buffers.
     while !frames.is_empty() {
+        let mut pushing_child = false;
         let step_result: LocalResult<()> = (|| {
-            match frames.pop().unwrap() {
-                EvalFrame::Program(mut frame) => {
+            match frames.last_mut().unwrap() {
+                EvalFrame::Program(frame) => {
                     if frame.pc == 0 {
                         frame.check_execution(execution, schema)?;
                     }
@@ -3785,17 +3789,17 @@ fn eval_frames<'a, 'data: 'a>(
                                 })?;
                             let scope = RowHostScope {
                                 nodes: frame.nodes,
-                                rows: frame.rows,
+                                rows: frame.rows.clone(),
                                 field_type,
                                 output: VectorValue::with_capacity(count, eval_type),
                             };
-                            push_frame(&mut frames, EvalFrame::RowHostScope(scope))?;
+                            *frames.last_mut().unwrap() = EvalFrame::RowHostScope(scope);
                             return Ok(());
                         }
                     }
                     if let Some(value) = returned.take() {
                         let needed = frame.stack.len().saturating_add(1);
-                        reserve_stack(&mut frame, needed)?;
+                        reserve_stack(frame, needed)?;
                         if let Some(flow) = frame.flow {
                             let id = value.meta.ok_or_else(|| {
                                 LocalError::InvalidSpec(
@@ -3838,7 +3842,7 @@ fn eval_frames<'a, 'data: 'a>(
                             frame.flow,
                         )?;
                         control.batch_selection = execution.is_batch();
-                        push_frame(&mut frames, EvalFrame::Program(frame))?;
+                        pushing_child = true;
                         push_frame(&mut frames, EvalFrame::Control(control))?;
                     } else if let RpnExpressionNode::HostCall { prepared, args } = node {
                         if tasks.catalog != Some(*prepared.catalog_key()) {
@@ -3848,12 +3852,12 @@ fn eval_frames<'a, 'data: 'a>(
                         }
 
                         let host = HostFrame::new(prepared, args, frame.rows.clone(), execution)?;
-                        push_frame(&mut frames, EvalFrame::Program(frame))?;
+                        pushing_child = true;
                         push_frame(&mut frames, EvalFrame::Host(host))?;
                     } else if let RpnExpressionNode::OrdinaryFnCall { prepared, args } = node {
                         let ordinary =
                             OrdinaryFrame::new(prepared, args, frame.rows.clone(), execution)?;
-                        push_frame(&mut frames, EvalFrame::Program(frame))?;
+                        pushing_child = true;
                         push_frame(&mut frames, EvalFrame::Ordinary(ordinary))?;
                     } else {
                         let leaf = frame.nodes.len() == 1;
@@ -3863,7 +3867,7 @@ fn eval_frames<'a, 'data: 'a>(
                                 _ => 0,
                             };
                             let needed = frame.stack.len().saturating_sub(used).saturating_add(1);
-                            reserve_stack(&mut frame, needed)?;
+                            reserve_stack(frame, needed)?;
                         }
                         // Charge space for the result while all argument values are
                         // still live, before invoking a kernel or input service.
@@ -3882,19 +3886,19 @@ fn eval_frames<'a, 'data: 'a>(
 
                         if leaf {
                             returned = Some(frame.leaf_result(value)?);
+                            return Ok(());
                         } else {
                             frame.stack.truncate(frame.stack.len() - used);
                             frame.stack.push(value);
-                            push_frame(&mut frames, EvalFrame::Program(frame))?;
                         }
                     }
                 }
-                EvalFrame::Control(mut frame) => {
+                EvalFrame::Control(frame) => {
                     if let Some(value) = returned.take() {
                         frame.accept(value, schema)?;
                     }
                     if let Some((child, rows)) = frame.request() {
-                        push_frame(&mut frames, EvalFrame::Control(frame))?;
+                        pushing_child = true;
                         push_frame(
                             &mut frames,
                             EvalFrame::Program(ProgramFrame::new(child, rows)),
@@ -3903,9 +3907,10 @@ fn eval_frames<'a, 'data: 'a>(
                         let value = frame.finish()?;
 
                         returned = Some(value);
+                        return Ok(());
                     }
                 }
-                EvalFrame::Ordinary(mut frame) => {
+                EvalFrame::Ordinary(frame) => {
                     if let Some(value) = returned.take() {
                         frame.accept(value.into_unannotated()?, schema, execution)?;
                     }
@@ -3915,7 +3920,7 @@ fn eval_frames<'a, 'data: 'a>(
                         let child = &frame.args[index];
 
                         let rows = frame.rows.clone();
-                        push_frame(&mut frames, EvalFrame::Ordinary(frame))?;
+                        pushing_child = true;
                         push_frame(
                             &mut frames,
                             EvalFrame::Program(ProgramFrame::new(child, rows)),
@@ -3924,6 +3929,7 @@ fn eval_frames<'a, 'data: 'a>(
                         let value = frame.finish_batch(ctx)?;
 
                         returned = Some(FrameResult::unannotated(value));
+                        return Ok(());
                     } else {
                         // Both completed operand values are live during kernel work.
 
@@ -3948,9 +3954,10 @@ fn eval_frames<'a, 'data: 'a>(
                         }
 
                         returned = Some(FrameResult::unannotated(value));
+                        return Ok(());
                     }
                 }
-                EvalFrame::RowHostScope(mut frame) => {
+                EvalFrame::RowHostScope(frame) => {
                     if let Some(value) = returned.take() {
                         let node = value.into_unannotated()?;
                         validate_frame_result(&node, 1)?;
@@ -3962,13 +3969,16 @@ fn eval_frames<'a, 'data: 'a>(
                         push_batch_scalar(&mut frame.output, node.get_logical_scalar_ref(0))?;
                     }
                     if frame.output.len() == frame.rows.len() {
-                        let physical_value = frame.output;
+                        let ty = frame.output.eval_type();
+                        let physical_value =
+                            std::mem::replace(&mut frame.output, VectorValue::with_capacity(0, ty));
                         let node = RpnStackNode::Vector {
                             value: RpnStackNodeVectorValue::Generated { physical_value },
                             field_type: frame.field_type,
                         };
 
                         returned = Some(FrameResult::unannotated(node));
+                        return Ok(());
                     } else {
                         let position = frame.output.len();
                         let child = ProgramFrame {
@@ -3982,11 +3992,11 @@ fn eval_frames<'a, 'data: 'a>(
                             flow: None,
                             result_meta: None,
                         };
-                        push_frame(&mut frames, EvalFrame::RowHostScope(frame))?;
+                        pushing_child = true;
                         push_frame(&mut frames, EvalFrame::Program(child))?;
                     }
                 }
-                EvalFrame::Host(mut frame) => {
+                EvalFrame::Host(frame) => {
                     if let Some(value) = returned.take() {
                         frame.accept(value.into_unannotated()?)?;
                         tasks.clear_result(frame.task.expect("successful host argument owns task"));
@@ -4052,7 +4062,6 @@ fn eval_frames<'a, 'data: 'a>(
                     }
                     if frame.scoped.is_none() && frame.cache[request.index].is_some() {
                         frame.ready = Some(request.index);
-                        push_frame(&mut frames, EvalFrame::Host(frame))?;
                     } else {
                         frame.awaiting = Some(request.index);
                         if request.mode == ArgMode::FreshResult {
@@ -4071,7 +4080,7 @@ fn eval_frames<'a, 'data: 'a>(
                         } else {
                             frame.rows.clone()
                         };
-                        push_frame(&mut frames, EvalFrame::Host(frame))?;
+                        pushing_child = true;
                         push_frame(
                             &mut frames,
                             EvalFrame::Program(ProgramFrame::new(child, rows)),
@@ -4081,7 +4090,17 @@ fn eval_frames<'a, 'data: 'a>(
             }
             Ok(())
         })();
+        // Only a completed frame leaves a value for its parent.
+        if step_result.is_ok() && returned.is_some() {
+            frames.pop();
+            continue;
+        }
         if let Err(error) = step_result {
+            // A failed host cannot catch its own error. A child allocation
+            // failure still belongs to its waiting parent Result boundary.
+            if !pushing_child {
+                frames.pop();
+            }
             let Some(barrier) = frames.iter().rposition(|frame| match frame {
                 EvalFrame::Host(host) => matches!((host.task,host.awaiting),(Some(task),Some(index)) if tasks.result_checkpoint(task,index).is_some()),
                 _ => false,

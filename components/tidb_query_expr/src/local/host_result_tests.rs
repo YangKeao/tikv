@@ -108,72 +108,75 @@ impl LocalHostServices for ResultServices {
 
 #[test]
 fn host_result_keeps_original_cause_and_continues_rhs_after_nested_cleanup() {
-    let base = Services::new(
-        vec![
-            (
-                Code::Sequence(vec![
-                    request(0, ArgMode::FreshResult),
-                    request(1, ArgMode::Fresh),
-                ]),
-                2,
-            ),
-            (Code::Relay, 1),
-            (Code::Counter, 0),
-        ],
-        vec![vec![Some(9)]],
-    );
-    let graph = host(
-        &base.catalog,
-        0,
-        vec![
-            host(&base.catalog, 1, vec![input(0)]),
-            host(&base.catalog, 2, vec![]),
-        ],
-    );
-    let mut program = base.compile(&graph);
-    let mut services = ResultServices::new(base);
-    services.rethrow = true;
-    let error = other_err!("one actual owned provider cause");
-    let address = error.0.as_ref() as *const _ as usize;
-    services.injected = Some(LocalError::Evaluation(error));
-    services.inject_at = Some(1);
-    let failure = services
-        .run(&mut program, ExecutionLimits::default())
-        .unwrap_err();
-    let LocalError::Evaluation(error) = failure else {
-        panic!("original error class")
-    };
-    assert_eq!(
-        error.0.as_ref() as *const _ as usize,
-        address,
-        "move exact boxed cause without reconstruction"
-    );
-    assert_eq!(services.failure_indices, vec![0]);
-    assert_eq!(
-        services.base.effects, 1,
-        "RHS runs once after actual left failure"
-    );
-    assert_eq!(
-        services.cancelled_before_reply.len(),
-        1,
-        "inner relay cancelled before result callback"
-    );
-    assert_eq!(
-        services.base.canceled().len(),
-        2,
-        "inner and root cleanup exactly once"
-    );
-    assert!(services.base.live.is_empty());
-    services.rethrow = false;
-    services.inject_at = None;
-    assert_eq!(
-        services
+    for depth in [1, 8, 32] {
+        let base = Services::new(
+            vec![
+                (
+                    Code::Sequence(vec![
+                        request(0, ArgMode::FreshResult),
+                        request(1, ArgMode::Fresh),
+                    ]),
+                    2,
+                ),
+                (Code::Relay, 1),
+                (Code::Counter, 0),
+            ],
+            vec![vec![Some(9)]],
+        );
+        let mut child = input(0);
+        for _ in 0..depth {
+            child = host(&base.catalog, 1, vec![child]);
+        }
+        let graph = host(
+            &base.catalog,
+            0,
+            vec![child, host(&base.catalog, 2, vec![])],
+        );
+        let mut program = base.compile(&graph);
+        let mut services = ResultServices::new(base);
+        services.rethrow = true;
+        let error = other_err!("one actual owned provider cause");
+        let address = error.0.as_ref() as *const _ as usize;
+        services.injected = Some(LocalError::Evaluation(error));
+        services.inject_at = Some(1);
+        let failure = services
             .run(&mut program, ExecutionLimits::default())
-            .unwrap()
-            .to_int_vec(),
-        vec![Some(2)]
-    );
-    assert!(services.base.live.is_empty());
+            .unwrap_err();
+        let LocalError::Evaluation(error) = failure else {
+            panic!("original error class")
+        };
+        assert_eq!(
+            error.0.as_ref() as *const _ as usize,
+            address,
+            "move exact boxed cause without reconstruction"
+        );
+        assert_eq!(services.failure_indices, vec![0]);
+        assert_eq!(
+            services.base.effects, 1,
+            "RHS runs once after actual left failure"
+        );
+        assert_eq!(
+            services.cancelled_before_reply.len(),
+            depth,
+            "inner relays cancelled before result callback"
+        );
+        assert_eq!(
+            services.base.canceled().len(),
+            depth + 1,
+            "inner and root cleanup exactly once"
+        );
+        assert!(services.base.live.is_empty());
+        services.rethrow = false;
+        services.inject_at = None;
+        assert_eq!(
+            services
+                .run(&mut program, ExecutionLimits::default())
+                .unwrap()
+                .to_int_vec(),
+            vec![Some(2)]
+        );
+        assert!(services.base.live.is_empty());
+    }
 }
 #[test]
 fn host_result_default_modes_and_default_error_handler_still_abort() {
