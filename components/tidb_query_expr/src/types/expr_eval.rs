@@ -3648,6 +3648,8 @@ fn push_frame<'a>(
 ) -> LocalResult<()> {
     reserve(frames, 1)?;
     frames.push(frame);
+    #[cfg(test)]
+    FRAME_MAX_DEPTH.with(|depth| depth.set(depth.get().max(frames.len())));
     Ok(())
 }
 
@@ -3680,6 +3682,7 @@ fn legacy_error(error: LocalError) -> tidb_query_common::Error {
 
 #[cfg(test)]
 thread_local! {
+    static FRAME_MAX_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static READY_KERNEL_FRAME_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -3827,6 +3830,7 @@ fn eval_frames<'a, 'data: 'a>(
                     let node = &frame.nodes[frame.pc];
                     frame.pc += 1;
 
+                    let reuse_program = frame.nodes.len() == 1 && frame.flow.is_none();
                     if let RpnExpressionNode::ShortCircuitFnCall {
                         func_meta,
                         args,
@@ -3841,8 +3845,12 @@ fn eval_frames<'a, 'data: 'a>(
                             frame.flow,
                         )?;
                         control.batch_selection = execution.is_batch();
-                        pushing_child = true;
-                        push_frame(&mut frames, EvalFrame::Control(control))?;
+                        if reuse_program {
+                            *frames.last_mut().unwrap() = EvalFrame::Control(control);
+                        } else {
+                            pushing_child = true;
+                            push_frame(&mut frames, EvalFrame::Control(control))?;
+                        }
                     } else if let RpnExpressionNode::HostCall { prepared, args } = node {
                         if tasks.catalog != Some(*prepared.catalog_key()) {
                             return Err(LocalError::HostContract(
@@ -3851,13 +3859,21 @@ fn eval_frames<'a, 'data: 'a>(
                         }
 
                         let host = HostFrame::new(prepared, args, frame.rows.clone(), execution)?;
-                        pushing_child = true;
-                        push_frame(&mut frames, EvalFrame::Host(host))?;
+                        if reuse_program {
+                            *frames.last_mut().unwrap() = EvalFrame::Host(host);
+                        } else {
+                            pushing_child = true;
+                            push_frame(&mut frames, EvalFrame::Host(host))?;
+                        }
                     } else if let RpnExpressionNode::OrdinaryFnCall { prepared, args } = node {
                         let ordinary =
                             OrdinaryFrame::new(prepared, args, frame.rows.clone(), execution)?;
-                        pushing_child = true;
-                        push_frame(&mut frames, EvalFrame::Ordinary(ordinary))?;
+                        if reuse_program {
+                            *frames.last_mut().unwrap() = EvalFrame::Ordinary(ordinary);
+                        } else {
+                            pushing_child = true;
+                            push_frame(&mut frames, EvalFrame::Ordinary(ordinary))?;
+                        }
                     } else {
                         let leaf = frame.nodes.len() == 1;
                         if !leaf {
@@ -5927,6 +5943,7 @@ mod tests {
                 schema: schema.clone(),
                 reads: 0,
             };
+            FRAME_MAX_DEPTH.with(|depth| depth.set(0));
             let result = program.eval_with_bindings(
                 ExecutionLimits {
                     max_retained_bytes: maximum,
@@ -5939,6 +5956,11 @@ mod tests {
             );
             assert!(matches!(result, Err(LocalError::Evaluation(_))));
             assert_eq!(services.reads, 2);
+            assert_eq!(
+                FRAME_MAX_DEPTH.with(|depth| depth.get()),
+                2,
+                "single calls must reuse their forwarding program frame"
+            );
         }
     }
 
