@@ -1373,6 +1373,28 @@ fn cast_uint_as_json(val: Option<&Int>) -> Result<Option<Json>> {
     }
 }
 
+// Native document coercion shares the JSON parser but owns its SQL diagnostics.
+#[rpn_fn(nullable)]
+fn parse_native_json(val: Option<BytesRef>) -> Result<Option<Json>> {
+    use tidb_query_common::error::EvaluateError;
+    let Some(val) = val else { return Ok(None) };
+    let text = std::str::from_utf8(val)
+        .map_err(|_| EvaluateError::Other("invalid UTF-8 string datum".into()))?;
+    let empty = text.trim().is_empty();
+    text.parse().map(Some).map_err(|_| {
+        EvaluateError::Custom {
+            code: 3140,
+            msg: if empty {
+                "Invalid JSON text: The document is empty"
+            } else {
+                "Invalid JSON text: The document root must not be followed by other values."
+            }
+            .into(),
+        }
+        .into()
+    })
+}
+
 #[rpn_fn(nullable, capture = [args, extra])]
 #[inline]
 fn cast_string_as_json(

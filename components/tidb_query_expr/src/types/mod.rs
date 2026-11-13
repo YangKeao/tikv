@@ -9,7 +9,8 @@ pub mod test_util;
 
 pub use self::{
     expr::{
-        ExpressionDecimal, ExpressionScalar, ExpressionVector, RpnExpression, RpnExpressionNode,
+        ExpressionDecimal, ExpressionScalar, ExpressionVector, InvocationMode, RpnExpression,
+        RpnExpressionNode,
     },
     expr_builder::RpnExpressionBuilder,
     expr_eval::{BATCH_MAX_SIZE, InputColumns, InputResult, RpnStackNode, RpnStackNodeVectorValue},

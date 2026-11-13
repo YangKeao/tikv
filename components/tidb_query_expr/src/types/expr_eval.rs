@@ -14,7 +14,7 @@ use tipb::FieldType;
 
 use super::{
     RpnFnCallExtra,
-    expr::{ExpressionScalar, ExpressionVector, RpnExpression, RpnExpressionNode},
+    expr::{ExpressionScalar, ExpressionVector, InvocationMode, RpnExpression, RpnExpressionNode},
 };
 
 /// A demanded column read. The evaluation context is not borrowed by results.
@@ -362,6 +362,29 @@ impl RpnExpression {
         input_logical_rows: &'a [usize],
         output_rows: usize,
     ) -> Result<RpnStackNode<'a>> {
+        self.eval_input_mode(
+            ctx,
+            schema,
+            input_physical_columns,
+            input_logical_rows,
+            output_rows,
+            InvocationMode::Vector,
+        )
+    }
+
+    /// Scalar demand is explicit even for a width-one vector.
+    pub fn eval_input_mode<'a>(
+        &'a self,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        input_physical_columns: &'a dyn InputColumns,
+        input_logical_rows: &'a [usize],
+        output_rows: usize,
+        mode: InvocationMode,
+    ) -> Result<RpnStackNode<'a>> {
+        if mode == InvocationMode::Scalar && output_rows != 1 {
+            return Err(other_err!("scalar invocation requires one row"));
+        }
         assert!(output_rows > 0);
         assert!(output_rows <= BATCH_MAX_SIZE);
 
@@ -396,11 +419,54 @@ impl RpnExpression {
             depth: usize,
             field_type: &'a FieldType,
         }
+        struct Ordered<'a> {
+            start: usize,
+            end: usize,
+            rows: Cow<'a, [usize]>,
+            mode: InvocationMode,
+            values: Vec<RpnStackNode<'a>>,
+            depth: usize,
+            branch_depth: usize,
+            field_type: &'a FieldType,
+        }
+        let mut ordered: Vec<Ordered<'a>> = Vec::new();
+        let mut mode = mode;
         let mut branches: Vec<Branch<'a>> = Vec::new();
         let mut rows = Cow::Borrowed(input_logical_rows);
         let mut active_count = output_rows;
         let mut pc = 0;
         loop {
+            if ordered
+                .last()
+                .is_some_and(|frame| frame.end == pc && frame.branch_depth == branches.len())
+            {
+                let frame = ordered.last_mut().unwrap();
+                if stack.len() != frame.depth + 1 {
+                    return Err(other_err!("invalid ordered region stack"));
+                }
+                frame.values.push(stack.pop().unwrap());
+                if frame.values.len() < frame.rows.len() {
+                    rows = Cow::Owned(vec![frame.rows[frame.values.len()]]);
+                    pc = frame.start;
+                    continue;
+                }
+                let frame = ordered.pop().unwrap();
+                let positions = (0..frame.values.len()).map(|i| [i]).collect::<Vec<_>>();
+                let inputs = frame
+                    .values
+                    .iter()
+                    .zip(positions.iter())
+                    .map(|(value, position)| (value, &position[..]));
+                stack.push(merge_selected_values(
+                    inputs,
+                    frame.rows.len(),
+                    frame.field_type,
+                )?);
+                rows = frame.rows;
+                active_count = rows.len();
+                mode = frame.mode;
+                continue;
+            }
             if branches.last().is_some_and(|branch| branch.end == pc) {
                 let branch = branches.last_mut().unwrap();
                 if stack.len() != branch.depth + 1 {
@@ -439,6 +505,47 @@ impl RpnExpression {
             }
             let node = &self.as_ref()[pc];
             match node {
+                RpnExpressionNode::OrderedRows { end, field_type } => {
+                    if *end <= pc || *end > self.len() {
+                        return Err(other_err!("invalid ordered region"));
+                    }
+                    if mode == InvocationMode::Vector && active_count > 0 {
+                        if rows.len() != active_count {
+                            return Err(other_err!("ordered region requires input row selection"));
+                        }
+                        let selected = vec![rows[0]];
+                        ordered.push(Ordered {
+                            start: pc + 1,
+                            end: *end,
+                            rows: std::mem::replace(&mut rows, Cow::Owned(selected)),
+                            mode,
+                            values: Vec::with_capacity(active_count),
+                            depth: stack.len(),
+                            branch_depth: branches.len(),
+                            field_type,
+                        });
+                        active_count = 1;
+                        mode = InvocationMode::Scalar;
+                    }
+                    pc += 1;
+                    continue;
+                }
+                RpnExpressionNode::NullGuard { target, .. } => {
+                    if *target <= pc || *target > self.len() {
+                        return Err(other_err!("invalid NULL guard"));
+                    }
+                    let value = stack
+                        .last()
+                        .ok_or_else(|| other_err!("missing NULL guard operand"))?;
+                    if mode == InvocationMode::Scalar
+                        && matches!(value.get_logical_scalar_ref(0), ScalarValueRef::Int(None))
+                    {
+                        pc = *target;
+                    } else {
+                        pc += 1;
+                    }
+                    continue;
+                }
                 RpnExpressionNode::JumpIfFalse {
                     target,
                     end,
@@ -547,7 +654,10 @@ impl RpnExpression {
         stack: &[RpnStackNode<'a>],
     ) -> Result<(usize, RpnStackNode<'a>)> {
         match node {
-            RpnExpressionNode::JumpIfFalse { .. } | RpnExpressionNode::Jump { .. } => {
+            RpnExpressionNode::JumpIfFalse { .. }
+            | RpnExpressionNode::Jump { .. }
+            | RpnExpressionNode::NullGuard { .. }
+            | RpnExpressionNode::OrderedRows { .. } => {
                 Err(other_err!("control edge outside RPN loop"))
             }
             RpnExpressionNode::ExpressionConstant { value, field_type } => Ok((
@@ -651,8 +761,22 @@ fn merge_branch_values<'a>(
     count: usize,
     field_type: &'a FieldType,
 ) -> Result<RpnStackNode<'a>> {
+    merge_selected_values(
+        [(&then_value, then_positions), (&else_value, else_positions)],
+        count,
+        field_type,
+    )
+}
+
+fn merge_selected_values<'a, 'b>(
+    inputs: impl IntoIterator<Item = (&'b RpnStackNode<'a>, &'b [usize])>,
+    count: usize,
+    field_type: &'a FieldType,
+) -> Result<RpnStackNode<'a>>
+where
+    'a: 'b,
+{
     use tidb_query_datatype::{EvalType, FieldTypeAccessor};
-    let inputs = [(&then_value, then_positions), (&else_value, else_positions)];
     match EvalType::try_from(field_type.as_accessor().tp()).map_err(|e| other_err!("{}", e))? {
         EvalType::Int => {
             let mut values = vec![None; count];

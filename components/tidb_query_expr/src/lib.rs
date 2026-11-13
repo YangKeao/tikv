@@ -43,6 +43,7 @@ pub mod impl_time;
 pub mod impl_vec;
 
 use tidb_query_common::Result;
+pub use tidb_query_common::error as evaluation_error;
 #[allow(unused_imports)]
 use tidb_query_datatype::{
     Charset, Collation, FieldTypeAccessor, FieldTypeFlag,

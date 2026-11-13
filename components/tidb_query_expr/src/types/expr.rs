@@ -33,9 +33,23 @@ pub struct ExpressionDecimal {
     pub declared_shape: Option<(i64, i64)>,
 }
 
+/// Invocation contract is independent of vector width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvocationMode {
+    Scalar,
+    Vector,
+}
+
 /// A type for each node in the RPN expression list.
 #[derive(Debug)]
 pub enum RpnExpressionNode {
+    /// Native row fallback: condition and demanded child share one row scope.
+    OrderedRows { end: usize, field_type: FieldType },
+    /// Scalar numeric demand skips the right child after a NULL left operand.
+    NullGuard {
+        target: usize,
+        field_type: FieldType,
+    },
     /// Native IF control edges. Targets are instruction offsets, not subtrees.
     JumpIfFalse {
         target: usize,
@@ -86,7 +100,9 @@ impl RpnExpressionNode {
             RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => field_type,
             RpnExpressionNode::FnCall { field_type, .. }
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
-            | RpnExpressionNode::Jump { field_type, .. } => field_type,
+            | RpnExpressionNode::Jump { field_type, .. }
+            | RpnExpressionNode::NullGuard { field_type, .. }
+            | RpnExpressionNode::OrderedRows { field_type, .. } => field_type,
             RpnExpressionNode::Constant { field_type, .. }
             | RpnExpressionNode::ExpressionConstant { field_type, .. } => field_type,
             RpnExpressionNode::ColumnRef { .. } => panic!(),
@@ -102,7 +118,9 @@ impl RpnExpressionNode {
             RpnExpressionNode::ShortCircuitFnCall { .. } => ExprType::ScalarFunc,
             RpnExpressionNode::FnCall { .. }
             | RpnExpressionNode::JumpIfFalse { .. }
-            | RpnExpressionNode::Jump { .. } => ExprType::ScalarFunc,
+            | RpnExpressionNode::Jump { .. }
+            | RpnExpressionNode::NullGuard { .. }
+            | RpnExpressionNode::OrderedRows { .. } => ExprType::ScalarFunc,
             RpnExpressionNode::Constant { value, .. } => match value.eval_type() {
                 EvalType::Bytes => ExprType::Bytes,
                 EvalType::DateTime => ExprType::MysqlTime,
@@ -269,6 +287,19 @@ impl RpnExpression {
         let mut jumps = std::collections::HashMap::new();
         let mut regions = Vec::new();
         for (pc, node) in nodes.iter().enumerate() {
+            while regions.last().is_some_and(|&(_, end)| pc >= end) {
+                regions.pop();
+            }
+            if let RpnExpressionNode::NullGuard { target, .. } = node {
+                if *target <= pc || *target > nodes.len() {
+                    return Err(invalid());
+                }
+                if let Some(&(split, end)) = regions.last() {
+                    if *target > if pc < split { split - 1 } else { end } {
+                        return Err(invalid());
+                    }
+                }
+            }
             if let RpnExpressionNode::JumpIfFalse { target, end, .. } = node {
                 if *target <= pc + 1
                     || *target >= *end
@@ -295,6 +326,37 @@ impl RpnExpression {
             };
             let mut successors = vec![pc + 1];
             match node {
+                RpnExpressionNode::OrderedRows { end, .. } => {
+                    if *end <= pc + 1 || *end > nodes.len() {
+                        return Err(invalid());
+                    }
+                    for (at, candidate) in nodes.iter().enumerate() {
+                        let targets: &[usize] = match candidate {
+                            RpnExpressionNode::JumpIfFalse { target, end, .. } => &[*target, *end],
+                            RpnExpressionNode::Jump { target, .. }
+                            | RpnExpressionNode::NullGuard { target, .. } => &[*target],
+                            RpnExpressionNode::OrderedRows { end, .. } => &[*end],
+                            _ => &[],
+                        };
+                        for target in targets {
+                            if (at > pc && at < *end && *target > *end)
+                                || ((at < pc || at >= *end) && *target > pc && *target < *end)
+                            {
+                                return Err(invalid());
+                            }
+                        }
+                    }
+                }
+                RpnExpressionNode::NullGuard { target, field_type } => {
+                    if stack.last() != Some(&EvalType::Int)
+                        || EvalType::try_from(field_type.as_accessor().tp())
+                            .map_err(|e| other_err!("{}", e))?
+                            != EvalType::Int
+                    {
+                        return Err(invalid());
+                    }
+                    successors.push(*target);
+                }
                 RpnExpressionNode::JumpIfFalse { target, .. } => {
                     if stack.pop() != Some(EvalType::Int) {
                         return Err(invalid());
@@ -370,6 +432,20 @@ impl RpnExpression {
             }
         }
         for (pc, node) in nodes.iter().enumerate() {
+            if let RpnExpressionNode::OrderedRows { end, field_type } = node {
+                let before = states[pc].as_ref().ok_or_else(invalid)?;
+                let after = states[*end].as_ref().ok_or_else(invalid)?;
+                if after.len() != before.len() + 1
+                    || after[..before.len()] != before[..]
+                    || after.last()
+                        != Some(
+                            &EvalType::try_from(field_type.as_accessor().tp())
+                                .map_err(|e| other_err!("{}", e))?,
+                        )
+                {
+                    return Err(invalid());
+                }
+            }
             if let RpnExpressionNode::JumpIfFalse {
                 end, field_type, ..
             } = node
@@ -411,7 +487,9 @@ impl RpnExpression {
         match last_node {
             RpnExpressionNode::FnCall { field_type, .. }
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
-            | RpnExpressionNode::Jump { field_type, .. } => field_type,
+            | RpnExpressionNode::Jump { field_type, .. }
+            | RpnExpressionNode::NullGuard { field_type, .. }
+            | RpnExpressionNode::OrderedRows { field_type, .. } => field_type,
             RpnExpressionNode::Constant { field_type, .. }
             | RpnExpressionNode::ExpressionConstant { field_type, .. } => field_type,
             RpnExpressionNode::ColumnRef { offset } => &schema[*offset],
