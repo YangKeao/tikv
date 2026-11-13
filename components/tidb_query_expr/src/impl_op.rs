@@ -132,7 +132,7 @@ fn merge_short_circuit_arg_result<Op: ScLogicalOp>(
     let mut resolved_count = 0;
     let is_first = result.is_empty();
     match arg_result {
-        RpnStackNode::ExpressionScalar { .. } => {
+        RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
             return Err(other_err!(
                 "wire logical function does not admit native scalar arguments"
             ));
@@ -626,7 +626,9 @@ fn right_shift(lhs: Option<&Int>, rhs: Option<&Int>) -> Result<Option<Int>> {
 mod tests {
     use tidb_query_codegen::rpn_fn;
     use tidb_query_datatype::{
-        FieldTypeFlag, FieldTypeTp, builder::FieldTypeBuilder, codec::mysql::TimeType,
+        FieldTypeFlag, FieldTypeTp,
+        builder::FieldTypeBuilder,
+        codec::{batch::LazyBatchColumnVec, mysql::TimeType},
         expr::EvalContext,
     };
     use tipb::ScalarFuncSig;

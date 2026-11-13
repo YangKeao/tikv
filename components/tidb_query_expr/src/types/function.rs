@@ -252,7 +252,7 @@ impl<'a, A: EvaluableRef<'a>, E: Evaluator<'a>> Evaluator<'a> for ArgConstructor
         metadata: &(dyn Any + Send),
     ) -> Result<VectorValue> {
         match &args[self.arg_index] {
-            RpnStackNode::ExpressionScalar { .. } => {
+            RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
                 Err(other_err!("native scalar requires a native-aware kernel"))
             }
             RpnStackNode::Scalar { value, .. } => {

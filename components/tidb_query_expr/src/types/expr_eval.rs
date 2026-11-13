@@ -14,7 +14,7 @@ use tipb::FieldType;
 
 use super::{
     RpnFnCallExtra,
-    expr::{ExpressionScalar, RpnExpression, RpnExpressionNode},
+    expr::{ExpressionScalar, ExpressionVector, RpnExpression, RpnExpressionNode},
 };
 
 /// A demanded column read. The evaluation context is not borrowed by results.
@@ -29,6 +29,23 @@ pub trait InputColumns {
         rows: &'a [usize],
         ctx: &mut EvalContext,
     ) -> InputResult<'a>;
+
+    /// A temporary branch selection may not be borrowed by its output.
+    fn read_selected<'a>(
+        &'a self,
+        schema: &'a [FieldType],
+        offset: usize,
+        rows: &[usize],
+        ctx: &mut EvalContext,
+    ) -> InputResult<'a> {
+        let value = self.read(schema, offset, rows, ctx)?.take_vector_value()?;
+        Ok(RpnStackNode::Vector {
+            value: RpnStackNodeVectorValue::Generated {
+                physical_value: value,
+            },
+            field_type: &schema[offset],
+        })
+    }
 }
 
 impl InputColumns for LazyBatchColumnVec {
@@ -139,6 +156,11 @@ impl RpnStackNodeVectorValue<'_> {
 /// owned vector value or a reference.
 #[derive(Debug)]
 pub enum RpnStackNode<'a> {
+    /// Full-domain native intermediate column.
+    ExpressionVector {
+        value: ExpressionVector,
+        field_type: &'a FieldType,
+    },
     /// Full-domain native scalar; no protobuf constructor emits this variant.
     ExpressionScalar {
         value: Cow<'a, ExpressionScalar>,
@@ -165,7 +187,8 @@ impl RpnStackNode<'_> {
     pub fn field_type(&self) -> &FieldType {
         match self {
             RpnStackNode::Scalar { field_type, .. }
-            | RpnStackNode::ExpressionScalar { field_type, .. } => field_type,
+            | RpnStackNode::ExpressionScalar { field_type, .. }
+            | RpnStackNode::ExpressionVector { field_type, .. } => field_type,
             RpnStackNode::Vector { field_type, .. } => field_type,
         }
     }
@@ -175,7 +198,9 @@ impl RpnStackNode<'_> {
     pub fn scalar_value(&self) -> Option<&ScalarValue> {
         match self {
             RpnStackNode::Scalar { value, .. } => Some(*value),
-            RpnStackNode::Vector { .. } | RpnStackNode::ExpressionScalar { .. } => None,
+            RpnStackNode::Vector { .. }
+            | RpnStackNode::ExpressionScalar { .. }
+            | RpnStackNode::ExpressionVector { .. } => None,
         }
     }
 
@@ -183,7 +208,9 @@ impl RpnStackNode<'_> {
     #[inline]
     pub fn vector_value(&self) -> Option<&RpnStackNodeVectorValue<'_>> {
         match self {
-            RpnStackNode::Scalar { .. } | RpnStackNode::ExpressionScalar { .. } => None,
+            RpnStackNode::Scalar { .. }
+            | RpnStackNode::ExpressionScalar { .. }
+            | RpnStackNode::ExpressionVector { .. } => None,
             RpnStackNode::Vector { value, .. } => Some(value),
         }
     }
@@ -200,13 +227,18 @@ impl RpnStackNode<'_> {
     /// Whether this is a `Vector` variant.
     #[inline]
     pub fn is_vector(&self) -> bool {
-        matches!(self, RpnStackNode::Vector { .. })
+        matches!(
+            self,
+            RpnStackNode::Vector { .. } | RpnStackNode::ExpressionVector { .. }
+        )
     }
 
     /// Gets the actual vector value.
     pub fn take_vector_value(self) -> Result<VectorValue> {
         match self {
-            RpnStackNode::Scalar { .. } | RpnStackNode::ExpressionScalar { .. } => {
+            RpnStackNode::Scalar { .. }
+            | RpnStackNode::ExpressionScalar { .. }
+            | RpnStackNode::ExpressionVector { .. } => {
                 Err(other_err!("take_vector_value on Scalar variant"))
             }
             RpnStackNode::Vector { value, .. } => value.take_vector_value(),
@@ -231,7 +263,7 @@ impl RpnStackNode<'_> {
                 physical_vector.get_scalar_ref(idx)
             }
             RpnStackNode::Scalar { value, .. } => value.as_scalar_value_ref(),
-            RpnStackNode::ExpressionScalar { .. } => {
+            RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
                 panic!("native scalar requires a native-aware kernel")
             }
         }
@@ -343,6 +375,7 @@ impl RpnExpression {
                 schema,
                 input_physical_columns,
                 input_logical_rows,
+                Some(input_logical_rows),
                 output_rows,
                 &self.as_ref()[0],
                 &[],
@@ -353,29 +386,121 @@ impl RpnExpression {
         // TODO: Is this stack can be reused?
         let mut stack = Vec::with_capacity(self.len());
 
+        struct Branch<'a> {
+            end: usize,
+            otherwise: usize,
+            rows: Cow<'a, [usize]>,
+            then_positions: Vec<usize>,
+            else_positions: Vec<usize>,
+            then_value: Option<RpnStackNode<'a>>,
+            depth: usize,
+            field_type: &'a FieldType,
+        }
+        let mut branches: Vec<Branch<'a>> = Vec::new();
+        let mut rows = Cow::Borrowed(input_logical_rows);
+        let mut active_count = output_rows;
         let mut pc = 0;
-        while pc < self.len() {
+        loop {
+            if branches.last().is_some_and(|branch| branch.end == pc) {
+                let branch = branches.last_mut().unwrap();
+                if stack.len() != branch.depth + 1 {
+                    return Err(other_err!("invalid branch stack depth"));
+                }
+                let value = stack.pop().unwrap();
+                if branch.then_value.is_none() {
+                    branch.then_value = Some(value);
+                    rows = Cow::Owned(
+                        branch
+                            .else_positions
+                            .iter()
+                            .map(|i| branch.rows[*i])
+                            .collect(),
+                    );
+                    active_count = rows.len();
+                    pc = branch.otherwise;
+                    continue;
+                }
+                let branch = branches.pop().unwrap();
+                let merged = merge_branch_values(
+                    branch.then_value.unwrap(),
+                    value,
+                    &branch.then_positions,
+                    &branch.else_positions,
+                    branch.rows.len(),
+                    branch.field_type,
+                )?;
+                rows = branch.rows;
+                active_count = rows.len();
+                stack.push(merged);
+                continue;
+            }
+            if pc == self.len() {
+                break;
+            }
             let node = &self.as_ref()[pc];
             match node {
-                RpnExpressionNode::JumpIfFalse { target, .. } => {
+                RpnExpressionNode::JumpIfFalse {
+                    target,
+                    end,
+                    field_type,
+                } => {
                     let condition = stack
                         .pop()
                         .ok_or_else(|| other_err!("missing IF condition"))?;
-                    let truth = match condition {
-                        RpnStackNode::Scalar {
-                            value: ScalarValue::Int(v),
-                            ..
-                        } => v.is_some_and(|v| v != 0),
-                        _ => {
-                            return Err(other_err!(
-                                "native IF currently requires a scalar integer condition"
-                            ));
-                        }
-                    };
-                    if *target <= pc || *target > self.len() {
+                    if *target <= pc || *target >= *end || *end > self.len() {
                         return Err(other_err!("invalid IF target"));
                     }
-                    pc = if truth { pc + 1 } else { *target };
+                    if let RpnStackNode::Scalar {
+                        value: ScalarValue::Int(v),
+                        ..
+                    } = condition
+                    {
+                        pc = if v.is_some_and(|v| v != 0) {
+                            pc + 1
+                        } else {
+                            *target
+                        };
+                        continue;
+                    }
+                    if !matches!(condition, RpnStackNode::Vector { .. }) {
+                        return Err(other_err!("IF requires integer condition"));
+                    }
+                    let mut then_positions = Vec::new();
+                    let mut else_positions = Vec::new();
+                    for i in 0..active_count {
+                        let ScalarValueRef::Int(v) = condition.get_logical_scalar_ref(i) else {
+                            return Err(other_err!("IF requires integer condition"));
+                        };
+                        if v.is_some_and(|v| *v != 0) {
+                            then_positions.push(i);
+                        } else {
+                            else_positions.push(i);
+                        }
+                    }
+                    if then_positions.is_empty() {
+                        pc = *target;
+                        continue;
+                    }
+                    if else_positions.is_empty() {
+                        pc += 1;
+                        continue;
+                    }
+                    if rows.len() != active_count {
+                        return Err(other_err!("dynamic IF requires input row selection"));
+                    }
+                    let selected = then_positions.iter().map(|i| rows[*i]).collect::<Vec<_>>();
+                    branches.push(Branch {
+                        end: *end,
+                        otherwise: *target,
+                        rows: std::mem::replace(&mut rows, Cow::Owned(selected)),
+                        then_positions,
+                        else_positions,
+                        then_value: None,
+                        depth: stack.len(),
+                        field_type,
+                    });
+                    active_count = rows.len();
+                    pc += 1;
                     continue;
                 }
                 RpnExpressionNode::Jump { target, .. } => {
@@ -387,12 +512,17 @@ impl RpnExpression {
                 }
                 _ => {}
             }
+            let borrowed = match &rows {
+                Cow::Borrowed(rows) => Some(*rows),
+                Cow::Owned(_) => None,
+            };
             let (consumed_args, result) = Self::eval_one_node(
                 ctx,
                 schema,
                 input_physical_columns,
-                input_logical_rows,
-                output_rows,
+                &rows,
+                borrowed,
+                active_count,
                 node,
                 &stack,
             )?;
@@ -410,7 +540,8 @@ impl RpnExpression {
         ctx: &mut EvalContext,
         schema: &'a [FieldType],
         input_physical_columns: &'a dyn InputColumns,
-        input_logical_rows: &'a [usize],
+        input_logical_rows: &[usize],
+        borrowed_rows: Option<&'a [usize]>,
         output_rows: usize,
         node: &'a RpnExpressionNode,
         stack: &[RpnStackNode<'a>],
@@ -433,7 +564,15 @@ impl RpnExpression {
                 assert_eq!(input_logical_rows.len(), output_rows);
                 Ok((
                     0,
-                    input_physical_columns.read(schema, *offset, input_logical_rows, ctx)?,
+                    match borrowed_rows {
+                        Some(rows) => input_physical_columns.read(schema, *offset, rows, ctx)?,
+                        None => input_physical_columns.read_selected(
+                            schema,
+                            *offset,
+                            input_logical_rows,
+                            ctx,
+                        )?,
+                    },
                 ))
             }
             RpnExpressionNode::ShortCircuitFnCall {
@@ -470,10 +609,13 @@ impl RpnExpression {
                 assert!(stack.len() >= *args_len);
                 let stack_slice_begin = stack.len() - *args_len;
                 let stack_slice = &stack[stack_slice_begin..];
-                if stack_slice
-                    .iter()
-                    .any(|arg| matches!(arg, RpnStackNode::ExpressionScalar { .. }))
-                {
+                if stack_slice.iter().any(|arg| {
+                    matches!(
+                        arg,
+                        RpnStackNode::ExpressionScalar { .. }
+                            | RpnStackNode::ExpressionVector { .. }
+                    )
+                }) {
                     return Err(other_err!(
                         "kernel {} does not yet admit native scalar arguments",
                         func_meta.name
@@ -498,6 +640,82 @@ impl RpnExpression {
                 ))
             }
         }
+    }
+}
+
+fn merge_branch_values<'a>(
+    then_value: RpnStackNode<'a>,
+    else_value: RpnStackNode<'a>,
+    then_positions: &[usize],
+    else_positions: &[usize],
+    count: usize,
+    field_type: &'a FieldType,
+) -> Result<RpnStackNode<'a>> {
+    use tidb_query_datatype::{EvalType, FieldTypeAccessor};
+    let inputs = [(&then_value, then_positions), (&else_value, else_positions)];
+    match EvalType::try_from(field_type.as_accessor().tp()).map_err(|e| other_err!("{}", e))? {
+        EvalType::Int => {
+            let mut values = vec![None; count];
+            for (source, positions) in inputs {
+                for (i, out) in positions.iter().enumerate() {
+                    let ScalarValueRef::Int(value) = source.get_logical_scalar_ref(i) else {
+                        return Err(other_err!("IF integer result mismatch"));
+                    };
+                    values[*out] = value.copied();
+                }
+            }
+            Ok(RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Generated {
+                    physical_value: VectorValue::Int(ChunkedVecSized::from(values)),
+                },
+                field_type,
+            })
+        }
+        EvalType::Real => {
+            let mut values = vec![None; count];
+            for (source, positions) in inputs {
+                for (i, out) in positions.iter().enumerate() {
+                    values[*out] = match source {
+                        RpnStackNode::ExpressionScalar { value, .. } => match value.as_ref() {
+                            ExpressionScalar::Real(value) => *value,
+                            _ => return Err(other_err!("IF real result mismatch")),
+                        },
+                        RpnStackNode::ExpressionVector {
+                            value: ExpressionVector::Real(values),
+                            ..
+                        } => values[i],
+                        _ => return Err(other_err!("IF real result mismatch")),
+                    };
+                }
+            }
+            Ok(RpnStackNode::ExpressionVector {
+                value: ExpressionVector::Real(values),
+                field_type,
+            })
+        }
+        EvalType::Decimal => {
+            let mut values = vec![None; count];
+            for (source, positions) in inputs {
+                for (i, out) in positions.iter().enumerate() {
+                    values[*out] = match source {
+                        RpnStackNode::ExpressionScalar { value, .. } => match value.as_ref() {
+                            ExpressionScalar::Decimal(value) => value.clone(),
+                            _ => return Err(other_err!("IF decimal result mismatch")),
+                        },
+                        RpnStackNode::ExpressionVector {
+                            value: ExpressionVector::Decimal(values),
+                            ..
+                        } => values[i].clone(),
+                        _ => return Err(other_err!("IF decimal result mismatch")),
+                    };
+                }
+            }
+            Ok(RpnStackNode::ExpressionVector {
+                value: ExpressionVector::Decimal(values),
+                field_type,
+            })
+        }
+        _ => Err(other_err!("IF result family is not admitted")),
     }
 }
 
@@ -548,6 +766,42 @@ mod tests {
     #[rpn_fn(nullable)]
     fn short_circuit_unreachable(_v: Option<&Int>) -> Result<Option<Int>> {
         unreachable!("short-circuited argument must not be evaluated")
+    }
+
+    #[test]
+    fn test_pb_if_remains_eager_with_short_circuit_flag() {
+        for flag in [Flag::empty(), Flag::ENABLE_SHORT_CIRCUIT_EXPRESSION] {
+            let expression =
+                ExprDefBuilder::scalar_func(ScalarFuncSig::IfInt, FieldTypeTp::LongLong)
+                    .push_child(ExprDefBuilder::constant_int(1))
+                    .push_child(ExprDefBuilder::constant_int(7))
+                    .push_child(
+                        ExprDefBuilder::scalar_func(
+                            ScalarFuncSig::UnaryMinusInt,
+                            FieldTypeTp::LongLong,
+                        )
+                        .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong)),
+                    )
+                    .build();
+            let mut context = EvalContext::new(Arc::new(EvalConfig::from_flag(flag)));
+            let program =
+                RpnExpressionBuilder::build_from_expr_tree(expression, &mut context, 1).unwrap();
+            let mut column = LazyBatchColumn::decoded_with_capacity_and_tp(2, EvalType::Int);
+            column.mut_decoded().push_int(Some(i64::MIN));
+            column.mut_decoded().push_int(Some(0));
+            let mut columns = LazyBatchColumnVec::from(vec![column]);
+            assert!(
+                program
+                    .eval(
+                        &mut context,
+                        &[FieldTypeTp::LongLong.into()],
+                        &mut columns,
+                        &[0, 1],
+                        2
+                    )
+                    .is_err()
+            );
+        }
     }
 
     /// Single constant node

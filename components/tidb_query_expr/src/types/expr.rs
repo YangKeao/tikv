@@ -16,6 +16,13 @@ pub enum ExpressionScalar {
     Decimal(Option<ExpressionDecimal>),
 }
 
+/// Native intermediate columns retain full floating and decimal domains.
+#[derive(Debug)]
+pub enum ExpressionVector {
+    Real(Vec<Option<f64>>),
+    Decimal(Vec<Option<ExpressionDecimal>>),
+}
+
 /// Exact expression-only Decimal data, independent of fixed-size storage.
 #[derive(Clone, Debug)]
 pub struct ExpressionDecimal {
@@ -32,6 +39,7 @@ pub enum RpnExpressionNode {
     /// Native IF control edges. Targets are instruction offsets, not subtrees.
     JumpIfFalse {
         target: usize,
+        end: usize,
         field_type: FieldType,
     },
     Jump {
@@ -87,7 +95,7 @@ impl RpnExpressionNode {
 
     #[cfg(test)]
     pub fn expr_tp(&self) -> tipb::ExprType {
-        use tidb_query_datatype::EvalType;
+        use tidb_query_datatype::{EvalType, FieldTypeAccessor};
         use tipb::ExprType;
 
         match self {
@@ -188,8 +196,11 @@ impl std::ops::DerefMut for RpnExpression {
     fn deref_mut(&mut self) -> &mut Vec<RpnExpressionNode> {
         // Any mutable access may change the expression tree, so cached metadata
         // must be rebuilt the next time it is requested.
+        assert!(
+            self.return_type.is_none(),
+            "finished control programs are immutable"
+        );
         self.metadata = OnceLock::new();
-        self.return_type = None;
         &mut self.nodes
     }
 }
@@ -212,8 +223,11 @@ impl AsRef<[RpnExpressionNode]> for RpnExpression {
 
 impl AsMut<[RpnExpressionNode]> for RpnExpression {
     fn as_mut(&mut self) -> &mut [RpnExpressionNode] {
+        assert!(
+            self.return_type.is_none(),
+            "finished control programs are immutable"
+        );
         self.metadata = OnceLock::new();
-        self.return_type = None;
         self.nodes.as_mut()
     }
 }
@@ -237,10 +251,154 @@ impl RpnExpression {
         }
     }
 
-    /// Declare the program exit type independently of the physical last branch.
-    /// Mutating the program clears this declaration.
-    pub fn set_return_type(&mut self, field_type: FieldType) {
-        self.return_type = Some(field_type);
+    /// Validate control edges, stack shapes and exit type, then freeze the
+    /// program. Legacy protobuf builders retain their existing mutable
+    /// straight-line API.
+    pub fn finish(
+        nodes: Vec<RpnExpressionNode>,
+        schema: &[FieldType],
+        return_type: FieldType,
+    ) -> tidb_query_common::Result<Self> {
+        use tidb_query_datatype::{EvalType, FieldTypeAccessor};
+        let invalid = || other_err!("invalid shared control program");
+        if nodes.is_empty() {
+            return Err(invalid());
+        }
+        let mut states: Vec<Option<Vec<EvalType>>> = vec![None; nodes.len() + 1];
+        states[0] = Some(Vec::new());
+        let mut jumps = std::collections::HashMap::new();
+        let mut regions = Vec::new();
+        for (pc, node) in nodes.iter().enumerate() {
+            if let RpnExpressionNode::JumpIfFalse { target, end, .. } = node {
+                if *target <= pc + 1
+                    || *target >= *end
+                    || *end > nodes.len()
+                    || !matches!(&nodes[target - 1], RpnExpressionNode::Jump { target: to, .. } if to == end)
+                    || jumps.insert(target - 1, *end).is_some()
+                {
+                    return Err(invalid());
+                }
+                while regions.last().is_some_and(|&(_, end)| pc >= end) {
+                    regions.pop();
+                }
+                if let Some(&(split, outer_end)) = regions.last() {
+                    if *end > if pc < split { split - 1 } else { outer_end } {
+                        return Err(invalid());
+                    }
+                }
+                regions.push((*target, *end));
+            }
+        }
+        for (pc, node) in nodes.iter().enumerate() {
+            let Some(mut stack) = states[pc].clone() else {
+                return Err(invalid());
+            };
+            let mut successors = vec![pc + 1];
+            match node {
+                RpnExpressionNode::JumpIfFalse { target, .. } => {
+                    if stack.pop() != Some(EvalType::Int) {
+                        return Err(invalid());
+                    }
+                    successors.push(*target);
+                }
+                RpnExpressionNode::Jump { target, .. } => {
+                    if jumps.get(&pc) != Some(target) {
+                        return Err(invalid());
+                    }
+                    successors[0] = *target;
+                }
+                RpnExpressionNode::ColumnRef { offset } => {
+                    stack.push(
+                        EvalType::try_from(
+                            schema.get(*offset).ok_or_else(invalid)?.as_accessor().tp(),
+                        )
+                        .map_err(|e| other_err!("{}", e))?,
+                    );
+                }
+                RpnExpressionNode::FnCall {
+                    args_len,
+                    field_type,
+                    ..
+                } => {
+                    if stack.len() < *args_len {
+                        return Err(invalid());
+                    }
+                    stack.truncate(stack.len() - args_len);
+                    stack.push(
+                        EvalType::try_from(field_type.as_accessor().tp())
+                            .map_err(|e| other_err!("{}", e))?,
+                    );
+                }
+                RpnExpressionNode::Constant { field_type, value } => {
+                    let declared = EvalType::try_from(field_type.as_accessor().tp())
+                        .map_err(|e| other_err!("{}", e))?;
+                    if declared != value.eval_type() {
+                        return Err(invalid());
+                    }
+                    stack.push(declared);
+                }
+                RpnExpressionNode::ExpressionConstant { field_type, value } => {
+                    let declared = EvalType::try_from(field_type.as_accessor().tp())
+                        .map_err(|e| other_err!("{}", e))?;
+                    let actual = match value {
+                        ExpressionScalar::Real(_) => EvalType::Real,
+                        ExpressionScalar::Decimal(_) => EvalType::Decimal,
+                    };
+                    if declared != actual {
+                        return Err(invalid());
+                    }
+                    stack.push(declared);
+                }
+                RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => {
+                    stack.push(
+                        EvalType::try_from(field_type.as_accessor().tp())
+                            .map_err(|e| other_err!("{}", e))?,
+                    );
+                }
+            }
+            for next in successors {
+                if next > nodes.len() {
+                    return Err(invalid());
+                }
+                if let Some(previous) = &states[next] {
+                    if previous != &stack {
+                        return Err(invalid());
+                    }
+                } else {
+                    states[next] = Some(stack.clone());
+                }
+            }
+        }
+        for (pc, node) in nodes.iter().enumerate() {
+            if let RpnExpressionNode::JumpIfFalse {
+                end, field_type, ..
+            } = node
+            {
+                let before = states[pc].as_ref().ok_or_else(invalid)?;
+                let after = states[*end].as_ref().ok_or_else(invalid)?;
+                if after.len() != before.len()
+                    || after.last()
+                        != Some(
+                            &EvalType::try_from(field_type.as_accessor().tp())
+                                .map_err(|e| other_err!("{}", e))?,
+                        )
+                    || after[..after.len() - 1] != before[..before.len() - 1]
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        if states[nodes.len()].as_deref()
+            != Some(&[EvalType::try_from(return_type.as_accessor().tp())
+                .map_err(|e| other_err!("{}", e))?])
+        {
+            return Err(invalid());
+        }
+        Ok(Self {
+            nodes,
+            return_type: Some(return_type),
+            metadata: OnceLock::new(),
+        })
     }
 
     /// Gets the field type of the return value.

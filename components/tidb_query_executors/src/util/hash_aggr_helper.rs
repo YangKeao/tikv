@@ -39,7 +39,7 @@ impl HashAggregationHelper {
                 logical_rows_len,
             )?;
             match aggr_expr_result {
-                RpnStackNode::ExpressionScalar { .. } => {
+                RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
                     return Err(other_err!(
                         "protobuf executor does not admit native expression values"
                     ));

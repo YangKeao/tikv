@@ -291,7 +291,7 @@ impl<Src: BatchExecutor> AggregationExecutorImpl<Src> for FastHashAggregationImp
         )?;
 
         match group_by_result {
-            RpnStackNode::ExpressionScalar { .. } => {
+            RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
                 return Err(other_err!(
                     "protobuf executor does not admit native expression values"
                 ));

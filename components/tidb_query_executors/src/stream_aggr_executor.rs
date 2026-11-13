@@ -442,7 +442,7 @@ fn update_current_states(
     if let Some(current_states) = states.rchunks_exact_mut(aggr_fn_len).next() {
         for (state, aggr_fn_input) in current_states.iter_mut().zip(aggr_expr_results) {
             match aggr_fn_input {
-                RpnStackNode::ExpressionScalar { .. } => {
+                RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
                     return Err(other_err!(
                         "protobuf executor does not admit native expression values"
                     ));

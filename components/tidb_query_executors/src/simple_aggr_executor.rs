@@ -203,7 +203,7 @@ impl<Src: BatchExecutor> AggregationExecutorImpl<Src> for SimpleAggregationImpl 
             )?;
 
             match aggr_fn_input {
-                RpnStackNode::ExpressionScalar { .. } => {
+                RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
                     return Err(other_err!(
                         "protobuf executor does not admit native expression values"
                     ));
