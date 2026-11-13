@@ -134,7 +134,12 @@ pub(super) fn evaluate<'a>(
             match part {
                 NativeDiagnosticPart::Text(text) => message.push_str(text),
                 NativeDiagnosticPart::Parameter(order) => {
-                    let Some(text) = input.parameter(*order)?.numeric_diagnostic_text(false) else {
+                    // Diagnostic lookup failure must not replace the arithmetic error.
+                    let Some(text) = input
+                        .parameter(*order)
+                        .ok()
+                        .and_then(|value| value.numeric_diagnostic_text(false))
+                    else {
                         return Ok(EvaluateError::Custom {
                             code: 1690,
                             msg: "DECIMAL value is out of range".into(),
