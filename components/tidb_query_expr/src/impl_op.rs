@@ -3,12 +3,12 @@
 use tidb_query_codegen::rpn_fn;
 use tidb_query_common::Result;
 use tidb_query_datatype::{
-    codec::{Error, batch::LazyBatchColumnVec, data_type::*},
+    codec::{Error, data_type::*},
     expr::EvalContext,
 };
 use tipb::FieldType;
 
-use crate::{RpnExpression, RpnStackNode, RpnStackNodeVectorValue};
+use crate::{InputColumns, RpnExpression, RpnStackNode, RpnStackNodeVectorValue};
 
 #[rpn_fn(nullable)]
 #[inline]
@@ -37,7 +37,7 @@ pub fn logical_or(arg0: Option<&i64>, arg1: Option<&i64>) -> Result<Option<i64>>
 pub fn sc_logical_and(
     ctx: &mut EvalContext,
     schema: &[FieldType],
-    input_physical_columns: &LazyBatchColumnVec,
+    input_physical_columns: &dyn InputColumns,
     input_logical_rows: &[usize],
     output_rows: usize,
     args: &[RpnExpression],
@@ -57,7 +57,7 @@ pub fn sc_logical_and(
 pub fn sc_logical_or(
     ctx: &mut EvalContext,
     schema: &[FieldType],
-    input_physical_columns: &LazyBatchColumnVec,
+    input_physical_columns: &dyn InputColumns,
     input_logical_rows: &[usize],
     output_rows: usize,
     args: &[RpnExpression],
@@ -255,7 +255,7 @@ fn merge_short_circuit_arg_result<Op: ScLogicalOp>(
 fn eval_logical_short_circuit<Op: ScLogicalOp>(
     ctx: &mut EvalContext,
     schema: &[FieldType],
-    input_physical_columns: &LazyBatchColumnVec,
+    input_physical_columns: &dyn InputColumns,
     input_logical_rows: &[usize],
     output_rows: usize,
     args: &[RpnExpression],
@@ -282,7 +282,7 @@ fn eval_logical_short_circuit<Op: ScLogicalOp>(
             None => (None, input_logical_rows, output_rows),
         };
 
-        let arg_result = arg.eval_decoded(
+        let arg_result = arg.eval_input(
             ctx,
             schema,
             input_physical_columns,

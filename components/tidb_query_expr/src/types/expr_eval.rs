@@ -17,6 +17,38 @@ use super::{
     expr::{ExpressionScalar, RpnExpression, RpnExpressionNode},
 };
 
+/// A demanded column read. The evaluation context is not borrowed by results.
+pub type InputResult<'a> = Result<RpnStackNode<'a>>;
+
+/// Data adapters supply values only; the RPN loop owns expression evaluation.
+pub trait InputColumns {
+    fn read<'a>(
+        &'a self,
+        schema: &'a [FieldType],
+        offset: usize,
+        rows: &'a [usize],
+        ctx: &mut EvalContext,
+    ) -> InputResult<'a>;
+}
+
+impl InputColumns for LazyBatchColumnVec {
+    fn read<'a>(
+        &'a self,
+        schema: &'a [FieldType],
+        offset: usize,
+        rows: &'a [usize],
+        _ctx: &mut EvalContext,
+    ) -> InputResult<'a> {
+        Ok(RpnStackNode::Vector {
+            value: RpnStackNodeVectorValue::Ref {
+                physical_value: self[offset].decoded(),
+                logical_rows: rows,
+            },
+            field_type: &schema[offset],
+        })
+    }
+}
+
 /// Represents a vector value node in the RPN stack.
 ///
 /// It can be either an owned node or a reference node.
@@ -280,6 +312,24 @@ impl RpnExpression {
         input_logical_rows: &'a [usize],
         output_rows: usize,
     ) -> Result<RpnStackNode<'a>> {
+        self.eval_input(
+            ctx,
+            schema,
+            input_physical_columns,
+            input_logical_rows,
+            output_rows,
+        )
+    }
+
+    /// Evaluate with a demanded input adapter using the same instruction loop.
+    pub fn eval_input<'a>(
+        &'a self,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        input_physical_columns: &'a dyn InputColumns,
+        input_logical_rows: &'a [usize],
+        output_rows: usize,
+    ) -> Result<RpnStackNode<'a>> {
         assert!(output_rows > 0);
         assert!(output_rows <= BATCH_MAX_SIZE);
 
@@ -359,7 +409,7 @@ impl RpnExpression {
     fn eval_one_node<'a>(
         ctx: &mut EvalContext,
         schema: &'a [FieldType],
-        input_physical_columns: &'a LazyBatchColumnVec,
+        input_physical_columns: &'a dyn InputColumns,
         input_logical_rows: &'a [usize],
         output_rows: usize,
         node: &'a RpnExpressionNode,
@@ -380,18 +430,10 @@ impl RpnExpression {
                 Ok((0, RpnStackNode::Scalar { value, field_type }))
             }
             RpnExpressionNode::ColumnRef { offset } => {
-                let field_type = &schema[*offset];
-                let decoded_physical_column = input_physical_columns[*offset].decoded();
                 assert_eq!(input_logical_rows.len(), output_rows);
                 Ok((
                     0,
-                    RpnStackNode::Vector {
-                        value: RpnStackNodeVectorValue::Ref {
-                            physical_value: decoded_physical_column,
-                            logical_rows: input_logical_rows,
-                        },
-                        field_type,
-                    },
+                    input_physical_columns.read(schema, *offset, input_logical_rows, ctx)?,
                 ))
             }
             RpnExpressionNode::ShortCircuitFnCall {

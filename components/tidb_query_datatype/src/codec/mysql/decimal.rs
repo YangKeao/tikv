@@ -971,6 +971,12 @@ impl Decimal {
         {
             return Err(box_err!("invalid exact Decimal parts"));
         }
+        if (int_cnt % 9 != 0 && word_buf[0] >= 10_u32.pow(u32::from(int_cnt % 9)))
+            || (frac_cnt % 9 != 0
+                && word_buf[used - 1] % 10_u32.pow(u32::from(9 - frac_cnt % 9)) != 0)
+        {
+            return Err(box_err!("misaligned exact Decimal parts"));
+        }
         Ok(Self {
             int_cnt,
             frac_cnt,

@@ -172,6 +172,7 @@ struct RpnExpressionMetadata {
 #[derive(Debug)]
 pub struct RpnExpression {
     nodes: Vec<RpnExpressionNode>,
+    return_type: Option<FieldType>,
     metadata: OnceLock<Box<RpnExpressionMetadata>>,
 }
 
@@ -188,6 +189,7 @@ impl std::ops::DerefMut for RpnExpression {
         // Any mutable access may change the expression tree, so cached metadata
         // must be rebuilt the next time it is requested.
         self.metadata = OnceLock::new();
+        self.return_type = None;
         &mut self.nodes
     }
 }
@@ -196,6 +198,7 @@ impl From<Vec<RpnExpressionNode>> for RpnExpression {
     fn from(v: Vec<RpnExpressionNode>) -> Self {
         Self {
             nodes: v,
+            return_type: None,
             metadata: OnceLock::new(),
         }
     }
@@ -210,6 +213,7 @@ impl AsRef<[RpnExpressionNode]> for RpnExpression {
 impl AsMut<[RpnExpressionNode]> for RpnExpression {
     fn as_mut(&mut self) -> &mut [RpnExpressionNode] {
         self.metadata = OnceLock::new();
+        self.return_type = None;
         self.nodes.as_mut()
     }
 }
@@ -233,9 +237,18 @@ impl RpnExpression {
         }
     }
 
+    /// Declare the program exit type independently of the physical last branch.
+    /// Mutating the program clears this declaration.
+    pub fn set_return_type(&mut self, field_type: FieldType) {
+        self.return_type = Some(field_type);
+    }
+
     /// Gets the field type of the return value.
     pub fn ret_field_type<'a>(&'a self, schema: &'a [FieldType]) -> &'a FieldType {
         assert!(!self.nodes.is_empty());
+        if let Some(field_type) = &self.return_type {
+            return field_type;
+        }
         let last_node = self.nodes.last().unwrap();
         match last_node {
             RpnExpressionNode::FnCall { field_type, .. }
@@ -256,10 +269,11 @@ impl RpnExpression {
     /// Returns true if the last element of expression is a `Constant` variant.
     pub fn is_last_constant(&self) -> bool {
         assert!(!self.nodes.is_empty());
-        matches!(
-            self.nodes.last().unwrap(),
-            RpnExpressionNode::Constant { .. }
-        )
+        self.return_type.is_none()
+            && matches!(
+                self.nodes.last().unwrap(),
+                RpnExpressionNode::Constant { .. }
+            )
     }
 
     /// Returns the number of nodes, including nodes nested in short-circuit
