@@ -8318,6 +8318,7 @@ dependencies = [
 [[package]]
 name = "tidb-datatype"
 version = "0.0.0"
+source = "git+https://github.com/YangKeao/tidb?rev=8abb688c80bd48de688bfc792bc735682404e4dd#8abb688c80bd48de688bfc792bc735682404e4dd"
 dependencies = [
  "chrono",
  "chrono-tz 0.10.4",
@@ -8336,6 +8337,7 @@ dependencies = [
 [[package]]
 name = "tidb-error"
 version = "0.0.0"
+source = "git+https://github.com/YangKeao/tidb?rev=8abb688c80bd48de688bfc792bc735682404e4dd#8abb688c80bd48de688bfc792bc735682404e4dd"
 dependencies = [
  "serde",
  "serde_json",
@@ -8345,6 +8347,7 @@ dependencies = [
 [[package]]
 name = "tidb-hack"
 version = "0.0.0"
+source = "git+https://github.com/YangKeao/tidb?rev=8abb688c80bd48de688bfc792bc735682404e4dd#8abb688c80bd48de688bfc792bc735682404e4dd"
 dependencies = [
  "foldhash 0.1.5",
  "hashbrown 0.15.5",
@@ -8354,10 +8357,12 @@ dependencies = [
 [[package]]
 name = "tidb-kvcache"
 version = "0.0.0"
+source = "git+https://github.com/YangKeao/tidb?rev=8abb688c80bd48de688bfc792bc735682404e4dd#8abb688c80bd48de688bfc792bc735682404e4dd"
 
 [[package]]
 name = "tidb-mysql"
 version = "0.0.0"
+source = "git+https://github.com/YangKeao/tidb?rev=8abb688c80bd48de688bfc792bc735682404e4dd#8abb688c80bd48de688bfc792bc735682404e4dd"
 dependencies = [
  "tidb-error",
 ]

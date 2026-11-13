@@ -89,7 +89,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2025-02-28
+          toolchain: nightly-2026-08-22
           components: rustfmt,clippy,rust-src,rust-analyzer
 
       - name: Cache Cargo registry
