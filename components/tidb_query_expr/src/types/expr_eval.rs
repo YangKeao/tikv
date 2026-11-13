@@ -26,6 +26,16 @@ pub type InputResult<'a> = Result<RpnStackNode<'a>>;
 /// Adapters supply data and concrete session capabilities; the loop owns
 /// evaluation.
 pub trait InputColumns {
+    fn div_precision_increment(&self) -> u32 {
+        4
+    }
+    fn handle_truncate(&self, _message: &str) -> Result<()> {
+        Err(other_err!("native truncate policy unavailable"))
+    }
+    fn handle_division_by_zero(&self) -> Result<()> {
+        Err(other_err!("native division policy unavailable"))
+    }
+
     fn get_string_variable(&self, _name: &str) -> Result<Option<Vec<u8>>> {
         Err(other_err!("variable reads unavailable"))
     }
@@ -56,13 +66,18 @@ pub trait InputColumns {
         rows: &[usize],
         ctx: &mut EvalContext,
     ) -> InputResult<'a> {
-        let value = self.read(schema, offset, rows, ctx)?.take_vector_value()?;
-        Ok(RpnStackNode::Vector {
-            value: RpnStackNodeVectorValue::Generated {
-                physical_value: value,
-            },
-            field_type: &schema[offset],
-        })
+        match self.read(schema, offset, rows, ctx)? {
+            RpnStackNode::ExpressionVector { value, .. } => Ok(RpnStackNode::ExpressionVector {
+                value,
+                field_type: &schema[offset],
+            }),
+            value => Ok(RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Generated {
+                    physical_value: value.take_vector_value()?,
+                },
+                field_type: &schema[offset],
+            }),
+        }
     }
 }
 
@@ -377,6 +392,7 @@ impl RpnExpression {
         ctx: &mut EvalContext,
         rows: &'a [usize],
         order: OutputOrder,
+        mode: InvocationMode,
     ) -> Result<Vec<RpnStackNode<'a>>> {
         if rows.is_empty() || rows.len() > BATCH_MAX_SIZE {
             return Err(other_err!("invalid group row count"));
@@ -385,7 +401,27 @@ impl RpnExpression {
             OutputOrder::Columns => programs
                 .iter()
                 .map(|(program, schema, input)| {
-                    program.eval_input(ctx, schema, *input, rows, rows.len())
+                    if mode == InvocationMode::Vector {
+                        return program.eval_input(ctx, schema, *input, rows, rows.len());
+                    }
+                    let values = (0..rows.len())
+                        .map(|i| {
+                            program.eval_input_mode(
+                                ctx,
+                                schema,
+                                *input,
+                                &rows[i..i + 1],
+                                1,
+                                InvocationMode::Scalar,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let positions: Vec<_> = (0..rows.len()).map(|i| [i]).collect();
+                    merge_selected_values(
+                        values.iter().zip(&positions).map(|(v, p)| (v, &p[..])),
+                        rows.len(),
+                        program.ret_field_type(schema),
+                    )
                 })
                 .collect(),
             OutputOrder::Rows => {
@@ -667,6 +703,42 @@ impl RpnExpression {
                     pc += 1;
                     continue;
                 }
+                RpnExpressionNode::RegexpArgument {
+                    target,
+                    count,
+                    field_type,
+                } => {
+                    if mode != InvocationMode::Scalar
+                        || stack.len() < *count
+                        || *count == 0
+                        || *target <= pc
+                        || *target > self.len()
+                    {
+                        return Err(other_err!("invalid regexp argument guard"));
+                    }
+                    let ScalarValueRef::Bytes(value) =
+                        stack.last().unwrap().get_logical_scalar_ref(0)
+                    else {
+                        return Err(other_err!("regexp argument requires bytes"));
+                    };
+                    match value {
+                        None => {
+                            stack.truncate(stack.len() - count);
+                            stack.push(integer_result(None, field_type));
+                            pc = *target;
+                        }
+                        Some(value) => {
+                            std::str::from_utf8(value).map_err(|_| {
+                                tidb_query_common::error::EvaluateError::Custom {
+                                    code: 1105,
+                                    msg: "invalid UTF-8 REGEXP_LIKE argument".into(),
+                                }
+                            })?;
+                            pc += 1;
+                        }
+                    }
+                    continue;
+                }
                 RpnExpressionNode::NullGuard { target, .. } => {
                     if *target <= pc || *target > self.len() {
                         return Err(other_err!("invalid NULL guard"));
@@ -674,8 +746,7 @@ impl RpnExpression {
                     let value = stack
                         .last()
                         .ok_or_else(|| other_err!("missing NULL guard operand"))?;
-                    if mode == InvocationMode::Scalar
-                        && matches!(value.get_logical_scalar_ref(0), ScalarValueRef::Int(None))
+                    if mode == InvocationMode::Scalar && super::native_arithmetic::is_null(value, 0)
                     {
                         pc = *target;
                     } else {
@@ -852,9 +923,12 @@ impl RpnExpression {
                             crate::impl_math::MySqlRng::new_with_seed(seed).gen()
                         })
                     } else {
-                        input_physical_columns
-                            .rand_next()
-                            .ok_or_else(|| other_err!("RAND requires a session"))?
+                        input_physical_columns.rand_next().ok_or_else(|| {
+                            tidb_query_common::error::EvaluateError::Custom {
+                                code: 1105,
+                                msg: "RAND requires a session".into(),
+                            }
+                        })?
                     };
                     values.push(Some(value));
                 }
@@ -868,11 +942,43 @@ impl RpnExpression {
             }
             RpnExpressionNode::JumpIfFalse { .. }
             | RpnExpressionNode::Jump { .. }
+            | RpnExpressionNode::RegexpArgument { .. }
             | RpnExpressionNode::NullGuard { .. }
             | RpnExpressionNode::OrderedRows { .. }
             | RpnExpressionNode::Repeat { .. }
             | RpnExpressionNode::RepeatEnd { .. } => {
                 Err(other_err!("control edge outside RPN loop"))
+            }
+            RpnExpressionNode::NativeCastReal { field_type } => Ok((
+                1,
+                super::native_arithmetic::cast_real(
+                    stack
+                        .last()
+                        .ok_or_else(|| other_err!("missing string cast operand"))?,
+                    field_type,
+                    output_rows,
+                    input_physical_columns,
+                )?,
+            )),
+            RpnExpressionNode::NativeArithmetic {
+                op,
+                overflow,
+                field_type,
+            } => {
+                if stack.len() < 2 {
+                    return Err(other_err!("missing native arithmetic operands"));
+                }
+                Ok((
+                    2,
+                    super::native_arithmetic::evaluate(
+                        *op,
+                        field_type,
+                        overflow,
+                        &stack[stack.len() - 2..],
+                        output_rows,
+                        input_physical_columns,
+                    )?,
+                ))
             }
             RpnExpressionNode::ExpressionConstant { value, field_type } => Ok((
                 0,

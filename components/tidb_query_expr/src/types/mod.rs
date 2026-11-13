@@ -1,6 +1,9 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod expr;
+mod native_arithmetic;
+mod native_decimal;
+pub use native_arithmetic::NativeArithmetic;
 mod expr_builder;
 mod expr_eval;
 pub mod function;

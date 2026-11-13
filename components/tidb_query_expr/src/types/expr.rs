@@ -50,6 +50,21 @@ pub enum OutputOrder {
 /// A type for each node in the RPN expression list.
 #[derive(Debug)]
 pub enum RpnExpressionNode {
+    /// Sequential native regexp arguments validate UTF-8 and return NULL
+    /// without evaluating later arguments. The loop owns this demand edge.
+    RegexpArgument {
+        target: usize,
+        count: usize,
+        field_type: FieldType,
+    },
+    NativeCastReal {
+        field_type: FieldType,
+    },
+    NativeArithmetic {
+        op: super::NativeArithmetic,
+        overflow: String,
+        field_type: FieldType,
+    },
     /// BENCHMARK evaluates its body anew, after count and type demand checks.
     Repeat {
         end: usize,
@@ -133,6 +148,9 @@ impl RpnExpressionNode {
         match self {
             RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => field_type,
             RpnExpressionNode::FnCall { field_type, .. }
+            | RpnExpressionNode::RegexpArgument { field_type, .. }
+            | RpnExpressionNode::NativeCastReal { field_type }
+            | RpnExpressionNode::NativeArithmetic { field_type, .. }
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
             | RpnExpressionNode::Jump { field_type, .. }
             | RpnExpressionNode::NullGuard { field_type, .. }
@@ -155,6 +173,9 @@ impl RpnExpressionNode {
         match self {
             RpnExpressionNode::ShortCircuitFnCall { .. } => ExprType::ScalarFunc,
             RpnExpressionNode::FnCall { .. }
+            | RpnExpressionNode::RegexpArgument { .. }
+            | RpnExpressionNode::NativeCastReal { .. }
+            | RpnExpressionNode::NativeArithmetic { .. }
             | RpnExpressionNode::JumpIfFalse { .. }
             | RpnExpressionNode::Jump { .. }
             | RpnExpressionNode::NullGuard { .. }
@@ -350,6 +371,7 @@ impl RpnExpression {
                     let targets: &[usize] = match candidate {
                         RpnExpressionNode::JumpIfFalse { target, end, .. } => &[*target, *end],
                         RpnExpressionNode::Jump { target, .. }
+                        | RpnExpressionNode::RegexpArgument { target, .. }
                         | RpnExpressionNode::NullGuard { target, .. } => &[*target],
                         RpnExpressionNode::Repeat { end, .. }
                         | RpnExpressionNode::OrderedRows { end, .. } => &[*end],
@@ -364,7 +386,9 @@ impl RpnExpression {
                     }
                 }
             }
-            if let RpnExpressionNode::NullGuard { target, .. } = node {
+            if let RpnExpressionNode::NullGuard { target, .. }
+            | RpnExpressionNode::RegexpArgument { target, .. } = node
+            {
                 if *target <= pc || *target > nodes.len() {
                     return Err(invalid());
                 }
@@ -465,6 +489,7 @@ impl RpnExpression {
                         let targets: &[usize] = match candidate {
                             RpnExpressionNode::JumpIfFalse { target, end, .. } => &[*target, *end],
                             RpnExpressionNode::Jump { target, .. }
+                            | RpnExpressionNode::RegexpArgument { target, .. }
                             | RpnExpressionNode::NullGuard { target, .. } => &[*target],
                             RpnExpressionNode::OrderedRows { end, .. }
                             | RpnExpressionNode::Repeat { end, .. } => &[*end],
@@ -480,10 +505,10 @@ impl RpnExpression {
                     }
                 }
                 RpnExpressionNode::NullGuard { target, field_type } => {
-                    if stack.last() != Some(&EvalType::Int)
-                        || EvalType::try_from(field_type.as_accessor().tp())
-                            .map_err(|e| other_err!("{}", e))?
-                            != EvalType::Int
+                    let declared = EvalType::try_from(field_type.as_accessor().tp())
+                        .map_err(|e| other_err!("{}", e))?;
+                    if !matches!(declared, EvalType::Int | EvalType::Real | EvalType::Decimal)
+                        || stack.last() != Some(&declared)
                     {
                         return Err(invalid());
                     }
@@ -508,6 +533,50 @@ impl RpnExpression {
                         )
                         .map_err(|e| other_err!("{}", e))?,
                     );
+                }
+                RpnExpressionNode::RegexpArgument {
+                    target,
+                    count,
+                    field_type,
+                } => {
+                    if *count == 0
+                        || stack.len() < *count
+                        || !stack[stack.len() - count..]
+                            .iter()
+                            .all(|t| *t == EvalType::Bytes)
+                        || field_type.as_accessor().tp()
+                            != tidb_query_datatype::FieldTypeTp::LongLong
+                    {
+                        return Err(invalid());
+                    }
+                    let mut null_stack = stack[..stack.len() - count].to_vec();
+                    null_stack.push(EvalType::Int);
+                    if let Some(previous) = &states[*target] {
+                        if previous != &null_stack {
+                            return Err(invalid());
+                        }
+                    } else {
+                        states[*target] = Some(null_stack);
+                    }
+                }
+                RpnExpressionNode::NativeCastReal { field_type } => {
+                    if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::Double
+                        || stack.pop() != Some(EvalType::Bytes)
+                    {
+                        return Err(invalid());
+                    }
+                    stack.push(EvalType::Real);
+                }
+                RpnExpressionNode::NativeArithmetic { field_type, .. } => {
+                    let ty = EvalType::try_from(field_type.as_accessor().tp())
+                        .map_err(|e| other_err!("{}", e))?;
+                    if !matches!(ty, EvalType::Real | EvalType::Decimal)
+                        || stack.pop() != Some(ty)
+                        || stack.pop() != Some(ty)
+                    {
+                        return Err(invalid());
+                    }
+                    stack.push(ty);
                 }
                 RpnExpressionNode::FnCall {
                     args_len,
@@ -538,7 +607,9 @@ impl RpnExpression {
                         ExpressionScalar::Real(_) => EvalType::Real,
                         ExpressionScalar::Decimal(_) => EvalType::Decimal,
                     };
-                    if declared != actual {
+                    if declared != actual
+                        || matches!(value, ExpressionScalar::Decimal(Some(v)) if !v.valid())
+                    {
                         return Err(invalid());
                     }
                     stack.push(declared);
@@ -618,6 +689,9 @@ impl RpnExpression {
         let last_node = self.nodes.last().unwrap();
         match last_node {
             RpnExpressionNode::FnCall { field_type, .. }
+            | RpnExpressionNode::RegexpArgument { field_type, .. }
+            | RpnExpressionNode::NativeCastReal { field_type }
+            | RpnExpressionNode::NativeArithmetic { field_type, .. }
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
             | RpnExpressionNode::Jump { field_type, .. }
             | RpnExpressionNode::NullGuard { field_type, .. }

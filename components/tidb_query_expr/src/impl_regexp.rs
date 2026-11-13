@@ -22,7 +22,7 @@ fn is_valid_match_type(m: char) -> bool {
     matches!(m, 'i' | 'c' | 'm' | 's')
 }
 
-fn get_match_type<C: Collator>(match_type: &[u8]) -> Result<String> {
+fn get_match_type<C: Collator>(match_type: &[u8], native: bool) -> Result<String> {
     let match_type = std::str::from_utf8(match_type)?;
     let mut flag_set = HashSet::<char>::new();
 
@@ -33,7 +33,7 @@ fn get_match_type<C: Collator>(match_type: &[u8]) -> Result<String> {
     for m in match_type.chars() {
         if !is_valid_match_type(m) {
             let err = format!("Invalid match type: {} in regexp", m);
-            return Err(Error::regexp_error(err).into());
+            return Err(regexp_diagnostic(native, "Invalid match type", err));
         }
         if m == 'c' {
             // re2 is case-sensitive by default, so we only need to delete 'i' flag
@@ -52,12 +52,16 @@ fn get_match_type<C: Collator>(match_type: &[u8]) -> Result<String> {
     Ok(flag)
 }
 
-fn build_regexp<C: Collator>(pattern: &[u8], match_type: &[u8]) -> Result<Regex> {
+fn build_regexp<C: Collator>(pattern: &[u8], match_type: &[u8], native: bool) -> Result<Regex> {
     if pattern.is_empty() {
-        return Err(Error::regexp_error("Empty pattern is invalid in regexp".into()).into());
+        return Err(regexp_diagnostic(
+            native,
+            "empty regular expression pattern",
+            "Empty pattern is invalid in regexp".into(),
+        ));
     }
 
-    let match_type = get_match_type::<C>(match_type)?;
+    let match_type = get_match_type::<C>(match_type, native)?;
 
     let pattern = String::from_utf8(pattern.to_vec())?;
     let pattern_with_tp = if !match_type.is_empty() {
@@ -66,8 +70,54 @@ fn build_regexp<C: Collator>(pattern: &[u8], match_type: &[u8]) -> Result<Regex>
         pattern
     };
 
-    Regex::new(&pattern_with_tp)
-        .map_err(|e| Error::regexp_error(format!("Invalid regexp pattern: {:?}", e)).into())
+    Regex::new(&pattern_with_tp).map_err(|e| {
+        regexp_diagnostic(
+            native,
+            "invalid regular expression pattern",
+            format!("Invalid regexp pattern: {:?}", e),
+        )
+    })
+}
+
+fn regexp_diagnostic(
+    native: bool,
+    native_message: &str,
+    pb_message: String,
+) -> tidb_query_common::error::Error {
+    if native {
+        tidb_query_common::error::EvaluateError::Custom {
+            code: 1105,
+            msg: native_message.into(),
+        }
+        .into()
+    } else {
+        Error::regexp_error(pb_message).into()
+    }
+}
+
+/// Native arguments have already passed sequential NULL/UTF-8 guards in the
+/// shared instruction loop; only the regex construction policy differs.
+#[rpn_fn(nullable, raw_varg, min_args = 2, max_args = 3)]
+pub fn native_regexp_like(args: &[ScalarValueRef<'_>]) -> Result<Option<i64>> {
+    let utf8 = |bytes| {
+        std::str::from_utf8(bytes).map_err(|_| tidb_query_common::error::EvaluateError::Custom {
+            code: 1105,
+            msg: "invalid UTF-8 REGEXP_LIKE argument".into(),
+        })
+    };
+    let mut strings = Vec::with_capacity(args.len());
+    for arg in args {
+        let Some(value) = arg.as_bytes() else {
+            return Ok(None);
+        };
+        strings.push(utf8(value)?);
+    }
+    let regex = build_regexp::<tidb_query_datatype::codec::collation::collator::CollatorUtf8Mb4Bin>(
+        strings[1].as_bytes(),
+        strings.get(2).copied().unwrap_or("").as_bytes(),
+        true,
+    )?;
+    Ok(Some(i64::from(regex.is_match(strings[0]))))
 }
 
 fn build_regexp_from_args<C: Collator>(
@@ -88,7 +138,7 @@ fn build_regexp_from_args<C: Collator>(
         b""
     };
 
-    build_regexp::<C>(pattern, match_type).map(Some)
+    build_regexp::<C>(pattern, match_type, false).map(Some)
 }
 
 fn init_regexp_data<C: Collator, const N: usize>(expr: &mut Expr) -> Result<Option<Regex>> {
@@ -111,7 +161,7 @@ fn init_regexp_data<C: Collator, const N: usize>(expr: &mut Expr) -> Result<Opti
         b""
     };
 
-    build_regexp::<C>(pattern, match_type).map(Some)
+    build_regexp::<C>(pattern, match_type, false).map(Some)
 }
 
 /// Currently, TiDB only supports regular expressions for utf-8 strings.
