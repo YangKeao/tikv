@@ -228,6 +228,17 @@ impl From<TimeType> for FieldTypeTp {
 
 // The common set of methods for `date/time`
 impl Time {
+    /// Exact unchecked in-memory bits for expression-layer semantic bridges.
+    /// This is not the timezone-aware packed storage encoding.
+    pub const fn from_expression_memory_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// Exact in-memory bits; callers must interpret TimeType/FSP explicitly.
+    pub const fn expression_memory_bits(self) -> u64 {
+        self.0
+    }
+
     /// Returns the hour number from 0 to 23.
     #[inline]
     pub fn hour(self) -> u32 {
@@ -3022,6 +3033,27 @@ mod tests {
                 config.time_zone.unwrap_or_else(Tz::utc);
 
             EvalContext::new(Arc::new(eval_config))
+        }
+    }
+
+    #[test]
+    fn test_expression_memory_bits_semantic_metadata() {
+        let calendar = (2024u64 << 50)
+            | (2 << 46)
+            | (3 << 41)
+            | (12 << 36)
+            | (34 << 30)
+            | (56 << 24)
+            | (123456 << 4);
+        for tag in 0..16 {
+            let value = Time::from_expression_memory_bits(calendar | tag);
+            assert_eq!(value.expression_memory_bits(), calendar | tag);
+            if tag >= 14 {
+                assert_eq!(value.get_time_type(), TimeType::Date);
+                assert_eq!(value.fsp(), 0);
+            } else {
+                assert_eq!(value.fsp(), (tag >> 1) as u8);
+            }
         }
     }
 

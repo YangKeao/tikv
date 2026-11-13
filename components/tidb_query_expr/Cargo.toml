@@ -29,7 +29,7 @@ regex = "1.1"
 serde = "1.0"
 serde_json = "1.0"
 static_assertions = { version = "1.0", features = ["nightly"] }
-tidb-datatype = { git = "https://github.com/YangKeao/tidb", rev = "88e183218a66197bd4a790db96fa1e373b1b17ce" }
+tidb-datatype = { git = "https://github.com/YangKeao/tidb", rev = "b6630d7bdeeccffa5262f5362bcb5cf88e6cec6b" }
 tidb_query_codegen = { workspace = true }
 tidb_query_common = { workspace = true }
 tidb_query_datatype = { workspace = true }

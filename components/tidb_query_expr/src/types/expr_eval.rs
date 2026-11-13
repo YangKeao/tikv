@@ -39,6 +39,9 @@ pub trait InputColumns {
     fn conversion_warnings(&self) -> &dyn tidb_datatype::ConversionWarningAppender {
         &tidb_datatype::IgnoreConversionWarnings
     }
+    fn date_modes(&self) -> tidb_datatype::DateModes {
+        tidb_datatype::DateModes::TIDB_DEFAULT_SQL_MODE
+    }
     fn div_precision_increment(&self) -> u32 {
         4
     }
@@ -1053,6 +1056,36 @@ impl RpnExpression {
                     input_physical_columns,
                 )?,
             )),
+            RpnExpressionNode::NativeDate { field_type } => {
+                let source = stack
+                    .last()
+                    .ok_or_else(|| other_err!("missing DATE operand"))?;
+                let policy =
+                    tidb_datatype::DateValuePolicy::native(input_physical_columns.date_modes());
+                let mut values = Vec::with_capacity(output_rows);
+                for row in 0..output_rows {
+                    let value = match native_time(source, row)? {
+                        None => None,
+                        Some(time) => match time.date_value(policy) {
+                            Some(value) => Some(value),
+                            None => {
+                                input_physical_columns.handle_truncate(&format!(
+                                    "Incorrect datetime value: '{time}'"
+                                ))?;
+                                None
+                            }
+                        },
+                    };
+                    values.push(value);
+                }
+                Ok((
+                    1,
+                    RpnStackNode::ExpressionVector {
+                        value: ExpressionVector::Time(values),
+                        field_type,
+                    },
+                ))
+            }
             RpnExpressionNode::NativeCastReal { field_type } => Ok((
                 1,
                 super::native_arithmetic::cast_real(
@@ -1203,6 +1236,20 @@ fn merge_branch_values<'a>(
     )
 }
 
+fn native_time(source: &RpnStackNode<'_>, row: usize) -> Result<Option<tidb_datatype::Time>> {
+    match source {
+        RpnStackNode::ExpressionScalar { value, .. } => match value.as_ref() {
+            ExpressionScalar::Time(value) => Ok(*value),
+            _ => Err(other_err!("native time result mismatch")),
+        },
+        RpnStackNode::ExpressionVector {
+            value: ExpressionVector::Time(values),
+            ..
+        } => Ok(values[row]),
+        _ => Err(other_err!("native time result mismatch")),
+    }
+}
+
 fn merge_selected_values<'a, 'b>(
     inputs: impl IntoIterator<Item = (&'b RpnStackNode<'a>, &'b [usize])>,
     count: usize,
@@ -1270,6 +1317,18 @@ where
             }
             Ok(RpnStackNode::ExpressionVector {
                 value: ExpressionVector::Real(values),
+                field_type,
+            })
+        }
+        EvalType::DateTime => {
+            let mut values = vec![None; count];
+            for (source, positions) in inputs {
+                for (i, out) in positions.iter().enumerate() {
+                    values[*out] = native_time(source, i)?;
+                }
+            }
+            Ok(RpnStackNode::ExpressionVector {
+                value: ExpressionVector::Time(values),
                 field_type,
             })
         }

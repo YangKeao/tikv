@@ -12,6 +12,7 @@ use crate::ShortCircuitFnMeta;
 /// These are transported intact; individual kernels own range checks.
 #[derive(Clone, Debug)]
 pub enum ExpressionScalar {
+    Time(Option<tidb_datatype::Time>),
     Real(Option<f64>),
     Decimal(Option<ExpressionDecimal>),
 }
@@ -19,6 +20,7 @@ pub enum ExpressionScalar {
 /// Native intermediate columns retain full floating and decimal domains.
 #[derive(Debug)]
 pub enum ExpressionVector {
+    Time(Vec<Option<tidb_datatype::Time>>),
     Real(Vec<Option<f64>>),
     Decimal(Vec<Option<ExpressionDecimal>>),
 }
@@ -53,6 +55,9 @@ pub enum RpnExpressionNode {
     /// Current raw parameter converted in the shared loop, once per invocation.
     NativeParameterDecimal {
         order: usize,
+        field_type: FieldType,
+    },
+    NativeDate {
         field_type: FieldType,
     },
     NativeCastReal {
@@ -149,6 +154,7 @@ impl RpnExpressionNode {
             RpnExpressionNode::FnCall { field_type, .. }
             | RpnExpressionNode::RegexpArgument { field_type, .. }
             | RpnExpressionNode::NativeParameterDecimal { field_type, .. }
+            | RpnExpressionNode::NativeDate { field_type }
             | RpnExpressionNode::NativeCastReal { field_type }
             | RpnExpressionNode::NativeArithmetic { field_type, .. }
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
@@ -175,6 +181,7 @@ impl RpnExpressionNode {
             RpnExpressionNode::FnCall { .. }
             | RpnExpressionNode::RegexpArgument { .. }
             | RpnExpressionNode::NativeParameterDecimal { .. }
+            | RpnExpressionNode::NativeDate { .. }
             | RpnExpressionNode::NativeCastReal { .. }
             | RpnExpressionNode::NativeArithmetic { .. }
             | RpnExpressionNode::JumpIfFalse { .. }
@@ -199,6 +206,7 @@ impl RpnExpressionNode {
             },
             RpnExpressionNode::ColumnRef { .. } => ExprType::ColumnRef,
             RpnExpressionNode::ExpressionConstant { value, .. } => match value {
+                ExpressionScalar::Time(_) => ExprType::MysqlTime,
                 ExpressionScalar::Real(_) => ExprType::Float64,
                 ExpressionScalar::Decimal(_) => ExprType::MysqlDecimal,
             },
@@ -567,6 +575,14 @@ impl RpnExpression {
                     }
                     stack.push(EvalType::Decimal);
                 }
+                RpnExpressionNode::NativeDate { field_type } => {
+                    if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::Date
+                        || stack.pop() != Some(EvalType::DateTime)
+                    {
+                        return Err(invalid());
+                    }
+                    stack.push(EvalType::DateTime);
+                }
                 RpnExpressionNode::NativeCastReal { field_type } => {
                     if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::Double
                         || stack.pop() != Some(EvalType::Bytes)
@@ -612,6 +628,7 @@ impl RpnExpression {
                     let declared = EvalType::try_from(field_type.as_accessor().tp())
                         .map_err(|e| other_err!("{}", e))?;
                     let actual = match value {
+                        ExpressionScalar::Time(_) => EvalType::DateTime,
                         ExpressionScalar::Real(_) => EvalType::Real,
                         ExpressionScalar::Decimal(_) => EvalType::Decimal,
                     };
@@ -699,6 +716,7 @@ impl RpnExpression {
             RpnExpressionNode::FnCall { field_type, .. }
             | RpnExpressionNode::RegexpArgument { field_type, .. }
             | RpnExpressionNode::NativeParameterDecimal { field_type, .. }
+            | RpnExpressionNode::NativeDate { field_type }
             | RpnExpressionNode::NativeCastReal { field_type }
             | RpnExpressionNode::NativeArithmetic { field_type, .. }
             | RpnExpressionNode::JumpIfFalse { field_type, .. }

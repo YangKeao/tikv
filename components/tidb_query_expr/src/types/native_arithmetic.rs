@@ -65,10 +65,12 @@ pub(super) fn parameter_decimal<'a>(
 pub(super) fn is_null(value: &RpnStackNode<'_>, row: usize) -> bool {
     match value {
         RpnStackNode::ExpressionScalar { value, .. } => match value.as_ref() {
+            ExpressionScalar::Time(v) => v.is_none(),
             ExpressionScalar::Real(v) => v.is_none(),
             ExpressionScalar::Decimal(v) => v.is_none(),
         },
         RpnStackNode::ExpressionVector { value, .. } => match value {
+            ExpressionVector::Time(v) => v[row].is_none(),
             ExpressionVector::Real(v) => v[row].is_none(),
             ExpressionVector::Decimal(v) => v[row].is_none(),
         },

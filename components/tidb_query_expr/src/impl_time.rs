@@ -59,15 +59,35 @@ pub fn date_format(
 #[rpn_fn(capture = [ctx])]
 #[inline]
 pub fn date(ctx: &mut EvalContext, t: &DateTime) -> Result<Option<DateTime>> {
-    if t.invalid_zero() {
-        return ctx
-            .handle_invalid_time_error(Error::incorrect_datetime_value(t))
-            .map(|_| Ok(None))?;
+    use tidb_datatype::{
+        CoreTime, DateClockPolicy, DateValuePolicy, Time as NativeTime, TimeType as NativeType,
+    };
+    let kind = match t.get_time_type() {
+        TimeType::Date => NativeType::Date,
+        TimeType::DateTime => NativeType::DateTime,
+        TimeType::Timestamp => NativeType::Timestamp,
+    };
+    // Only the calendar bits match: SDK nibble15 is Date, native is Timestamp/FSP7.
+    let native = NativeTime::new(
+        CoreTime::from_raw(t.expression_memory_bits() & !15),
+        kind,
+        i64::from(t.fsp()),
+    )
+    .expect("SDK Time has FSP0..6, or Date with FSP0");
+    let policy = DateValuePolicy {
+        reject_zero: true,
+        reject_partial_zero: true,
+        clock: DateClockPolicy::PreserveExistingDate,
+    };
+    match native.date_value(policy) {
+        Some(value) => Ok(Some(DateTime::from_expression_memory_bits(
+            value.core_time().raw() | 14,
+        ))),
+        None => {
+            ctx.handle_invalid_time_error(Error::incorrect_datetime_value(t))?;
+            Ok(None)
+        }
     }
-
-    let mut res = *t;
-    res.set_time_type(TimeType::Date)?;
-    Ok(Some(res))
 }
 
 #[rpn_fn(capture = [ctx])]
@@ -2084,6 +2104,79 @@ mod tests {
                 .unwrap();
             assert_eq!(output, None, "{:?} {:?}", date, format);
         }
+    }
+
+    #[test]
+    fn test_date_fixed_hidden_clock_and_zero() {
+        // Old PB DATE keeps the clock on existing Date, including nibble15.
+        let bits = (2024u64 << 50)
+            | (2 << 46)
+            | (3 << 41)
+            | (12 << 36)
+            | (34 << 30)
+            | (56 << 24)
+            | (123456 << 4);
+        for tag in [12, 13, 14, 15] {
+            let input = Time::from_expression_memory_bits(bits | tag);
+            let output: Option<DateTime> = RpnFnScalarEvaluator::new()
+                .push_param(Some(input))
+                .evaluate(ScalarFuncSig::Date)
+                .unwrap();
+            let expected = if tag >= 14 {
+                bits | 14
+            } else {
+                (2024u64 << 50) | (2 << 46) | (3 << 41) | 14
+            };
+            assert_eq!(output.unwrap().expression_memory_bits(), expected);
+        }
+        for bits in [0, 2024u64 << 50, (2024u64 << 50) | (2 << 46), 1u64 << 36] {
+            let output: Option<DateTime> = RpnFnScalarEvaluator::new()
+                .push_param(Some(Time::from_expression_memory_bits(bits)))
+                .evaluate(ScalarFuncSig::Date)
+                .unwrap();
+            assert!(output.is_none());
+        }
+    }
+
+    #[test]
+    fn test_date_zero_diagnostic_policy() {
+        use std::sync::Arc;
+
+        use tidb_query_datatype::expr::{EvalConfig, Flag};
+        for strict in [false, true] {
+            for insert in [false, true] {
+                for bits in [0, 2024u64 << 50, 1u64 << 36] {
+                    let mut cfg = EvalConfig::new();
+                    if strict {
+                        cfg.sql_mode.insert(SqlMode::STRICT_ALL_TABLES);
+                    }
+                    if insert {
+                        cfg.set_flag(Flag::IN_INSERT_STMT);
+                    }
+                    let mut ctx = EvalContext::new(Arc::new(cfg));
+                    let value = Time::from_expression_memory_bits(bits);
+                    let original = Error::incorrect_datetime_value(value);
+                    let result = date(&mut ctx, &value);
+                    if strict && insert {
+                        assert_eq!(
+                            result.unwrap_err().to_string(),
+                            format!("Evaluate error: Incorrect datetime value: '{value}'")
+                        );
+                        assert!(ctx.warnings.warnings.is_empty());
+                    } else {
+                        assert!(result.unwrap().is_none());
+                        assert_eq!(ctx.warnings.warnings.len(), 1);
+                        assert_eq!(ctx.warnings.warnings[0].get_code(), 1292);
+                        assert_eq!(ctx.warnings.warnings[0].get_msg(), original.to_string());
+                    }
+                }
+            }
+        }
+        let output: Option<DateTime> = RpnFnScalarEvaluator::new()
+            .push_param(None::<DateTime>)
+            .evaluate(ScalarFuncSig::Date)
+            .unwrap();
+        assert!(output.is_none());
     }
 
     #[test]
