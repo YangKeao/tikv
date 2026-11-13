@@ -1350,10 +1350,10 @@ mod tests {
 
     #[test]
     fn test_execution_seeded_repeat_state_is_local_and_continues() {
-        let integer = tidb_query_datatype::FieldTypeBuilder::new()
+        let integer = tidb_query_datatype::builder::FieldTypeBuilder::new()
             .tp(FieldTypeTp::LongLong)
             .build();
-        let real = tidb_query_datatype::FieldTypeBuilder::new()
+        let real = tidb_query_datatype::builder::FieldTypeBuilder::new()
             .tp(FieldTypeTp::Double)
             .build();
         let literal = |value| RpnExpressionNode::Constant {
