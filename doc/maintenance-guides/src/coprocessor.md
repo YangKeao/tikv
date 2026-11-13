@@ -321,7 +321,10 @@ edges and full-domain expression constants in RpnExpression. They execute in
 the existing expr_eval loop. The protobuf builder does not emit these nodes;
 its eager IF and flagged AND/OR semantics remain unchanged. Native floating
 constants can carry NaN without weakening the protobuf NotNan domain. Native
-Decimal constants retain coefficient data, stored/display scales and declared
-shape without passing through fixed-size storage. Current protobuf executors
+Decimal values use the original sibling `tidb-datatype::Decimal` directly,
+retaining hidden precision and declared shape across every RPN node. Native
+arithmetic and String-to-Real parsing reuse that lower-level crate; only
+diagnostic policy and scheduling remain in RPN. The sibling TiDB checkout is a
+build dependency. PB values and algorithms remain in `tidb_query_datatype`. Current protobuf executors
 reject those extra result variants explicitly. Native kernel conversion,
 dynamic IF demand and default frontend integration remain separate gates.

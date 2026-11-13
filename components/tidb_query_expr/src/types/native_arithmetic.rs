@@ -1,13 +1,11 @@
 // Copyright 2026 TiKV Project Authors. Licensed under Apache-2.0.
 
+use tidb_datatype::{DecimalCodecWarning, float_warning_input, str_to_float};
 use tidb_query_common::error::{EvaluateError, Result};
 use tidb_query_datatype::{EvalType, FieldTypeAccessor, codec::data_type::ScalarValueRef};
 use tipb::FieldType;
 
-use super::{
-    ExpressionDecimal, ExpressionScalar, ExpressionVector, InputColumns, RpnStackNode,
-    native_decimal::DecimalCodecWarning,
-};
+use super::{ExpressionDecimal, ExpressionScalar, ExpressionVector, InputColumns, RpnStackNode};
 
 /// Native arithmetic uses full expression values; PB signatures remain
 /// unchanged.
@@ -48,6 +46,13 @@ fn real(value: &RpnStackNode<'_>, row: usize) -> Result<Option<f64>> {
         _ => Err(other_err!("native real operand required")),
     }
 }
+pub(super) fn valid_decimal(value: &ExpressionDecimal) -> bool {
+    let coefficient = value.coefficient_digits().as_bytes();
+    !coefficient.is_empty()
+        && coefficient.iter().all(u8::is_ascii_digit)
+        && coefficient.len() >= value.storage_scale() as usize
+        && value.scale() <= value.storage_scale()
+}
 fn decimal<'a>(value: &'a RpnStackNode<'_>, row: usize) -> Result<Option<&'a ExpressionDecimal>> {
     let v = match value {
         RpnStackNode::ExpressionScalar { value, .. } => match value.as_ref() {
@@ -60,7 +65,7 @@ fn decimal<'a>(value: &'a RpnStackNode<'_>, row: usize) -> Result<Option<&'a Exp
         } => v[row].as_ref(),
         _ => return Err(other_err!("native decimal operand required")),
     };
-    if v.is_some_and(|v| !v.valid()) {
+    if v.is_some_and(|v| !valid_decimal(v)) {
         return Err(other_err!("invalid expression decimal"));
     }
     Ok(v)
@@ -146,69 +151,6 @@ pub(super) fn evaluate<'a>(
     Ok(RpnStackNode::ExpressionVector { value, field_type })
 }
 
-// Native numeric-prefix scanner from TiDB364aef2 convert.rs. This expression
-// conversion reports one truncation event, matching ops::bytes_to_f64.
-struct NumericPrefix {
-    value: String,
-    truncated: bool,
-}
-fn valid_float_prefix(input: &str, is_function_cast: bool) -> NumericPrefix {
-    if is_function_cast && input.is_empty() {
-        return NumericPrefix {
-            value: "0".to_owned(),
-            truncated: false,
-        };
-    }
-
-    let bytes = input.as_bytes();
-    let mut saw_dot = false;
-    let mut saw_digit = false;
-    let mut valid_len = 0;
-    let mut exponent_index: Option<usize> = None;
-    let mut effective_len = bytes.len();
-    for (index, byte) in bytes.iter().copied().enumerate() {
-        match byte {
-            b'+' | b'-'
-                if index == 0 || exponent_index.is_some_and(|exponent| index == exponent + 1) => {}
-            b'+' | b'-' => break,
-            b'.' if saw_dot || exponent_index.is_some_and(|exponent| exponent > 0) => break,
-            b'.' => {
-                saw_dot = true;
-                if saw_digit {
-                    valid_len = index + 1;
-                }
-            }
-            b'e' | b'E' if !saw_digit || exponent_index.is_some() => break,
-            b'e' | b'E' => {
-                exponent_index = Some(index);
-                if index + 1 == bytes.len() {
-                    return NumericPrefix {
-                        value: input[..index].to_owned(),
-                        truncated: false,
-                    };
-                }
-            }
-            0 => {
-                effective_len = valid_len;
-                break;
-            }
-            b'0'..=b'9' => {
-                saw_digit = true;
-                valid_len = index + 1;
-            }
-            _ => break,
-        }
-    }
-    NumericPrefix {
-        value: if valid_len == 0 {
-            "0".to_owned()
-        } else {
-            input[..valid_len].to_owned()
-        },
-        truncated: valid_len == 0 || valid_len != effective_len,
-    }
-}
-
 pub(super) fn cast_real<'a>(
     source: &RpnStackNode<'_>,
     field_type: &'a FieldType,
@@ -224,32 +166,14 @@ pub(super) fn cast_real<'a>(
                 return Ok(None);
             };
             let text = String::from_utf8_lossy(value);
-            let text = text.trim();
-            let prefix = valid_float_prefix(text, true);
-            let (value, truncated) = match prefix.value.parse::<f64>() {
-                Ok(v) if v.is_infinite() => (
-                    if v.is_sign_positive() {
-                        f64::MAX
-                    } else {
-                        -f64::MAX
-                    },
-                    true,
-                ),
-                Ok(v) => (v, prefix.truncated),
-                Err(_) => (0.0, true),
-            };
-            if truncated {
-                let subject = text.split('\0').next().unwrap_or_default();
-                let mut cut = subject.len().min(128);
-                while !subject.is_char_boundary(cut) {
-                    cut -= 1;
-                }
+            let converted = str_to_float(&text, true);
+            if converted.event.is_some() {
                 input.handle_truncate(&format!(
                     "Truncated incorrect DOUBLE value: '{}'",
-                    &subject[..cut]
+                    float_warning_input(&text)
                 ))?;
             }
-            Ok(Some(value))
+            Ok(Some(converted.value))
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(RpnStackNode::ExpressionVector {

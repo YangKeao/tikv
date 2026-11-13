@@ -29,6 +29,7 @@ regex = "1.1"
 serde = "1.0"
 serde_json = "1.0"
 static_assertions = { version = "1.0", features = ["nightly"] }
+tidb-datatype = { path = "../../../tidb/rust/crates/tidb-datatype" }
 tidb_query_codegen = { workspace = true }
 tidb_query_common = { workspace = true }
 tidb_query_datatype = { workspace = true }

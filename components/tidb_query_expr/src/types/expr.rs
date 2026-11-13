@@ -23,15 +23,8 @@ pub enum ExpressionVector {
     Decimal(Vec<Option<ExpressionDecimal>>),
 }
 
-/// Exact expression-only Decimal data, independent of fixed-size storage.
-#[derive(Clone, Debug)]
-pub struct ExpressionDecimal {
-    pub negative: bool,
-    pub coefficient: Vec<u8>,
-    pub storage_scale: u32,
-    pub result_scale: u32,
-    pub declared_shape: Option<(i64, i64)>,
-}
+/// Full native value and algorithms share their existing lower-level owner.
+pub use tidb_datatype::Decimal as ExpressionDecimal;
 
 /// Invocation contract is independent of vector width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -608,7 +601,7 @@ impl RpnExpression {
                         ExpressionScalar::Decimal(_) => EvalType::Decimal,
                     };
                     if declared != actual
-                        || matches!(value, ExpressionScalar::Decimal(Some(v)) if !v.valid())
+                        || matches!(value, ExpressionScalar::Decimal(Some(v)) if !super::native_arithmetic::valid_decimal(v))
                     {
                         return Err(invalid());
                     }

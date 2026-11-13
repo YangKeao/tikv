@@ -2,7 +2,6 @@
 
 mod expr;
 mod native_arithmetic;
-mod native_decimal;
 pub use native_arithmetic::NativeArithmetic;
 mod expr_builder;
 mod expr_eval;
