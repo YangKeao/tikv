@@ -59,9 +59,6 @@ pub trait InputColumns {
     fn rand_next(&self) -> Option<f64> {
         None
     }
-    fn rand_seeded_next(&self, _key: usize, _seed: i64) -> Option<f64> {
-        None
-    }
 
     fn read<'a>(
         &'a self,
@@ -316,6 +313,136 @@ impl RpnStackNode<'_> {
     }
 }
 
+/// State for one execution of one frozen program. Local instruction ordinals
+/// distinguish seeded RAND occurrences; dropping this object ends their
+/// streams.
+pub struct RpnExecution<'p> {
+    program: &'p RpnExpression,
+    seeded: SeededState,
+}
+
+struct SeededState {
+    enabled: bool,
+    values: std::collections::HashMap<usize, crate::impl_math::MySqlRng>,
+}
+
+impl<'p> RpnExecution<'p> {
+    pub fn new(program: &'p RpnExpression, supports_seeded_rand: bool) -> Self {
+        Self {
+            program,
+            seeded: SeededState {
+                enabled: supports_seeded_rand,
+                values: std::collections::HashMap::new(),
+            },
+        }
+    }
+
+    pub fn eval_input_mode<'a>(
+        &mut self,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        input: &'a dyn InputColumns,
+        rows: &'a [usize],
+        output_rows: usize,
+        mode: InvocationMode,
+    ) -> Result<RpnStackNode<'a>>
+    where
+        'p: 'a,
+    {
+        self.program.eval_input_mode_with_state(
+            ctx,
+            schema,
+            input,
+            rows,
+            output_rows,
+            mode,
+            &mut self.seeded,
+        )
+    }
+
+    /// Both frontend projections share the same expression loop and traversal.
+    pub fn eval_group<'a>(
+        programs: &mut [(&mut RpnExecution<'p>, &'a [FieldType], &'a dyn InputColumns)],
+        ctx: &mut EvalContext,
+        rows: &'a [usize],
+        order: OutputOrder,
+        mode: InvocationMode,
+    ) -> Result<Vec<RpnStackNode<'a>>>
+    where
+        'p: 'a,
+    {
+        if rows.is_empty() || rows.len() > BATCH_MAX_SIZE {
+            return Err(other_err!("invalid group row count"));
+        }
+        match order {
+            OutputOrder::Columns => programs
+                .iter_mut()
+                .map(|(program, schema, input)| {
+                    if mode == InvocationMode::Vector {
+                        return program.eval_input_mode(
+                            ctx,
+                            schema,
+                            *input,
+                            rows,
+                            rows.len(),
+                            InvocationMode::Vector,
+                        );
+                    }
+                    let values = (0..rows.len())
+                        .map(|i| {
+                            program.eval_input_mode(
+                                ctx,
+                                schema,
+                                *input,
+                                &rows[i..i + 1],
+                                1,
+                                InvocationMode::Scalar,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let positions: Vec<_> = (0..rows.len()).map(|i| [i]).collect();
+                    merge_selected_values(
+                        values.iter().zip(&positions).map(|(v, p)| (v, &p[..])),
+                        rows.len(),
+                        program.program.ret_field_type(schema),
+                    )
+                })
+                .collect(),
+            OutputOrder::Rows => {
+                let mut columns: Vec<Vec<RpnStackNode<'a>>> = (0..programs.len())
+                    .map(|_| Vec::with_capacity(rows.len()))
+                    .collect();
+                for i in 0..rows.len() {
+                    for (out, (program, schema, input)) in
+                        columns.iter_mut().zip(programs.iter_mut())
+                    {
+                        out.push(program.eval_input_mode(
+                            ctx,
+                            schema,
+                            *input,
+                            &rows[i..i + 1],
+                            1,
+                            InvocationMode::Scalar,
+                        )?);
+                    }
+                }
+                let positions: Vec<_> = (0..rows.len()).map(|i| [i]).collect();
+                columns
+                    .into_iter()
+                    .zip(programs)
+                    .map(|(values, (program, schema, _))| {
+                        merge_selected_values(
+                            values.iter().zip(&positions).map(|(v, p)| (v, &p[..])),
+                            rows.len(),
+                            program.program.ret_field_type(schema),
+                        )
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
 impl RpnExpression {
     /// Evaluates the expression into a vector.
     ///
@@ -399,76 +526,6 @@ impl RpnExpression {
         )
     }
 
-    /// Both frontend projections share the same expression loop and traversal.
-    pub fn eval_group<'a>(
-        programs: &[(&'a Self, &'a [FieldType], &'a dyn InputColumns)],
-        ctx: &mut EvalContext,
-        rows: &'a [usize],
-        order: OutputOrder,
-        mode: InvocationMode,
-    ) -> Result<Vec<RpnStackNode<'a>>> {
-        if rows.is_empty() || rows.len() > BATCH_MAX_SIZE {
-            return Err(other_err!("invalid group row count"));
-        }
-        match order {
-            OutputOrder::Columns => programs
-                .iter()
-                .map(|(program, schema, input)| {
-                    if mode == InvocationMode::Vector {
-                        return program.eval_input(ctx, schema, *input, rows, rows.len());
-                    }
-                    let values = (0..rows.len())
-                        .map(|i| {
-                            program.eval_input_mode(
-                                ctx,
-                                schema,
-                                *input,
-                                &rows[i..i + 1],
-                                1,
-                                InvocationMode::Scalar,
-                            )
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let positions: Vec<_> = (0..rows.len()).map(|i| [i]).collect();
-                    merge_selected_values(
-                        values.iter().zip(&positions).map(|(v, p)| (v, &p[..])),
-                        rows.len(),
-                        program.ret_field_type(schema),
-                    )
-                })
-                .collect(),
-            OutputOrder::Rows => {
-                let mut columns: Vec<Vec<RpnStackNode<'a>>> = (0..programs.len())
-                    .map(|_| Vec::with_capacity(rows.len()))
-                    .collect();
-                for i in 0..rows.len() {
-                    for (out, (program, schema, input)) in columns.iter_mut().zip(programs) {
-                        out.push(program.eval_input_mode(
-                            ctx,
-                            schema,
-                            *input,
-                            &rows[i..i + 1],
-                            1,
-                            InvocationMode::Scalar,
-                        )?);
-                    }
-                }
-                let positions: Vec<_> = (0..rows.len()).map(|i| [i]).collect();
-                columns
-                    .into_iter()
-                    .zip(programs)
-                    .map(|(values, (program, schema, _))| {
-                        merge_selected_values(
-                            values.iter().zip(&positions).map(|(v, p)| (v, &p[..])),
-                            rows.len(),
-                            program.ret_field_type(schema),
-                        )
-                    })
-                    .collect()
-            }
-        }
-    }
-
     /// Evaluate with a demanded input adapter using the same instruction loop.
     pub fn eval_input<'a>(
         &'a self,
@@ -498,6 +555,26 @@ impl RpnExpression {
         output_rows: usize,
         mode: InvocationMode,
     ) -> Result<RpnStackNode<'a>> {
+        RpnExecution::new(self, false).eval_input_mode(
+            ctx,
+            schema,
+            input_physical_columns,
+            input_logical_rows,
+            output_rows,
+            mode,
+        )
+    }
+
+    fn eval_input_mode_with_state<'a>(
+        &'a self,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        input_physical_columns: &'a dyn InputColumns,
+        input_logical_rows: &'a [usize],
+        output_rows: usize,
+        mode: InvocationMode,
+        seeded: &mut SeededState,
+    ) -> Result<RpnStackNode<'a>> {
         if mode == InvocationMode::Scalar && output_rows != 1 {
             return Err(other_err!("scalar invocation requires one row"));
         }
@@ -518,6 +595,8 @@ impl RpnExpression {
                 output_rows,
                 &self.as_ref()[0],
                 &[],
+                seeded,
+                0,
             )?;
             return Ok(result);
         }
@@ -853,6 +932,8 @@ impl RpnExpression {
                 active_count,
                 node,
                 &stack,
+                seeded,
+                pc,
             )?;
             stack.truncate(stack.len() - consumed_args);
             stack.push(result);
@@ -873,6 +954,8 @@ impl RpnExpression {
         output_rows: usize,
         node: &'a RpnExpressionNode,
         stack: &[RpnStackNode<'a>],
+        seeded_state: &mut SeededState,
+        node_index: usize,
     ) -> Result<(usize, RpnStackNode<'a>)> {
         match node {
             RpnExpressionNode::UserVariable {
@@ -926,15 +1009,15 @@ impl RpnExpression {
                             ScalarValueRef::Int(seed) => seed.copied().unwrap_or(0),
                             _ => return Err(other_err!("RAND seed requires integer")),
                         };
-                        let stateful = if *constant_seed {
-                            input_physical_columns
-                                .rand_seeded_next(std::ptr::from_ref(node) as usize, seed)
+                        if *constant_seed && seeded_state.enabled {
+                            seeded_state
+                                .values
+                                .entry(node_index)
+                                .or_insert_with(|| crate::impl_math::MySqlRng::new_with_seed(seed))
+                                .gen()
                         } else {
-                            None
-                        };
-                        stateful.unwrap_or_else(|| {
                             crate::impl_math::MySqlRng::new_with_seed(seed).gen()
-                        })
+                        }
                     } else {
                         input_physical_columns.rand_next().ok_or_else(|| {
                             tidb_query_common::error::EvaluateError::Custom {
@@ -1263,6 +1346,80 @@ mod tests {
     #[rpn_fn(nullable)]
     fn short_circuit_unreachable(_v: Option<&Int>) -> Result<Option<Int>> {
         unreachable!("short-circuited argument must not be evaluated")
+    }
+
+    #[test]
+    fn test_execution_seeded_repeat_state_is_local_and_continues() {
+        let integer = tidb_query_datatype::FieldTypeBuilder::new()
+            .tp(FieldTypeTp::LongLong)
+            .build();
+        let real = tidb_query_datatype::FieldTypeBuilder::new()
+            .tp(FieldTypeTp::Double)
+            .build();
+        let literal = |value| RpnExpressionNode::Constant {
+            value: ScalarValue::Int(Some(value)),
+            field_type: integer.clone(),
+        };
+        let program = RpnExpression::finish(
+            vec![
+                literal(3),
+                RpnExpressionNode::Repeat {
+                    end: 5,
+                    supported_type: true,
+                    field_type: integer.clone(),
+                },
+                literal(7),
+                RpnExpressionNode::Rand {
+                    seeded: true,
+                    constant_seed: true,
+                    field_type: real,
+                },
+                RpnExpressionNode::RepeatEnd {
+                    field_type: integer.clone(),
+                },
+            ],
+            &[],
+            integer,
+        )
+        .unwrap();
+        let input = LazyBatchColumnVec::empty();
+        let mut execution = RpnExecution::new(&program, true);
+        let mut expected = crate::impl_math::MySqlRng::new_with_seed(7);
+        for _ in 0..2 {
+            execution
+                .eval_input_mode(
+                    &mut EvalContext::default(),
+                    &[],
+                    &input,
+                    &[0],
+                    1,
+                    InvocationMode::Scalar,
+                )
+                .unwrap();
+            for _ in 0..3 {
+                expected.gen();
+            }
+            // Inspect state without consuming it; the body output is discarded.
+            assert_eq!(execution.seeded.values.len(), 1);
+        }
+        assert_eq!(
+            execution.seeded.values.get_mut(&3).unwrap().gen(),
+            expected.gen()
+        );
+        let fresh = RpnExecution::new(&program, true);
+        assert!(fresh.seeded.values.is_empty());
+        let mut unsupported = RpnExecution::new(&program, false);
+        unsupported
+            .eval_input_mode(
+                &mut EvalContext::default(),
+                &[],
+                &input,
+                &[0],
+                1,
+                InvocationMode::Scalar,
+            )
+            .unwrap();
+        assert!(unsupported.seeded.values.is_empty());
     }
 
     #[test]

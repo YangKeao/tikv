@@ -15,6 +15,9 @@ pub use self::{
         RpnExpression, RpnExpressionNode,
     },
     expr_builder::RpnExpressionBuilder,
-    expr_eval::{BATCH_MAX_SIZE, InputColumns, InputResult, RpnStackNode, RpnStackNodeVectorValue},
+    expr_eval::{
+        BATCH_MAX_SIZE, InputColumns, InputResult, RpnExecution, RpnStackNode,
+        RpnStackNodeVectorValue,
+    },
     function::{RpnFnCallExtra, RpnFnMeta, ShortCircuitFnMeta},
 };
