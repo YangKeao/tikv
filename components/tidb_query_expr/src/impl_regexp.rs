@@ -52,7 +52,15 @@ fn get_match_type<C: Collator>(match_type: &[u8], native: bool) -> Result<String
     Ok(flag)
 }
 
+#[cfg(test)]
+thread_local! { pub(crate) static NATIVE_PREPARATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 fn build_regexp<C: Collator>(pattern: &[u8], match_type: &[u8], native: bool) -> Result<Regex> {
+    #[cfg(test)]
+    if native {
+        NATIVE_PREPARATIONS.with(|count| count.set(count.get() + 1));
+    }
+
     if pattern.is_empty() {
         return Err(regexp_diagnostic(
             native,
@@ -99,25 +107,60 @@ fn regexp_diagnostic(
 /// shared instruction loop; only the regex construction policy differs.
 #[rpn_fn(nullable, raw_varg, min_args = 2, max_args = 3)]
 pub fn native_regexp_like(args: &[ScalarValueRef<'_>]) -> Result<Option<i64>> {
-    let utf8 = |bytes| {
-        std::str::from_utf8(bytes).map_err(|_| tidb_query_common::error::EvaluateError::Custom {
-            code: 1105,
-            msg: "invalid UTF-8 REGEXP_LIKE argument".into(),
-        })
-    };
-    let mut strings = Vec::with_capacity(args.len());
-    for arg in args {
-        let Some(value) = arg.as_bytes() else {
-            return Ok(None);
+    NativeRegexp::default().evaluate(args)
+}
+
+/// One literal native occurrence, owned by an execution rather than its
+/// program.
+#[derive(Default)]
+pub(crate) struct NativeRegexp {
+    prepared: Option<std::result::Result<Regex, (i32, String)>>,
+}
+
+impl NativeRegexp {
+    pub(crate) fn evaluate(&mut self, args: &[ScalarValueRef<'_>]) -> Result<Option<i64>> {
+        let utf8 = |bytes| {
+            std::str::from_utf8(bytes).map_err(|_| {
+                tidb_query_common::error::EvaluateError::Custom {
+                    code: 1105,
+                    msg: "invalid UTF-8 REGEXP_LIKE argument".into(),
+                }
+            })
         };
-        strings.push(utf8(value)?);
+        let mut strings = Vec::with_capacity(args.len());
+        for arg in args {
+            let Some(value) = arg.as_bytes() else {
+                return Ok(None);
+            };
+            strings.push(utf8(value)?);
+        }
+        if self.prepared.is_none() {
+            let prepared = build_regexp::<
+                tidb_query_datatype::codec::collation::collator::CollatorUtf8Mb4Bin,
+            >(
+                strings[1].as_bytes(),
+                strings.get(2).copied().unwrap_or("").as_bytes(),
+                true,
+            );
+            self.prepared = Some(match prepared {
+                Ok(regex) => Ok(regex),
+                Err(error) => match error.0.as_ref() {
+                    tidb_query_common::error::ErrorInner::Evaluate(
+                        tidb_query_common::error::EvaluateError::Custom { code: 1105, msg },
+                    ) => Err((1105, msg.clone())),
+                    _ => return Err(error),
+                },
+            });
+        }
+        let prepared = self.prepared.as_ref().unwrap();
+        let regex = prepared.as_ref().map_err(|(code, msg)| {
+            tidb_query_common::error::EvaluateError::Custom {
+                code: *code,
+                msg: msg.clone(),
+            }
+        })?;
+        Ok(Some(i64::from(regex.is_match(strings[0]))))
     }
-    let regex = build_regexp::<tidb_query_datatype::codec::collation::collator::CollatorUtf8Mb4Bin>(
-        strings[1].as_bytes(),
-        strings.get(2).copied().unwrap_or("").as_bytes(),
-        true,
-    )?;
-    Ok(Some(i64::from(regex.is_match(strings[0]))))
 }
 
 fn build_regexp_from_args<C: Collator>(

@@ -317,11 +317,12 @@ impl RpnStackNode<'_> {
 }
 
 /// State for one execution of one frozen program. Local instruction ordinals
-/// distinguish seeded RAND occurrences; dropping this object ends their
-/// streams.
+/// distinguish seeded RAND and literal regexp occurrences; dropping this object
+/// ends their state.
 pub struct RpnExecution<'p> {
     program: &'p RpnExpression,
     seeded: SeededState,
+    regexps: std::collections::HashMap<usize, crate::impl_regexp::NativeRegexp>,
 }
 
 struct SeededState {
@@ -333,6 +334,7 @@ impl<'p> RpnExecution<'p> {
     pub fn new(program: &'p RpnExpression, supports_seeded_rand: bool) -> Self {
         Self {
             program,
+            regexps: std::collections::HashMap::new(),
             seeded: SeededState {
                 enabled: supports_seeded_rand,
                 values: std::collections::HashMap::new(),
@@ -360,6 +362,7 @@ impl<'p> RpnExecution<'p> {
             output_rows,
             mode,
             &mut self.seeded,
+            &mut self.regexps,
         )
     }
 
@@ -577,6 +580,7 @@ impl RpnExpression {
         output_rows: usize,
         mode: InvocationMode,
         seeded: &mut SeededState,
+        regexps: &mut std::collections::HashMap<usize, crate::impl_regexp::NativeRegexp>,
     ) -> Result<RpnStackNode<'a>> {
         if mode == InvocationMode::Scalar && output_rows != 1 {
             return Err(other_err!("scalar invocation requires one row"));
@@ -599,6 +603,7 @@ impl RpnExpression {
                 &self.as_ref()[0],
                 &[],
                 seeded,
+                regexps,
                 0,
             )?;
             return Ok(result);
@@ -936,6 +941,7 @@ impl RpnExpression {
                 node,
                 &stack,
                 seeded,
+                regexps,
                 pc,
             )?;
             stack.truncate(stack.len() - consumed_args);
@@ -958,6 +964,7 @@ impl RpnExpression {
         node: &'a RpnExpressionNode,
         stack: &[RpnStackNode<'a>],
         seeded_state: &mut SeededState,
+        regexps: &mut std::collections::HashMap<usize, crate::impl_regexp::NativeRegexp>,
         node_index: usize,
     ) -> Result<(usize, RpnStackNode<'a>)> {
         match node {
@@ -1056,6 +1063,31 @@ impl RpnExpression {
                     input_physical_columns,
                 )?,
             )),
+            RpnExpressionNode::NativeRegexpLike {
+                args_len,
+                field_type,
+            } => {
+                let args = &stack[stack.len() - args_len..];
+                let state = regexps.entry(node_index).or_default();
+                let mut values =
+                    VectorValue::with_capacity(output_rows, tidb_query_datatype::EvalType::Int);
+                for row in 0..output_rows {
+                    let args: Vec<_> = args
+                        .iter()
+                        .map(|arg| arg.get_logical_scalar_ref(row))
+                        .collect();
+                    values.push_int(state.evaluate(&args)?);
+                }
+                Ok((
+                    *args_len,
+                    RpnStackNode::Vector {
+                        value: RpnStackNodeVectorValue::Generated {
+                            physical_value: values,
+                        },
+                        field_type,
+                    },
+                ))
+            }
             RpnExpressionNode::NativeDate { field_type } => {
                 let source = stack
                     .last()
@@ -1405,6 +1437,323 @@ mod tests {
     #[rpn_fn(nullable)]
     fn short_circuit_unreachable(_v: Option<&Int>) -> Result<Option<Int>> {
         unreachable!("short-circuited argument must not be evaluated")
+    }
+
+    fn literal_regexp_program(pattern: &[u8], flags: Option<&[u8]>) -> RpnExpression {
+        let integer: FieldType = FieldTypeTp::LongLong.into();
+        let end = if flags.is_some() { 8 } else { 6 };
+        let mut nodes = vec![
+            RpnExpressionNode::OrderedRows {
+                end,
+                field_type: integer.clone(),
+            },
+            RpnExpressionNode::ColumnRef { offset: 0 },
+            RpnExpressionNode::RegexpArgument {
+                target: end,
+                count: 1,
+                field_type: integer.clone(),
+            },
+            RpnExpressionNode::Constant {
+                value: ScalarValue::Bytes(Some(pattern.to_vec())),
+                field_type: FieldTypeTp::VarString.into(),
+            },
+            RpnExpressionNode::RegexpArgument {
+                target: end,
+                count: 2,
+                field_type: integer.clone(),
+            },
+        ];
+        if let Some(flags) = flags {
+            nodes.push(RpnExpressionNode::Constant {
+                value: ScalarValue::Bytes(Some(flags.to_vec())),
+                field_type: FieldTypeTp::VarString.into(),
+            });
+            nodes.push(RpnExpressionNode::RegexpArgument {
+                target: end,
+                count: 3,
+                field_type: integer.clone(),
+            });
+        }
+        nodes.push(RpnExpressionNode::NativeRegexpLike {
+            args_len: if flags.is_some() { 3 } else { 2 },
+            field_type: integer.clone(),
+        });
+        RpnExpression::finish(nodes, &[FieldTypeTp::VarString.into()], integer).unwrap()
+    }
+
+    struct RegexpInput(ScalarValue, std::cell::Cell<usize>);
+    impl InputColumns for RegexpInput {
+        fn read<'a>(
+            &'a self,
+            schema: &'a [FieldType],
+            _: usize,
+            rows: &'a [usize],
+            _: &mut EvalContext,
+        ) -> InputResult<'a> {
+            self.1.set(self.1.get() + 1);
+            let mut values =
+                VectorValue::with_capacity(rows.len(), tidb_query_datatype::EvalType::Bytes);
+            for _ in rows {
+                values.push_bytes(self.0.as_scalar_value_ref().as_bytes().map(|v| v.to_vec()));
+            }
+            Ok(RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Generated {
+                    physical_value: values,
+                },
+                field_type: &schema[0],
+            })
+        }
+    }
+
+    #[test]
+    fn test_execution_literal_regexp_prepares_once_across_batches() {
+        let program = literal_regexp_program(b"^a", Some(b"i"));
+        let schema = [FieldTypeTp::VarString.into()];
+        let input = RegexpInput(
+            ScalarValue::Bytes(Some(b"Abc".to_vec())),
+            Default::default(),
+        );
+        crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.set(0));
+        // Regex preparation is independent of seeded RAND capabilities.
+        let mut first = RpnExecution::new(&program, false);
+        let mut second = RpnExecution::new(&program, false);
+        assert!(first.regexps.is_empty() && second.regexps.is_empty());
+        for _ in 0..2 {
+            for execution in [&mut first, &mut second] {
+                let value = execution
+                    .eval_input_mode(
+                        &mut EvalContext::default(),
+                        &schema,
+                        &input,
+                        &[2, 0, 2],
+                        3,
+                        InvocationMode::Vector,
+                    )
+                    .unwrap();
+                for row in 0..3 {
+                    assert_eq!(value.get_logical_scalar_ref(row).as_int(), Some(&1));
+                }
+                assert_eq!(execution.regexps.len(), 1);
+            }
+        }
+        assert_eq!(
+            crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.get()),
+            2
+        );
+        assert_eq!(input.1.get(), 12, "a hit still demands the subject");
+        let fresh = RpnExecution::new(&program, false);
+        assert!(fresh.regexps.is_empty());
+        println!(
+            "RpnExecution static bytes={}",
+            std::mem::size_of::<RpnExecution<'_>>()
+        );
+    }
+
+    #[test]
+    fn test_execution_literal_regexp_error_replay_and_guards() {
+        let schema = [FieldTypeTp::VarString.into()];
+        for (pattern, flags, expected) in [
+            (&b"["[..], None, "invalid regular expression pattern"),
+            (&b""[..], None, "empty regular expression pattern"),
+            (&b"a"[..], Some(&b"n"[..]), "Invalid match type"),
+        ] {
+            let program = literal_regexp_program(pattern, flags);
+            let mut execution = RpnExecution::new(&program, false);
+            crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.set(0));
+            for mode in [InvocationMode::Scalar, InvocationMode::Vector] {
+                for value in [
+                    None,
+                    Some(vec![0xff]),
+                    Some(b"abc".to_vec()),
+                    None,
+                    Some(vec![0xff]),
+                    Some(b"abc".to_vec()),
+                ] {
+                    let input = RegexpInput(ScalarValue::Bytes(value.clone()), Default::default());
+                    let result = execution.eval_input_mode(
+                        &mut EvalContext::default(),
+                        &schema,
+                        &input,
+                        &[0],
+                        1,
+                        mode,
+                    );
+                    if value.is_none() {
+                        assert!(result.unwrap().get_logical_scalar_ref(0).as_int().is_none());
+                    } else {
+                        let error = result.unwrap_err();
+                        let tidb_query_common::error::ErrorInner::Evaluate(
+                            tidb_query_common::error::EvaluateError::Custom { code, msg },
+                        ) = error.0.as_ref()
+                        else {
+                            panic!("{error:?}")
+                        };
+                        assert_eq!(*code, 1105);
+                        assert_eq!(
+                            msg,
+                            if value == Some(vec![0xff]) {
+                                "invalid UTF-8 REGEXP_LIKE argument"
+                            } else {
+                                expected
+                            }
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.get()),
+                1
+            );
+            assert_eq!(execution.regexps.len(), 1);
+        }
+        // Invalid argument encoding never reaches preparation.
+        let program = literal_regexp_program(&[0xff], None);
+        let mut execution = RpnExecution::new(&program, false);
+        let input = RegexpInput(
+            ScalarValue::Bytes(Some(b"abc".to_vec())),
+            Default::default(),
+        );
+        assert!(
+            execution
+                .eval_input_mode(
+                    &mut EvalContext::default(),
+                    &schema,
+                    &input,
+                    &[0],
+                    1,
+                    InvocationMode::Scalar
+                )
+                .is_err()
+        );
+        assert!(execution.regexps.is_empty());
+    }
+
+    #[test]
+    fn test_execution_literal_regexp_dead_branch_has_no_state() {
+        let integer: FieldType = FieldTypeTp::LongLong.into();
+        let mut nodes = vec![
+            RpnExpressionNode::Constant {
+                value: ScalarValue::Int(Some(0)),
+                field_type: integer.clone(),
+            },
+            RpnExpressionNode::JumpIfFalse {
+                target: 9,
+                end: 10,
+                field_type: integer.clone(),
+            },
+        ];
+        let mut body = literal_regexp_program(b"[", None).into_inner();
+        for node in &mut body {
+            match node {
+                RpnExpressionNode::OrderedRows { end, .. } => *end += 2,
+                RpnExpressionNode::RegexpArgument { target, .. } => *target += 2,
+                _ => (),
+            }
+        }
+        nodes.extend(body);
+        nodes.push(RpnExpressionNode::Jump {
+            target: 10,
+            field_type: integer.clone(),
+        });
+        nodes.push(RpnExpressionNode::Constant {
+            value: ScalarValue::Int(Some(7)),
+            field_type: integer.clone(),
+        });
+        let schema = [FieldTypeTp::VarString.into()];
+        let program = RpnExpression::finish(nodes, &schema, integer).unwrap();
+        let input = RegexpInput(
+            ScalarValue::Bytes(Some(b"abc".to_vec())),
+            Default::default(),
+        );
+        let mut execution = RpnExecution::new(&program, false);
+        crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.set(0));
+        for _ in 0..2 {
+            assert_eq!(
+                execution
+                    .eval_input_mode(
+                        &mut EvalContext::default(),
+                        &schema,
+                        &input,
+                        &[2, 0, 2],
+                        3,
+                        InvocationMode::Vector
+                    )
+                    .unwrap()
+                    .get_logical_scalar_ref(0)
+                    .as_int(),
+                Some(&7)
+            );
+        }
+        assert!(execution.regexps.is_empty());
+        assert_eq!(input.1.get(), 0);
+        assert_eq!(
+            crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.get()),
+            0
+        );
+    }
+
+    #[test]
+    fn test_execution_literal_regexp_repeat_and_node_isolation() {
+        let integer: FieldType = FieldTypeTp::LongLong.into();
+        let mut nodes = vec![
+            RpnExpressionNode::Constant {
+                value: ScalarValue::Int(Some(3)),
+                field_type: integer.clone(),
+            },
+            RpnExpressionNode::Repeat {
+                end: 16,
+                supported_type: true,
+                field_type: integer.clone(),
+            },
+        ];
+        // Two occurrences in one root. A wrapping addition consumes both results.
+        for start in [2, 8] {
+            let mut occurrence = literal_regexp_program(b"a", None).into_inner();
+            for node in &mut occurrence {
+                match node {
+                    RpnExpressionNode::OrderedRows { end, .. } => *end += start,
+                    RpnExpressionNode::RegexpArgument { target, .. } => *target += start,
+                    _ => (),
+                }
+            }
+            nodes.extend(occurrence);
+        }
+        nodes.push(RpnExpressionNode::FnCall {
+            func_meta: arithmetic_fn_meta::<IntIntPlus>(),
+            args_len: 2,
+            field_type: integer.clone(),
+            metadata: Box::new(()),
+        });
+        nodes.push(RpnExpressionNode::RepeatEnd {
+            field_type: integer.clone(),
+        });
+        let schema = [FieldTypeTp::VarString.into()];
+        let program = RpnExpression::finish(nodes, &schema, integer).unwrap();
+        let input = RegexpInput(
+            ScalarValue::Bytes(Some(b"abc".to_vec())),
+            Default::default(),
+        );
+        let mut execution = RpnExecution::new(&program, false);
+        crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.set(0));
+        for _ in 0..2 {
+            let result = execution
+                .eval_input_mode(
+                    &mut EvalContext::default(),
+                    &schema,
+                    &input,
+                    &[0],
+                    1,
+                    InvocationMode::Scalar,
+                )
+                .unwrap();
+            assert_eq!(result.get_logical_scalar_ref(0).as_int(), Some(&0));
+        }
+        assert_eq!(input.1.get(), 12);
+        assert_eq!(execution.regexps.len(), 2);
+        assert_eq!(
+            crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.get()),
+            2
+        );
     }
 
     #[test]

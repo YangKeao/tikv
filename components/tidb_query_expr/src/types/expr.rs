@@ -52,6 +52,12 @@ pub enum RpnExpressionNode {
         count: usize,
         field_type: FieldType,
     },
+    /// Builder guarantees literal pattern and optional literal match type.
+    /// Arguments and their guards still execute on every invocation.
+    NativeRegexpLike {
+        args_len: usize,
+        field_type: FieldType,
+    },
     /// Current raw parameter converted in the shared loop, once per invocation.
     NativeParameterDecimal {
         order: usize,
@@ -153,6 +159,7 @@ impl RpnExpressionNode {
             RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => field_type,
             RpnExpressionNode::FnCall { field_type, .. }
             | RpnExpressionNode::RegexpArgument { field_type, .. }
+            | RpnExpressionNode::NativeRegexpLike { field_type, .. }
             | RpnExpressionNode::NativeParameterDecimal { field_type, .. }
             | RpnExpressionNode::NativeDate { field_type }
             | RpnExpressionNode::NativeCastReal { field_type }
@@ -180,6 +187,7 @@ impl RpnExpressionNode {
             RpnExpressionNode::ShortCircuitFnCall { .. } => ExprType::ScalarFunc,
             RpnExpressionNode::FnCall { .. }
             | RpnExpressionNode::RegexpArgument { .. }
+            | RpnExpressionNode::NativeRegexpLike { .. }
             | RpnExpressionNode::NativeParameterDecimal { .. }
             | RpnExpressionNode::NativeDate { .. }
             | RpnExpressionNode::NativeCastReal { .. }
@@ -568,6 +576,23 @@ impl RpnExpression {
                         states[*target] = Some(null_stack);
                     }
                 }
+                RpnExpressionNode::NativeRegexpLike {
+                    args_len,
+                    field_type,
+                } => {
+                    if !(2..=3).contains(args_len)
+                        || stack.len() < *args_len
+                        || !stack[stack.len() - args_len..]
+                            .iter()
+                            .all(|t| *t == EvalType::Bytes)
+                        || field_type.as_accessor().tp()
+                            != tidb_query_datatype::FieldTypeTp::LongLong
+                    {
+                        return Err(invalid());
+                    }
+                    stack.truncate(stack.len() - args_len);
+                    stack.push(EvalType::Int);
+                }
                 RpnExpressionNode::NativeParameterDecimal { field_type, .. } => {
                     if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::NewDecimal
                     {
@@ -715,6 +740,7 @@ impl RpnExpression {
         match last_node {
             RpnExpressionNode::FnCall { field_type, .. }
             | RpnExpressionNode::RegexpArgument { field_type, .. }
+            | RpnExpressionNode::NativeRegexpLike { field_type, .. }
             | RpnExpressionNode::NativeParameterDecimal { field_type, .. }
             | RpnExpressionNode::NativeDate { field_type }
             | RpnExpressionNode::NativeCastReal { field_type }
