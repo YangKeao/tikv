@@ -8,9 +8,41 @@ use tipb::FieldType;
 use super::super::function::RpnFnMeta;
 use crate::ShortCircuitFnMeta;
 
+/// Native expression values outside the original protobuf scalar domain.
+/// These are transported intact; individual kernels own range checks.
+#[derive(Clone, Debug)]
+pub enum ExpressionScalar {
+    Real(Option<f64>),
+    Decimal(Option<ExpressionDecimal>),
+}
+
+/// Exact expression-only Decimal data, independent of fixed-size storage.
+#[derive(Clone, Debug)]
+pub struct ExpressionDecimal {
+    pub negative: bool,
+    pub coefficient: Vec<u8>,
+    pub storage_scale: u32,
+    pub result_scale: u32,
+    pub declared_shape: Option<(i64, i64)>,
+}
+
 /// A type for each node in the RPN expression list.
 #[derive(Debug)]
 pub enum RpnExpressionNode {
+    /// Native IF control edges. Targets are instruction offsets, not subtrees.
+    JumpIfFalse {
+        target: usize,
+        field_type: FieldType,
+    },
+    Jump {
+        target: usize,
+        field_type: FieldType,
+    },
+    /// A native scalar whose full domain is wider than protobuf storage.
+    ExpressionConstant {
+        value: ExpressionScalar,
+        field_type: FieldType,
+    },
     /// Represents a function call that decides which arguments and rows need to
     /// be evaluated. Each argument remains an independent RPN expression.
     ShortCircuitFnCall {
@@ -44,8 +76,11 @@ impl RpnExpressionNode {
     pub fn field_type(&self) -> &FieldType {
         match self {
             RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => field_type,
-            RpnExpressionNode::FnCall { field_type, .. } => field_type,
-            RpnExpressionNode::Constant { field_type, .. } => field_type,
+            RpnExpressionNode::FnCall { field_type, .. }
+            | RpnExpressionNode::JumpIfFalse { field_type, .. }
+            | RpnExpressionNode::Jump { field_type, .. } => field_type,
+            RpnExpressionNode::Constant { field_type, .. }
+            | RpnExpressionNode::ExpressionConstant { field_type, .. } => field_type,
             RpnExpressionNode::ColumnRef { .. } => panic!(),
         }
     }
@@ -57,7 +92,9 @@ impl RpnExpressionNode {
 
         match self {
             RpnExpressionNode::ShortCircuitFnCall { .. } => ExprType::ScalarFunc,
-            RpnExpressionNode::FnCall { .. } => ExprType::ScalarFunc,
+            RpnExpressionNode::FnCall { .. }
+            | RpnExpressionNode::JumpIfFalse { .. }
+            | RpnExpressionNode::Jump { .. } => ExprType::ScalarFunc,
             RpnExpressionNode::Constant { value, .. } => match value.eval_type() {
                 EvalType::Bytes => ExprType::Bytes,
                 EvalType::DateTime => ExprType::MysqlTime,
@@ -71,6 +108,10 @@ impl RpnExpressionNode {
                 EvalType::VectorFloat32 => ExprType::TiDbVectorFloat32,
             },
             RpnExpressionNode::ColumnRef { .. } => ExprType::ColumnRef,
+            RpnExpressionNode::ExpressionConstant { value, .. } => match value {
+                ExpressionScalar::Real(_) => ExprType::Float64,
+                ExpressionScalar::Decimal(_) => ExprType::MysqlDecimal,
+            },
         }
     }
 
@@ -197,8 +238,11 @@ impl RpnExpression {
         assert!(!self.nodes.is_empty());
         let last_node = self.nodes.last().unwrap();
         match last_node {
-            RpnExpressionNode::FnCall { field_type, .. } => field_type,
-            RpnExpressionNode::Constant { field_type, .. } => field_type,
+            RpnExpressionNode::FnCall { field_type, .. }
+            | RpnExpressionNode::JumpIfFalse { field_type, .. }
+            | RpnExpressionNode::Jump { field_type, .. } => field_type,
+            RpnExpressionNode::Constant { field_type, .. }
+            | RpnExpressionNode::ExpressionConstant { field_type, .. } => field_type,
             RpnExpressionNode::ColumnRef { offset } => &schema[*offset],
             RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => field_type,
         }

@@ -1,5 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::borrow::Cow;
+
 use tidb_query_common::Result;
 pub use tidb_query_datatype::codec::data_type::{
     BATCH_MAX_SIZE, IDENTICAL_LOGICAL_ROWS, LogicalRows,
@@ -12,7 +14,7 @@ use tipb::FieldType;
 
 use super::{
     RpnFnCallExtra,
-    expr::{RpnExpression, RpnExpressionNode},
+    expr::{ExpressionScalar, RpnExpression, RpnExpressionNode},
 };
 
 /// Represents a vector value node in the RPN stack.
@@ -105,6 +107,11 @@ impl RpnStackNodeVectorValue<'_> {
 /// owned vector value or a reference.
 #[derive(Debug)]
 pub enum RpnStackNode<'a> {
+    /// Full-domain native scalar; no protobuf constructor emits this variant.
+    ExpressionScalar {
+        value: Cow<'a, ExpressionScalar>,
+        field_type: &'a FieldType,
+    },
     /// Represents a scalar value. Comes from a constant node in expression
     /// list.
     Scalar {
@@ -125,7 +132,8 @@ impl RpnStackNode<'_> {
     #[inline]
     pub fn field_type(&self) -> &FieldType {
         match self {
-            RpnStackNode::Scalar { field_type, .. } => field_type,
+            RpnStackNode::Scalar { field_type, .. }
+            | RpnStackNode::ExpressionScalar { field_type, .. } => field_type,
             RpnStackNode::Vector { field_type, .. } => field_type,
         }
     }
@@ -135,7 +143,7 @@ impl RpnStackNode<'_> {
     pub fn scalar_value(&self) -> Option<&ScalarValue> {
         match self {
             RpnStackNode::Scalar { value, .. } => Some(*value),
-            RpnStackNode::Vector { .. } => None,
+            RpnStackNode::Vector { .. } | RpnStackNode::ExpressionScalar { .. } => None,
         }
     }
 
@@ -143,7 +151,7 @@ impl RpnStackNode<'_> {
     #[inline]
     pub fn vector_value(&self) -> Option<&RpnStackNodeVectorValue<'_>> {
         match self {
-            RpnStackNode::Scalar { .. } => None,
+            RpnStackNode::Scalar { .. } | RpnStackNode::ExpressionScalar { .. } => None,
             RpnStackNode::Vector { value, .. } => Some(value),
         }
     }
@@ -151,7 +159,10 @@ impl RpnStackNode<'_> {
     /// Whether this is a `Scalar` variant.
     #[inline]
     pub fn is_scalar(&self) -> bool {
-        matches!(self, RpnStackNode::Scalar { .. })
+        matches!(
+            self,
+            RpnStackNode::Scalar { .. } | RpnStackNode::ExpressionScalar { .. }
+        )
     }
 
     /// Whether this is a `Vector` variant.
@@ -163,7 +174,9 @@ impl RpnStackNode<'_> {
     /// Gets the actual vector value.
     pub fn take_vector_value(self) -> Result<VectorValue> {
         match self {
-            RpnStackNode::Scalar { .. } => Err(other_err!("take_vector_value on Scalar variant")),
+            RpnStackNode::Scalar { .. } | RpnStackNode::ExpressionScalar { .. } => {
+                Err(other_err!("take_vector_value on Scalar variant"))
+            }
             RpnStackNode::Vector { value, .. } => value.take_vector_value(),
         }
     }
@@ -186,6 +199,9 @@ impl RpnStackNode<'_> {
                 physical_vector.get_scalar_ref(idx)
             }
             RpnStackNode::Scalar { value, .. } => value.as_scalar_value_ref(),
+            RpnStackNode::ExpressionScalar { .. } => {
+                panic!("native scalar requires a native-aware kernel")
+            }
         }
     }
 }
@@ -287,7 +303,40 @@ impl RpnExpression {
         // TODO: Is this stack can be reused?
         let mut stack = Vec::with_capacity(self.len());
 
-        for node in self.as_ref() {
+        let mut pc = 0;
+        while pc < self.len() {
+            let node = &self.as_ref()[pc];
+            match node {
+                RpnExpressionNode::JumpIfFalse { target, .. } => {
+                    let condition = stack
+                        .pop()
+                        .ok_or_else(|| other_err!("missing IF condition"))?;
+                    let truth = match condition {
+                        RpnStackNode::Scalar {
+                            value: ScalarValue::Int(v),
+                            ..
+                        } => v.is_some_and(|v| v != 0),
+                        _ => {
+                            return Err(other_err!(
+                                "native IF currently requires a scalar integer condition"
+                            ));
+                        }
+                    };
+                    if *target <= pc || *target > self.len() {
+                        return Err(other_err!("invalid IF target"));
+                    }
+                    pc = if truth { pc + 1 } else { *target };
+                    continue;
+                }
+                RpnExpressionNode::Jump { target, .. } => {
+                    if *target <= pc || *target > self.len() {
+                        return Err(other_err!("invalid jump target"));
+                    }
+                    pc = *target;
+                    continue;
+                }
+                _ => {}
+            }
             let (consumed_args, result) = Self::eval_one_node(
                 ctx,
                 schema,
@@ -299,6 +348,7 @@ impl RpnExpression {
             )?;
             stack.truncate(stack.len() - consumed_args);
             stack.push(result);
+            pc += 1;
         }
 
         assert_eq!(stack.len(), 1);
@@ -316,6 +366,16 @@ impl RpnExpression {
         stack: &[RpnStackNode<'a>],
     ) -> Result<(usize, RpnStackNode<'a>)> {
         match node {
+            RpnExpressionNode::JumpIfFalse { .. } | RpnExpressionNode::Jump { .. } => {
+                Err(other_err!("control edge outside RPN loop"))
+            }
+            RpnExpressionNode::ExpressionConstant { value, field_type } => Ok((
+                0,
+                RpnStackNode::ExpressionScalar {
+                    value: Cow::Borrowed(value),
+                    field_type,
+                },
+            )),
             RpnExpressionNode::Constant { value, field_type } => {
                 Ok((0, RpnStackNode::Scalar { value, field_type }))
             }
@@ -368,6 +428,15 @@ impl RpnExpression {
                 assert!(stack.len() >= *args_len);
                 let stack_slice_begin = stack.len() - *args_len;
                 let stack_slice = &stack[stack_slice_begin..];
+                if stack_slice
+                    .iter()
+                    .any(|arg| matches!(arg, RpnStackNode::ExpressionScalar { .. }))
+                {
+                    return Err(other_err!(
+                        "kernel {} does not yet admit native scalar arguments",
+                        func_meta.name
+                    ));
+                }
                 let mut call_extra = RpnFnCallExtra { ret_field_type };
                 let ret = (func_meta.fn_ptr)(
                     ctx,
@@ -394,9 +463,12 @@ impl RpnExpression {
 mod tests {
     #![allow(clippy::float_cmp)]
 
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        borrow::Cow,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use test::{Bencher, black_box};
@@ -1922,6 +1994,8 @@ mod tests {
 
 #[cfg(test)]
 mod benches {
+    use std::borrow::Cow;
+
     use tidb_query_codegen::rpn_fn;
     use tidb_query_common::Result;
     use tidb_query_datatype::{

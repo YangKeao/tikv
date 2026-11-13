@@ -324,6 +324,11 @@ impl<Src: BatchExecutor> AggregationExecutorImpl<Src> for SlowHashAggregationImp
             // we'll then remove them if the group already exists
             for (i, group_by_result) in self.group_by_results_unsafe.iter().enumerate() {
                 match group_by_result {
+                    RpnStackNode::ExpressionScalar { .. } => {
+                        return Err(other_err!(
+                            "protobuf executor does not admit native expression values"
+                        ));
+                    }
                     RpnStackNode::Vector { value, field_type } => {
                         value.as_ref().encode_sort_key(
                             value.logical_rows_struct().get_idx(logical_row_idx),
@@ -364,6 +369,11 @@ impl<Src: BatchExecutor> AggregationExecutorImpl<Src> for SlowHashAggregationImp
             for (i, col_index) in self.extra_group_by_col_index.iter().enumerate() {
                 let group_by_result = &self.group_by_results_unsafe[*col_index];
                 match group_by_result {
+                    RpnStackNode::ExpressionScalar { .. } => {
+                        return Err(other_err!(
+                            "protobuf executor does not admit native expression values"
+                        ));
+                    }
                     RpnStackNode::Vector { value, field_type } => {
                         debug_assert!(value.as_ref().eval_type() == EvalType::Bytes);
                         value.as_ref().encode(

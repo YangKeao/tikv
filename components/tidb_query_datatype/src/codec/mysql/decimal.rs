@@ -952,6 +952,34 @@ pub enum RoundMode {
 }
 
 impl Decimal {
+    /// Exact base-1e9 parts, including fraction digits hidden by result scale.
+    pub fn to_parts(&self) -> (u8, u8, u8, bool, [u32; 9]) {
+        (
+            self.int_cnt,
+            self.frac_cnt,
+            self.result_frac_cnt,
+            self.negative,
+            self.word_buf,
+        )
+    }
+
+    /// Import an exact decimal without text or floating-point conversion.
+    pub fn from_parts(parts: (u8, u8, u8, bool, [u32; 9])) -> Result<Self> {
+        let (int_cnt, frac_cnt, result_frac_cnt, negative, word_buf) = parts;
+        let used = (usize::from(int_cnt) + 8) / 9 + (usize::from(frac_cnt) + 8) / 9;
+        if used > 9 || result_frac_cnt > 81 || word_buf[..used].iter().any(|w| *w >= 1_000_000_000)
+        {
+            return Err(box_err!("invalid exact Decimal parts"));
+        }
+        Ok(Self {
+            int_cnt,
+            frac_cnt,
+            result_frac_cnt,
+            negative,
+            word_buf,
+        })
+    }
+
     /// abs the Decimal into a new Decimal.
     #[inline]
     pub fn abs(mut self) -> Res<Decimal> {

@@ -108,6 +108,11 @@ impl<Src: BatchExecutor> BatchSelectionExecutor<Src> {
                 &src_logical_rows_copy,
                 src_logical_rows_copy.len(),
             )? {
+                RpnStackNode::ExpressionScalar { .. } => {
+                    return Err(other_err!(
+                        "protobuf executor does not admit native expression values"
+                    ));
+                }
                 RpnStackNode::Scalar { value, .. } => {
                     update_logical_rows_by_scalar_value(
                         &mut src_result.logical_rows,

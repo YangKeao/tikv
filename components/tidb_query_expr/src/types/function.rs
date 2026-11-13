@@ -256,6 +256,9 @@ impl<'a, A: EvaluableRef<'a>, E: Evaluator<'a>> Evaluator<'a> for ArgConstructor
         metadata: &(dyn Any + Send),
     ) -> Result<VectorValue> {
         match &args[self.arg_index] {
+            RpnStackNode::ExpressionScalar { .. } => {
+                Err(other_err!("native scalar requires a native-aware kernel"))
+            }
             RpnStackNode::Scalar { value, .. } => {
                 let v = A::borrow_scalar_value_ref(value.as_scalar_value_ref());
                 let new_def = Arg {

@@ -313,3 +313,15 @@ Companion docs:
 - `src/server/service/kv.rs` is the RPC entry point.
 - `src/storage` provides snapshots and the lock-related behavior.
 - `components/in_memory_engine` can accelerate snapshot-backed reads indirectly.
+
+## Native expression adapter checkpoint
+
+The experimental sibling Rust TiDB adapter can build flat native IF control
+edges and full-domain expression constants in RpnExpression. They execute in
+the existing expr_eval loop. The protobuf builder does not emit these nodes;
+its eager IF and flagged AND/OR semantics remain unchanged. Native floating
+constants can carry NaN without weakening the protobuf NotNan domain. Native
+Decimal constants retain coefficient data, stored/display scales and declared
+shape without passing through fixed-size storage. Current protobuf executors
+reject those extra result variants explicitly. Native kernel conversion,
+dynamic IF demand and default frontend integration remain separate gates.

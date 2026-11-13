@@ -132,6 +132,11 @@ fn merge_short_circuit_arg_result<Op: ScLogicalOp>(
     let mut resolved_count = 0;
     let is_first = result.is_empty();
     match arg_result {
+        RpnStackNode::ExpressionScalar { .. } => {
+            return Err(other_err!(
+                "wire logical function does not admit native scalar arguments"
+            ));
+        }
         RpnStackNode::Scalar { value, .. } => {
             let value = match value {
                 ScalarValue::Int(_) | ScalarValue::Enum(_) => value.as_int().copied(),
