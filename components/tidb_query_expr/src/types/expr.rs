@@ -40,11 +40,43 @@ pub enum InvocationMode {
     Vector,
 }
 
+/// Projection traversal is separate from a function's invocation mode.
+#[derive(Debug, Clone, Copy)]
+pub enum OutputOrder {
+    Columns,
+    Rows,
+}
+
 /// A type for each node in the RPN expression list.
 #[derive(Debug)]
 pub enum RpnExpressionNode {
+    /// BENCHMARK evaluates its body anew, after count and type demand checks.
+    Repeat {
+        end: usize,
+        supported_type: bool,
+        field_type: FieldType,
+    },
+    RepeatEnd {
+        field_type: FieldType,
+    },
+    /// Names are build-time tokens; NULL assignment leaves the session
+    /// unchanged.
+    UserVariable {
+        name: String,
+        write: bool,
+        field_type: FieldType,
+    },
+    /// Native session RNG and per-occurrence constant-seed contract.
+    Rand {
+        seeded: bool,
+        constant_seed: bool,
+        field_type: FieldType,
+    },
     /// Native row fallback: condition and demanded child share one row scope.
-    OrderedRows { end: usize, field_type: FieldType },
+    OrderedRows {
+        end: usize,
+        field_type: FieldType,
+    },
     /// Scalar numeric demand skips the right child after a NULL left operand.
     NullGuard {
         target: usize,
@@ -89,7 +121,9 @@ pub enum RpnExpressionNode {
 
     /// Represents a reference to a column in the columns specified in
     /// evaluation.
-    ColumnRef { offset: usize },
+    ColumnRef {
+        offset: usize,
+    },
 }
 
 impl RpnExpressionNode {
@@ -102,7 +136,11 @@ impl RpnExpressionNode {
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
             | RpnExpressionNode::Jump { field_type, .. }
             | RpnExpressionNode::NullGuard { field_type, .. }
-            | RpnExpressionNode::OrderedRows { field_type, .. } => field_type,
+            | RpnExpressionNode::OrderedRows { field_type, .. }
+            | RpnExpressionNode::Rand { field_type, .. }
+            | RpnExpressionNode::UserVariable { field_type, .. }
+            | RpnExpressionNode::Repeat { field_type, .. }
+            | RpnExpressionNode::RepeatEnd { field_type } => field_type,
             RpnExpressionNode::Constant { field_type, .. }
             | RpnExpressionNode::ExpressionConstant { field_type, .. } => field_type,
             RpnExpressionNode::ColumnRef { .. } => panic!(),
@@ -120,7 +158,11 @@ impl RpnExpressionNode {
             | RpnExpressionNode::JumpIfFalse { .. }
             | RpnExpressionNode::Jump { .. }
             | RpnExpressionNode::NullGuard { .. }
-            | RpnExpressionNode::OrderedRows { .. } => ExprType::ScalarFunc,
+            | RpnExpressionNode::OrderedRows { .. }
+            | RpnExpressionNode::Rand { .. }
+            | RpnExpressionNode::UserVariable { .. }
+            | RpnExpressionNode::Repeat { .. }
+            | RpnExpressionNode::RepeatEnd { .. } => ExprType::ScalarFunc,
             RpnExpressionNode::Constant { value, .. } => match value.eval_type() {
                 EvalType::Bytes => ExprType::Bytes,
                 EvalType::DateTime => ExprType::MysqlTime,
@@ -285,10 +327,42 @@ impl RpnExpression {
         let mut states: Vec<Option<Vec<EvalType>>> = vec![None; nodes.len() + 1];
         states[0] = Some(Vec::new());
         let mut jumps = std::collections::HashMap::new();
+        let mut repeat_ends = std::collections::HashMap::new();
         let mut regions = Vec::new();
         for (pc, node) in nodes.iter().enumerate() {
             while regions.last().is_some_and(|&(_, end)| pc >= end) {
                 regions.pop();
+            }
+            if let RpnExpressionNode::Repeat {
+                end,
+                supported_type,
+                ..
+            } = node
+            {
+                if *end <= pc + 1
+                    || *end > nodes.len()
+                    || !matches!(nodes[end - 1], RpnExpressionNode::RepeatEnd { .. })
+                    || repeat_ends.insert(end - 1, *supported_type).is_some()
+                {
+                    return Err(invalid());
+                }
+                for (at, candidate) in nodes.iter().enumerate() {
+                    let targets: &[usize] = match candidate {
+                        RpnExpressionNode::JumpIfFalse { target, end, .. } => &[*target, *end],
+                        RpnExpressionNode::Jump { target, .. }
+                        | RpnExpressionNode::NullGuard { target, .. } => &[*target],
+                        RpnExpressionNode::Repeat { end, .. }
+                        | RpnExpressionNode::OrderedRows { end, .. } => &[*end],
+                        _ => &[],
+                    };
+                    for target in targets {
+                        if (at > pc && at < *end && *target > end - 1)
+                            || ((at < pc || at >= *end) && *target > pc && *target < *end)
+                        {
+                            return Err(invalid());
+                        }
+                    }
+                }
             }
             if let RpnExpressionNode::NullGuard { target, .. } = node {
                 if *target <= pc || *target > nodes.len() {
@@ -326,6 +400,63 @@ impl RpnExpression {
             };
             let mut successors = vec![pc + 1];
             match node {
+                RpnExpressionNode::Repeat {
+                    end, field_type, ..
+                } => {
+                    if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::LongLong {
+                        return Err(invalid());
+                    }
+                    if stack.pop() != Some(EvalType::Int) {
+                        return Err(invalid());
+                    }
+                    let mut skipped = stack.clone();
+                    skipped.push(EvalType::Int);
+                    if let Some(previous) = &states[*end] {
+                        if previous != &skipped {
+                            return Err(invalid());
+                        }
+                    } else {
+                        states[*end] = Some(skipped);
+                    }
+                }
+                RpnExpressionNode::RepeatEnd { field_type } => {
+                    if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::LongLong {
+                        return Err(invalid());
+                    }
+                    let supported = repeat_ends.get(&pc).ok_or_else(invalid)?;
+                    if *supported && stack.pop().is_none() {
+                        return Err(invalid());
+                    }
+                    stack.push(EvalType::Int);
+                }
+                RpnExpressionNode::UserVariable {
+                    write, field_type, ..
+                } => {
+                    if *write && stack.pop() != Some(EvalType::Bytes) {
+                        return Err(invalid());
+                    }
+                    if EvalType::try_from(field_type.as_accessor().tp())
+                        .map_err(|e| other_err!("{}", e))?
+                        != EvalType::Bytes
+                    {
+                        return Err(invalid());
+                    }
+                    stack.push(EvalType::Bytes);
+                }
+                RpnExpressionNode::Rand {
+                    seeded, field_type, ..
+                } => {
+                    if *seeded && stack.pop() != Some(EvalType::Int) {
+                        return Err(invalid());
+                    }
+                    if EvalType::try_from(field_type.as_accessor().tp())
+                        .map_err(|e| other_err!("{}", e))?
+                        != EvalType::Real
+                    {
+                        return Err(invalid());
+                    }
+                    stack.push(EvalType::Real);
+                }
                 RpnExpressionNode::OrderedRows { end, .. } => {
                     if *end <= pc + 1 || *end > nodes.len() {
                         return Err(invalid());
@@ -335,7 +466,8 @@ impl RpnExpression {
                             RpnExpressionNode::JumpIfFalse { target, end, .. } => &[*target, *end],
                             RpnExpressionNode::Jump { target, .. }
                             | RpnExpressionNode::NullGuard { target, .. } => &[*target],
-                            RpnExpressionNode::OrderedRows { end, .. } => &[*end],
+                            RpnExpressionNode::OrderedRows { end, .. }
+                            | RpnExpressionNode::Repeat { end, .. } => &[*end],
                             _ => &[],
                         };
                         for target in targets {
@@ -489,7 +621,11 @@ impl RpnExpression {
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
             | RpnExpressionNode::Jump { field_type, .. }
             | RpnExpressionNode::NullGuard { field_type, .. }
-            | RpnExpressionNode::OrderedRows { field_type, .. } => field_type,
+            | RpnExpressionNode::OrderedRows { field_type, .. }
+            | RpnExpressionNode::Rand { field_type, .. }
+            | RpnExpressionNode::UserVariable { field_type, .. }
+            | RpnExpressionNode::Repeat { field_type, .. }
+            | RpnExpressionNode::RepeatEnd { field_type } => field_type,
             RpnExpressionNode::Constant { field_type, .. }
             | RpnExpressionNode::ExpressionConstant { field_type, .. } => field_type,
             RpnExpressionNode::ColumnRef { offset } => &schema[*offset],

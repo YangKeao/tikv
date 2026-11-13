@@ -14,14 +14,32 @@ use tipb::FieldType;
 
 use super::{
     RpnFnCallExtra,
-    expr::{ExpressionScalar, ExpressionVector, InvocationMode, RpnExpression, RpnExpressionNode},
+    expr::{
+        ExpressionScalar, ExpressionVector, InvocationMode, OutputOrder, RpnExpression,
+        RpnExpressionNode,
+    },
 };
 
 /// A demanded column read. The evaluation context is not borrowed by results.
 pub type InputResult<'a> = Result<RpnStackNode<'a>>;
 
-/// Data adapters supply values only; the RPN loop owns expression evaluation.
+/// Adapters supply data and concrete session capabilities; the loop owns
+/// evaluation.
 pub trait InputColumns {
+    fn get_string_variable(&self, _name: &str) -> Result<Option<Vec<u8>>> {
+        Err(other_err!("variable reads unavailable"))
+    }
+    fn set_string_variable(&self, _name: &str, _value: &[u8]) -> Result<()> {
+        Err(other_err!("variable writes unavailable"))
+    }
+
+    fn rand_next(&self) -> Option<f64> {
+        None
+    }
+    fn rand_seeded_next(&self, _key: usize, _seed: i64) -> Option<f64> {
+        None
+    }
+
     fn read<'a>(
         &'a self,
         schema: &'a [FieldType],
@@ -353,6 +371,55 @@ impl RpnExpression {
         )
     }
 
+    /// Both frontend projections share the same expression loop and traversal.
+    pub fn eval_group<'a>(
+        programs: &[(&'a Self, &'a [FieldType], &'a dyn InputColumns)],
+        ctx: &mut EvalContext,
+        rows: &'a [usize],
+        order: OutputOrder,
+    ) -> Result<Vec<RpnStackNode<'a>>> {
+        if rows.is_empty() || rows.len() > BATCH_MAX_SIZE {
+            return Err(other_err!("invalid group row count"));
+        }
+        match order {
+            OutputOrder::Columns => programs
+                .iter()
+                .map(|(program, schema, input)| {
+                    program.eval_input(ctx, schema, *input, rows, rows.len())
+                })
+                .collect(),
+            OutputOrder::Rows => {
+                let mut columns: Vec<Vec<RpnStackNode<'a>>> = (0..programs.len())
+                    .map(|_| Vec::with_capacity(rows.len()))
+                    .collect();
+                for i in 0..rows.len() {
+                    for (out, (program, schema, input)) in columns.iter_mut().zip(programs) {
+                        out.push(program.eval_input_mode(
+                            ctx,
+                            schema,
+                            *input,
+                            &rows[i..i + 1],
+                            1,
+                            InvocationMode::Scalar,
+                        )?);
+                    }
+                }
+                let positions: Vec<_> = (0..rows.len()).map(|i| [i]).collect();
+                columns
+                    .into_iter()
+                    .zip(programs)
+                    .map(|(values, (program, schema, _))| {
+                        merge_selected_values(
+                            values.iter().zip(&positions).map(|(v, p)| (v, &p[..])),
+                            rows.len(),
+                            program.ret_field_type(schema),
+                        )
+                    })
+                    .collect()
+            }
+        }
+    }
+
     /// Evaluate with a demanded input adapter using the same instruction loop.
     pub fn eval_input<'a>(
         &'a self,
@@ -429,6 +496,14 @@ impl RpnExpression {
             branch_depth: usize,
             field_type: &'a FieldType,
         }
+        struct Repeat<'a> {
+            start: usize,
+            end: usize,
+            remaining: u64,
+            depth: usize,
+            field_type: &'a FieldType,
+        }
+        let mut repeats: Vec<Repeat<'a>> = Vec::new();
         let mut ordered: Vec<Ordered<'a>> = Vec::new();
         let mut mode = mode;
         let mut branches: Vec<Branch<'a>> = Vec::new();
@@ -436,6 +511,22 @@ impl RpnExpression {
         let mut active_count = output_rows;
         let mut pc = 0;
         loop {
+            if repeats.last().is_some_and(|repeat| repeat.end - 1 == pc) {
+                let repeat = repeats.last_mut().unwrap();
+                if stack.len() != repeat.depth + 1 {
+                    return Err(other_err!("invalid repeat stack"));
+                }
+                stack.pop();
+                repeat.remaining -= 1;
+                if repeat.remaining != 0 {
+                    pc = repeat.start;
+                } else {
+                    let repeat = repeats.pop().unwrap();
+                    stack.push(integer_result(Some(0), repeat.field_type));
+                    pc = repeat.end;
+                }
+                continue;
+            }
             if ordered
                 .last()
                 .is_some_and(|frame| frame.end == pc && frame.branch_depth == branches.len())
@@ -505,6 +596,52 @@ impl RpnExpression {
             }
             let node = &self.as_ref()[pc];
             match node {
+                RpnExpressionNode::Repeat {
+                    end,
+                    supported_type,
+                    field_type,
+                } => {
+                    if mode != InvocationMode::Scalar
+                        || active_count != 1
+                        || *end <= pc + 1
+                        || *end > self.len()
+                    {
+                        return Err(other_err!("invalid repeat invocation"));
+                    }
+                    let count = stack
+                        .pop()
+                        .ok_or_else(|| other_err!("missing repeat count"))?;
+                    let ScalarValueRef::Int(count) = count.get_logical_scalar_ref(0) else {
+                        return Err(other_err!("repeat requires integer count"));
+                    };
+                    if count.is_none_or(|count| *count < 0) {
+                        stack.push(integer_result(None, field_type));
+                        pc = *end;
+                        continue;
+                    }
+                    if !supported_type {
+                        return Err(tidb_query_common::error::EvaluateError::Custom {
+                            code: 1105,
+                            msg: "VectorFloat32 is not supported for BENCHMARK()".into(),
+                        }
+                        .into());
+                    }
+                    let count = *count.unwrap() as u64;
+                    if count == 0 {
+                        stack.push(integer_result(Some(0), field_type));
+                        pc = *end;
+                        continue;
+                    }
+                    repeats.push(Repeat {
+                        start: pc + 1,
+                        end: *end,
+                        remaining: count,
+                        depth: stack.len(),
+                        field_type,
+                    });
+                    pc += 1;
+                    continue;
+                }
                 RpnExpressionNode::OrderedRows { end, field_type } => {
                     if *end <= pc || *end > self.len() {
                         return Err(other_err!("invalid ordered region"));
@@ -654,10 +791,87 @@ impl RpnExpression {
         stack: &[RpnStackNode<'a>],
     ) -> Result<(usize, RpnStackNode<'a>)> {
         match node {
+            RpnExpressionNode::UserVariable {
+                name,
+                write,
+                field_type,
+            } => {
+                let mut values =
+                    VectorValue::with_capacity(output_rows, tidb_query_datatype::EvalType::Bytes);
+                for row in 0..output_rows {
+                    let value = if *write {
+                        let ScalarValueRef::Bytes(value) = stack
+                            .last()
+                            .ok_or_else(|| other_err!("missing variable value"))?
+                            .get_logical_scalar_ref(row)
+                        else {
+                            return Err(other_err!("variable value requires bytes"));
+                        };
+                        if let Some(value) = value {
+                            input_physical_columns.set_string_variable(name, value)?;
+                        }
+                        value.map(|v| v.to_vec())
+                    } else {
+                        input_physical_columns.get_string_variable(name)?
+                    };
+                    values.push_bytes(value);
+                }
+                Ok((
+                    usize::from(*write),
+                    RpnStackNode::Vector {
+                        value: RpnStackNodeVectorValue::Generated {
+                            physical_value: values,
+                        },
+                        field_type,
+                    },
+                ))
+            }
+            RpnExpressionNode::Rand {
+                seeded,
+                constant_seed,
+                field_type,
+            } => {
+                let mut values = Vec::with_capacity(output_rows);
+                for row in 0..output_rows {
+                    let value = if *seeded {
+                        let seed = match stack
+                            .last()
+                            .ok_or_else(|| other_err!("missing RAND seed"))?
+                            .get_logical_scalar_ref(row)
+                        {
+                            ScalarValueRef::Int(seed) => seed.copied().unwrap_or(0),
+                            _ => return Err(other_err!("RAND seed requires integer")),
+                        };
+                        let stateful = if *constant_seed {
+                            input_physical_columns
+                                .rand_seeded_next(std::ptr::from_ref(node) as usize, seed)
+                        } else {
+                            None
+                        };
+                        stateful.unwrap_or_else(|| {
+                            crate::impl_math::MySqlRng::new_with_seed(seed).gen()
+                        })
+                    } else {
+                        input_physical_columns
+                            .rand_next()
+                            .ok_or_else(|| other_err!("RAND requires a session"))?
+                    };
+                    values.push(Some(value));
+                }
+                Ok((
+                    usize::from(*seeded),
+                    RpnStackNode::ExpressionVector {
+                        value: ExpressionVector::Real(values),
+                        field_type,
+                    },
+                ))
+            }
             RpnExpressionNode::JumpIfFalse { .. }
             | RpnExpressionNode::Jump { .. }
             | RpnExpressionNode::NullGuard { .. }
-            | RpnExpressionNode::OrderedRows { .. } => {
+            | RpnExpressionNode::OrderedRows { .. }
+            | RpnExpressionNode::Repeat { .. }
+            | RpnExpressionNode::RepeatEnd { .. } => {
                 Err(other_err!("control edge outside RPN loop"))
             }
             RpnExpressionNode::ExpressionConstant { value, field_type } => Ok((
@@ -753,6 +967,15 @@ impl RpnExpression {
     }
 }
 
+fn integer_result(value: Option<i64>, field_type: &FieldType) -> RpnStackNode<'_> {
+    RpnStackNode::Vector {
+        value: RpnStackNodeVectorValue::Generated {
+            physical_value: VectorValue::Int(ChunkedVecSized::from(vec![value])),
+        },
+        field_type,
+    }
+}
+
 fn merge_branch_values<'a>(
     then_value: RpnStackNode<'a>,
     else_value: RpnStackNode<'a>,
@@ -791,6 +1014,27 @@ where
             Ok(RpnStackNode::Vector {
                 value: RpnStackNodeVectorValue::Generated {
                     physical_value: VectorValue::Int(ChunkedVecSized::from(values)),
+                },
+                field_type,
+            })
+        }
+        EvalType::Bytes => {
+            let mut values = vec![None; count];
+            for (source, positions) in inputs {
+                for (i, out) in positions.iter().enumerate() {
+                    let ScalarValueRef::Bytes(value) = source.get_logical_scalar_ref(i) else {
+                        return Err(other_err!("byte result mismatch"));
+                    };
+                    values[*out] = value.map(|v| v.to_vec());
+                }
+            }
+            let mut result = VectorValue::with_capacity(count, EvalType::Bytes);
+            for value in values {
+                result.push_bytes(value);
+            }
+            Ok(RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Generated {
+                    physical_value: result,
                 },
                 field_type,
             })

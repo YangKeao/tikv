@@ -1378,8 +1378,10 @@ fn cast_uint_as_json(val: Option<&Int>) -> Result<Option<Json>> {
 fn parse_native_json(val: Option<BytesRef>) -> Result<Option<Json>> {
     use tidb_query_common::error::EvaluateError;
     let Some(val) = val else { return Ok(None) };
-    let text = std::str::from_utf8(val)
-        .map_err(|_| EvaluateError::Other("invalid UTF-8 string datum".into()))?;
+    let text = std::str::from_utf8(val).map_err(|_| EvaluateError::Custom {
+        code: 1105,
+        msg: "invalid UTF-8 string datum".into(),
+    })?;
     let empty = text.trim().is_empty();
     text.parse().map(Some).map_err(|_| {
         EvaluateError::Custom {

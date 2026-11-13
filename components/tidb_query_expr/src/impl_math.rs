@@ -699,13 +699,13 @@ impl MySqlRng {
         Self::new_with_seed(nsec)
     }
 
-    fn new_with_seed(seed: i64) -> Self {
+    pub(crate) fn new_with_seed(seed: i64) -> Self {
         let seed1 = (seed.wrapping_mul(0x10001).wrapping_add(55555555)) as u32 % MAX_RAND_VALUE;
         let seed2 = (seed.wrapping_mul(0x10000001)) as u32 % MAX_RAND_VALUE;
         MySqlRng { seed1, seed2 }
     }
 
-    fn gen(&mut self) -> f64 {
+    pub(crate) fn gen(&mut self) -> f64 {
         self.seed1 = (self.seed1 * 3 + self.seed2) % MAX_RAND_VALUE;
         self.seed2 = (self.seed1 + self.seed2 + 33) % MAX_RAND_VALUE;
         f64::from(self.seed1) / f64::from(MAX_RAND_VALUE)
