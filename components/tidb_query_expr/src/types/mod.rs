@@ -2,7 +2,7 @@
 
 mod expr;
 mod native_arithmetic;
-pub use native_arithmetic::NativeArithmetic;
+pub use native_arithmetic::{NativeArithmetic, NativeDiagnosticPart};
 mod expr_builder;
 mod expr_eval;
 pub mod function;

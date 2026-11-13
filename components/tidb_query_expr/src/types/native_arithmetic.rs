@@ -17,6 +17,51 @@ pub enum NativeArithmetic {
     Divide,
 }
 
+/// Static source text and demanded raw parameter positions for overflow
+/// diagnostics.
+#[derive(Debug, Clone)]
+pub enum NativeDiagnosticPart {
+    Text(String),
+    Parameter(usize),
+}
+
+pub(super) fn parameter_decimal<'a>(
+    order: usize,
+    field_type: &'a FieldType,
+    input: &dyn InputColumns,
+) -> Result<RpnStackNode<'a>> {
+    let value = input.parameter(order)?;
+    let field = tidb_datatype::infer_param_type_from_datum(&value);
+    let value = if value.is_null() || field.code() == tidb_datatype::FieldTypeCode::Null {
+        None
+    } else {
+        let context = tidb_datatype::ConversionContext::new(
+            input.conversion_flags(),
+            input.conversion_location(),
+            input.conversion_warnings(),
+        );
+        let (value, error) = value
+            .to_typed_decimal_with_context(&field, &context)
+            .map_err(|_| EvaluateError::Custom {
+                code: 1105,
+                msg: "constant cannot be converted to decimal".into(),
+            })?;
+        if let Some(error) = error {
+            let error = error.to_sql_error();
+            return Err(EvaluateError::Custom {
+                code: i32::from(error.code),
+                msg: error.message,
+            }
+            .into());
+        }
+        Some(value)
+    };
+    Ok(RpnStackNode::ExpressionScalar {
+        value: std::borrow::Cow::Owned(ExpressionScalar::Decimal(value)),
+        field_type,
+    })
+}
+
 pub(super) fn is_null(value: &RpnStackNode<'_>, row: usize) -> bool {
     match value {
         RpnStackNode::ExpressionScalar { value, .. } => match value.as_ref() {
@@ -75,6 +120,7 @@ pub(super) fn evaluate<'a>(
     op: NativeArithmetic,
     field_type: &'a FieldType,
     overflow: &str,
+    diagnostic: &[NativeDiagnosticPart],
     args: &[RpnStackNode<'_>],
     rows: usize,
     input: &dyn InputColumns,
@@ -82,9 +128,30 @@ pub(super) fn evaluate<'a>(
     let [left, right] = args else {
         return Err(other_err!("binary arithmetic requires two operands"));
     };
-    let overflow = || EvaluateError::Custom {
-        code: 1690,
-        msg: overflow.to_owned(),
+    let overflow = || -> Result<EvaluateError> {
+        let mut message = String::new();
+        for part in diagnostic {
+            match part {
+                NativeDiagnosticPart::Text(text) => message.push_str(text),
+                NativeDiagnosticPart::Parameter(order) => {
+                    let Some(text) = input.parameter(*order)?.numeric_diagnostic_text(false) else {
+                        return Ok(EvaluateError::Custom {
+                            code: 1690,
+                            msg: "DECIMAL value is out of range".into(),
+                        });
+                    };
+                    message.push_str(&text);
+                }
+            }
+        }
+        Ok(EvaluateError::Custom {
+            code: 1690,
+            msg: if diagnostic.is_empty() {
+                overflow.to_owned()
+            } else {
+                message
+            },
+        })
     };
     let value = match EvalType::try_from(field_type.as_accessor().tp())
         .map_err(|e| other_err!("{}", e))?
@@ -106,7 +173,7 @@ pub(super) fn evaluate<'a>(
                         NativeArithmetic::Divide => a / b,
                     };
                     if !value.is_finite() {
-                        return Err(overflow().into());
+                        return Err(overflow()?.into());
                     }
                     Ok(Some(value))
                 })
@@ -133,7 +200,7 @@ pub(super) fn evaluate<'a>(
                         }
                     };
                     if warning == Some(DecimalCodecWarning::Overflow) {
-                        return Err(overflow().into());
+                        return Err(overflow()?.into());
                     }
                     if matches!(op, NativeArithmetic::Divide)
                         && warning == Some(DecimalCodecWarning::Truncated)

@@ -26,6 +26,19 @@ pub type InputResult<'a> = Result<RpnStackNode<'a>>;
 /// Adapters supply data and concrete session capabilities; the loop owns
 /// evaluation.
 pub trait InputColumns {
+    /// Parameter bindings are immutable for the duration of one evaluation.
+    fn parameter(&self, _order: usize) -> Result<tidb_datatype::Datum> {
+        Err(other_err!("native parameters unavailable"))
+    }
+    fn conversion_flags(&self) -> tidb_datatype::ConversionFlags {
+        tidb_datatype::STRICT_FLAGS
+    }
+    fn conversion_location(&self) -> tidb_datatype::ConversionLocation {
+        tidb_datatype::ConversionLocation::UTC
+    }
+    fn conversion_warnings(&self) -> &dyn tidb_datatype::ConversionWarningAppender {
+        &tidb_datatype::IgnoreConversionWarnings
+    }
     fn div_precision_increment(&self) -> u32 {
         4
     }
@@ -949,6 +962,14 @@ impl RpnExpression {
             | RpnExpressionNode::RepeatEnd { .. } => {
                 Err(other_err!("control edge outside RPN loop"))
             }
+            RpnExpressionNode::NativeParameterDecimal { order, field_type } => Ok((
+                0,
+                super::native_arithmetic::parameter_decimal(
+                    *order,
+                    field_type,
+                    input_physical_columns,
+                )?,
+            )),
             RpnExpressionNode::NativeCastReal { field_type } => Ok((
                 1,
                 super::native_arithmetic::cast_real(
@@ -963,6 +984,7 @@ impl RpnExpression {
             RpnExpressionNode::NativeArithmetic {
                 op,
                 overflow,
+                diagnostic,
                 field_type,
             } => {
                 if stack.len() < 2 {
@@ -974,6 +996,7 @@ impl RpnExpression {
                         *op,
                         field_type,
                         overflow,
+                        diagnostic,
                         &stack[stack.len() - 2..],
                         output_rows,
                         input_physical_columns,

@@ -50,12 +50,18 @@ pub enum RpnExpressionNode {
         count: usize,
         field_type: FieldType,
     },
+    /// Current raw parameter converted in the shared loop, once per invocation.
+    NativeParameterDecimal {
+        order: usize,
+        field_type: FieldType,
+    },
     NativeCastReal {
         field_type: FieldType,
     },
     NativeArithmetic {
         op: super::NativeArithmetic,
         overflow: String,
+        diagnostic: Vec<super::NativeDiagnosticPart>,
         field_type: FieldType,
     },
     /// BENCHMARK evaluates its body anew, after count and type demand checks.
@@ -142,6 +148,7 @@ impl RpnExpressionNode {
             RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => field_type,
             RpnExpressionNode::FnCall { field_type, .. }
             | RpnExpressionNode::RegexpArgument { field_type, .. }
+            | RpnExpressionNode::NativeParameterDecimal { field_type, .. }
             | RpnExpressionNode::NativeCastReal { field_type }
             | RpnExpressionNode::NativeArithmetic { field_type, .. }
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
@@ -167,6 +174,7 @@ impl RpnExpressionNode {
             RpnExpressionNode::ShortCircuitFnCall { .. } => ExprType::ScalarFunc,
             RpnExpressionNode::FnCall { .. }
             | RpnExpressionNode::RegexpArgument { .. }
+            | RpnExpressionNode::NativeParameterDecimal { .. }
             | RpnExpressionNode::NativeCastReal { .. }
             | RpnExpressionNode::NativeArithmetic { .. }
             | RpnExpressionNode::JumpIfFalse { .. }
@@ -552,6 +560,13 @@ impl RpnExpression {
                         states[*target] = Some(null_stack);
                     }
                 }
+                RpnExpressionNode::NativeParameterDecimal { field_type, .. } => {
+                    if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::NewDecimal
+                    {
+                        return Err(invalid());
+                    }
+                    stack.push(EvalType::Decimal);
+                }
                 RpnExpressionNode::NativeCastReal { field_type } => {
                     if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::Double
                         || stack.pop() != Some(EvalType::Bytes)
@@ -683,6 +698,7 @@ impl RpnExpression {
         match last_node {
             RpnExpressionNode::FnCall { field_type, .. }
             | RpnExpressionNode::RegexpArgument { field_type, .. }
+            | RpnExpressionNode::NativeParameterDecimal { field_type, .. }
             | RpnExpressionNode::NativeCastReal { field_type }
             | RpnExpressionNode::NativeArithmetic { field_type, .. }
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
