@@ -54,7 +54,7 @@ pub(super) fn parameter_decimal<'a>(
             }
             .into());
         }
-        Some(value)
+        Some(value.into())
     };
     Ok(RpnStackNode::ExpressionScalar {
         value: std::borrow::Cow::Owned(ExpressionScalar::Decimal(value)),
@@ -92,11 +92,7 @@ fn real(value: &RpnStackNode<'_>, row: usize) -> Result<Option<f64>> {
     }
 }
 pub(super) fn valid_decimal(value: &ExpressionDecimal) -> bool {
-    let coefficient = value.coefficient_digits().as_bytes();
-    !coefficient.is_empty()
-        && coefficient.iter().all(u8::is_ascii_digit)
-        && coefficient.len() >= value.storage_scale() as usize
-        && value.scale() <= value.storage_scale()
+    value.is_valid()
 }
 fn decimal<'a>(value: &'a RpnStackNode<'_>, row: usize) -> Result<Option<&'a ExpressionDecimal>> {
     let v = match value {

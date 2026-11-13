@@ -24,7 +24,7 @@ pub enum ExpressionVector {
 }
 
 /// Full native value and algorithms share their existing lower-level owner.
-pub use tidb_datatype::Decimal as ExpressionDecimal;
+pub use tidb_datatype::DecimalArithmeticValue as ExpressionDecimal;
 
 /// Invocation contract is independent of vector width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
