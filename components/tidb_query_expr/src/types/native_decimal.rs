@@ -202,6 +202,10 @@ impl Decimal {
     }
 
     pub(crate) fn mul_mysql(&self, other: &Decimal) -> (Decimal, Option<DecimalCodecWarning>) {
+        // The native fast path preserves hidden digits that the word path rounds.
+        if let Some(product) = self.try_mul_mysql_fast(other) {
+            return (product, None);
+        }
         let left = MyDecimalWords::from_decimal(self);
         let right = MyDecimalWords::from_decimal(other);
         let words_int_left = digits_to_words(left.digits_int.max(0) as usize) as i32;
@@ -332,6 +336,24 @@ impl Decimal {
             value.round_or_truncate_to_scale_with_storage(result_scale as i32, true, storage_scale),
             warning,
         )
+    }
+
+    fn try_mul_mysql_fast(&self, other: &Decimal) -> Option<Decimal> {
+        let result_scale = self.result_scale.checked_add(other.result_scale)?;
+        if result_scale > CODEC_MAX_DECIMAL_SCALE as u32 {
+            return None;
+        }
+        let left = self.digits().parse::<i128>().ok()?;
+        let right = other.digits().parse::<i128>().ok()?;
+        let product = left.checked_mul(right)?;
+        let negative = (product < 0) || (self.negative != other.negative && product != 0);
+        let storage_scale = self.storage_scale.checked_add(other.storage_scale)?;
+        Some(Decimal::new_with_storage(
+            negative,
+            product.unsigned_abs().to_string(),
+            result_scale,
+            storage_scale,
+        ))
     }
 
     pub(crate) fn div_mysql_with_warning(
