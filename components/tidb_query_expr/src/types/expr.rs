@@ -107,6 +107,12 @@ pub enum RpnExpressionNode {
         field_type: FieldType,
     },
     /// Native IF control edges. Targets are instruction offsets, not subtrees.
+    /// Keep a non-NULL scalar and jump, or discard NULL and evaluate the next
+    /// arm.
+    JumpIfNotNull {
+        target: usize,
+        field_type: FieldType,
+    },
     JumpIfFalse {
         target: usize,
         end: usize,
@@ -173,6 +179,7 @@ impl RpnExpressionNode {
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
             | RpnExpressionNode::Jump { field_type, .. }
             | RpnExpressionNode::NullGuard { field_type, .. }
+            | RpnExpressionNode::JumpIfNotNull { field_type, .. }
             | RpnExpressionNode::OrderedRows { field_type, .. }
             | RpnExpressionNode::Rand { field_type, .. }
             | RpnExpressionNode::UserVariable { field_type, .. }
@@ -205,6 +212,7 @@ impl RpnExpressionNode {
             | RpnExpressionNode::JumpIfFalse { .. }
             | RpnExpressionNode::Jump { .. }
             | RpnExpressionNode::NullGuard { .. }
+            | RpnExpressionNode::JumpIfNotNull { .. }
             | RpnExpressionNode::OrderedRows { .. }
             | RpnExpressionNode::Rand { .. }
             | RpnExpressionNode::UserVariable { .. }
@@ -384,7 +392,8 @@ impl RpnExpression {
             RpnExpressionNode::JumpIfFalse { target, end, .. } => [Some(target), Some(end)],
             RpnExpressionNode::Jump { target, .. }
             | RpnExpressionNode::RegexpArgument { target, .. }
-            | RpnExpressionNode::NullGuard { target, .. } => [Some(target), None],
+            | RpnExpressionNode::NullGuard { target, .. }
+            | RpnExpressionNode::JumpIfNotNull { target, .. } => [Some(target), None],
             RpnExpressionNode::Repeat { end, .. } | RpnExpressionNode::OrderedRows { end, .. } => {
                 [Some(end), None]
             }
@@ -433,6 +442,7 @@ impl RpnExpression {
                 }
             }
             if let RpnExpressionNode::NullGuard { target, .. }
+            | RpnExpressionNode::JumpIfNotNull { target, .. }
             | RpnExpressionNode::RegexpArgument { target, .. } = node
             {
                 if *target <= pc || *target > nodes.len() {
@@ -571,6 +581,22 @@ impl RpnExpression {
                         return Err(invalid());
                     }
                     successors.push(*target);
+                }
+                RpnExpressionNode::JumpIfNotNull { target, field_type } => {
+                    if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::LongLong
+                        || available == 0
+                        || stack.last() != Some(&EvalType::Int)
+                    {
+                        return Err(invalid());
+                    }
+                    if let Some(previous) = &states[*target] {
+                        if previous != &stack {
+                            return Err(invalid());
+                        }
+                    } else {
+                        states[*target] = Some(stack.clone());
+                    }
+                    stack.pop();
                 }
                 RpnExpressionNode::JumpIfFalse { target, .. } => {
                     if pop(&mut stack) != Some(EvalType::Int) {
@@ -817,6 +843,7 @@ impl RpnExpression {
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
             | RpnExpressionNode::Jump { field_type, .. }
             | RpnExpressionNode::NullGuard { field_type, .. }
+            | RpnExpressionNode::JumpIfNotNull { field_type, .. }
             | RpnExpressionNode::OrderedRows { field_type, .. }
             | RpnExpressionNode::Rand { field_type, .. }
             | RpnExpressionNode::UserVariable { field_type, .. }
@@ -912,6 +939,50 @@ mod tests {
             preserve_mode: false,
         };
         assert!(RpnExpression::finish(missing_boundary, &[], result_type()).is_err());
+    }
+
+    #[test]
+    fn test_finish_checks_non_null_jump_and_operand() {
+        use RpnExpressionNode::*;
+        use tidb_query_datatype::{FieldTypeTp, codec::data_type::ScalarValue};
+
+        let ty = || FieldTypeTp::LongLong.into();
+        let int = || Constant {
+            value: ScalarValue::Int(None),
+            field_type: ty(),
+        };
+        let guard = |target| JumpIfNotNull {
+            target,
+            field_type: ty(),
+        };
+        assert!(RpnExpression::finish(vec![int(), guard(3), int()], &[], ty()).is_ok());
+        assert!(RpnExpression::finish(vec![int(), guard(1), int()], &[], ty()).is_err());
+        assert!(RpnExpression::finish(vec![int(), guard(4), int()], &[], ty()).is_err());
+        let bytes = Constant {
+            value: ScalarValue::Bytes(Some(vec![])),
+            field_type: FieldTypeTp::VarString.into(),
+        };
+        assert!(RpnExpression::finish(vec![int(), guard(3), bytes], &[], ty()).is_err());
+        assert!(
+            RpnExpression::finish(
+                vec![
+                    int(),
+                    LogicalStart {
+                        and: false,
+                        end: 7,
+                        preserve_mode: true
+                    },
+                    guard(4),
+                    int(),
+                    LogicalNext,
+                    int(),
+                    LogicalEnd { field_type: ty() },
+                ],
+                &[],
+                ty()
+            )
+            .is_err()
+        );
     }
 
     #[test]

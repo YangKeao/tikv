@@ -1073,6 +1073,21 @@ impl RpnExpression {
                     }
                     continue;
                 }
+                RpnExpressionNode::JumpIfNotNull { target, .. } => {
+                    if mode != InvocationMode::Scalar || *target <= pc || *target > self.len() {
+                        return Err(other_err!("invalid non-NULL jump"));
+                    }
+                    let value = stack
+                        .last()
+                        .ok_or_else(|| other_err!("missing non-NULL jump operand"))?;
+                    if super::native_arithmetic::is_null(value, 0) {
+                        stack.pop();
+                        pc += 1;
+                    } else {
+                        pc = *target;
+                    }
+                    continue;
+                }
                 RpnExpressionNode::JumpIfFalse {
                     target,
                     end,
@@ -1268,6 +1283,7 @@ impl RpnExpression {
             | RpnExpressionNode::Jump { .. }
             | RpnExpressionNode::RegexpArgument { .. }
             | RpnExpressionNode::NullGuard { .. }
+            | RpnExpressionNode::JumpIfNotNull { .. }
             | RpnExpressionNode::OrderedRows { .. }
             | RpnExpressionNode::Repeat { .. }
             | RpnExpressionNode::RepeatEnd { .. } => {
