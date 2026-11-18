@@ -161,6 +161,12 @@ pub trait CmpOp {
     }
 
     fn compare_order(ordering: std::cmp::Ordering) -> bool;
+
+    /// Result for an unordered native DOUBLE comparison, such as NaN.
+    #[inline]
+    fn compare_unordered() -> bool {
+        false
+    }
 }
 
 pub struct CmpOpLt;
@@ -205,6 +211,11 @@ impl CmpOp for CmpOpNe {
     #[inline]
     fn compare_order(ordering: Ordering) -> bool {
         ordering != Ordering::Equal
+    }
+
+    #[inline]
+    fn compare_unordered() -> bool {
+        true
     }
 }
 

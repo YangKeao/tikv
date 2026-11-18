@@ -1427,7 +1427,8 @@ impl RpnExpression {
                         RpnStackNode::ExpressionScalar { .. }
                             | RpnStackNode::ExpressionVector { .. }
                     )
-                }) {
+                }) && !metadata.is::<super::native_arithmetic::NativeDoubleComparisonArgs>()
+                {
                     return Err(other_err!(
                         "kernel {} does not yet admit native scalar arguments",
                         func_meta.name

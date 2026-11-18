@@ -2,10 +2,17 @@
 
 use tidb_datatype::{DecimalCodecWarning, float_warning_input, str_to_float};
 use tidb_query_common::error::{EvaluateError, Result};
-use tidb_query_datatype::{EvalType, FieldTypeAccessor, codec::data_type::ScalarValueRef};
+use tidb_query_datatype::{
+    EvalType, FieldTypeAccessor, FieldTypeTp,
+    codec::data_type::{ChunkedVecSized, Real, ScalarValueRef, VectorValue},
+};
 use tipb::FieldType;
 
-use super::{ExpressionDecimal, ExpressionScalar, ExpressionVector, InputColumns, RpnStackNode};
+use super::{
+    ExpressionDecimal, ExpressionScalar, ExpressionVector, InputColumns, RpnExpressionNode,
+    RpnFnMeta, RpnStackNode,
+};
+use crate::impl_compare::{BasicComparer, CmpOp, compare_fn_meta};
 
 /// Native arithmetic uses full expression values; PB signatures remain
 /// unchanged.
@@ -96,6 +103,40 @@ fn real(value: &RpnStackNode<'_>, row: usize) -> Result<Option<f64>> {
         _ => Err(other_err!("native real operand required")),
     }
 }
+pub(super) struct NativeDoubleComparisonArgs;
+
+/// Compare full-domain native doubles without converting them to PB Real.
+pub fn native_real_comparison_node<F: CmpOp>() -> RpnExpressionNode {
+    let func_meta = RpnFnMeta {
+        fn_ptr: |_, rows, args, _, _| {
+            let [lhs, rhs] = args else {
+                return Err(other_err!("native DOUBLE comparison requires two operands"));
+            };
+            let mut values = Vec::with_capacity(rows);
+            for row in 0..rows {
+                values.push(match (real(lhs, row)?, real(rhs, row)?) {
+                    (None, None) => F::compare_null(),
+                    (None, _) | (_, None) => F::compare_partial_null(),
+                    (Some(lhs), Some(rhs)) => {
+                        let matched = lhs
+                            .partial_cmp(&rhs)
+                            .map_or_else(F::compare_unordered, F::compare_order);
+                        Some(i64::from(matched))
+                    }
+                });
+            }
+            Ok(VectorValue::Int(ChunkedVecSized::from(values)))
+        },
+        ..compare_fn_meta::<BasicComparer<Real, F>>()
+    };
+    RpnExpressionNode::FnCall {
+        func_meta,
+        args_len: 2,
+        field_type: FieldTypeTp::LongLong.into(),
+        metadata: Box::new(NativeDoubleComparisonArgs),
+    }
+}
+
 pub(super) fn valid_decimal(value: &ExpressionDecimal) -> bool {
     value.is_valid()
 }
