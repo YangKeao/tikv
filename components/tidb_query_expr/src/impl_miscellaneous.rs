@@ -8,7 +8,7 @@ use std::{
 
 use rand::Rng;
 use tidb_query_codegen::rpn_fn;
-use tidb_query_common::Result;
+use tidb_query_common::{Result, error::EvaluateError};
 use tidb_query_datatype::codec::{data_type::*, mysql::RoundMode};
 use uuid::Uuid;
 
@@ -64,10 +64,12 @@ pub fn any_value_bytes(args: &[Option<BytesRef>]) -> Result<Option<Bytes>> {
 #[rpn_fn]
 #[inline]
 pub fn inet_aton(addr: BytesRef) -> Result<Option<Int>> {
-    let addr = String::from_utf8_lossy(addr);
+    Ok(parse_inet_aton(&String::from_utf8_lossy(addr)))
+}
 
+fn parse_inet_aton(addr: &str) -> Option<i64> {
     if addr.is_empty() || addr.ends_with('.') {
-        return Ok(None);
+        return None;
     }
     let (mut byte_result, mut result, mut dot_count): (u64, u64, usize) = (0, 0, 0);
     for c in addr.chars() {
@@ -75,17 +77,17 @@ pub fn inet_aton(addr: BytesRef) -> Result<Option<Int>> {
             let digit = c as u64 - '0' as u64;
             byte_result = byte_result * 10 + digit;
             if byte_result > 255 {
-                return Ok(None);
+                return None;
             }
         } else if c == '.' {
             dot_count += 1;
             if dot_count > 3 {
-                return Ok(None);
+                return None;
             }
             result = (result << 8) + byte_result;
             byte_result = 0;
         } else {
-            return Ok(None);
+            return None;
         }
     }
     if dot_count == 1 {
@@ -94,7 +96,7 @@ pub fn inet_aton(addr: BytesRef) -> Result<Option<Int>> {
         result <<= 8;
     }
 
-    Ok(Some(((result << 8) + byte_result) as i64))
+    Some(((result << 8) + byte_result) as i64)
 }
 
 #[rpn_fn(nullable)]
@@ -208,6 +210,40 @@ pub fn is_ipv6(addr: Option<BytesRef>) -> Result<Option<Int>> {
         },
         None => Some(0),
     })
+}
+
+fn sql_ip_text(addr: BytesRef<'_>) -> Result<&str> {
+    std::str::from_utf8(addr).map_err(|_| {
+        EvaluateError::Custom {
+            code: 1105,
+            msg: "invalid UTF-8 string datum".into(),
+        }
+        .into()
+    })
+}
+
+/// The native string signature rejects malformed UTF-8.
+#[rpn_fn]
+pub fn inet_aton_utf8(addr: BytesRef) -> Result<Option<Int>> {
+    Ok(parse_inet_aton(sql_ip_text(addr)?))
+}
+
+/// The native predicate permits leading zeroes in four decimal components.
+#[rpn_fn]
+pub fn is_ipv4_utf8(addr: BytesRef) -> Result<Option<Int>> {
+    let text = sql_ip_text(addr)?;
+    let mut parts = text.split('.');
+    let dotted_quad =
+        (0..4).all(|_| parts.next().is_some_and(|part| !part.is_empty())) && parts.next().is_none();
+    let valid = dotted_quad && parse_inet_aton(text).is_some();
+    Ok(Some(i64::from(valid)))
+}
+
+/// The native predicate propagates NULL and reports malformed UTF-8.
+#[rpn_fn]
+pub fn is_ipv6_utf8(addr: BytesRef) -> Result<Option<Int>> {
+    sql_ip_text(addr)?;
+    is_ipv6(Some(addr))
 }
 
 #[rpn_fn(nullable)]
