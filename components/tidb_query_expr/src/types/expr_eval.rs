@@ -88,12 +88,29 @@ pub trait InputColumns {
                 value,
                 field_type: &schema[offset],
             }),
-            value => Ok(RpnStackNode::Vector {
-                value: RpnStackNodeVectorValue::Generated {
-                    physical_value: value.take_vector_value()?,
-                },
-                field_type: &schema[offset],
-            }),
+            RpnStackNode::Vector { value, field_type } => {
+                let schema_type = &schema[offset];
+                let field_type = match field_type {
+                    RpnVectorFieldType::Borrowed(field_type)
+                        if std::ptr::eq(field_type, schema_type) =>
+                    {
+                        schema_type.into()
+                    }
+                    RpnVectorFieldType::Borrowed(field_type) => {
+                        RpnVectorFieldType::Owned(Box::new(field_type.clone()))
+                    }
+                    RpnVectorFieldType::Owned(field_type) => RpnVectorFieldType::Owned(field_type),
+                };
+                Ok(RpnStackNode::Vector {
+                    value: RpnStackNodeVectorValue::Generated {
+                        physical_value: value.take_vector_value()?,
+                    },
+                    field_type,
+                })
+            }
+            RpnStackNode::ExpressionScalar { .. } => {
+                Err(other_err!("take_vector_value on Scalar variant"))
+            }
         }
     }
 }
@@ -111,7 +128,7 @@ impl InputColumns for LazyBatchColumnVec {
                 physical_value: self[offset].decoded(),
                 logical_rows: rows,
             },
-            field_type: &schema[offset],
+            field_type: (&schema[offset]).into(),
         })
     }
 }
@@ -201,6 +218,29 @@ impl RpnStackNodeVectorValue<'_> {
     }
 }
 
+/// A PB vector's field declaration, which may outlive a temporary row
+/// selection.
+#[derive(Debug)]
+pub enum RpnVectorFieldType<'a> {
+    Borrowed(&'a FieldType),
+    Owned(Box<FieldType>),
+}
+
+impl<'a> From<&'a FieldType> for RpnVectorFieldType<'a> {
+    fn from(field_type: &'a FieldType) -> Self {
+        Self::Borrowed(field_type)
+    }
+}
+
+impl AsRef<FieldType> for RpnVectorFieldType<'_> {
+    fn as_ref(&self) -> &FieldType {
+        match self {
+            Self::Borrowed(field_type) => field_type,
+            Self::Owned(field_type) => field_type,
+        }
+    }
+}
+
 /// A type for each node in the RPN evaluation stack. It can be one of a scalar
 /// value node or a vector value node. The vector value node can be either an
 /// owned vector value or a reference.
@@ -230,7 +270,7 @@ pub enum RpnStackNode<'a> {
     /// result.
     Vector {
         value: RpnStackNodeVectorValue<'a>,
-        field_type: &'a FieldType,
+        field_type: RpnVectorFieldType<'a>,
     },
 }
 
@@ -242,7 +282,7 @@ impl RpnStackNode<'_> {
             RpnStackNode::Scalar { field_type, .. }
             | RpnStackNode::ExpressionScalar { field_type, .. }
             | RpnStackNode::ExpressionVector { field_type, .. } => field_type,
-            RpnStackNode::Vector { field_type, .. } => field_type,
+            RpnStackNode::Vector { field_type, .. } => field_type.as_ref(),
             RpnStackNode::OwnedScalar(value) => &value.1,
         }
     }
@@ -893,7 +933,7 @@ impl RpnExpression {
                         let (width, physical_value) = frame.state.finish(&mut rows);
                         stack.push(RpnStackNode::Vector {
                             value: RpnStackNodeVectorValue::Generated { physical_value },
-                            field_type,
+                            field_type: field_type.into(),
                         });
                         active_count = width;
                         mode = frame.parent_mode;
@@ -1167,7 +1207,7 @@ impl RpnExpression {
                         value: RpnStackNodeVectorValue::Generated {
                             physical_value: values,
                         },
-                        field_type,
+                        field_type: field_type.into(),
                     },
                 ))
             }
@@ -1255,7 +1295,7 @@ impl RpnExpression {
                         value: RpnStackNodeVectorValue::Generated {
                             physical_value: values,
                         },
-                        field_type,
+                        field_type: field_type.into(),
                     },
                 ))
             }
@@ -1384,7 +1424,7 @@ impl RpnExpression {
                         value: RpnStackNodeVectorValue::Generated {
                             physical_value: ret,
                         },
-                        field_type: ret_field_type,
+                        field_type: ret_field_type.into(),
                     },
                 ))
             }
@@ -1397,7 +1437,7 @@ fn integer_result(value: Option<i64>, field_type: &FieldType) -> RpnStackNode<'_
         value: RpnStackNodeVectorValue::Generated {
             physical_value: VectorValue::Int(ChunkedVecSized::from(vec![value])),
         },
-        field_type,
+        field_type: field_type.into(),
     }
 }
 
@@ -1454,7 +1494,7 @@ where
                 value: RpnStackNodeVectorValue::Generated {
                     physical_value: VectorValue::Int(ChunkedVecSized::from(values)),
                 },
-                field_type,
+                field_type: field_type.into(),
             })
         }
         EvalType::Bytes => {
@@ -1475,7 +1515,7 @@ where
                 value: RpnStackNodeVectorValue::Generated {
                     physical_value: result,
                 },
-                field_type,
+                field_type: field_type.into(),
             })
         }
         EvalType::Real => {
@@ -1576,6 +1616,110 @@ mod tests {
         )))
     }
 
+    #[test]
+    fn test_public_logical_input_preserves_vector_declaration() {
+        use tidb_query_datatype::{FieldTypeFlag, codec::mysql::Duration};
+
+        struct Input {
+            columns: LazyBatchColumnVec,
+            hour_type: FieldType,
+            reads: std::cell::RefCell<Vec<(usize, Vec<usize>)>>,
+        }
+        impl InputColumns for Input {
+            fn read<'a>(
+                &'a self,
+                schema: &'a [FieldType],
+                offset: usize,
+                rows: &'a [usize],
+                ctx: &mut EvalContext,
+            ) -> InputResult<'a> {
+                self.reads.borrow_mut().push((offset, rows.to_vec()));
+                if offset == 0 {
+                    return self.columns.read(schema, offset, rows, ctx);
+                }
+                Ok(RpnStackNode::Vector {
+                    value: RpnStackNodeVectorValue::Ref {
+                        physical_value: self.columns[offset].decoded(),
+                        logical_rows: rows,
+                    },
+                    field_type: (&self.hour_type).into(),
+                })
+            }
+        }
+
+        let integer: FieldType = FieldTypeTp::LongLong.into();
+        let mut unsigned = integer.clone();
+        unsigned.as_mut_accessor().set_flag(FieldTypeFlag::UNSIGNED);
+        let schema = [integer.clone(), unsigned.clone()];
+        let mut duration: FieldType = FieldTypeTp::Duration.into();
+        duration.set_decimal(0);
+        let make_time = ExprDefBuilder::scalar_func(ScalarFuncSig::MakeTime, duration)
+            .push_child(ExprDefBuilder::column_ref(1, unsigned.clone()))
+            .push_child(ExprDefBuilder::constant_int(0))
+            .push_child(ExprDefBuilder::constant_real(0.0));
+        let rhs = ExprDefBuilder::scalar_func(ScalarFuncSig::LtDuration, integer.clone())
+            .push_child(make_time)
+            .push_child(ExprDefBuilder::constant_duration(Duration::zero()));
+        let expression = ExprDefBuilder::scalar_func(ScalarFuncSig::LogicalOr, integer.clone())
+            .push_child(ExprDefBuilder::column_ref(0, integer.clone()))
+            .push_child(rhs)
+            .build();
+        let mut ctx = short_circuit_context();
+        let program = RpnExpressionBuilder::build_from_expr_tree(expression, &mut ctx, 2).unwrap();
+        let rows = [2, 0, 1, 2];
+        let columns = LazyBatchColumnVec::from(vec![
+            VectorValue::Int(vec![Some(1), Some(0), None].into()),
+            VectorValue::Int(vec![Some(-1), Some(-1), Some(-1)].into()),
+        ]);
+        let mut signed = integer;
+        signed.set_flen(19);
+        let mut observations = Vec::new();
+        for (hour_type, expected) in [
+            (signed, [Some(1), Some(1), Some(1), Some(1)]),
+            (unsigned, [None, Some(1), Some(0), None]),
+        ] {
+            let input = Input {
+                columns: columns.clone(),
+                hour_type,
+                reads: Default::default(),
+            };
+            let selected = input
+                .read_selected(&schema, 1, &[2, 1, 2], &mut ctx)
+                .unwrap();
+            assert_eq!(selected.field_type(), &input.hour_type);
+            let selected_vector = selected.vector_value().unwrap();
+            assert_eq!(selected_vector.logical_rows(), &[0, 1, 2]);
+            assert_eq!(selected_vector.as_ref().to_int_vec(), &[Some(-1); 3]);
+            input.reads.borrow_mut().clear();
+            let result = program
+                .eval_input(&mut ctx, &schema, &input, &rows, rows.len())
+                .unwrap();
+            assert!(result.is_vector());
+            let values = result.vector_value().unwrap().as_ref().to_int_vec();
+            let reads = input.reads.borrow();
+            eprintln!(
+                "unsigned={}, reads={reads:?}, values={values:?}",
+                input.hour_type.is_unsigned()
+            );
+            assert_eq!(*reads, [(0, rows.to_vec()), (1, vec![2, 1, 2])]);
+            observations.push((values.to_vec(), expected));
+        }
+        let selected = columns
+            .read_selected(&schema, 1, &[2, 1, 2], &mut ctx)
+            .unwrap();
+        assert!(std::ptr::eq(selected.field_type(), &schema[1]));
+        let stored = program
+            .eval_decoded(&mut ctx, &schema, &columns, &rows, rows.len())
+            .unwrap();
+        assert_eq!(
+            stored.vector_value().unwrap().as_ref().to_int_vec(),
+            &[None, Some(1), Some(0), None],
+        );
+        for (actual, expected) in observations {
+            assert_eq!(actual, expected);
+        }
+    }
+
     #[rpn_fn(nullable)]
     fn short_circuit_counted_identity(v: Option<&Int>) -> Result<Option<Int>> {
         SHORT_CIRCUIT_RHS_EVAL_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -1648,7 +1792,7 @@ mod tests {
                 value: RpnStackNodeVectorValue::Generated {
                     physical_value: values,
                 },
-                field_type: &schema[0],
+                field_type: (&schema[0]).into(),
             })
         }
     }
@@ -3493,6 +3637,7 @@ mod tests {
 
     #[test]
     fn test_take_vector_value() {
+        let field_type: FieldType = FieldTypeTp::Double.into();
         let scalar_node = RpnStackNode::Scalar {
             value: &ScalarValue::Real(Real::new(10.0).ok()),
             field_type: &FieldTypeTp::Double.into(),
@@ -3507,7 +3652,7 @@ mod tests {
             value: (RpnStackNodeVectorValue::Generated {
                 physical_value: (column),
             }),
-            field_type: &FieldTypeTp::Double.into(),
+            field_type: (&field_type).into(),
         };
         let taked_value = vector_generate_node
             .take_vector_value()
@@ -3529,7 +3674,7 @@ mod tests {
                 physical_value: &column2,
                 logical_rows: &logical_rows,
             }),
-            field_type: &FieldTypeTp::Double.into(),
+            field_type: (&field_type).into(),
         };
         let taked_value = vector_generate_node
             .take_vector_value()
