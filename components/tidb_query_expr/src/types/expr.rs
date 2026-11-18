@@ -585,8 +585,10 @@ impl RpnExpression {
                 RpnExpressionNode::JumpIfNotNull { target, field_type } => {
                     let declared = EvalType::try_from(field_type.as_accessor().tp())
                         .map_err(|e| other_err!("{}", e))?;
-                    if !matches!(declared, EvalType::Int | EvalType::Real | EvalType::Decimal)
-                        || available == 0
+                    if !matches!(
+                        declared,
+                        EvalType::Int | EvalType::Real | EvalType::Decimal | EvalType::Bytes
+                    ) || available == 0
                         || stack.last() != Some(&declared)
                     {
                         return Err(invalid());
