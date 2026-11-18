@@ -2733,3 +2733,81 @@ fn test_select_with_commit_ts() {
         }
     }
 }
+
+#[test]
+fn test_short_circuit_computed_projection() {
+    let data = vec![(1, Some("invalid-int"), 0), (2, Some("2"), 1), (3, None, 1)];
+    let product = ProductTable::new();
+    let (_, endpoint) = init_with_data(&product, &data);
+    let columns = product.columns_info();
+    let expression = ExprDefBuilder::scalar_func(ScalarFuncSig::LogicalOr, FieldTypeTp::LongLong)
+        .push_child(
+            ExprDefBuilder::scalar_func(ScalarFuncSig::EqInt, FieldTypeTp::LongLong)
+                .push_child(ExprDefBuilder::column_ref(
+                    offset_for_column(&columns, product["count"].id) as usize,
+                    FieldTypeTp::LongLong,
+                ))
+                .push_child(ExprDefBuilder::constant_int(0)),
+        )
+        .push_child(
+            ExprDefBuilder::scalar_func(ScalarFuncSig::CastStringAsInt, FieldTypeTp::LongLong)
+                .push_child(ExprDefBuilder::column_ref(
+                    offset_for_column(&columns, product["name"].id) as usize,
+                    FieldTypeTp::VarString,
+                )),
+        )
+        .build();
+    for (flag, expected_warnings) in [
+        (
+            0,
+            vec![(
+                1292,
+                "evaluation failed: Truncated incorrect INTEGER value: 'invalid-int'",
+            )],
+        ),
+        (FLAG_ENABLE_SHORT_CIRCUIT_EXPRESSION, vec![]),
+    ] {
+        let req = DagSelect::from(&product)
+            .projection(vec![expression.clone()])
+            .output_offsets(Some(vec![0]))
+            .build_with(Context::default(), &[FLAG_TRUNCATE_AS_WARNING, flag]);
+        let mut dag = tipb::DagRequest::default();
+        dag.merge_from_bytes(req.get_data()).unwrap();
+        assert_eq!(dag.get_flags(), FLAG_TRUNCATE_AS_WARNING | flag);
+        assert_eq!(dag.get_output_offsets(), &[0]);
+        let [scan, projection] = dag.get_executors() else {
+            panic!("expected table scan followed by projection");
+        };
+        assert_eq!(scan.get_tp(), tipb::ExecType::TypeTableScan);
+        assert_eq!(projection.get_tp(), tipb::ExecType::TypeProjection);
+        assert_eq!(
+            projection.get_projection().get_exprs(),
+            std::slice::from_ref(&expression)
+        );
+
+        let raw = handle_request(&endpoint, req);
+        assert!(!raw.has_region_error(), "{raw:?}");
+        assert!(!raw.has_locked(), "{raw:?}");
+        assert!(raw.get_other_error().is_empty(), "{raw:?}");
+        let mut response = SelectResponse::default();
+        response.merge_from_bytes(raw.get_data()).unwrap();
+        assert!(!response.has_error(), "{response:?}");
+        let warnings: Vec<_> = response
+            .get_warnings()
+            .iter()
+            .map(|warning| (warning.get_code(), warning.get_msg()))
+            .collect();
+        assert_eq!(response.get_warning_count(), expected_warnings.len() as i64);
+        assert_eq!(warnings, expected_warnings);
+
+        let rows: Vec<_> = DagChunkSpliter::new(response.take_chunks().into(), 1).collect();
+        eprintln!(
+            "flags={}, rows={rows:?}, warnings={expected_warnings:?}",
+            dag.get_flags()
+        );
+        assert_eq!(
+            rows,
+            vec![vec![Datum::I64(1)], vec![Datum::I64(1)], vec![Datum::Null]]
+        );
+    }
+}
