@@ -180,6 +180,18 @@ pub fn is_ipv4_mapped(addr: Option<BytesRef>) -> Result<Option<i64>> {
     }))
 }
 
+/// SQL propagates NULL for binary address predicates.
+#[rpn_fn]
+pub fn is_ipv4_compat_or_null(addr: BytesRef) -> Result<Option<Int>> {
+    is_ipv4_compat(Some(addr))
+}
+
+/// SQL propagates NULL for binary address predicates.
+#[rpn_fn]
+pub fn is_ipv4_mapped_or_null(addr: BytesRef) -> Result<Option<Int>> {
+    is_ipv4_mapped(Some(addr))
+}
+
 #[rpn_fn(nullable)]
 #[inline]
 pub fn is_ipv6(addr: Option<BytesRef>) -> Result<Option<Int>> {
