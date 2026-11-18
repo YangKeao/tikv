@@ -113,7 +113,8 @@ impl<Src: BatchExecutor> BatchSelectionExecutor<Src> {
                         "protobuf executor does not admit native expression values"
                     ));
                 }
-                RpnStackNode::Scalar { value, .. } => {
+                node @ (RpnStackNode::Scalar { .. } | RpnStackNode::OwnedScalar(_)) => {
+                    let value = node.scalar_value().unwrap();
                     update_logical_rows_by_scalar_value(
                         &mut src_result.logical_rows,
                         &mut self.context,

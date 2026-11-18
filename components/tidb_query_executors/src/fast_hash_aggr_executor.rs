@@ -296,7 +296,8 @@ impl<Src: BatchExecutor> AggregationExecutorImpl<Src> for FastHashAggregationImp
                     "protobuf executor does not admit native expression values"
                 ));
             }
-            RpnStackNode::Scalar { value, .. } => {
+            node @ (RpnStackNode::Scalar { .. } | RpnStackNode::OwnedScalar(_)) => {
+                let value = node.scalar_value().unwrap();
                 match_template::match_template! {
                     TT = [Int, Bytes, Real, Duration, Decimal, DateTime, Enum, VectorFloat32],
                     match value {

@@ -324,7 +324,8 @@ impl<Src: BatchExecutor> AggregationExecutorImpl<Src> for SlowHashAggregationImp
             // we'll then remove them if the group already exists
             for (i, group_by_result) in self.group_by_results_unsafe.iter().enumerate() {
                 match group_by_result {
-                    RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
+                    RpnStackNode::ExpressionScalar { .. }
+                    | RpnStackNode::ExpressionVector { .. } => {
                         return Err(other_err!(
                             "protobuf executor does not admit native expression values"
                         ));
@@ -338,7 +339,9 @@ impl<Src: BatchExecutor> AggregationExecutorImpl<Src> for SlowHashAggregationImp
                         )?;
                         self.group_key_offsets.push(self.group_key_buffer.len());
                     }
-                    RpnStackNode::Scalar { value, field_type } => {
+                    node @ (RpnStackNode::Scalar { .. } | RpnStackNode::OwnedScalar(_)) => {
+                        let value = node.scalar_value().unwrap();
+                        let field_type = node.field_type();
                         match self.cached_encoded_result[i].as_ref() {
                             Some(b) => {
                                 self.group_key_buffer.extend_from_slice(b);
@@ -369,7 +372,8 @@ impl<Src: BatchExecutor> AggregationExecutorImpl<Src> for SlowHashAggregationImp
             for (i, col_index) in self.extra_group_by_col_index.iter().enumerate() {
                 let group_by_result = &self.group_by_results_unsafe[*col_index];
                 match group_by_result {
-                    RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
+                    RpnStackNode::ExpressionScalar { .. }
+                    | RpnStackNode::ExpressionVector { .. } => {
                         return Err(other_err!(
                             "protobuf executor does not admit native expression values"
                         ));
@@ -384,7 +388,9 @@ impl<Src: BatchExecutor> AggregationExecutorImpl<Src> for SlowHashAggregationImp
                         )?;
                         self.group_key_offsets.push(self.group_key_buffer.len());
                     }
-                    RpnStackNode::Scalar { value, field_type } => {
+                    node @ (RpnStackNode::Scalar { .. } | RpnStackNode::OwnedScalar(_)) => {
+                        let value = node.scalar_value().unwrap();
+                        let field_type = node.field_type();
                         debug_assert!(value.eval_type() == EvalType::Bytes);
 
                         let i = i + self.group_by_exps.len();

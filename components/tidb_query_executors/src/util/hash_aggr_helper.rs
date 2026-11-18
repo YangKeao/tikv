@@ -44,7 +44,8 @@ impl HashAggregationHelper {
                         "protobuf executor does not admit native expression values"
                     ));
                 }
-                RpnStackNode::Scalar { value, .. } => {
+                node @ (RpnStackNode::Scalar { .. } | RpnStackNode::OwnedScalar(_)) => {
+                    let value = node.scalar_value().unwrap();
                     match_template_evaltype! {
                         TT, match value.as_scalar_value_ref() {
                             ScalarValueRef::TT(scalar_value) => {
