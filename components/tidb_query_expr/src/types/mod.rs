@@ -19,5 +19,5 @@ pub use self::{
         BATCH_MAX_SIZE, InputColumns, InputResult, OwnedRpnExecution, RpnExecution,
         RpnExecutionRef, RpnStackNode, RpnStackNodeVectorValue,
     },
-    function::{RpnFnCallExtra, RpnFnMeta, ShortCircuitFnMeta},
+    function::{RpnFnCallExtra, RpnFnMeta},
 };

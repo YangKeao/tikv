@@ -78,3 +78,67 @@ pub fn rewrite_exp_for_bit_op(schema: &[FieldType], exp: &mut RpnExpression) -> 
     exp.push(node);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tidb_query_datatype::{
+        codec::{batch::LazyBatchColumnVec, data_type::VectorValue},
+        expr::{EvalConfig, EvalContext, Flag},
+    };
+    use tipb::ScalarFuncSig::*;
+    use tipb_helper::ExprDefBuilder;
+
+    use super::*;
+
+    #[test]
+    fn test_sum_appends_cast_to_pb_short_circuit_root() {
+        let declaration = FieldTypeBuilder::new()
+            .tp(FieldTypeTp::LongLong)
+            .flen(19)
+            .build();
+        let mut expression = ExprDefBuilder::scalar_func(LogicalOr, FieldTypeTp::LongLong)
+            .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong))
+            .push_child(
+                ExprDefBuilder::scalar_func(CastIntAsInt, FieldTypeTp::LongLong)
+                    .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong)),
+            )
+            .build();
+        expression.set_field_type(declaration.clone());
+        let schema = [FieldTypeTp::LongLong.into()];
+        let mut ctx = EvalContext::new(Arc::new(EvalConfig::from_flag(
+            Flag::ENABLE_SHORT_CIRCUIT_EXPRESSION,
+        )));
+        let mut program =
+            RpnExpressionBuilder::build_from_expr_tree(expression, &mut ctx, 1).unwrap();
+        assert_eq!(program.ret_field_type(&schema), &declaration);
+        assert!(!program.is_last_constant());
+        assert_eq!(program.work_count(), 4);
+        assert_eq!(program.column_ref_count(), 2);
+
+        rewrite_exp_for_sum_avg(&schema, &mut program).unwrap();
+        assert_eq!(
+            program.ret_field_type(&schema).as_accessor().tp(),
+            FieldTypeTp::NewDecimal
+        );
+        assert!(!program.is_last_constant());
+        assert_eq!(program.work_count(), 5);
+        assert_eq!(program.column_ref_count(), 2);
+        let mut columns =
+            LazyBatchColumnVec::from(vec![VectorValue::Int(vec![Some(9), None].into())]);
+        let value = program
+            .eval(&mut ctx, &schema, &mut columns, &[1, 0, 1], 3)
+            .unwrap();
+        assert!(value.get_logical_scalar_ref(0).as_decimal().is_none());
+        assert_eq!(
+            value
+                .get_logical_scalar_ref(1)
+                .as_decimal()
+                .unwrap()
+                .to_string(),
+            "1"
+        );
+        assert!(value.get_logical_scalar_ref(2).as_decimal().is_none());
+    }
+}

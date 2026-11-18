@@ -19,7 +19,6 @@ use super::{
     super::function::RpnFnMeta,
     expr::{RpnExpression, RpnExpressionNode},
 };
-use crate::ShortCircuitFnMeta;
 
 // Each active short-circuit call retains batch results and may retain row maps.
 // Bound nesting to keep both the evaluator stack and retained batch state
@@ -92,19 +91,15 @@ impl RpnExpressionBuilder {
         max_columns: usize,
     ) -> Result<RpnExpression> {
         let mut expr_nodes = Vec::new();
-        let mut build_ctx = RpnBuildContext::new(
-            ctx,
-            super::super::map_expr_node_to_rpn_func,
-            super::super::map_expr_node_to_sc_func,
-            max_columns,
-        );
+        let mut build_ctx =
+            RpnBuildContext::new(ctx, super::super::map_expr_node_to_rpn_func, max_columns);
         build_ctx.append_rpn_nodes_recursively(
             tree_node,
             ScalarFuncSig::Unspecified,
             0,
             &mut expr_nodes,
         )?;
-        Ok(RpnExpression::from(expr_nodes))
+        Ok(lower_program(expr_nodes))
     }
 
     /// Only used in tests, with a customized function mapper.
@@ -138,19 +133,14 @@ impl RpnExpressionBuilder {
         F: Fn(&Expr) -> Result<RpnFnMeta> + Copy,
     {
         let mut expr_nodes = Vec::new();
-        let mut build_ctx = RpnBuildContext::new(
-            ctx,
-            fn_mapper,
-            super::super::map_expr_node_to_sc_func,
-            max_columns,
-        );
+        let mut build_ctx = RpnBuildContext::new(ctx, fn_mapper, max_columns);
         build_ctx.append_rpn_nodes_recursively(
             tree_node,
             ScalarFuncSig::Unspecified,
             0,
             &mut expr_nodes,
         )?;
-        Ok(RpnExpression::from(expr_nodes))
+        Ok(lower_program(expr_nodes))
     }
 
     /// Creates a new builder instance.
@@ -248,6 +238,69 @@ impl AsRef<[RpnExpressionNode]> for RpnExpressionBuilder {
     }
 }
 
+enum BuildNode {
+    Instruction(RpnExpressionNode),
+    Logical {
+        sig: ScalarFuncSig,
+        args: Vec<Vec<BuildNode>>,
+        field_type: FieldType,
+    },
+}
+
+fn lower_program(nodes: Vec<BuildNode>) -> RpnExpression {
+    let mut instructions = Vec::with_capacity(nodes.len());
+    emit_nodes(nodes, &mut instructions);
+    instructions.into()
+}
+
+fn emit_nodes(nodes: Vec<BuildNode>, output: &mut Vec<RpnExpressionNode>) {
+    for node in nodes {
+        match node {
+            BuildNode::Instruction(node) => output.push(node),
+            BuildNode::Logical {
+                sig,
+                args,
+                field_type,
+            } => {
+                let start = output.len();
+                output.push(RpnExpressionNode::LogicalStart {
+                    and: sig == ScalarFuncSig::LogicalAnd,
+                    end: 0,
+                });
+                for arg in args {
+                    emit_logical_arg(sig, arg, output);
+                }
+                let last = output.last_mut().expect("logical call has operands");
+                debug_assert!(matches!(last, RpnExpressionNode::LogicalNext));
+                *last = RpnExpressionNode::LogicalEnd { field_type };
+                let end = output.len();
+                let RpnExpressionNode::LogicalStart { end: target, .. } = &mut output[start] else {
+                    unreachable!()
+                };
+                *target = end;
+            }
+        }
+    }
+}
+
+fn emit_logical_arg(
+    sig: ScalarFuncSig,
+    mut nodes: Vec<BuildNode>,
+    output: &mut Vec<RpnExpressionNode>,
+) {
+    if should_flatten(sig, &nodes) {
+        let BuildNode::Logical { args, .. } = nodes.pop().unwrap() else {
+            unreachable!()
+        };
+        for arg in args {
+            emit_logical_arg(sig, arg, output);
+        }
+    } else {
+        emit_nodes(nodes, output);
+        output.push(RpnExpressionNode::LogicalNext);
+    }
+}
+
 /// Transforms eval tree nodes into RPN nodes.
 ///
 /// Suppose that we have a function call:
@@ -283,31 +336,27 @@ impl AsRef<[RpnExpressionNode]> for RpnExpressionBuilder {
 /// ```
 ///
 /// The transform process is mostly a post-order traversal. When short-circuit
-/// evaluation is enabled, logical calls are converted with each argument in a
-/// separate RPN expression; adjacent associative `AND`/`OR` calls may be
-/// flattened to avoid recursive evaluation.
+/// evaluation is enabled, logical operands are grouped during construction,
+/// then emitted into a single instruction stream with their control edges.
 ///
 /// This context carries the dependencies shared by every recursive call.
-struct RpnBuildContext<'a, F, SCF> {
+struct RpnBuildContext<'a, F> {
     ctx: &'a mut EvalContext,
     fn_mapper: F,
-    sc_fn_mapper: SCF,
     max_columns: usize,
     // TODO: Passing `max_columns` is only a workaround solution that works when we only check
     // column offset. To totally check whether or not the expression is valid, we need to pass in
     // the full schema instead.
 }
 
-impl<'a, F, SCF> RpnBuildContext<'a, F, SCF>
+impl<'a, F> RpnBuildContext<'a, F>
 where
     F: Fn(&Expr) -> Result<RpnFnMeta>,
-    SCF: Fn(&Expr) -> Option<ShortCircuitFnMeta>,
 {
-    fn new(ctx: &'a mut EvalContext, fn_mapper: F, sc_fn_mapper: SCF, max_columns: usize) -> Self {
+    fn new(ctx: &'a mut EvalContext, fn_mapper: F, max_columns: usize) -> Self {
         Self {
             ctx,
             fn_mapper,
-            sc_fn_mapper,
             max_columns,
         }
     }
@@ -317,7 +366,7 @@ where
         tree_node: Expr,
         parent_sig: ScalarFuncSig,
         depth: usize,
-        rpn_nodes: &mut Vec<RpnExpressionNode>,
+        rpn_nodes: &mut Vec<BuildNode>,
     ) -> Result<()> {
         match tree_node.get_tp() {
             ExprType::ScalarFunc => {
@@ -340,9 +389,10 @@ where
         mut tree_node: Expr,
         parent_sig: ScalarFuncSig,
         depth: usize,
-        rpn_nodes: &mut Vec<RpnExpressionNode>,
+        rpn_nodes: &mut Vec<BuildNode>,
     ) -> Result<()> {
-        let short_circuit_func_meta = (self.sc_fn_mapper)(&tree_node);
+        let sig = tree_node.get_sig();
+        let logical = matches!(sig, ScalarFuncSig::LogicalAnd | ScalarFuncSig::LogicalOr);
 
         // Map, validate, and initialize metadata before taking the children because
         // each of these operations may inspect the original expression tree.
@@ -360,17 +410,12 @@ where
         let args: Vec<_> = tree_node.take_children().into();
         let args_len = args.len();
 
-        let can_flatten_with_parent =
-            short_circuit_func_meta.is_some_and(|func_meta| can_flatten(parent_sig, func_meta.sig));
-
-        let short_circuit_depth = short_circuit_func_meta.map_or(depth, |_| {
-            if can_flatten_with_parent {
-                depth
-            } else {
-                depth.saturating_add(1)
-            }
-        });
-        let can_short_circuit = short_circuit_func_meta.is_some()
+        let short_circuit_depth = if logical && !can_flatten(parent_sig, sig) {
+            depth.saturating_add(1)
+        } else {
+            depth
+        };
+        let can_short_circuit = logical
             && self
                 .ctx
                 .cfg
@@ -379,44 +424,23 @@ where
             && short_circuit_depth <= MAX_SHORT_CIRCUIT_NESTING_DEPTH;
 
         if can_short_circuit {
-            let short_circuit_func_meta = short_circuit_func_meta.unwrap();
             let mut parsed_args = Vec::with_capacity(args_len);
             let mut is_short_circuit_worthwhile = false;
             for arg in args {
                 let mut arg_nodes = Vec::new();
 
-                self.append_rpn_nodes_recursively(
-                    arg,
-                    short_circuit_func_meta.sig,
-                    short_circuit_depth,
-                    &mut arg_nodes,
-                )?;
+                self.append_rpn_nodes_recursively(arg, sig, short_circuit_depth, &mut arg_nodes)?;
 
-                is_short_circuit_worthwhile |= should_flatten(short_circuit_func_meta, &arg_nodes)
-                    || !is_simple_expr(&arg_nodes);
+                is_short_circuit_worthwhile |=
+                    should_flatten(sig, &arg_nodes) || !is_simple_expr(&arg_nodes);
 
                 parsed_args.push(arg_nodes);
             }
 
             if is_short_circuit_worthwhile {
-                let mut short_circuit_args = Vec::with_capacity(args_len);
-                for arg_nodes in parsed_args {
-                    if can_flatten_with_parent {
-                        // Defer flattening to the root of this same-operator chain so
-                        // each argument is moved only once into the final list.
-                        short_circuit_args.push(RpnExpression::from(arg_nodes));
-                    } else {
-                        append_short_circuit_arg(
-                            short_circuit_func_meta,
-                            arg_nodes,
-                            &mut short_circuit_args,
-                        );
-                    }
-                }
-
-                rpn_nodes.push(RpnExpressionNode::ShortCircuitFnCall {
-                    func_meta: short_circuit_func_meta,
-                    args: short_circuit_args.into_boxed_slice(),
+                rpn_nodes.push(BuildNode::Logical {
+                    sig,
+                    args: parsed_args,
                     field_type: tree_node.take_field_type(),
                 });
                 return Ok(());
@@ -440,12 +464,12 @@ where
                 )?
             }
         }
-        rpn_nodes.push(RpnExpressionNode::FnCall {
+        rpn_nodes.push(BuildNode::Instruction(RpnExpressionNode::FnCall {
             func_meta,
             args_len,
             field_type: tree_node.take_field_type(),
             metadata,
-        });
+        }));
         Ok(())
     }
 
@@ -453,7 +477,7 @@ where
     fn handle_node_column_ref(
         &self,
         tree_node: Expr,
-        rpn_nodes: &mut Vec<RpnExpressionNode>,
+        rpn_nodes: &mut Vec<BuildNode>,
     ) -> Result<()> {
         let offset =
             tree_node.get_val().read_i64().map_err(|_| {
@@ -466,7 +490,9 @@ where
                 offset
             ));
         }
-        rpn_nodes.push(RpnExpressionNode::ColumnRef { offset });
+        rpn_nodes.push(BuildNode::Instruction(RpnExpressionNode::ColumnRef {
+            offset,
+        }));
         Ok(())
     }
 
@@ -474,7 +500,7 @@ where
     fn handle_node_constant(
         &mut self,
         mut tree_node: Expr,
-        rpn_nodes: &mut Vec<RpnExpressionNode>,
+        rpn_nodes: &mut Vec<BuildNode>,
     ) -> Result<()> {
         let eval_type = box_try!(EvalType::try_from(
             tree_node.get_field_type().as_accessor().tp()
@@ -527,10 +553,10 @@ where
                 ));
             }
         };
-        rpn_nodes.push(RpnExpressionNode::Constant {
+        rpn_nodes.push(BuildNode::Instruction(RpnExpressionNode::Constant {
             value: scalar_value,
             field_type: tree_node.take_field_type(),
-        });
+        }));
         Ok(())
     }
 }
@@ -540,47 +566,17 @@ fn can_flatten(father: ScalarFuncSig, son: ScalarFuncSig) -> bool {
     father == son && (father == ScalarFuncSig::LogicalOr || father == ScalarFuncSig::LogicalAnd)
 }
 
-#[inline]
-fn should_flatten(father_func: ShortCircuitFnMeta, arg: &[RpnExpressionNode]) -> bool {
-    assert!(!arg.is_empty());
-    if arg.len() > 1 {
-        return false;
-    }
-
-    matches!(
-        arg.last().unwrap(),
-        RpnExpressionNode::ShortCircuitFnCall {
-            func_meta: son_func,
-            ..
-        } if can_flatten(father_func.sig, son_func.sig)
-    )
+fn should_flatten(parent: ScalarFuncSig, arg: &[BuildNode]) -> bool {
+    matches!(arg, [BuildNode::Logical { sig, .. }] if can_flatten(parent, *sig))
 }
 
-#[inline]
-fn is_simple_expr(arg: &[RpnExpressionNode]) -> bool {
+fn is_simple_expr(arg: &[BuildNode]) -> bool {
     matches!(
         arg,
-        [RpnExpressionNode::Constant { .. } | RpnExpressionNode::ColumnRef { .. }]
+        [BuildNode::Instruction(
+            RpnExpressionNode::Constant { .. } | RpnExpressionNode::ColumnRef { .. }
+        )]
     )
-}
-
-fn append_short_circuit_arg(
-    func: ShortCircuitFnMeta,
-    mut arg_nodes: Vec<RpnExpressionNode>,
-    output: &mut Vec<RpnExpression>,
-) {
-    if should_flatten(func, &arg_nodes) {
-        match arg_nodes.pop().unwrap() {
-            RpnExpressionNode::ShortCircuitFnCall { args, .. } => {
-                for arg in args.into_vec() {
-                    append_short_circuit_arg(func, arg.into_inner(), output);
-                }
-            }
-            _ => unreachable!(),
-        }
-    } else {
-        output.push(RpnExpression::from(arg_nodes));
-    }
 }
 
 #[inline]
@@ -723,15 +719,31 @@ mod tests {
     }
 
     fn short_circuit_depth(expr: &RpnExpression) -> usize {
-        expr.iter()
-            .map(|node| match node {
-                RpnExpressionNode::ShortCircuitFnCall { args, .. } => {
-                    1 + args.iter().map(short_circuit_depth).max().unwrap_or(0)
+        let mut depth = 0;
+        let mut max_depth = 0;
+        for node in expr.iter() {
+            match node {
+                RpnExpressionNode::LogicalStart { .. } => {
+                    depth += 1;
+                    max_depth = max_depth.max(depth);
                 }
-                _ => 0,
+                RpnExpressionNode::LogicalEnd { .. } => depth -= 1,
+                _ => {}
+            }
+        }
+        assert_eq!(depth, 0);
+        max_depth
+    }
+
+    fn logical_operand_count(expr: &RpnExpression) -> usize {
+        expr.iter()
+            .filter(|n| {
+                matches!(
+                    n,
+                    RpnExpressionNode::LogicalNext | RpnExpressionNode::LogicalEnd { .. }
+                )
             })
-            .max()
-            .unwrap_or(0)
+            .count()
     }
 
     fn nested_logical_sig(root_sig: ScalarFuncSig, level: usize) -> ScalarFuncSig {
@@ -788,9 +800,6 @@ mod tests {
             RpnExpressionNode::FnCall { func_meta, .. } => {
                 func_meta.name == "logical_or" || func_meta.name == "logical_and"
             }
-            RpnExpressionNode::ShortCircuitFnCall { args, .. } => {
-                args.iter().any(contains_regular_logical_call)
-            }
             _ => false,
         })
     }
@@ -799,10 +808,13 @@ mod tests {
         let mut stack = Vec::with_capacity(expr.len());
         for node in expr.iter() {
             let contains_short_circuit = match node {
-                RpnExpressionNode::ShortCircuitFnCall { args, .. } => {
-                    for arg in args {
-                        assert_no_short_circuit_below_regular_logical(arg);
-                    }
+                RpnExpressionNode::LogicalStart { .. } => continue,
+                RpnExpressionNode::LogicalNext => {
+                    assert!(stack.pop().is_some());
+                    continue;
+                }
+                RpnExpressionNode::LogicalEnd { .. } => {
+                    assert!(stack.pop().is_some());
                     true
                 }
                 RpnExpressionNode::FnCall {
@@ -1225,7 +1237,7 @@ mod tests {
         assert!(
             eager_exp
                 .iter()
-                .all(|node| !matches!(node, RpnExpressionNode::ShortCircuitFnCall { .. }))
+                .all(|node| !matches!(node, RpnExpressionNode::LogicalStart { .. }))
         );
 
         let mut ctx = short_circuit_context();
@@ -1237,18 +1249,35 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(exp.len(), 3);
-        match &exp[0] {
-            RpnExpressionNode::ShortCircuitFnCall {
-                func_meta, args, ..
-            } => {
-                assert_eq!(func_meta.sig, ScalarFuncSig::LogicalOr);
-                assert_eq!(args.len(), 2);
-            }
-            node => panic!("expected short-circuit call, got {:?}", node),
+        assert_eq!(exp.len(), 9);
+        assert!(matches!(
+            exp[0],
+            RpnExpressionNode::LogicalStart { and: false, end: 7 }
+        ));
+        assert!(matches!(exp[2], RpnExpressionNode::LogicalNext));
+        assert!(matches!(exp[6], RpnExpressionNode::LogicalEnd { .. }));
+        assert!(matches!(exp[7], RpnExpressionNode::Constant { .. }));
+        assert!(matches!(exp[8], RpnExpressionNode::FnCall { .. }));
+    }
+
+    #[test]
+    fn test_pb_logical_validates_skipped_regexp_metadata() {
+        let regexp =
+            ExprDefBuilder::scalar_func(ScalarFuncSig::RegexpLikeSig, FieldTypeTp::LongLong)
+                .push_child(ExprDefBuilder::constant_bytes(b"abc".to_vec()))
+                .push_child(ExprDefBuilder::constant_bytes(b"[".to_vec()));
+        let expr = ExprDefBuilder::scalar_func(ScalarFuncSig::LogicalOr, FieldTypeTp::LongLong)
+            .push_child(ExprDefBuilder::constant_int(1))
+            .push_child(regexp)
+            .build();
+        for mut ctx in [EvalContext::default(), short_circuit_context()] {
+            let error =
+                RpnExpressionBuilder::build_from_expr_tree(expr.clone(), &mut ctx, 0).unwrap_err();
+            assert!(
+                error.to_string().contains("Invalid regexp pattern"),
+                "{error}"
+            );
         }
-        assert!(matches!(exp[1], RpnExpressionNode::Constant { .. }));
-        assert!(matches!(exp[2], RpnExpressionNode::FnCall { .. }));
     }
 
     #[test]
@@ -1278,21 +1307,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(exp.len(), 1);
-        match &exp[0] {
-            RpnExpressionNode::ShortCircuitFnCall {
-                func_meta, args, ..
-            } => {
-                assert_eq!(func_meta.sig, ScalarFuncSig::LogicalOr);
-                assert_eq!(args.len(), 3);
-                assert_eq!(args[0].len(), 3);
-                assert!(matches!(
-                    args[0].last(),
-                    Some(RpnExpressionNode::FnCall { .. })
-                ));
-            }
-            node => panic!("expected short-circuit call, got {:?}", node),
-        }
+        assert!(matches!(
+            exp[0],
+            RpnExpressionNode::LogicalStart { and: false, end: 9 }
+        ));
+        assert!(matches!(exp[3], RpnExpressionNode::FnCall { .. }));
+        assert!(matches!(exp[4], RpnExpressionNode::LogicalNext));
+        assert_eq!(logical_operand_count(&exp), 3);
         assert_eq!(exp.node_count(), 6);
         // The flattened root has three binary OR operations even though the
         // outer two are represented by one short-circuit node.
@@ -1322,12 +1343,7 @@ mod tests {
 
                 assert_eq!(short_circuit_depth(&exp), 1);
                 assert!(!contains_regular_logical_call(&exp));
-                match exp.last().unwrap() {
-                    RpnExpressionNode::ShortCircuitFnCall { args, .. } => {
-                        assert_eq!(args.len(), depth + 1);
-                    }
-                    node => panic!("expected flattened short-circuit call, got {:?}", node),
-                }
+                assert_eq!(logical_operand_count(&exp), depth + 1);
             }
         }
     }
@@ -1376,23 +1392,15 @@ mod tests {
                     .join()
                     .unwrap();
 
-                assert_eq!(exp.len(), 1, "depth={depth}, sig={sig:?}");
                 assert_eq!(short_circuit_depth(&exp), 1, "depth={depth}, sig={sig:?}");
                 assert!(
                     !contains_regular_logical_call(&exp),
                     "depth={depth}, sig={sig:?}"
                 );
-                match exp.last().unwrap() {
-                    RpnExpressionNode::ShortCircuitFnCall {
-                        func_meta, args, ..
-                    } => {
-                        assert_eq!(func_meta.sig, sig);
-                        assert_eq!(args.len(), depth + 1);
-                    }
-                    node => panic!(
-                        "expected root short-circuit call for depth={depth}, sig={sig:?}, got {node:?}"
-                    ),
-                }
+                assert!(
+                    matches!(exp[0], RpnExpressionNode::LogicalStart { and, end } if and == (sig == ScalarFuncSig::LogicalAnd) && end == exp.len())
+                );
+                assert_eq!(logical_operand_count(&exp), depth + 1);
                 assert_eq!(
                     exp.referenced_column_offsets(),
                     &(0..=depth).collect::<Vec<_>>(),
@@ -1445,7 +1453,7 @@ mod tests {
                             if depth > limit {
                                 assert!(matches!(
                                     lazy.last(),
-                                    Some(RpnExpressionNode::ShortCircuitFnCall { .. })
+                                    Some(RpnExpressionNode::LogicalEnd { .. })
                                 ));
                                 assert!(contains_regular_logical_call(&lazy));
                                 assert_no_short_circuit_below_regular_logical(&lazy);

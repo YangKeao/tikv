@@ -30,23 +30,6 @@ use tidb_query_datatype::{EvalType, FieldTypeAccessor, codec::data_type::*, expr
 use tipb::{Expr, FieldType, ScalarFuncSig};
 
 use super::{RpnStackNode, expr_eval::LogicalRows};
-use crate::{InputColumns, RpnExpression};
-
-#[derive(Debug, Clone, Copy)]
-pub struct ShortCircuitFnMeta {
-    pub sig: ScalarFuncSig,
-
-    /// A function that evaluates its arguments on demand for selected rows.
-    pub fn_ptr: fn(
-        ctx: &mut EvalContext,
-        schema: &[FieldType],
-        input_physical_columns: &dyn InputColumns,
-        input_logical_rows: &[usize],
-        output_rows: usize,
-        args: &[RpnExpression],
-    ) -> Result<VectorValue>,
-}
-
 /// Metadata of an RPN function.
 #[derive(Clone, Copy)]
 pub struct RpnFnMeta {

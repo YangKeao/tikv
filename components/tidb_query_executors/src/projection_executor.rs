@@ -291,6 +291,108 @@ mod tests {
     use crate::util::mock_executor::MockExecutor;
 
     #[test]
+    fn test_pb_computed_short_circuit_projection() {
+        use tidb_query_datatype::expr::Flag;
+        use tipb::ScalarFuncSig::*;
+        use tipb_helper::ExprDefBuilder;
+
+        let cast = ExprDefBuilder::scalar_func(CastStringAsInt, FieldTypeTp::LongLong)
+            .push_child(ExprDefBuilder::column_ref(1, FieldTypeTp::VarString));
+        let logical = ExprDefBuilder::scalar_func(LogicalOr, FieldTypeTp::LongLong)
+            .push_child(
+                ExprDefBuilder::scalar_func(EqInt, FieldTypeTp::LongLong)
+                    .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong))
+                    .push_child(ExprDefBuilder::constant_int(0)),
+            )
+            .push_child(cast)
+            .build();
+        for (flags, warning_count) in [
+            (Flag::TRUNCATE_AS_WARNING, 2),
+            (
+                Flag::TRUNCATE_AS_WARNING | Flag::ENABLE_SHORT_CIRCUIT_EXPRESSION,
+                0,
+            ),
+        ] {
+            let src = MockExecutor::new(
+                vec![FieldTypeTp::LongLong.into(), FieldTypeTp::VarString.into()],
+                vec![BatchExecuteResult {
+                    physical_columns: LazyBatchColumnVec::from(vec![
+                        VectorValue::Int(vec![Some(0), Some(1), Some(1)].into()),
+                        VectorValue::Bytes(
+                            vec![Some(b"invalid-int".to_vec()), Some(b"2".to_vec()), None].into(),
+                        ),
+                    ]),
+                    logical_rows: vec![2, 0, 1, 0],
+                    warnings: EvalWarnings::default(),
+                    is_drained: Ok(BatchExecIsDrain::Drain),
+                }],
+            );
+            let mut exec = BatchProjectionExecutor::new(
+                Arc::new(EvalConfig::from_flag(flags)),
+                src,
+                vec![logical.clone()],
+            )
+            .unwrap();
+            assert_eq!(exec.schema(), &[FieldType::from(FieldTypeTp::LongLong)]);
+            let output = block_on(exec.next_batch(8));
+            assert!(matches!(output.is_drained, Ok(BatchExecIsDrain::Drain)));
+            let values = output.physical_columns[0].decoded().to_int_vec();
+            eprintln!(
+                "PB projection flags={flags:?} rows={:?} values={values:?} warnings={}",
+                output.logical_rows, output.warnings.warning_cnt
+            );
+            assert_eq!(output.logical_rows, [0, 1, 2, 3]);
+            assert_eq!(values, &[None, Some(1), Some(1), Some(1)]);
+            assert_eq!(output.warnings.warning_cnt, warning_count);
+        }
+    }
+
+    #[test]
+    fn test_pb_projection_predecodes_each_root_before_short_circuit() {
+        use tidb_query_datatype::expr::Flag;
+        use tipb::ScalarFuncSig::*;
+        use tipb_helper::ExprDefBuilder;
+
+        let cast = |value| {
+            ExprDefBuilder::scalar_func(CastStringAsInt, FieldTypeTp::LongLong).push_child(value)
+        };
+        let second = ExprDefBuilder::scalar_func(LogicalOr, FieldTypeTp::LongLong)
+            .push_child(ExprDefBuilder::constant_int(1))
+            .push_child(cast(ExprDefBuilder::column_ref(0, FieldTypeTp::VarString)))
+            .build();
+        let mut malformed = LazyBatchColumn::raw_with_capacity(1);
+        malformed.mut_raw().push(&[0xff]);
+        let src = MockExecutor::new(
+            vec![FieldTypeTp::VarString.into()],
+            vec![BatchExecuteResult {
+                physical_columns: vec![malformed].into(),
+                logical_rows: vec![0],
+                warnings: EvalWarnings::default(),
+                is_drained: Ok(BatchExecIsDrain::Drain),
+            }],
+        );
+        let mut exec = BatchProjectionExecutor::new(
+            Arc::new(EvalConfig::from_flag(
+                Flag::TRUNCATE_AS_WARNING | Flag::ENABLE_SHORT_CIRCUIT_EXPRESSION,
+            )),
+            src,
+            vec![
+                cast(ExprDefBuilder::constant_bytes(b"invalid-int".to_vec())).build(),
+                second,
+            ],
+        )
+        .unwrap();
+        let output = block_on(exec.next_batch(8));
+        eprintln!(
+            "predecode error={:?}, previous root warnings={}",
+            output.is_drained, output.warnings.warning_cnt
+        );
+        assert!(output.is_drained.is_err());
+        assert!(output.logical_rows.is_empty());
+        assert_eq!(output.warnings.warning_cnt, 1);
+    }
+
+    #[test]
     fn test_empty_rows() {
         #[rpn_fn]
         fn foo() -> Result<Option<i64>> {

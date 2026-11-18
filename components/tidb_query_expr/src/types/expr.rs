@@ -6,7 +6,6 @@ use tidb_query_datatype::codec::data_type::ScalarValue;
 use tipb::FieldType;
 
 use super::super::function::RpnFnMeta;
-use crate::ShortCircuitFnMeta;
 
 /// Native expression values outside the original protobuf scalar domain.
 /// These are transported intact; individual kernels own range checks.
@@ -122,11 +121,15 @@ pub enum RpnExpressionNode {
         value: ExpressionScalar,
         field_type: FieldType,
     },
-    /// Represents a function call that decides which arguments and rows need to
-    /// be evaluated. Each argument remains an independent RPN expression.
-    ShortCircuitFnCall {
-        func_meta: ShortCircuitFnMeta,
-        args: Box<[RpnExpression]>,
+    /// Starts a PB AND/OR region. The end points past its last operand marker.
+    LogicalStart {
+        and: bool,
+        end: usize,
+    },
+    /// Merges one operand and advances only the undecided output positions.
+    LogicalNext,
+    /// Merges the last operand and supplies the logical result declaration.
+    LogicalEnd {
         field_type: FieldType,
     },
 
@@ -156,7 +159,7 @@ impl RpnExpressionNode {
     #[cfg(test)]
     pub fn field_type(&self) -> &FieldType {
         match self {
-            RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => field_type,
+            RpnExpressionNode::LogicalEnd { field_type } => field_type,
             RpnExpressionNode::FnCall { field_type, .. }
             | RpnExpressionNode::RegexpArgument { field_type, .. }
             | RpnExpressionNode::NativeRegexpLike { field_type, .. }
@@ -174,7 +177,9 @@ impl RpnExpressionNode {
             | RpnExpressionNode::RepeatEnd { field_type } => field_type,
             RpnExpressionNode::Constant { field_type, .. }
             | RpnExpressionNode::ExpressionConstant { field_type, .. } => field_type,
-            RpnExpressionNode::ColumnRef { .. } => panic!(),
+            RpnExpressionNode::ColumnRef { .. }
+            | RpnExpressionNode::LogicalStart { .. }
+            | RpnExpressionNode::LogicalNext => panic!(),
         }
     }
 
@@ -184,7 +189,9 @@ impl RpnExpressionNode {
         use tipb::ExprType;
 
         match self {
-            RpnExpressionNode::ShortCircuitFnCall { .. } => ExprType::ScalarFunc,
+            RpnExpressionNode::LogicalStart { .. }
+            | RpnExpressionNode::LogicalNext
+            | RpnExpressionNode::LogicalEnd { .. } => ExprType::ScalarFunc,
             RpnExpressionNode::FnCall { .. }
             | RpnExpressionNode::RegexpArgument { .. }
             | RpnExpressionNode::NativeRegexpLike { .. }
@@ -240,17 +247,21 @@ impl RpnExpressionNode {
     }
 
     fn collect_metadata(&self, metadata: &mut RpnExpressionMetadata) {
-        metadata.node_count += 1;
         match self {
-            RpnExpressionNode::ShortCircuitFnCall { args, .. } => {
-                // A flattened logical call represents a chain of binary
-                // operations. Keep those operations in the work estimate even
-                // though flattening stores them in one physical node.
-                metadata.work_count += args.len().saturating_sub(1);
-                for arg in args {
-                    arg.collect_metadata(metadata);
-                }
+            // Match the previous logical work estimate: N operands have
+            // N-1 binary operations, one per non-final marker.
+            RpnExpressionNode::LogicalNext => {
+                metadata.work_count += 1;
+                return;
             }
+            RpnExpressionNode::LogicalStart { .. } => {
+                metadata.node_count += 1;
+                return;
+            }
+            RpnExpressionNode::LogicalEnd { .. } => return,
+            _ => metadata.node_count += 1,
+        }
+        match self {
             RpnExpressionNode::ColumnRef { offset } => {
                 metadata.work_count += 1;
                 metadata.column_ref_count += 1;
@@ -435,6 +446,7 @@ impl RpnExpression {
                 regions.push((*target, *end));
             }
         }
+        let mut logical_regions = Vec::<(usize, Vec<EvalType>, bool)>::new();
         for (pc, node) in nodes.iter().enumerate() {
             let Some(mut stack) = states[pc].clone() else {
                 return Err(invalid());
@@ -664,11 +676,39 @@ impl RpnExpression {
                     }
                     stack.push(declared);
                 }
-                RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => {
-                    stack.push(
-                        EvalType::try_from(field_type.as_accessor().tp())
-                            .map_err(|e| other_err!("{}", e))?,
-                    );
+                RpnExpressionNode::LogicalStart { end, .. } => {
+                    if *end <= pc + 4
+                        || *end > nodes.len()
+                        || logical_regions
+                            .last()
+                            .is_some_and(|parent| *end >= parent.0)
+                        || !matches!(nodes[end - 1], RpnExpressionNode::LogicalEnd { .. })
+                    {
+                        return Err(invalid());
+                    }
+                    logical_regions.push((*end, stack.clone(), false));
+                }
+                RpnExpressionNode::LogicalNext | RpnExpressionNode::LogicalEnd { .. } => {
+                    let (end, operands_base, saw_next) =
+                        logical_regions.last_mut().ok_or_else(invalid)?;
+                    if !matches!(stack.pop(), Some(EvalType::Int | EvalType::Enum))
+                        || stack != *operands_base
+                    {
+                        return Err(invalid());
+                    }
+                    match node {
+                        RpnExpressionNode::LogicalNext if pc + 1 < *end => *saw_next = true,
+                        RpnExpressionNode::LogicalEnd { field_type }
+                            if pc + 1 == *end
+                                && *saw_next
+                                && EvalType::try_from(field_type.as_accessor().tp()).ok()
+                                    == Some(EvalType::Int) =>
+                        {
+                            logical_regions.pop();
+                            stack.push(EvalType::Int);
+                        }
+                        _ => return Err(invalid()),
+                    }
                 }
             }
             for next in successors {
@@ -756,7 +796,10 @@ impl RpnExpression {
             RpnExpressionNode::Constant { field_type, .. }
             | RpnExpressionNode::ExpressionConstant { field_type, .. } => field_type,
             RpnExpressionNode::ColumnRef { offset } => &schema[*offset],
-            RpnExpressionNode::ShortCircuitFnCall { field_type, .. } => field_type,
+            RpnExpressionNode::LogicalEnd { field_type } => field_type,
+            RpnExpressionNode::LogicalStart { .. } | RpnExpressionNode::LogicalNext => {
+                unreachable!("logical program ends inside an operand")
+            }
         }
     }
 
@@ -775,18 +818,13 @@ impl RpnExpression {
             )
     }
 
-    /// Returns the number of nodes, including nodes nested in short-circuit
-    /// arguments.
+    /// Counts logical nodes, excluding short-circuit operand markers.
     pub fn node_count(&self) -> usize {
         self.metadata().node_count
     }
 
-    /// Returns the approximate executor work units for this expression,
-    /// including nodes nested in short-circuit arguments.
-    ///
-    /// A flattened short-circuit call is counted as one unit per logical
-    /// operation (`args.len() - 1`) so flattening does not hide the work of the
-    /// logical operations it replaces.
+    /// Returns the executor work estimate, including one unit per binary
+    /// operation represented by a flattened short-circuit region.
     pub fn work_count(&self) -> usize {
         self.metadata().work_count
     }
@@ -809,6 +847,39 @@ impl RpnExpression {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_finish_validates_logical_operand_boundaries() {
+        use tidb_query_datatype::{
+            FieldTypeTp,
+            expr::{EvalConfig, EvalContext, Flag},
+        };
+        use tipb::ScalarFuncSig::*;
+        use tipb_helper::ExprDefBuilder;
+
+        let expression = ExprDefBuilder::scalar_func(LogicalAnd, FieldTypeTp::LongLong)
+            .push_child(ExprDefBuilder::constant_int(1))
+            .push_child(
+                ExprDefBuilder::scalar_func(CastIntAsInt, FieldTypeTp::LongLong)
+                    .push_child(ExprDefBuilder::constant_int(0)),
+            )
+            .build();
+        let build = || {
+            let mut ctx = EvalContext::new(std::sync::Arc::new(EvalConfig::from_flag(
+                Flag::ENABLE_SHORT_CIRCUIT_EXPRESSION,
+            )));
+            crate::RpnExpressionBuilder::build_from_expr_tree(expression.clone(), &mut ctx, 0)
+                .unwrap()
+                .into_inner()
+        };
+        let result_type = || FieldTypeTp::LongLong.into();
+        assert!(RpnExpression::finish(build(), &[], result_type()).is_ok());
+        let mut missing_boundary = build();
+        missing_boundary.remove(2);
+        let end = missing_boundary.len();
+        missing_boundary[0] = RpnExpressionNode::LogicalStart { and: true, end };
+        assert!(RpnExpression::finish(missing_boundary, &[], result_type()).is_err());
+    }
 
     #[test]
     fn test_cached_metadata_is_deduplicated_and_invalidated_by_mutation() {

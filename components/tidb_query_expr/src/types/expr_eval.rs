@@ -546,6 +546,11 @@ impl<'p> RpnExecutionRef<'p, '_> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static EVALUATOR_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl RpnExpression {
     /// Evaluates the expression into a vector.
     ///
@@ -679,6 +684,8 @@ impl RpnExpression {
         seeded: &mut SeededState,
         regexps: &mut std::collections::HashMap<usize, crate::impl_regexp::NativeRegexp>,
     ) -> Result<RpnStackNode<'a>> {
+        #[cfg(test)]
+        EVALUATOR_ENTRIES.with(|entries| entries.set(entries.get() + 1));
         if mode == InvocationMode::Scalar && output_rows != 1 {
             return Err(other_err!("scalar invocation requires one row"));
         }
@@ -736,6 +743,13 @@ impl RpnExpression {
             depth: usize,
             field_type: &'a FieldType,
         }
+        struct Logical<'a> {
+            end: usize,
+            depth: usize,
+            parent_mode: InvocationMode,
+            state: crate::impl_op::LogicalState<'a>,
+        }
+        let mut logicals: Vec<Logical<'a>> = Vec::new();
         let mut repeats: Vec<Repeat<'a>> = Vec::new();
         let mut ordered: Vec<Ordered<'a>> = Vec::new();
         let mut mode = mode;
@@ -829,6 +843,53 @@ impl RpnExpression {
             }
             let node = &self.as_ref()[pc];
             match node {
+                RpnExpressionNode::LogicalStart { and, end } => {
+                    if *end <= pc + 4
+                        || *end > self.len()
+                        || logicals.last().is_some_and(|parent| *end >= parent.end)
+                        || !matches!(self[end - 1], RpnExpressionNode::LogicalEnd { .. })
+                    {
+                        return Err(other_err!("invalid logical region"));
+                    }
+                    assert!(rows.is_empty() || rows.len() == active_count);
+                    logicals.push(Logical {
+                        end: *end,
+                        depth: stack.len(),
+                        parent_mode: mode,
+                        state: crate::impl_op::LogicalState::new(*and, active_count),
+                    });
+                    mode = InvocationMode::Vector;
+                    pc += 1;
+                    continue;
+                }
+                RpnExpressionNode::LogicalNext | RpnExpressionNode::LogicalEnd { .. } => {
+                    let frame = logicals
+                        .last_mut()
+                        .ok_or_else(|| other_err!("missing logical region"))?;
+                    let last = matches!(node, RpnExpressionNode::LogicalEnd { .. });
+                    if stack.len() != frame.depth + 1 || last != (pc + 1 == frame.end) {
+                        return Err(other_err!("invalid logical operand"));
+                    }
+                    if frame.state.advance(stack.pop().unwrap(), &mut rows, last)? {
+                        let frame = logicals.pop().unwrap();
+                        let RpnExpressionNode::LogicalEnd { field_type } = &self[frame.end - 1]
+                        else {
+                            unreachable!()
+                        };
+                        let (width, physical_value) = frame.state.finish(&mut rows);
+                        stack.push(RpnStackNode::Vector {
+                            value: RpnStackNodeVectorValue::Generated { physical_value },
+                            field_type,
+                        });
+                        active_count = width;
+                        mode = frame.parent_mode;
+                        pc = frame.end;
+                    } else {
+                        active_count = frame.state.pending_len();
+                        pc += 1;
+                    }
+                    continue;
+                }
                 RpnExpressionNode::Repeat {
                     end,
                     supported_type,
@@ -1143,7 +1204,10 @@ impl RpnExpression {
                     },
                 ))
             }
-            RpnExpressionNode::JumpIfFalse { .. }
+            RpnExpressionNode::LogicalStart { .. }
+            | RpnExpressionNode::LogicalNext
+            | RpnExpressionNode::LogicalEnd { .. }
+            | RpnExpressionNode::JumpIfFalse { .. }
             | RpnExpressionNode::Jump { .. }
             | RpnExpressionNode::RegexpArgument { .. }
             | RpnExpressionNode::NullGuard { .. }
@@ -1270,29 +1334,6 @@ impl RpnExpression {
                             input_logical_rows,
                             ctx,
                         )?,
-                    },
-                ))
-            }
-            RpnExpressionNode::ShortCircuitFnCall {
-                func_meta,
-                args,
-                field_type,
-            } => {
-                let ret = (func_meta.fn_ptr)(
-                    ctx,
-                    schema,
-                    input_physical_columns,
-                    input_logical_rows,
-                    output_rows,
-                    args,
-                )?;
-                Ok((
-                    0,
-                    RpnStackNode::Vector {
-                        value: RpnStackNodeVectorValue::Generated {
-                            physical_value: ret,
-                        },
-                        field_type,
                     },
                 ))
             }
@@ -2325,7 +2366,7 @@ mod tests {
             .build();
         let mut ctx = short_circuit_context();
         let exp = RpnExpressionBuilder::build_from_expr_tree(node, &mut ctx, 3).unwrap();
-        let mut columns = LazyBatchColumnVec::from(vec![
+        let columns = LazyBatchColumnVec::from(vec![
             VectorValue::Int(vec![Some(1), Some(0), None, Some(0)].into()),
             VectorValue::Int(vec![Some(0), Some(0), Some(0), None].into()),
             VectorValue::Int(vec![Some(1), Some(1), Some(0), Some(1)].into()),
@@ -2335,14 +2376,47 @@ mod tests {
             FieldTypeTp::LongLong.into(),
             FieldTypeTp::LongLong.into(),
         ];
+        struct ObservedInput {
+            columns: LazyBatchColumnVec,
+            reads: std::cell::RefCell<Vec<(usize, Vec<usize>)>>,
+        }
+        impl InputColumns for ObservedInput {
+            fn read<'a>(
+                &'a self,
+                schema: &'a [FieldType],
+                offset: usize,
+                rows: &'a [usize],
+                ctx: &mut EvalContext,
+            ) -> InputResult<'a> {
+                self.reads.borrow_mut().push((offset, rows.to_vec()));
+                self.columns.read(schema, offset, rows, ctx)
+            }
+        }
+        let input = ObservedInput {
+            columns,
+            reads: Default::default(),
+        };
+        let rows = [3, 1, 2, 0, 3, 1];
+        EVALUATOR_ENTRIES.with(|entries| entries.set(0));
         let result = exp
-            .eval(&mut ctx, schema, &mut columns, &[3, 1, 2, 0], 4)
+            .eval_input(&mut ctx, schema, &input, &rows, rows.len())
             .unwrap();
-
-        assert_eq!(
-            result.vector_value().unwrap().as_ref().to_int_vec(),
-            &[None, Some(0), Some(0), Some(1)]
+        let entries = EVALUATOR_ENTRIES.with(|entries| entries.get());
+        let values = result.vector_value().unwrap().as_ref().to_int_vec();
+        eprintln!(
+            "entries={entries}, reads={:?}, values={values:?}",
+            input.reads.borrow()
         );
+        assert_eq!(
+            *input.reads.borrow(),
+            [
+                (0, rows.to_vec()),
+                (1, vec![3, 1, 2, 3, 1]),
+                (2, vec![3, 2, 0, 3]),
+            ]
+        );
+        assert_eq!(values, &[None, Some(0), Some(0), Some(1), None, Some(0)]);
+        assert_eq!(entries, 1, "one evaluator entry per root");
     }
 
     #[test]
