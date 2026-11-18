@@ -4,7 +4,7 @@ use tidb_datatype::{DecimalCodecWarning, float_warning_input, str_to_float};
 use tidb_query_common::error::{EvaluateError, Result};
 use tidb_query_datatype::{
     EvalType, FieldTypeAccessor, FieldTypeTp,
-    codec::data_type::{ChunkedVecSized, Real, ScalarValueRef, VectorValue},
+    codec::data_type::{ChunkedVecSized, Decimal, Real, ScalarValueRef, VectorValue},
 };
 use tipb::FieldType;
 
@@ -103,18 +103,49 @@ fn real(value: &RpnStackNode<'_>, row: usize) -> Result<Option<f64>> {
         _ => Err(other_err!("native real operand required")),
     }
 }
-pub(super) struct NativeDoubleComparisonArgs;
+pub(super) struct NativeComparisonArgs;
+
+trait NativeComparisonValue: PartialOrd + Sized {
+    fn from_stack(value: &RpnStackNode<'_>, row: usize) -> Result<Option<Self>>;
+}
+
+impl NativeComparisonValue for f64 {
+    fn from_stack(value: &RpnStackNode<'_>, row: usize) -> Result<Option<Self>> {
+        real(value, row)
+    }
+}
+
+impl NativeComparisonValue for tidb_datatype::Decimal {
+    fn from_stack(value: &RpnStackNode<'_>, row: usize) -> Result<Option<Self>> {
+        Ok(decimal(value, row)?
+            .cloned()
+            .map(ExpressionDecimal::into_decimal))
+    }
+}
 
 /// Compare full-domain native doubles without converting them to PB Real.
 pub fn native_real_comparison_node<F: CmpOp>() -> RpnExpressionNode {
+    native_comparison_node::<F, f64>(compare_fn_meta::<BasicComparer<Real, F>>())
+}
+
+/// Compare exact native decimals with the original datatype ordering.
+pub fn native_decimal_comparison_node<F: CmpOp>() -> RpnExpressionNode {
+    native_comparison_node::<F, tidb_datatype::Decimal>(
+        compare_fn_meta::<BasicComparer<Decimal, F>>(),
+    )
+}
+
+fn native_comparison_node<F: CmpOp, T: NativeComparisonValue>(
+    meta: RpnFnMeta,
+) -> RpnExpressionNode {
     let func_meta = RpnFnMeta {
         fn_ptr: |_, rows, args, _, _| {
             let [lhs, rhs] = args else {
-                return Err(other_err!("native DOUBLE comparison requires two operands"));
+                return Err(other_err!("native comparison requires two operands"));
             };
             let mut values = Vec::with_capacity(rows);
             for row in 0..rows {
-                values.push(match (real(lhs, row)?, real(rhs, row)?) {
+                values.push(match (T::from_stack(lhs, row)?, T::from_stack(rhs, row)?) {
                     (None, None) => F::compare_null(),
                     (None, _) | (_, None) => F::compare_partial_null(),
                     (Some(lhs), Some(rhs)) => {
@@ -127,13 +158,13 @@ pub fn native_real_comparison_node<F: CmpOp>() -> RpnExpressionNode {
             }
             Ok(VectorValue::Int(ChunkedVecSized::from(values)))
         },
-        ..compare_fn_meta::<BasicComparer<Real, F>>()
+        ..meta
     };
     RpnExpressionNode::FnCall {
         func_meta,
         args_len: 2,
         field_type: FieldTypeTp::LongLong.into(),
-        metadata: Box::new(NativeDoubleComparisonArgs),
+        metadata: Box::new(NativeComparisonArgs),
     }
 }
 
