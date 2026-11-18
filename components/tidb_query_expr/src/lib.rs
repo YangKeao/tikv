@@ -258,7 +258,11 @@ where
     Ok(mapper(lhs_is_unsigned, rhs_is_unsigned))
 }
 
-fn compare_mapper<F: CmpOp>(lhs_is_unsigned: bool, rhs_is_unsigned: bool) -> RpnFnMeta {
+/// Select the integer comparer for the two operand declarations.
+pub fn integer_comparison_fn_meta<F: CmpOp>(
+    lhs_is_unsigned: bool,
+    rhs_is_unsigned: bool,
+) -> RpnFnMeta {
     match (lhs_is_unsigned, rhs_is_unsigned) {
         (false, false) => compare_fn_meta::<BasicComparer<Int, F>>(),
         (false, true) => compare_fn_meta::<IntUintComparer<F>>(),
@@ -521,7 +525,7 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::FromBinary => map_from_binary_fn_sig(expr)?,
 
         // impl_compare
-        ScalarFuncSig::LtInt => map_int_sig(value, children, compare_mapper::<CmpOpLt>)?,
+        ScalarFuncSig::LtInt => map_int_sig(value, children, integer_comparison_fn_meta::<CmpOpLt>)?,
         ScalarFuncSig::LtReal => compare_fn_meta::<BasicComparer<Real, CmpOpLt>>(),
         ScalarFuncSig::LtDecimal => compare_fn_meta::<BasicComparer<Decimal, CmpOpLt>>(),
         ScalarFuncSig::LtString => map_string_compare_sig::<CmpOpLt>(ft)?,
@@ -529,7 +533,7 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::LtDuration => compare_fn_meta::<BasicComparer<Duration, CmpOpLt>>(),
         ScalarFuncSig::LtJson => compare_json_fn_meta::<CmpOpLt>(),
         ScalarFuncSig::LtVectorFloat32 => compare_vector_float32_fn_meta::<CmpOpLt>(),
-        ScalarFuncSig::LeInt => map_int_sig(value, children, compare_mapper::<CmpOpLe>)?,
+        ScalarFuncSig::LeInt => map_int_sig(value, children, integer_comparison_fn_meta::<CmpOpLe>)?,
         ScalarFuncSig::LeReal => compare_fn_meta::<BasicComparer<Real, CmpOpLe>>(),
         ScalarFuncSig::LeDecimal => compare_fn_meta::<BasicComparer<Decimal, CmpOpLe>>(),
         ScalarFuncSig::LeString => map_string_compare_sig::<CmpOpLe>(ft)?,
@@ -557,7 +561,7 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::LeastCmpStringAsTime=> least_cmp_string_as_time_fn_meta(),
         ScalarFuncSig::LeastDuration => least_duration_fn_meta(),
         ScalarFuncSig::IntervalReal => interval_real_fn_meta(),
-        ScalarFuncSig::GtInt => map_int_sig(value, children, compare_mapper::<CmpOpGt>)?,
+        ScalarFuncSig::GtInt => map_int_sig(value, children, integer_comparison_fn_meta::<CmpOpGt>)?,
         ScalarFuncSig::GtReal => compare_fn_meta::<BasicComparer<Real, CmpOpGt>>(),
         ScalarFuncSig::GtDecimal => compare_fn_meta::<BasicComparer<Decimal, CmpOpGt>>(),
         ScalarFuncSig::GtString => map_string_compare_sig::<CmpOpGt>(ft)?,
@@ -565,7 +569,7 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::GtDuration => compare_fn_meta::<BasicComparer<Duration, CmpOpGt>>(),
         ScalarFuncSig::GtJson => compare_json_fn_meta::<CmpOpGt>(),
         ScalarFuncSig::GtVectorFloat32 => compare_vector_float32_fn_meta::<CmpOpGt>(),
-        ScalarFuncSig::GeInt => map_int_sig(value, children, compare_mapper::<CmpOpGe>)?,
+        ScalarFuncSig::GeInt => map_int_sig(value, children, integer_comparison_fn_meta::<CmpOpGe>)?,
         ScalarFuncSig::GeReal => compare_fn_meta::<BasicComparer<Real, CmpOpGe>>(),
         ScalarFuncSig::GeDecimal => compare_fn_meta::<BasicComparer<Decimal, CmpOpGe>>(),
         ScalarFuncSig::GeString => map_string_compare_sig::<CmpOpGe>(ft)?,
@@ -573,7 +577,7 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::GeDuration => compare_fn_meta::<BasicComparer<Duration, CmpOpGe>>(),
         ScalarFuncSig::GeJson => compare_json_fn_meta::<CmpOpGe>(),
         ScalarFuncSig::GeVectorFloat32 => compare_vector_float32_fn_meta::<CmpOpGe>(),
-        ScalarFuncSig::NeInt => map_int_sig(value, children, compare_mapper::<CmpOpNe>)?,
+        ScalarFuncSig::NeInt => map_int_sig(value, children, integer_comparison_fn_meta::<CmpOpNe>)?,
         ScalarFuncSig::NeReal => compare_fn_meta::<BasicComparer<Real, CmpOpNe>>(),
         ScalarFuncSig::NeDecimal => compare_fn_meta::<BasicComparer<Decimal, CmpOpNe>>(),
         ScalarFuncSig::NeString => map_string_compare_sig::<CmpOpNe>(ft)?,
@@ -581,7 +585,7 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::NeDuration => compare_fn_meta::<BasicComparer<Duration, CmpOpNe>>(),
         ScalarFuncSig::NeJson => compare_json_fn_meta::<CmpOpNe>(),
         ScalarFuncSig::NeVectorFloat32 => compare_vector_float32_fn_meta::<CmpOpNe>(),
-        ScalarFuncSig::EqInt => map_int_sig(value, children, compare_mapper::<CmpOpEq>)?,
+        ScalarFuncSig::EqInt => map_int_sig(value, children, integer_comparison_fn_meta::<CmpOpEq>)?,
         ScalarFuncSig::EqReal => compare_fn_meta::<BasicComparer<Real, CmpOpEq>>(),
         ScalarFuncSig::EqDecimal => compare_fn_meta::<BasicComparer<Decimal, CmpOpEq>>(),
         ScalarFuncSig::EqString => map_string_compare_sig::<CmpOpEq>(ft)?,
@@ -589,7 +593,7 @@ fn map_expr_node_to_rpn_func(expr: &Expr) -> Result<RpnFnMeta> {
         ScalarFuncSig::EqDuration => compare_fn_meta::<BasicComparer<Duration, CmpOpEq>>(),
         ScalarFuncSig::EqJson => compare_json_fn_meta::<CmpOpEq>(),
         ScalarFuncSig::EqVectorFloat32 => compare_vector_float32_fn_meta::<CmpOpEq>(),
-        ScalarFuncSig::NullEqInt => map_int_sig(value, children, compare_mapper::<CmpOpNullEq>)?,
+        ScalarFuncSig::NullEqInt => map_int_sig(value, children, integer_comparison_fn_meta::<CmpOpNullEq>)?,
         ScalarFuncSig::NullEqReal => compare_fn_meta::<BasicComparer<Real, CmpOpNullEq>>(),
         ScalarFuncSig::NullEqDecimal => compare_fn_meta::<BasicComparer<Decimal, CmpOpNullEq>>(),
         ScalarFuncSig::NullEqString => map_string_compare_sig::<CmpOpNullEq>(ft)?,
