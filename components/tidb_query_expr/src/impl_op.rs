@@ -98,13 +98,14 @@ fn merge_short_circuit_arg_result<Op: ScLogicalOp>(
                 "wire logical function does not admit native scalar arguments"
             ));
         }
-        RpnStackNode::Scalar { value, .. } => {
-            let value = match value {
-                ScalarValue::Int(_) | ScalarValue::Enum(_) => value.as_int().copied(),
+        node @ (RpnStackNode::Scalar { .. } | RpnStackNode::OwnedScalar(_)) => {
+            let scalar = node.scalar_value().unwrap();
+            let value = match scalar {
+                ScalarValue::Int(_) | ScalarValue::Enum(_) => scalar.as_int().copied(),
                 _ => {
                     return Err(other_err!(
                         "logical expression must produce Int, got {}",
-                        value.eval_type()
+                        scalar.eval_type()
                     ));
                 }
             };

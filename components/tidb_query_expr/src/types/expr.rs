@@ -377,8 +377,32 @@ impl RpnExpression {
         states[0] = Some(Vec::new());
         let mut jumps = std::collections::HashMap::new();
         let mut repeat_ends = std::collections::HashMap::new();
+        let control_targets = |node: &RpnExpressionNode| match *node {
+            RpnExpressionNode::JumpIfFalse { target, end, .. } => [Some(target), Some(end)],
+            RpnExpressionNode::Jump { target, .. }
+            | RpnExpressionNode::RegexpArgument { target, .. }
+            | RpnExpressionNode::NullGuard { target, .. } => [Some(target), None],
+            RpnExpressionNode::Repeat { end, .. } | RpnExpressionNode::OrderedRows { end, .. } => {
+                [Some(end), None]
+            }
+            _ => [None, None],
+        };
+        // A distinct instruction position identifies each operand, including
+        // its nesting. The opener belongs to its parent; each closing marker
+        // belongs to the operand that produces its value.
+        let mut logical_owners = vec![None; nodes.len() + 1];
+        let mut operands = Vec::new();
         let mut regions = Vec::new();
         for (pc, node) in nodes.iter().enumerate() {
+            logical_owners[pc] = operands.last().copied();
+            match node {
+                RpnExpressionNode::LogicalStart { .. } => operands.push(pc),
+                RpnExpressionNode::LogicalNext => *operands.last_mut().ok_or_else(invalid)? = pc,
+                RpnExpressionNode::LogicalEnd { .. } => {
+                    operands.pop().ok_or_else(invalid)?;
+                }
+                _ => {}
+            }
             while regions.last().is_some_and(|&(_, end)| pc >= end) {
                 regions.pop();
             }
@@ -396,18 +420,9 @@ impl RpnExpression {
                     return Err(invalid());
                 }
                 for (at, candidate) in nodes.iter().enumerate() {
-                    let targets: &[usize] = match candidate {
-                        RpnExpressionNode::JumpIfFalse { target, end, .. } => &[*target, *end],
-                        RpnExpressionNode::Jump { target, .. }
-                        | RpnExpressionNode::RegexpArgument { target, .. }
-                        | RpnExpressionNode::NullGuard { target, .. } => &[*target],
-                        RpnExpressionNode::Repeat { end, .. }
-                        | RpnExpressionNode::OrderedRows { end, .. } => &[*end],
-                        _ => &[],
-                    };
-                    for target in targets {
-                        if (at > pc && at < *end && *target > end - 1)
-                            || ((at < pc || at >= *end) && *target > pc && *target < *end)
+                    for target in control_targets(candidate).into_iter().flatten() {
+                        if (at > pc && at < *end && target > end - 1)
+                            || ((at < pc || at >= *end) && target > pc && target < *end)
                         {
                             return Err(invalid());
                         }
@@ -446,10 +461,29 @@ impl RpnExpression {
                 regions.push((*target, *end));
             }
         }
-        let mut logical_regions = Vec::<(usize, Vec<EvalType>, bool)>::new();
+        if !operands.is_empty() {
+            return Err(invalid());
+        }
+        let mut logical_regions = Vec::<(usize, usize, bool)>::new();
         for (pc, node) in nodes.iter().enumerate() {
+            if control_targets(node)
+                .into_iter()
+                .flatten()
+                .any(|target| logical_owners.get(target) != Some(&logical_owners[pc]))
+            {
+                return Err(invalid());
+            }
             let Some(mut stack) = states[pc].clone() else {
                 return Err(invalid());
+            };
+            let floor = logical_regions.last().map_or(0, |region| region.1);
+            let available = stack.len().checked_sub(floor).ok_or_else(invalid)?;
+            let pop = |stack: &mut Vec<EvalType>| {
+                if stack.len() > floor {
+                    stack.pop()
+                } else {
+                    None
+                }
             };
             let mut successors = vec![pc + 1];
             match node {
@@ -459,7 +493,7 @@ impl RpnExpression {
                     if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::LongLong {
                         return Err(invalid());
                     }
-                    if stack.pop() != Some(EvalType::Int) {
+                    if pop(&mut stack) != Some(EvalType::Int) {
                         return Err(invalid());
                     }
                     let mut skipped = stack.clone();
@@ -477,7 +511,7 @@ impl RpnExpression {
                         return Err(invalid());
                     }
                     let supported = repeat_ends.get(&pc).ok_or_else(invalid)?;
-                    if *supported && stack.pop().is_none() {
+                    if *supported && pop(&mut stack).is_none() {
                         return Err(invalid());
                     }
                     stack.push(EvalType::Int);
@@ -485,7 +519,7 @@ impl RpnExpression {
                 RpnExpressionNode::UserVariable {
                     write, field_type, ..
                 } => {
-                    if *write && stack.pop() != Some(EvalType::Bytes) {
+                    if *write && pop(&mut stack) != Some(EvalType::Bytes) {
                         return Err(invalid());
                     }
                     if EvalType::try_from(field_type.as_accessor().tp())
@@ -499,7 +533,7 @@ impl RpnExpression {
                 RpnExpressionNode::Rand {
                     seeded, field_type, ..
                 } => {
-                    if *seeded && stack.pop() != Some(EvalType::Int) {
+                    if *seeded && pop(&mut stack) != Some(EvalType::Int) {
                         return Err(invalid());
                     }
                     if EvalType::try_from(field_type.as_accessor().tp())
@@ -515,18 +549,9 @@ impl RpnExpression {
                         return Err(invalid());
                     }
                     for (at, candidate) in nodes.iter().enumerate() {
-                        let targets: &[usize] = match candidate {
-                            RpnExpressionNode::JumpIfFalse { target, end, .. } => &[*target, *end],
-                            RpnExpressionNode::Jump { target, .. }
-                            | RpnExpressionNode::RegexpArgument { target, .. }
-                            | RpnExpressionNode::NullGuard { target, .. } => &[*target],
-                            RpnExpressionNode::OrderedRows { end, .. }
-                            | RpnExpressionNode::Repeat { end, .. } => &[*end],
-                            _ => &[],
-                        };
-                        for target in targets {
-                            if (at > pc && at < *end && *target > *end)
-                                || ((at < pc || at >= *end) && *target > pc && *target < *end)
+                        for target in control_targets(candidate).into_iter().flatten() {
+                            if (at > pc && at < *end && target > *end)
+                                || ((at < pc || at >= *end) && target > pc && target < *end)
                             {
                                 return Err(invalid());
                             }
@@ -537,6 +562,7 @@ impl RpnExpression {
                     let declared = EvalType::try_from(field_type.as_accessor().tp())
                         .map_err(|e| other_err!("{}", e))?;
                     if !matches!(declared, EvalType::Int | EvalType::Real | EvalType::Decimal)
+                        || available == 0
                         || stack.last() != Some(&declared)
                     {
                         return Err(invalid());
@@ -544,7 +570,7 @@ impl RpnExpression {
                     successors.push(*target);
                 }
                 RpnExpressionNode::JumpIfFalse { target, .. } => {
-                    if stack.pop() != Some(EvalType::Int) {
+                    if pop(&mut stack) != Some(EvalType::Int) {
                         return Err(invalid());
                     }
                     successors.push(*target);
@@ -569,7 +595,7 @@ impl RpnExpression {
                     field_type,
                 } => {
                     if *count == 0
-                        || stack.len() < *count
+                        || available < *count
                         || !stack[stack.len() - count..]
                             .iter()
                             .all(|t| *t == EvalType::Bytes)
@@ -593,7 +619,7 @@ impl RpnExpression {
                     field_type,
                 } => {
                     if !(2..=3).contains(args_len)
-                        || stack.len() < *args_len
+                        || available < *args_len
                         || !stack[stack.len() - args_len..]
                             .iter()
                             .all(|t| *t == EvalType::Bytes)
@@ -614,7 +640,7 @@ impl RpnExpression {
                 }
                 RpnExpressionNode::NativeDate { field_type } => {
                     if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::Date
-                        || stack.pop() != Some(EvalType::DateTime)
+                        || pop(&mut stack) != Some(EvalType::DateTime)
                     {
                         return Err(invalid());
                     }
@@ -622,7 +648,7 @@ impl RpnExpression {
                 }
                 RpnExpressionNode::NativeCastReal { field_type } => {
                     if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::Double
-                        || stack.pop() != Some(EvalType::Bytes)
+                        || pop(&mut stack) != Some(EvalType::Bytes)
                     {
                         return Err(invalid());
                     }
@@ -632,8 +658,8 @@ impl RpnExpression {
                     let ty = EvalType::try_from(field_type.as_accessor().tp())
                         .map_err(|e| other_err!("{}", e))?;
                     if !matches!(ty, EvalType::Real | EvalType::Decimal)
-                        || stack.pop() != Some(ty)
-                        || stack.pop() != Some(ty)
+                        || pop(&mut stack) != Some(ty)
+                        || pop(&mut stack) != Some(ty)
                     {
                         return Err(invalid());
                     }
@@ -644,7 +670,7 @@ impl RpnExpression {
                     field_type,
                     ..
                 } => {
-                    if stack.len() < *args_len {
+                    if available < *args_len {
                         return Err(invalid());
                     }
                     stack.truncate(stack.len() - args_len);
@@ -686,13 +712,13 @@ impl RpnExpression {
                     {
                         return Err(invalid());
                     }
-                    logical_regions.push((*end, stack.clone(), false));
+                    logical_regions.push((*end, stack.len(), false));
                 }
                 RpnExpressionNode::LogicalNext | RpnExpressionNode::LogicalEnd { .. } => {
                     let (end, operands_base, saw_next) =
                         logical_regions.last_mut().ok_or_else(invalid)?;
-                    if !matches!(stack.pop(), Some(EvalType::Int | EvalType::Enum))
-                        || stack != *operands_base
+                    if !matches!(pop(&mut stack), Some(EvalType::Int | EvalType::Enum))
+                        || stack.len() != *operands_base
                     {
                         return Err(invalid());
                     }
@@ -879,6 +905,153 @@ mod tests {
         let end = missing_boundary.len();
         missing_boundary[0] = RpnExpressionNode::LogicalStart { and: true, end };
         assert!(RpnExpression::finish(missing_boundary, &[], result_type()).is_err());
+    }
+
+    #[test]
+    fn test_finish_rejects_logical_edges_and_parent_stack_consumption() {
+        use RpnExpressionNode::*;
+        use tidb_query_datatype::{FieldTypeTp, codec::data_type::ScalarValue};
+
+        let ty = || FieldTypeTp::LongLong.into();
+        let int = |value| Constant {
+            value: ScalarValue::Int(value),
+            field_type: ty(),
+        };
+        let guard = |target| NullGuard {
+            target,
+            field_type: ty(),
+        };
+        let start = |end| LogicalStart { and: false, end };
+        let end = || LogicalEnd { field_type: ty() };
+        let plus = || FnCall {
+            func_meta: crate::impl_arithmetic::arithmetic_fn_meta::<
+                crate::impl_arithmetic::IntIntPlus,
+            >(),
+            args_len: 2,
+            field_type: ty(),
+            metadata: Box::new(()),
+        };
+        let programs = [
+            (
+                "enter operand",
+                vec![
+                    int(None),
+                    guard(3),
+                    start(7),
+                    int(Some(1)),
+                    LogicalNext,
+                    int(Some(0)),
+                    end(),
+                    plus(),
+                ],
+            ),
+            (
+                "leave operand",
+                vec![
+                    start(6),
+                    int(None),
+                    guard(6),
+                    LogicalNext,
+                    int(Some(1)),
+                    end(),
+                ],
+            ),
+            (
+                "cross operands",
+                vec![
+                    start(7),
+                    int(None),
+                    guard(5),
+                    LogicalNext,
+                    int(Some(1)),
+                    guard(6),
+                    end(),
+                ],
+            ),
+            (
+                "consume parent",
+                vec![
+                    int(Some(7)),
+                    start(8),
+                    int(Some(1)),
+                    plus(),
+                    int(Some(0)),
+                    LogicalNext,
+                    int(Some(0)),
+                    end(),
+                    plus(),
+                ],
+            ),
+        ];
+        let accepted: Vec<_> = programs
+            .into_iter()
+            .filter_map(|(name, nodes)| {
+                RpnExpression::finish(nodes, &[], ty())
+                    .is_ok()
+                    .then_some(name)
+            })
+            .collect();
+        assert!(
+            accepted.is_empty(),
+            "malformed programs accepted: {accepted:?}"
+        );
+    }
+
+    #[test]
+    fn test_finish_allows_control_inside_logical_operand_with_parent_value() {
+        use RpnExpressionNode::*;
+        use tidb_query_datatype::{
+            FieldTypeTp,
+            codec::{batch::LazyBatchColumnVec, data_type::ScalarValue},
+            expr::EvalContext,
+        };
+        let ty = || FieldTypeTp::LongLong.into();
+        let int = |value| Constant {
+            value: ScalarValue::Int(Some(value)),
+            field_type: ty(),
+        };
+        let program = RpnExpression::finish(
+            vec![
+                int(7),
+                LogicalStart {
+                    and: false,
+                    end: 10,
+                },
+                int(0),
+                JumpIfFalse {
+                    target: 6,
+                    end: 7,
+                    field_type: ty(),
+                },
+                int(1),
+                Jump {
+                    target: 7,
+                    field_type: ty(),
+                },
+                int(0),
+                LogicalNext,
+                int(1),
+                LogicalEnd { field_type: ty() },
+                FnCall {
+                    func_meta: crate::impl_arithmetic::arithmetic_fn_meta::<
+                        crate::impl_arithmetic::IntIntPlus,
+                    >(),
+                    args_len: 2,
+                    field_type: ty(),
+                    metadata: Box::new(()),
+                },
+            ],
+            &[],
+            ty(),
+        )
+        .unwrap();
+        let input = LazyBatchColumnVec::empty();
+        let result = program
+            .eval_input(&mut EvalContext::default(), &[], &input, &[], 2)
+            .unwrap();
+        for row in 0..2 {
+            assert_eq!(result.get_logical_scalar_ref(row).as_int(), Some(&8));
+        }
     }
 
     #[test]

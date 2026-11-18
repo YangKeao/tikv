@@ -80,6 +80,10 @@ pub trait InputColumns {
         ctx: &mut EvalContext,
     ) -> InputResult<'a> {
         match self.read(schema, offset, rows, ctx)? {
+            RpnStackNode::Scalar { value, field_type } => Ok(RpnStackNode::OwnedScalar(Box::new(
+                (value.clone(), field_type.clone()),
+            ))),
+            RpnStackNode::OwnedScalar(value) => Ok(RpnStackNode::OwnedScalar(value)),
             RpnStackNode::ExpressionVector { value, .. } => Ok(RpnStackNode::ExpressionVector {
                 value,
                 field_type: &schema[offset],
@@ -219,6 +223,9 @@ pub enum RpnStackNode<'a> {
         field_type: &'a FieldType,
     },
 
+    /// A scalar and field declaration retained after a temporary selection.
+    OwnedScalar(Box<(ScalarValue, FieldType)>),
+
     /// Represents a vector value. Comes from a column reference or evaluated
     /// result.
     Vector {
@@ -236,6 +243,7 @@ impl RpnStackNode<'_> {
             | RpnStackNode::ExpressionScalar { field_type, .. }
             | RpnStackNode::ExpressionVector { field_type, .. } => field_type,
             RpnStackNode::Vector { field_type, .. } => field_type,
+            RpnStackNode::OwnedScalar(value) => &value.1,
         }
     }
 
@@ -244,6 +252,7 @@ impl RpnStackNode<'_> {
     pub fn scalar_value(&self) -> Option<&ScalarValue> {
         match self {
             RpnStackNode::Scalar { value, .. } => Some(*value),
+            RpnStackNode::OwnedScalar(value) => Some(&value.0),
             RpnStackNode::Vector { .. }
             | RpnStackNode::ExpressionScalar { .. }
             | RpnStackNode::ExpressionVector { .. } => None,
@@ -255,6 +264,7 @@ impl RpnStackNode<'_> {
     pub fn vector_value(&self) -> Option<&RpnStackNodeVectorValue<'_>> {
         match self {
             RpnStackNode::Scalar { .. }
+            | RpnStackNode::OwnedScalar(_)
             | RpnStackNode::ExpressionScalar { .. }
             | RpnStackNode::ExpressionVector { .. } => None,
             RpnStackNode::Vector { value, .. } => Some(value),
@@ -266,7 +276,9 @@ impl RpnStackNode<'_> {
     pub fn is_scalar(&self) -> bool {
         matches!(
             self,
-            RpnStackNode::Scalar { .. } | RpnStackNode::ExpressionScalar { .. }
+            RpnStackNode::Scalar { .. }
+                | RpnStackNode::OwnedScalar(_)
+                | RpnStackNode::ExpressionScalar { .. }
         )
     }
 
@@ -283,6 +295,7 @@ impl RpnStackNode<'_> {
     pub fn take_vector_value(self) -> Result<VectorValue> {
         match self {
             RpnStackNode::Scalar { .. }
+            | RpnStackNode::OwnedScalar(_)
             | RpnStackNode::ExpressionScalar { .. }
             | RpnStackNode::ExpressionVector { .. } => {
                 Err(other_err!("take_vector_value on Scalar variant"))
@@ -309,6 +322,7 @@ impl RpnStackNode<'_> {
                 physical_vector.get_scalar_ref(idx)
             }
             RpnStackNode::Scalar { value, .. } => value.as_scalar_value_ref(),
+            RpnStackNode::OwnedScalar(value) => value.0.as_scalar_value_ref(),
             RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
                 panic!("native scalar requires a native-aware kernel")
             }
@@ -1023,11 +1037,7 @@ impl RpnExpression {
                     if *target <= pc || *target >= *end || *end > self.len() {
                         return Err(other_err!("invalid IF target"));
                     }
-                    if let RpnStackNode::Scalar {
-                        value: ScalarValue::Int(v),
-                        ..
-                    } = condition
-                    {
+                    if let Some(ScalarValue::Int(v)) = condition.scalar_value() {
                         pc = if v.is_some_and(|v| v != 0) {
                             pc + 1
                         } else {
@@ -2417,6 +2427,88 @@ mod tests {
         );
         assert_eq!(values, &[None, Some(0), Some(0), Some(1), None, Some(0)]);
         assert_eq!(entries, 1, "one evaluator entry per root");
+    }
+
+    #[test]
+    fn test_public_logical_input_broadcasts_scalar_after_compaction() {
+        struct Input {
+            left: LazyBatchColumnVec,
+            right: ScalarValue,
+            right_type: FieldType,
+            reads: std::cell::RefCell<Vec<(usize, Vec<usize>)>>,
+        }
+        impl InputColumns for Input {
+            fn read<'a>(
+                &'a self,
+                schema: &'a [FieldType],
+                offset: usize,
+                rows: &'a [usize],
+                ctx: &mut EvalContext,
+            ) -> InputResult<'a> {
+                self.reads.borrow_mut().push((offset, rows.to_vec()));
+                if offset == 0 {
+                    self.left.read(schema, offset, rows, ctx)
+                } else {
+                    Ok(RpnStackNode::Scalar {
+                        value: &self.right,
+                        field_type: &self.right_type,
+                    })
+                }
+            }
+        }
+        let expression =
+            ExprDefBuilder::scalar_func(ScalarFuncSig::LogicalOr, FieldTypeTp::LongLong)
+                .push_child(
+                    ExprDefBuilder::scalar_func(ScalarFuncSig::CastIntAsInt, FieldTypeTp::LongLong)
+                        .push_child(ExprDefBuilder::column_ref(0, FieldTypeTp::LongLong)),
+                )
+                .push_child(ExprDefBuilder::column_ref(1, FieldTypeTp::LongLong))
+                .build();
+        let mut ctx = short_circuit_context();
+        let program = RpnExpressionBuilder::build_from_expr_tree(expression, &mut ctx, 2).unwrap();
+        let schema: [FieldType; 2] = [FieldTypeTp::LongLong.into(), FieldTypeTp::LongLong.into()];
+        let mut right_type = schema[1].clone();
+        right_type.set_flen(19);
+        let mut observations = Vec::new();
+        for (right, expected) in [
+            (Some(1), [Some(1), Some(1), Some(1), Some(1)]),
+            (Some(0), [None, Some(1), Some(0), None]),
+            (None, [None, Some(1), None, None]),
+        ] {
+            let input = Input {
+                left: LazyBatchColumnVec::from(vec![VectorValue::Int(
+                    vec![Some(1), Some(0), None].into(),
+                )]),
+                right: ScalarValue::Int(right),
+                right_type: right_type.clone(),
+                reads: Default::default(),
+            };
+            let scalar = input
+                .read_selected(&schema, 1, &[2, 1, 2], &mut ctx)
+                .unwrap();
+            assert!(scalar.is_scalar());
+            assert_eq!(scalar.scalar_value().unwrap().as_int().copied(), right);
+            assert_eq!(scalar.field_type(), &right_type);
+            drop(scalar);
+            input.reads.borrow_mut().clear();
+            let result = program
+                .eval_input(&mut ctx, &schema, &input, &[2, 0, 1, 2], 4)
+                .map(|result| {
+                    result
+                        .vector_value()
+                        .unwrap()
+                        .as_ref()
+                        .to_int_vec()
+                        .to_vec()
+                });
+            let reads = input.reads.into_inner();
+            eprintln!("rhs={right:?}, reads={reads:?}, result={result:?}");
+            observations.push((reads, result, expected));
+        }
+        for (reads, result, expected) in observations {
+            assert_eq!(reads, [(0, vec![2, 0, 1, 2]), (1, vec![2, 1, 2])]);
+            assert_eq!(result.unwrap(), expected);
+        }
     }
 
     #[test]

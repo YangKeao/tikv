@@ -238,8 +238,8 @@ impl<'a, A: EvaluableRef<'a>, E: Evaluator<'a>> Evaluator<'a> for ArgConstructor
             RpnStackNode::ExpressionScalar { .. } | RpnStackNode::ExpressionVector { .. } => {
                 Err(other_err!("native scalar requires a native-aware kernel"))
             }
-            RpnStackNode::Scalar { value, .. } => {
-                let v = A::borrow_scalar_value_ref(value.as_scalar_value_ref());
+            node @ (RpnStackNode::Scalar { .. } | RpnStackNode::OwnedScalar(_)) => {
+                let v = A::borrow_scalar_value_ref(node.get_logical_scalar_ref(0));
                 let new_def = Arg {
                     arg: ScalarArg::new(v),
                     rem: def,
