@@ -321,6 +321,10 @@ impl RpnStackNode<'_> {
 /// ends their state.
 pub struct RpnExecution<'p> {
     program: &'p RpnExpression,
+    state: ExecutionState,
+}
+
+struct ExecutionState {
     seeded: SeededState,
     regexps: std::collections::HashMap<usize, crate::impl_regexp::NativeRegexp>,
 }
@@ -330,10 +334,9 @@ struct SeededState {
     values: std::collections::HashMap<usize, crate::impl_math::MySqlRng>,
 }
 
-impl<'p> RpnExecution<'p> {
-    pub fn new(program: &'p RpnExpression, supports_seeded_rand: bool) -> Self {
+impl ExecutionState {
+    fn new(supports_seeded_rand: bool) -> Self {
         Self {
-            program,
             regexps: std::collections::HashMap::new(),
             seeded: SeededState {
                 enabled: supports_seeded_rand,
@@ -341,8 +344,98 @@ impl<'p> RpnExecution<'p> {
             },
         }
     }
+}
+
+/// Owns a frozen program and its private state without requiring shared
+/// access to the program's function metadata.
+pub struct OwnedRpnExecution {
+    program: RpnExpression,
+    state: ExecutionState,
+}
+
+impl OwnedRpnExecution {
+    pub fn new(program: RpnExpression, supports_seeded_rand: bool) -> Self {
+        Self {
+            program,
+            state: ExecutionState::new(supports_seeded_rand),
+        }
+    }
+
+    /// Drop all state from the prior execution while retaining the program.
+    pub fn reset(&mut self, supports_seeded_rand: bool) {
+        self.state = ExecutionState::new(supports_seeded_rand);
+    }
+
+    pub fn borrow_execution(&mut self) -> RpnExecutionRef<'_, '_> {
+        RpnExecutionRef {
+            program: &self.program,
+            state: &mut self.state,
+        }
+    }
+}
+
+/// Short-lived view of a program and its associated execution state.
+pub struct RpnExecutionRef<'p, 's> {
+    program: &'p RpnExpression,
+    state: &'s mut ExecutionState,
+}
+
+impl<'p> RpnExecution<'p> {
+    pub fn new(program: &'p RpnExpression, supports_seeded_rand: bool) -> Self {
+        Self {
+            program,
+            state: ExecutionState::new(supports_seeded_rand),
+        }
+    }
+
+    pub fn borrow_execution(&mut self) -> RpnExecutionRef<'p, '_> {
+        RpnExecutionRef {
+            program: self.program,
+            state: &mut self.state,
+        }
+    }
 
     pub fn eval_input_mode<'a>(
+        &mut self,
+        ctx: &mut EvalContext,
+        schema: &'a [FieldType],
+        input: &'a dyn InputColumns,
+        rows: &'a [usize],
+        output_rows: usize,
+        mode: InvocationMode,
+    ) -> Result<RpnStackNode<'a>>
+    where
+        'p: 'a,
+    {
+        self.borrow_execution()
+            .eval_input_mode(ctx, schema, input, rows, output_rows, mode)
+    }
+
+    /// Both frontend projections share the same expression loop and traversal.
+    pub fn eval_group<'a>(
+        programs: &mut [(&mut RpnExecution<'p>, &'a [FieldType], &'a dyn InputColumns)],
+        ctx: &mut EvalContext,
+        rows: &'a [usize],
+        order: OutputOrder,
+        mode: InvocationMode,
+    ) -> Result<Vec<RpnStackNode<'a>>>
+    where
+        'p: 'a,
+    {
+        let mut views: Vec<_> = programs
+            .iter_mut()
+            .map(|(execution, schema, input)| (execution.borrow_execution(), *schema, *input))
+            .collect();
+        RpnExecutionRef::eval_group(&mut views, ctx, rows, order, mode)
+    }
+}
+
+impl<'p> RpnExecutionRef<'p, '_> {
+    pub fn program(&self) -> &'p RpnExpression {
+        self.program
+    }
+
+    fn eval_input_mode<'a>(
         &mut self,
         ctx: &mut EvalContext,
         schema: &'a [FieldType],
@@ -361,14 +454,18 @@ impl<'p> RpnExecution<'p> {
             rows,
             output_rows,
             mode,
-            &mut self.seeded,
-            &mut self.regexps,
+            &mut self.state.seeded,
+            &mut self.state.regexps,
         )
     }
 
     /// Both frontend projections share the same expression loop and traversal.
     pub fn eval_group<'a>(
-        programs: &mut [(&mut RpnExecution<'p>, &'a [FieldType], &'a dyn InputColumns)],
+        programs: &mut [(
+            RpnExecutionRef<'p, '_>,
+            &'a [FieldType],
+            &'a dyn InputColumns,
+        )],
         ctx: &mut EvalContext,
         rows: &'a [usize],
         order: OutputOrder,
@@ -1517,7 +1614,7 @@ mod tests {
         // Regex preparation is independent of seeded RAND capabilities.
         let mut first = RpnExecution::new(&program, false);
         let mut second = RpnExecution::new(&program, false);
-        assert!(first.regexps.is_empty() && second.regexps.is_empty());
+        assert!(first.state.regexps.is_empty() && second.state.regexps.is_empty());
         for _ in 0..2 {
             for execution in [&mut first, &mut second] {
                 let value = execution
@@ -1533,7 +1630,7 @@ mod tests {
                 for row in 0..3 {
                     assert_eq!(value.get_logical_scalar_ref(row).as_int(), Some(&1));
                 }
-                assert_eq!(execution.regexps.len(), 1);
+                assert_eq!(execution.state.regexps.len(), 1);
             }
         }
         assert_eq!(
@@ -1542,11 +1639,49 @@ mod tests {
         );
         assert_eq!(input.1.get(), 12, "a hit still demands the subject");
         let fresh = RpnExecution::new(&program, false);
-        assert!(fresh.regexps.is_empty());
+        assert!(fresh.state.regexps.is_empty());
         println!(
             "RpnExecution static bytes={}",
             std::mem::size_of::<RpnExecution<'_>>()
         );
+    }
+
+    #[test]
+    fn test_owned_execution_resets_literal_regexp_state() {
+        let program = literal_regexp_program(b"^a", Some(b"i"));
+        let mut execution = OwnedRpnExecution::new(program, false);
+        let schema = [FieldTypeTp::VarString.into()];
+        let input = RegexpInput(
+            ScalarValue::Bytes(Some(b"Abc".to_vec())),
+            Default::default(),
+        );
+        crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.set(0));
+        for opens in 1..=2 {
+            execution.reset(false);
+            assert!(execution.state.regexps.is_empty());
+            for _ in 0..2 {
+                let root = (
+                    execution.borrow_execution(),
+                    &schema[..],
+                    &input as &dyn InputColumns,
+                );
+                let output = RpnExecutionRef::eval_group(
+                    &mut [root],
+                    &mut EvalContext::default(),
+                    &[2, 0, 2],
+                    OutputOrder::Columns,
+                    InvocationMode::Vector,
+                )
+                .unwrap();
+                for row in 0..3 {
+                    assert_eq!(output[0].get_logical_scalar_ref(row).as_int(), Some(&1));
+                }
+            }
+            assert_eq!(
+                crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.get()),
+                opens
+            );
+        }
     }
 
     #[test]
@@ -1604,7 +1739,7 @@ mod tests {
                 crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.get()),
                 1
             );
-            assert_eq!(execution.regexps.len(), 1);
+            assert_eq!(execution.state.regexps.len(), 1);
         }
         // Invalid argument encoding never reaches preparation.
         let program = literal_regexp_program(&[0xff], None);
@@ -1625,7 +1760,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(execution.regexps.is_empty());
+        assert!(execution.state.regexps.is_empty());
     }
 
     #[test]
@@ -1684,7 +1819,7 @@ mod tests {
                 Some(&7)
             );
         }
-        assert!(execution.regexps.is_empty());
+        assert!(execution.state.regexps.is_empty());
         assert_eq!(input.1.get(), 0);
         assert_eq!(
             crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.get()),
@@ -1749,7 +1884,7 @@ mod tests {
             assert_eq!(result.get_logical_scalar_ref(0).as_int(), Some(&0));
         }
         assert_eq!(input.1.get(), 12);
-        assert_eq!(execution.regexps.len(), 2);
+        assert_eq!(execution.state.regexps.len(), 2);
         assert_eq!(
             crate::impl_regexp::NATIVE_PREPARATIONS.with(|count| count.get()),
             2
@@ -1808,14 +1943,14 @@ mod tests {
                 expected.gen();
             }
             // Inspect state without consuming it; the body output is discarded.
-            assert_eq!(execution.seeded.values.len(), 1);
+            assert_eq!(execution.state.seeded.values.len(), 1);
         }
         assert_eq!(
-            execution.seeded.values.get_mut(&3).unwrap().gen(),
+            execution.state.seeded.values.get_mut(&3).unwrap().gen(),
             expected.gen()
         );
         let fresh = RpnExecution::new(&program, true);
-        assert!(fresh.seeded.values.is_empty());
+        assert!(fresh.state.seeded.values.is_empty());
         let mut unsupported = RpnExecution::new(&program, false);
         unsupported
             .eval_input_mode(
@@ -1827,7 +1962,7 @@ mod tests {
                 InvocationMode::Scalar,
             )
             .unwrap();
-        assert!(unsupported.seeded.values.is_empty());
+        assert!(unsupported.state.seeded.values.is_empty());
     }
 
     #[test]
