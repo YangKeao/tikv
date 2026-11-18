@@ -22,6 +22,25 @@ fn json_type(arg: JsonRef, writer: BytesWriter) -> Result<BytesGuard> {
     Ok(writer.write(Some(Bytes::from(arg.json_type()))))
 }
 
+// Native literal and opaque payloads have their own classification and
+// malformed-input contract. All other tags use the ordinary binary kernel.
+#[rpn_fn(writer)]
+fn native_json_type(arg: JsonRef, writer: BytesWriter) -> Result<BytesGuard> {
+    if !matches!(arg.get_type(), JsonType::Literal | JsonType::Opaque) {
+        return Ok(writer.write_ref(Some(arg.json_type())));
+    }
+    let document = tidb_datatype::BinaryJSON::from_encoded_parts(arg.get_type() as u8, arg.value());
+    let kind =
+        document
+            .type_name()
+            .map_err(|_| tidb_query_common::error::EvaluateError::Custom {
+                code: 3140,
+                msg: "Invalid JSON text: The document root must not be followed by other values."
+                    .into(),
+            })?;
+    Ok(writer.write_ref(Some(kind.as_bytes())))
+}
+
 #[rpn_fn(nullable, raw_varg, min_args = 2, extra_validator = json_modify_validator)]
 #[inline]
 fn json_set(args: &[ScalarValueRef]) -> Result<Option<Json>> {
