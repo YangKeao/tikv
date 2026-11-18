@@ -489,7 +489,8 @@ impl<'p> RpnExecutionRef<'p, '_> {
         self.program
     }
 
-    fn eval_input_mode<'a>(
+    /// Evaluate one root while retaining the owning execution's state.
+    pub fn eval_input_mode<'a>(
         &mut self,
         ctx: &mut EvalContext,
         schema: &'a [FieldType],
