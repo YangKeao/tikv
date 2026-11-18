@@ -266,6 +266,7 @@ fn emit_nodes(nodes: Vec<BuildNode>, output: &mut Vec<RpnExpressionNode>) {
                 output.push(RpnExpressionNode::LogicalStart {
                     and: sig == ScalarFuncSig::LogicalAnd,
                     end: 0,
+                    preserve_mode: false,
                 });
                 for arg in args {
                     emit_logical_arg(sig, arg, output);
@@ -1252,7 +1253,11 @@ mod tests {
         assert_eq!(exp.len(), 9);
         assert!(matches!(
             exp[0],
-            RpnExpressionNode::LogicalStart { and: false, end: 7 }
+            RpnExpressionNode::LogicalStart {
+                and: false,
+                end: 7,
+                preserve_mode: false
+            }
         ));
         assert!(matches!(exp[2], RpnExpressionNode::LogicalNext));
         assert!(matches!(exp[6], RpnExpressionNode::LogicalEnd { .. }));
@@ -1309,7 +1314,11 @@ mod tests {
 
         assert!(matches!(
             exp[0],
-            RpnExpressionNode::LogicalStart { and: false, end: 9 }
+            RpnExpressionNode::LogicalStart {
+                and: false,
+                end: 9,
+                preserve_mode: false
+            }
         ));
         assert!(matches!(exp[3], RpnExpressionNode::FnCall { .. }));
         assert!(matches!(exp[4], RpnExpressionNode::LogicalNext));
@@ -1398,7 +1407,7 @@ mod tests {
                     "depth={depth}, sig={sig:?}"
                 );
                 assert!(
-                    matches!(exp[0], RpnExpressionNode::LogicalStart { and, end } if and == (sig == ScalarFuncSig::LogicalAnd) && end == exp.len())
+                    matches!(exp[0], RpnExpressionNode::LogicalStart { and, end, preserve_mode: false } if and == (sig == ScalarFuncSig::LogicalAnd) && end == exp.len())
                 );
                 assert_eq!(logical_operand_count(&exp), depth + 1);
                 assert_eq!(

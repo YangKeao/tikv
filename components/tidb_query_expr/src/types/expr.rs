@@ -121,10 +121,13 @@ pub enum RpnExpressionNode {
         value: ExpressionScalar,
         field_type: FieldType,
     },
-    /// Starts a PB AND/OR region. The end points past its last operand marker.
+    /// Starts an AND/OR region. The end points past its last operand marker.
     LogicalStart {
         and: bool,
         end: usize,
+        /// Native operands keep the enclosing scalar invocation.
+        /// PB operands use vector invocation.
+        preserve_mode: bool,
     },
     /// Merges one operand and advances only the undecided output positions.
     LogicalNext,
@@ -903,7 +906,11 @@ mod tests {
         let mut missing_boundary = build();
         missing_boundary.remove(2);
         let end = missing_boundary.len();
-        missing_boundary[0] = RpnExpressionNode::LogicalStart { and: true, end };
+        missing_boundary[0] = RpnExpressionNode::LogicalStart {
+            and: true,
+            end,
+            preserve_mode: false,
+        };
         assert!(RpnExpression::finish(missing_boundary, &[], result_type()).is_err());
     }
 
@@ -921,7 +928,11 @@ mod tests {
             target,
             field_type: ty(),
         };
-        let start = |end| LogicalStart { and: false, end };
+        let start = |end| LogicalStart {
+            and: false,
+            end,
+            preserve_mode: false,
+        };
         let end = || LogicalEnd { field_type: ty() };
         let plus = || FnCall {
             func_meta: crate::impl_arithmetic::arithmetic_fn_meta::<
@@ -1016,6 +1027,7 @@ mod tests {
                 LogicalStart {
                     and: false,
                     end: 10,
+                    preserve_mode: false,
                 },
                 int(0),
                 JumpIfFalse {

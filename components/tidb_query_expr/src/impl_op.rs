@@ -637,7 +637,11 @@ mod tests {
         args: Vec<crate::RpnExpression>,
     ) -> Result<VectorValue> {
         use crate::RpnExpressionNode::*;
-        let mut instructions = vec![LogicalStart { and: false, end: 0 }];
+        let mut instructions = vec![LogicalStart {
+            and: false,
+            end: 0,
+            preserve_mode: false,
+        }];
         for arg in args {
             instructions.extend(arg.into_inner());
             instructions.push(LogicalNext);
@@ -646,7 +650,11 @@ mod tests {
             field_type: FieldTypeTp::LongLong.into(),
         };
         let end = instructions.len();
-        instructions[0] = LogicalStart { and: false, end };
+        instructions[0] = LogicalStart {
+            and: false,
+            end,
+            preserve_mode: false,
+        };
         crate::RpnExpression::from(instructions)
             .eval_decoded(ctx, schema, columns, rows, width)?
             .take_vector_value()

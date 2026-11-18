@@ -897,7 +897,11 @@ impl RpnExpression {
             }
             let node = &self.as_ref()[pc];
             match node {
-                RpnExpressionNode::LogicalStart { and, end } => {
+                RpnExpressionNode::LogicalStart {
+                    and,
+                    end,
+                    preserve_mode,
+                } => {
                     if *end <= pc + 4
                         || *end > self.len()
                         || logicals.last().is_some_and(|parent| *end >= parent.end)
@@ -912,7 +916,9 @@ impl RpnExpression {
                         parent_mode: mode,
                         state: crate::impl_op::LogicalState::new(*and, active_count),
                     });
-                    mode = InvocationMode::Vector;
+                    if !preserve_mode {
+                        mode = InvocationMode::Vector;
+                    }
                     pc += 1;
                     continue;
                 }
