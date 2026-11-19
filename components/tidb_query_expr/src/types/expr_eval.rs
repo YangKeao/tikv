@@ -1394,6 +1394,36 @@ impl RpnExpression {
                     },
                 ))
             }
+            RpnExpressionNode::NativeDoubleMath { op, field_type } => {
+                use crate::impl_math::DoubleMath;
+                let source = stack
+                    .last()
+                    .ok_or_else(|| other_err!("missing math operand"))?;
+                let inputs =
+                    (0..output_rows).map(|row| super::native_arithmetic::real(source, row));
+                let output = if *op == DoubleMath::Sign {
+                    let values = inputs
+                        .map(|value| value.map(|value| value.map(DoubleMath::sign_value)))
+                        .collect::<Result<Vec<_>>>()?;
+                    RpnStackNode::Vector {
+                        value: RpnStackNodeVectorValue::Generated {
+                            physical_value: VectorValue::Int(ChunkedVecSized::from(values)),
+                        },
+                        field_type: field_type.into(),
+                    }
+                } else {
+                    let values = inputs
+                        .map(|value| {
+                            value.map(|value| value.and_then(|value| op.real_value(value)))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    RpnStackNode::ExpressionVector {
+                        value: ExpressionVector::Real(values),
+                        field_type,
+                    }
+                };
+                Ok((1, output))
+            }
             RpnExpressionNode::NativeArithmetic {
                 op,
                 overflow,

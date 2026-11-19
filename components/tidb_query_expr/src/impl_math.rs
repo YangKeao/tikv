@@ -261,31 +261,47 @@ fn abs_decimal(arg: &Decimal) -> Result<Option<Decimal>> {
     Ok(Some(res?))
 }
 
+/// Scalar math with an already typed DOUBLE operand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DoubleMath {
+    /// Arc sine with the unit interval as its domain.
+    Asin,
+    /// Arc cosine with the unit interval as its domain.
+    Acos,
+    /// Nonnegative square root.
+    Sqrt,
+    /// Integer sign of the operand.
+    Sign,
+}
+
+impl DoubleMath {
+    pub(crate) fn real_value(self, value: f64) -> Option<f64> {
+        match self {
+            Self::Asin => (-1.0..=1.0).contains(&value).then(|| value.asin()),
+            Self::Acos => (-1.0..=1.0).contains(&value).then(|| value.acos()),
+            Self::Sqrt if value < 0.0 => None,
+            Self::Sqrt => Some(value.sqrt()),
+            Self::Sign => unreachable!("SIGN returns an integer"),
+        }
+    }
+
+    pub(crate) fn sign_value(value: f64) -> Int {
+        i64::from(value > 0.0) - i64::from(value < 0.0)
+    }
+}
+
 #[inline]
 #[rpn_fn]
 fn sign(arg: &Real) -> Result<Option<Int>> {
-    Ok(Some({
-        if **arg > 0f64 {
-            1
-        } else if **arg == 0f64 {
-            0
-        } else {
-            -1
-        }
-    }))
+    Ok(Some(DoubleMath::sign_value(**arg)))
 }
 
 #[inline]
 #[rpn_fn]
 fn sqrt(arg: &Real) -> Result<Option<Real>> {
-    Ok({
-        if **arg < 0f64 {
-            None
-        } else {
-            let res = arg.sqrt();
-            Real::new(res).ok()
-        }
-    })
+    Ok(DoubleMath::Sqrt
+        .real_value(**arg)
+        .and_then(|value| Real::new(value).ok()))
 }
 
 #[inline]
@@ -375,13 +391,17 @@ fn degrees(arg: &Real) -> Result<Option<Real>> {
 #[inline]
 #[rpn_fn]
 pub fn asin(arg: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(arg.asin()).ok())
+    Ok(DoubleMath::Asin
+        .real_value(**arg)
+        .and_then(|value| Real::new(value).ok()))
 }
 
 #[inline]
 #[rpn_fn]
 pub fn acos(arg: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(arg.acos()).ok())
+    Ok(DoubleMath::Acos
+        .real_value(**arg)
+        .and_then(|value| Real::new(value).ok()))
 }
 
 #[inline]
