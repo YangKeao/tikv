@@ -776,6 +776,46 @@ pub fn substring_index(
     Ok(writer.write_ref(Some(result)))
 }
 
+/// Native negative counts select among the non-overlapping forward matches.
+#[rpn_fn(writer)]
+pub fn native_substring_index(
+    s: BytesRef,
+    delim: BytesRef,
+    count: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    if *count >= 0 || s.is_empty() || delim.is_empty() {
+        return substring_index(s, delim, count, writer);
+    }
+
+    let index = count.unsigned_abs();
+    if index > s.len() as u64 {
+        return Ok(writer.write_ref(Some(s)));
+    }
+    let matches = || memmem::find_iter(s, delim);
+    let output = matches()
+        .count()
+        .checked_sub(index as usize)
+        .and_then(|n| matches().nth(n))
+        .map_or(s, |start| &s[start + delim.len()..]);
+    Ok(writer.write_ref(Some(output)))
+}
+
+/// Unsigned counts above i64::MAX are beyond any representable byte payload.
+#[rpn_fn(writer)]
+pub fn native_substring_index_unsigned(
+    s: BytesRef,
+    delim: BytesRef,
+    count: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    if *count >= 0 || delim.is_empty() {
+        substring_index(s, delim, count, writer)
+    } else {
+        Ok(writer.write_ref(Some(s)))
+    }
+}
+
 #[rpn_fn]
 #[inline]
 pub fn strcmp<C: Collator>(left: BytesRef, right: BytesRef) -> Result<Option<i64>> {
@@ -3534,6 +3574,12 @@ mod tests {
     #[test]
     fn test_substring_index() {
         let test_cases = vec![
+            (
+                Some(b"aaaaa".to_vec()),
+                Some(b"aa".to_vec()),
+                Some(-1),
+                Some(vec![]),
+            ),
             (None, None, None, None),
             (Some(vec![]), None, None, None),
             (Some(vec![]), Some(vec![]), Some(1i64), Some(vec![])),
