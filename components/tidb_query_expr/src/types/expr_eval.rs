@@ -1435,6 +1435,7 @@ impl RpnExpression {
                             | RpnStackNode::ExpressionVector { .. }
                     )
                 }) && !metadata.is::<super::native_arithmetic::NativeComparisonArgs>()
+                    && !metadata.is::<crate::impl_time::CalendarPart>()
                 {
                     return Err(other_err!(
                         "kernel {} does not yet admit native scalar arguments",
@@ -1490,6 +1491,35 @@ fn merge_branch_values<'a>(
         count,
         field_type,
     )
+}
+
+/// Build a typed calendar extract that reads the native Time carrier as-is.
+pub fn native_calendar_part_node(part: crate::impl_time::CalendarPart) -> RpnExpressionNode {
+    use crate::impl_time::CalendarPart;
+
+    RpnExpressionNode::FnCall {
+        func_meta: super::RpnFnMeta {
+            name: "native_calendar_part",
+            fn_ptr: |_, rows, args, _, metadata| {
+                let [source] = args else {
+                    return Err(other_err!("calendar part requires one time operand"));
+                };
+                let part = metadata
+                    .downcast_ref::<CalendarPart>()
+                    .ok_or_else(|| other_err!("missing calendar part"))?;
+                let mut values = Vec::with_capacity(rows);
+                for row in 0..rows {
+                    values
+                        .push(native_time(source, row)?.map(|time| part.extract(time.core_time())));
+                }
+                Ok(VectorValue::Int(ChunkedVecSized::from(values)))
+            },
+            ..crate::impl_time::month_fn_meta()
+        },
+        args_len: 1,
+        field_type: tidb_query_datatype::FieldTypeTp::LongLong.into(),
+        metadata: Box::new(part),
+    }
 }
 
 fn native_time(source: &RpnStackNode<'_>, row: usize) -> Result<Option<tidb_datatype::Time>> {

@@ -632,10 +632,40 @@ pub fn make_time(
     }
 }
 
+/// Calendar component of an already typed date or datetime.
+#[derive(Clone, Copy, Debug)]
+pub enum CalendarPart {
+    /// Calendar year.
+    Year,
+    /// Month of the year.
+    Month,
+    /// Day of the month.
+    Day,
+    /// Quarter of the year.
+    Quarter,
+}
+
+impl CalendarPart {
+    pub(crate) fn extract(self, time: tidb_datatype::CoreTime) -> Int {
+        match self {
+            Self::Year => i64::from(time.year()),
+            Self::Month => i64::from(time.month()),
+            Self::Day => i64::from(time.day()),
+            Self::Quarter => i64::from(time.month().div_ceil(3)),
+        }
+    }
+
+    fn extract_wire(self, time: &DateTime) -> Int {
+        self.extract(tidb_datatype::CoreTime::from_raw(
+            time.expression_memory_bits() & !15,
+        ))
+    }
+}
+
 #[rpn_fn(nullable)]
 #[inline]
 pub fn month(t: Option<&DateTime>) -> Result<Option<Int>> {
-    t.map_or(Ok(None), |time| Ok(Some(Int::from(time.month()))))
+    Ok(t.map(|time| CalendarPart::Month.extract_wire(time)))
 }
 
 #[rpn_fn(capture = [ctx])]
@@ -696,7 +726,7 @@ pub fn year(ctx: &mut EvalContext, t: Option<&DateTime>) -> Result<Option<Int>> 
         }
         return Ok(Some(0));
     }
-    Ok(Some(Int::from(t.year())))
+    Ok(Some(CalendarPart::Year.extract_wire(t)))
 }
 
 #[rpn_fn(nullable, capture = [ctx])]
@@ -715,7 +745,7 @@ pub fn day_of_month(ctx: &mut EvalContext, t: Option<&DateTime>) -> Result<Optio
         }
         return Ok(Some(0));
     }
-    Ok(Some(Int::from(t.day())))
+    Ok(Some(CalendarPart::Day.extract_wire(t)))
 }
 
 #[rpn_fn(nullable, capture = [ctx])]
@@ -917,7 +947,7 @@ pub fn duration_string_time_diff(
 #[rpn_fn]
 #[inline]
 pub fn quarter(t: &DateTime) -> Result<Option<Int>> {
-    Ok(Some(Int::from(t.month() + 2) / 3))
+    Ok(Some(CalendarPart::Quarter.extract_wire(t)))
 }
 
 /// Cast Duration into string representation and drop subsec if possible.
@@ -3151,6 +3181,33 @@ mod tests {
             .evaluate::<Int>(ScalarFuncSig::TimeToSec)
             .unwrap();
         assert_eq!(output, None);
+    }
+
+    #[test]
+    fn pb_calendar_parts_keep_zero_date_policy() {
+        use std::sync::Arc;
+
+        use tidb_query_datatype::{FieldTypeTp, expr::EvalConfig};
+        for sig in [
+            ScalarFuncSig::Year,
+            ScalarFuncSig::Month,
+            ScalarFuncSig::DayOfMonth,
+            ScalarFuncSig::Quarter,
+        ] {
+            let mut cfg = EvalConfig::new();
+            cfg.sql_mode.insert(SqlMode::NO_ZERO_DATE);
+            let (result, ctx) = RpnFnScalarEvaluator::new_for_test(EvalContext::new(Arc::new(cfg)))
+                .push_param(Some(DateTime::from_expression_memory_bits(0)))
+                .evaluate_raw(FieldTypeTp::LongLong, sig);
+            if matches!(sig, ScalarFuncSig::Year | ScalarFuncSig::DayOfMonth) {
+                assert_eq!(result.unwrap(), ScalarValue::Int(None));
+                assert_eq!(ctx.warnings.warnings.len(), 1);
+                assert_eq!(ctx.warnings.warnings[0].get_code(), 1292);
+            } else {
+                assert_eq!(result.unwrap(), ScalarValue::Int(Some(0)));
+                assert!(ctx.warnings.warnings.is_empty());
+            }
+        }
     }
 
     #[test]
