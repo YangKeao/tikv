@@ -687,13 +687,15 @@ impl RpnExpression {
                     }
                     stack.push(EvalType::Real);
                 }
-                RpnExpressionNode::NativeArithmetic { field_type, .. } => {
+                RpnExpressionNode::NativeArithmetic { op, field_type, .. } => {
                     let ty = EvalType::try_from(field_type.as_accessor().tp())
                         .map_err(|e| other_err!("{}", e))?;
-                    if !matches!(ty, EvalType::Real | EvalType::Decimal)
-                        || pop(&mut stack) != Some(ty)
-                        || pop(&mut stack) != Some(ty)
-                    {
+                    let valid_type = if matches!(op, super::NativeArithmetic::IntegerModulo) {
+                        ty == EvalType::Int
+                    } else {
+                        matches!(ty, EvalType::Real | EvalType::Decimal)
+                    };
+                    if !valid_type || pop(&mut stack) != Some(ty) || pop(&mut stack) != Some(ty) {
                         return Err(invalid());
                     }
                     stack.push(ty);

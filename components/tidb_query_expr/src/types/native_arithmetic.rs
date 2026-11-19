@@ -3,14 +3,14 @@
 use tidb_datatype::{DecimalCodecWarning, float_warning_input, str_to_float};
 use tidb_query_common::error::{EvaluateError, Result};
 use tidb_query_datatype::{
-    EvalType, FieldTypeAccessor, FieldTypeTp,
+    EvalType, FieldTypeAccessor, FieldTypeFlag, FieldTypeTp,
     codec::data_type::{ChunkedVecSized, Decimal, Real, ScalarValueRef, VectorValue},
 };
 use tipb::FieldType;
 
 use super::{
     ExpressionDecimal, ExpressionScalar, ExpressionVector, InputColumns, RpnExpressionNode,
-    RpnFnMeta, RpnStackNode,
+    RpnFnMeta, RpnStackNode, RpnStackNodeVectorValue,
 };
 use crate::impl_compare::{BasicComparer, CmpOp, compare_fn_meta};
 
@@ -22,6 +22,7 @@ pub enum NativeArithmetic {
     Subtract,
     Multiply,
     Divide,
+    IntegerModulo,
 }
 
 /// Static source text and demanded raw parameter positions for overflow
@@ -189,6 +190,54 @@ fn decimal<'a>(value: &'a RpnStackNode<'_>, row: usize) -> Result<Option<&'a Exp
     Ok(v)
 }
 
+fn integer_modulo<'a>(
+    left: &RpnStackNode<'_>,
+    right: &RpnStackNode<'_>,
+    field_type: &'a FieldType,
+    rows: usize,
+    input: &dyn InputColumns,
+) -> Result<RpnStackNode<'a>> {
+    use crate::impl_arithmetic::{ArithmeticOp, IntIntMod, IntUintMod, UintIntMod, UintUintMod};
+
+    let unsigned = |value: &RpnStackNode<'_>| {
+        value
+            .field_type()
+            .as_accessor()
+            .flag()
+            .contains(FieldTypeFlag::UNSIGNED)
+    };
+    let modulo = match (unsigned(left), unsigned(right)) {
+        (false, false) => IntIntMod::calc,
+        (false, true) => IntUintMod::calc,
+        (true, false) => UintIntMod::calc,
+        (true, true) => UintUintMod::calc,
+    };
+    let mut values = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let (ScalarValueRef::Int(lhs), ScalarValueRef::Int(rhs)) = (
+            left.get_logical_scalar_ref(row),
+            right.get_logical_scalar_ref(row),
+        ) else {
+            return Err(other_err!("integer MOD operands required"));
+        };
+        let result = match (lhs, rhs) {
+            (Some(_), Some(0)) => {
+                input.handle_division_by_zero()?;
+                None
+            }
+            (Some(lhs), Some(rhs)) => modulo(lhs, rhs)?,
+            _ => None,
+        };
+        values.push(result);
+    }
+    Ok(RpnStackNode::Vector {
+        value: RpnStackNodeVectorValue::Generated {
+            physical_value: VectorValue::Int(ChunkedVecSized::from(values)),
+        },
+        field_type: field_type.into(),
+    })
+}
+
 pub(super) fn evaluate<'a>(
     op: NativeArithmetic,
     field_type: &'a FieldType,
@@ -201,6 +250,9 @@ pub(super) fn evaluate<'a>(
     let [left, right] = args else {
         return Err(other_err!("binary arithmetic requires two operands"));
     };
+    if matches!(op, NativeArithmetic::IntegerModulo) {
+        return integer_modulo(left, right, field_type, rows, input);
+    }
     let overflow = || -> Result<EvaluateError> {
         let mut message = String::new();
         for part in diagnostic {
@@ -241,6 +293,7 @@ pub(super) fn evaluate<'a>(
                         return Ok(None);
                     };
                     let value = match op {
+                        NativeArithmetic::IntegerModulo => unreachable!("handled above"),
                         NativeArithmetic::Add => a + b,
                         NativeArithmetic::Subtract => a - b,
                         NativeArithmetic::Multiply => a * b,
@@ -264,6 +317,7 @@ pub(super) fn evaluate<'a>(
                         return Ok(None);
                     };
                     let (value, warning) = match op {
+                        NativeArithmetic::IntegerModulo => unreachable!("handled above"),
                         NativeArithmetic::Add => a.add_mysql(b),
                         NativeArithmetic::Subtract => a.sub_mysql(b),
                         NativeArithmetic::Multiply => a.mul_mysql(b),
