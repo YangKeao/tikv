@@ -690,7 +690,11 @@ impl RpnExpression {
                 RpnExpressionNode::NativeArithmetic { op, field_type, .. } => {
                     let ty = EvalType::try_from(field_type.as_accessor().tp())
                         .map_err(|e| other_err!("{}", e))?;
-                    let valid_type = if matches!(op, super::NativeArithmetic::IntegerModulo) {
+                    let valid_type = if matches!(
+                        op,
+                        super::NativeArithmetic::IntegerModulo
+                            | super::NativeArithmetic::IntegerDivide
+                    ) {
                         ty == EvalType::Int
                     } else {
                         matches!(ty, EvalType::Real | EvalType::Decimal)

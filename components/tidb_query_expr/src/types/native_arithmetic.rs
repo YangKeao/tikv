@@ -23,6 +23,7 @@ pub enum NativeArithmetic {
     Multiply,
     Divide,
     IntegerModulo,
+    IntegerDivide,
 }
 
 /// Static source text and demanded raw parameter positions for overflow
@@ -190,14 +191,21 @@ fn decimal<'a>(value: &'a RpnStackNode<'_>, row: usize) -> Result<Option<&'a Exp
     Ok(v)
 }
 
-fn integer_modulo<'a>(
+fn integer_arithmetic<'a>(
+    op: NativeArithmetic,
     left: &RpnStackNode<'_>,
     right: &RpnStackNode<'_>,
     field_type: &'a FieldType,
     rows: usize,
     input: &dyn InputColumns,
 ) -> Result<RpnStackNode<'a>> {
-    use crate::impl_arithmetic::{ArithmeticOp, IntIntMod, IntUintMod, UintIntMod, UintUintMod};
+    use tidb_query_common::error::ErrorInner;
+    use tidb_query_datatype::codec::error::ERR_DATA_OUT_OF_RANGE;
+
+    use crate::impl_arithmetic::{
+        ArithmeticOp, IntDivideInt, IntDivideUint, IntIntMod, IntUintMod, UintDivideInt,
+        UintDivideUint, UintIntMod, UintUintMod,
+    };
 
     let unsigned = |value: &RpnStackNode<'_>| {
         value
@@ -206,11 +214,17 @@ fn integer_modulo<'a>(
             .flag()
             .contains(FieldTypeFlag::UNSIGNED)
     };
-    let modulo = match (unsigned(left), unsigned(right)) {
-        (false, false) => IntIntMod::calc,
-        (false, true) => IntUintMod::calc,
-        (true, false) => UintIntMod::calc,
-        (true, true) => UintUintMod::calc,
+    let (lhs_unsigned, rhs_unsigned) = (unsigned(left), unsigned(right));
+    let dividing = matches!(op, NativeArithmetic::IntegerDivide);
+    let kernel = match (dividing, lhs_unsigned, rhs_unsigned) {
+        (false, false, false) => IntIntMod::calc,
+        (false, false, true) => IntUintMod::calc,
+        (false, true, false) => UintIntMod::calc,
+        (false, true, true) => UintUintMod::calc,
+        (true, false, false) => IntDivideInt::calc,
+        (true, false, true) => IntDivideUint::calc,
+        (true, true, false) => UintDivideInt::calc,
+        (true, true, true) => UintDivideUint::calc,
     };
     let mut values = Vec::with_capacity(rows);
     for row in 0..rows {
@@ -218,14 +232,47 @@ fn integer_modulo<'a>(
             left.get_logical_scalar_ref(row),
             right.get_logical_scalar_ref(row),
         ) else {
-            return Err(other_err!("integer MOD operands required"));
+            return Err(other_err!("integer arithmetic operands required"));
         };
         let result = match (lhs, rhs) {
             (Some(_), Some(0)) => {
                 input.handle_division_by_zero()?;
                 None
             }
-            (Some(lhs), Some(rhs)) => modulo(lhs, rhs)?,
+            (Some(lhs), Some(rhs)) => kernel(lhs, rhs).map_err(|error| {
+                if !dividing
+                    || !matches!(
+                        &*error.0,
+                        ErrorInner::Evaluate(EvaluateError::Custom {
+                            code: ERR_DATA_OUT_OF_RANGE,
+                            ..
+                        })
+                    )
+                {
+                    return error;
+                }
+                let class = if lhs_unsigned || rhs_unsigned {
+                    "BIGINT UNSIGNED"
+                } else {
+                    "BIGINT"
+                };
+                let text = |n: i64, unsigned| {
+                    if unsigned {
+                        (n as u64).to_string()
+                    } else {
+                        n.to_string()
+                    }
+                };
+                EvaluateError::Custom {
+                    code: ERR_DATA_OUT_OF_RANGE,
+                    msg: format!(
+                        "{class} value is out of range in '({}, {})'",
+                        text(*lhs, lhs_unsigned),
+                        text(*rhs, rhs_unsigned)
+                    ),
+                }
+                .into()
+            })?,
             _ => None,
         };
         values.push(result);
@@ -250,8 +297,11 @@ pub(super) fn evaluate<'a>(
     let [left, right] = args else {
         return Err(other_err!("binary arithmetic requires two operands"));
     };
-    if matches!(op, NativeArithmetic::IntegerModulo) {
-        return integer_modulo(left, right, field_type, rows, input);
+    if matches!(
+        op,
+        NativeArithmetic::IntegerModulo | NativeArithmetic::IntegerDivide
+    ) {
+        return integer_arithmetic(op, left, right, field_type, rows, input);
     }
     let overflow = || -> Result<EvaluateError> {
         let mut message = String::new();
@@ -293,7 +343,9 @@ pub(super) fn evaluate<'a>(
                         return Ok(None);
                     };
                     let value = match op {
-                        NativeArithmetic::IntegerModulo => unreachable!("handled above"),
+                        NativeArithmetic::IntegerModulo | NativeArithmetic::IntegerDivide => {
+                            unreachable!("handled above")
+                        }
                         NativeArithmetic::Add => a + b,
                         NativeArithmetic::Subtract => a - b,
                         NativeArithmetic::Multiply => a * b,
@@ -317,7 +369,9 @@ pub(super) fn evaluate<'a>(
                         return Ok(None);
                     };
                     let (value, warning) = match op {
-                        NativeArithmetic::IntegerModulo => unreachable!("handled above"),
+                        NativeArithmetic::IntegerModulo | NativeArithmetic::IntegerDivide => {
+                            unreachable!("handled above")
+                        }
                         NativeArithmetic::Add => a.add_mysql(b),
                         NativeArithmetic::Subtract => a.sub_mysql(b),
                         NativeArithmetic::Multiply => a.mul_mysql(b),
