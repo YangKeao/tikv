@@ -751,12 +751,16 @@ pub enum PacketString {
     Concat(usize),
     /// CONCAT_WS with its number of arguments, including the separator.
     ConcatWs(usize),
+    /// TO_BASE64 with a byte string.
+    ToBase64,
+    /// FROM_BASE64 with a byte string.
+    FromBase64,
 }
 
 impl PacketString {
     pub(crate) fn args_len(self) -> usize {
         match self {
-            Self::Space => 1,
+            Self::Space | Self::ToBase64 | Self::FromBase64 => 1,
             Self::Repeat => 2,
             Self::Concat(args_len) | Self::ConcatWs(args_len) => args_len,
         }
@@ -765,6 +769,7 @@ impl PacketString {
     pub(crate) fn accepts(self, args: &[EvalType]) -> bool {
         match self {
             Self::Space => args == [EvalType::Int],
+            Self::ToBase64 | Self::FromBase64 => args == [EvalType::Bytes],
             Self::Repeat => args == [EvalType::Bytes, EvalType::Int],
             Self::Concat(_) => !args.is_empty() && args.iter().all(|arg| *arg == EvalType::Bytes),
             Self::ConcatWs(_) => args.len() >= 2 && args.iter().all(|arg| *arg == EvalType::Bytes),
@@ -778,8 +783,14 @@ impl PacketString {
         rows: usize,
     ) -> Result<VectorValue> {
         let limit = input.max_allowed_packet();
-        if matches!(self, Self::Concat(_) | Self::ConcatWs(_)) {
-            return self.evaluate_join(input, args, rows, limit);
+        match self {
+            Self::Concat(_) | Self::ConcatWs(_) => {
+                return self.evaluate_join(input, args, rows, limit);
+            }
+            Self::ToBase64 | Self::FromBase64 => {
+                return self.evaluate_base64(input, &args[0], rows, limit);
+            }
+            Self::Space | Self::Repeat => {}
         }
         let count_arg = &args[self.args_len() - 1];
         let mut values = ChunkedVecBytes::with_capacity(rows);
@@ -822,7 +833,7 @@ impl PacketString {
                         }
                     }
                 }
-                Self::Concat(_) | Self::ConcatWs(_) => unreachable!(),
+                _ => unreachable!(),
             };
             values = result.into_inner();
         }
@@ -895,6 +906,62 @@ impl PacketString {
                 } else {
                     writer.write(None)
                 }
+            };
+            values = result.into_inner();
+        }
+        Ok(VectorValue::Bytes(values))
+    }
+
+    fn evaluate_base64(
+        self,
+        host: &dyn crate::InputColumns,
+        arg: &crate::RpnStackNode<'_>,
+        rows: usize,
+        limit: u64,
+    ) -> Result<VectorValue> {
+        let mut values = ChunkedVecBytes::with_capacity(rows);
+        for row in 0..rows {
+            let ScalarValueRef::Bytes(input) = arg.get_logical_scalar_ref(row) else {
+                return Err(other_err!("base64 requires bytes"));
+            };
+            let Some(input) = input else {
+                values.push_null();
+                continue;
+            };
+            let writer = values.into_writer();
+            let result = if matches!(self, Self::ToBase64) {
+                // Go's native length guard is separate from the PB blob cap.
+                let size = if input.len() as u64 > 6_827_690_988_321_067_803 {
+                    None
+                } else {
+                    encoded_size(input.len())
+                };
+                match size {
+                    Some(size) if size as u64 > limit => {
+                        host.handle_allowed_packet_overflowed("to_base64")?;
+                        writer.write(None)
+                    }
+                    Some(size) => encode_base64(input, size, writer),
+                    None => writer.write(None),
+                }
+            } else if input.len() > (isize::MAX as usize) / 3 {
+                writer.write(None)
+            } else if (input.len() * 3 / 4) as u64 > limit {
+                // Estimate from the original bytes, before skipping whitespace.
+                host.handle_allowed_packet_overflowed("from_base64")?;
+                writer.write(None)
+            } else {
+                let cleaned: Vec<_> = input
+                    .iter()
+                    .copied()
+                    .filter(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+                    .collect();
+                let decoded = cleaned
+                    .len()
+                    .is_multiple_of(BASE64_ENCODED_CHUNK_LENGTH)
+                    .then(|| base64::decode_config(&cleaned, base64::STANDARD).ok())
+                    .flatten();
+                writer.write(decoded)
             };
             values = result.into_inner();
         }
@@ -1188,13 +1255,17 @@ pub fn to_base64(bs: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
     }
 
     if let Some(size) = encoded_size(bs.len()) {
-        let mut buf = vec![0; size];
-        let len_without_wrap = base64::encode_config_slice(bs, base64::STANDARD, &mut buf);
-        line_wrap(&mut buf, len_without_wrap);
-        Ok(writer.write(Some(buf)))
+        Ok(encode_base64(bs, size, writer))
     } else {
         Ok(writer.write_ref(Some(b"")))
     }
+}
+
+fn encode_base64(bs: BytesRef, size: usize, writer: BytesWriter) -> BytesGuard {
+    let mut buf = vec![0; size];
+    let len_without_wrap = base64::encode_config_slice(bs, base64::STANDARD, &mut buf);
+    line_wrap(&mut buf, len_without_wrap);
+    writer.write(Some(buf))
 }
 
 // similar logic to crate `line-wrap`, since we had call `encoded_size` before,
@@ -4643,6 +4714,21 @@ mod tests {
             .evaluate(ScalarFuncSig::FromBase64)
             .unwrap();
         assert_eq!(invalid_base64_output, Some(b"".to_vec()));
+    }
+
+    #[test]
+    fn pb_base64_keeps_padding_and_whitespace_policy() {
+        for (input, expected) in [
+            (&b"Zg="[..], &b""[..]),
+            (&b"Zg\x0b=="[..], &b"f"[..]),
+            (&b"Zg\x0c=="[..], &b"f"[..]),
+        ] {
+            let actual = RpnFnScalarEvaluator::new()
+                .push_param(Some(input.to_vec()))
+                .evaluate::<Bytes>(ScalarFuncSig::FromBase64)
+                .unwrap();
+            assert_eq!(actual.as_deref(), Some(expected));
+        }
     }
 
     #[test]
