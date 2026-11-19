@@ -150,8 +150,7 @@ pub fn week_day(ctx: &mut EvalContext, t: Option<&DateTime>) -> Result<Option<In
             .handle_invalid_time_error(Error::incorrect_datetime_value(t))
             .map(|_| Ok(None))?;
     }
-    let day = t.weekday().num_days_from_monday();
-    Ok(Some(i64::from(day)))
+    Ok(Some(CalendarPart::Weekday.extract_wire(t)))
 }
 
 #[rpn_fn(nullable, capture = [ctx])]
@@ -166,8 +165,7 @@ pub fn day_of_week(ctx: &mut EvalContext, t: Option<&DateTime>) -> Result<Option
             .handle_invalid_time_error(Error::incorrect_datetime_value(t))
             .map(|_| Ok(None))?;
     }
-    let day = t.weekday().number_from_sunday();
-    Ok(Some(Int::from(day)))
+    Ok(Some(CalendarPart::DayOfWeek.extract_wire(t)))
 }
 
 #[rpn_fn(nullable, capture = [ctx])]
@@ -182,8 +180,7 @@ pub fn day_of_year(ctx: &mut EvalContext, t: Option<&DateTime>) -> Result<Option
             .handle_invalid_time_error(Error::incorrect_datetime_value(t))
             .map(|_| Ok(None))?;
     }
-    let day = t.days();
-    Ok(Some(Int::from(day)))
+    Ok(Some(CalendarPart::DayOfYear.extract_wire(t)))
 }
 
 #[rpn_fn(nullable, capture = [ctx])]
@@ -643,6 +640,12 @@ pub enum CalendarPart {
     Day,
     /// Quarter of the year.
     Quarter,
+    /// Weekday numbered from Sunday as one.
+    DayOfWeek,
+    /// Weekday numbered from Monday as zero.
+    Weekday,
+    /// One-based day of the year.
+    DayOfYear,
 }
 
 impl CalendarPart {
@@ -652,10 +655,39 @@ impl CalendarPart {
             Self::Month => i64::from(time.month()),
             Self::Day => i64::from(time.day()),
             Self::Quarter => i64::from(time.month().div_ceil(3)),
+            Self::DayOfWeek => i64::from(time.weekday().sunday_index()) + 1,
+            Self::Weekday => (i64::from(time.weekday().sunday_index()) + 6) % 7,
+            Self::DayOfYear => {
+                i64::from(time.day())
+                    + (1..time.month())
+                        .map(|month| {
+                            // Wire ordinals use 31 for months beyond December.
+                            let days = tidb_datatype::get_last_day(time.year(), month);
+                            i64::from(if days == 0 { 31 } else { days })
+                        })
+                        .sum::<i64>()
+            }
+        }
+    }
+
+    pub(crate) fn extract_native(self, time: tidb_datatype::CoreTime) -> Option<Int> {
+        if matches!(self, Self::DayOfWeek | Self::Weekday | Self::DayOfYear)
+            && !(1..=tidb_datatype::get_last_day(time.year(), time.month())).contains(&time.day())
+        {
+            None
+        } else {
+            Some(self.extract(time))
         }
     }
 
     fn extract_wire(self, time: &DateTime) -> Int {
+        if time.month() > 12 {
+            match self {
+                Self::DayOfWeek => return i64::from(time.weekday().number_from_sunday()),
+                Self::Weekday => return i64::from(time.weekday().num_days_from_monday()),
+                _ => {}
+            }
+        }
         self.extract(tidb_datatype::CoreTime::from_raw(
             time.expression_memory_bits() & !15,
         ))
@@ -2445,6 +2477,7 @@ mod tests {
             ("2018-11-12 00:00:00.000000", Some(316)),
             ("2018-11-30 00:00:00.000000", Some(334)),
             ("2018-12-31 00:00:00.000000", Some(365)),
+            ("0000-03-01 00:00:00.000000", Some(61)),
             ("2016-12-31 00:00:00.000000", Some(366)),
             ("0000-00-00 00:00:00.000000", None),
             ("2018-11-00 00:00:00.000000", None),

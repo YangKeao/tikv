@@ -1600,8 +1600,10 @@ pub fn native_calendar_part_node(part: crate::impl_time::CalendarPart) -> RpnExp
                     .ok_or_else(|| other_err!("missing calendar part"))?;
                 let mut values = Vec::with_capacity(rows);
                 for row in 0..rows {
-                    values
-                        .push(native_time(source, row)?.map(|time| part.extract(time.core_time())));
+                    values.push(
+                        native_time(source, row)?
+                            .and_then(|time| part.extract_native(time.core_time())),
+                    );
                 }
                 Ok(VectorValue::Int(ChunkedVecSized::from(values)))
             },
