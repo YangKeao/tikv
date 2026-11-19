@@ -63,6 +63,30 @@ pub fn native_vec_from_text(input: BytesRef) -> Result<Option<VectorFloat32>> {
     Ok(Some(VectorFloat32::from_f32(vector.elements().to_vec())?))
 }
 
+/// CAST AS VECTOR uses the native SQL conversion and declared dimension.
+#[rpn_fn(capture = [extra])]
+pub fn native_cast_string_as_vector(
+    extra: &mut crate::RpnFnCallExtra<'_>,
+    input: BytesRef,
+) -> Result<Option<VectorFloat32>> {
+    use tidb_datatype::{ConversionFlags, Datum, FieldType, FieldTypeCode};
+    use tidb_query_common::error::EvaluateError;
+
+    let target = FieldType::new(FieldTypeCode::VectorFloat32)
+        .with_flen(i64::from(extra.ret_field_type.get_flen()));
+    let value = Datum::new_bytes(input)
+        .convert_to(&target, ConversionFlags::default())
+        .map_err(|error| EvaluateError::Custom {
+            code: 1105,
+            msg: error.to_string(),
+        })?
+        .value;
+    let Datum::VectorFloat32(vector) = value else {
+        unreachable!("byte input converted to a vector");
+    };
+    Ok(Some(VectorFloat32::from_f32(vector.elements().to_vec())?))
+}
+
 /// Native vector functions use the same algorithms and retain SQL errors.
 #[derive(Clone, Copy)]
 pub enum NativeVectorDistance {
