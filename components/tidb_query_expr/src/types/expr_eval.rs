@@ -1574,6 +1574,7 @@ impl RpnExpression {
                     && !metadata.is::<crate::impl_time::CalendarPart>()
                     && !metadata.is::<crate::impl_time::CalendarName>()
                     && !metadata.is::<crate::impl_time::DurationPart>()
+                    && !metadata.is::<NativeDateDifference>()
                 {
                     return Err(other_err!(
                         "kernel {} does not yet admit native scalar arguments",
@@ -1719,6 +1720,41 @@ pub fn native_duration_part_node(part: crate::impl_time::DurationPart) -> RpnExp
         args_len: 1,
         field_type: tidb_query_datatype::FieldTypeTp::LongLong.into(),
         metadata: Box::new(part),
+    }
+}
+
+struct NativeDateDifference;
+
+/// Build a DATEDIFF call over two native date or datetime expressions.
+pub fn native_date_difference_node() -> RpnExpressionNode {
+    RpnExpressionNode::FnCall {
+        func_meta: super::RpnFnMeta {
+            name: "native_date_difference",
+            fn_ptr: |_, rows, args, _, _| {
+                let [left, right] = args else {
+                    return Err(other_err!("DATEDIFF requires two time operands"));
+                };
+                let values = (0..rows)
+                    .map(|row| {
+                        let (Some(left), Some(right)) =
+                            (native_time(left, row)?, native_time(right, row)?)
+                        else {
+                            return Ok(None);
+                        };
+                        // A zero suffix is a wire DATETIME at FSP 0. Its existing
+                        // date_diff conversion clears clocks before comparing dates.
+                        let left = DateTime::from_expression_memory_bits(left.core_time().raw());
+                        let right = DateTime::from_expression_memory_bits(right.core_time().raw());
+                        Ok(left.date_diff(right))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(VectorValue::Int(ChunkedVecSized::from(values)))
+            },
+            ..crate::impl_time::date_diff_fn_meta()
+        },
+        args_len: 2,
+        field_type: tidb_query_datatype::FieldTypeTp::LongLong.into(),
+        metadata: Box::new(NativeDateDifference),
     }
 }
 
