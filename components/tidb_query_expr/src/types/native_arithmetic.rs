@@ -89,6 +89,7 @@ pub(super) fn is_null(value: &RpnStackNode<'_>, row: usize) -> bool {
                 | ScalarValueRef::Bytes(None)
                 | ScalarValueRef::Real(None)
                 | ScalarValueRef::Decimal(None)
+                | ScalarValueRef::VectorFloat32(None)
         ),
     }
 }

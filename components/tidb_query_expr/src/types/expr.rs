@@ -587,7 +587,11 @@ impl RpnExpression {
                         .map_err(|e| other_err!("{}", e))?;
                     if !matches!(
                         declared,
-                        EvalType::Int | EvalType::Real | EvalType::Decimal | EvalType::Bytes
+                        EvalType::Int
+                            | EvalType::Real
+                            | EvalType::Decimal
+                            | EvalType::Bytes
+                            | EvalType::VectorFloat32
                     ) || available == 0
                         || stack.last() != Some(&declared)
                     {
@@ -973,6 +977,20 @@ mod tests {
             field_type: FieldTypeTp::VarString.into(),
         };
         assert!(RpnExpression::finish(vec![int(), guard(3), bytes], &[], ty()).is_err());
+        let vector_type = || FieldTypeTp::TiDbVectorFloat32.into();
+        let vector = || Constant {
+            value: ScalarValue::VectorFloat32(None),
+            field_type: vector_type(),
+        };
+        let vector_guard = || JumpIfNotNull {
+            target: 3,
+            field_type: vector_type(),
+        };
+        assert!(
+            RpnExpression::finish(vec![vector(), vector_guard(), vector()], &[], vector_type())
+                .is_ok()
+        );
+        assert!(RpnExpression::finish(vec![int(), vector_guard(), int()], &[], ty()).is_err());
         assert!(
             RpnExpression::finish(
                 vec![
