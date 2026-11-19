@@ -51,6 +51,52 @@ fn vec_l2_norm(a: VectorFloat32Ref) -> Result<Option<Real>> {
     Ok(Real::new(a.l2_norm()).ok())
 }
 
+/// Native vector functions use the same algorithms and retain SQL errors.
+#[derive(Clone, Copy)]
+pub enum NativeVectorDistance {
+    L1,
+    L2,
+    NegativeInnerProduct,
+    Cosine,
+}
+
+pub fn native_vector_distance_fn_meta() -> crate::RpnFnMeta {
+    use tidb_query_common::error::{ErrorInner, EvaluateError};
+
+    crate::RpnFnMeta {
+        fn_ptr: |ctx, rows, args, extra, metadata| {
+            let Some(distance) = metadata.downcast_ref::<NativeVectorDistance>() else {
+                return Err(other_err!("missing vector distance metadata"));
+            };
+            let kernel = match distance {
+                NativeVectorDistance::L1 => vec_l1_distance_fn_meta(),
+                NativeVectorDistance::L2 => vec_l2_distance_fn_meta(),
+                NativeVectorDistance::NegativeInnerProduct => vec_negative_inner_product_fn_meta(),
+                NativeVectorDistance::Cosine => vec_cosine_distance_fn_meta(),
+            };
+            (kernel.fn_ptr)(ctx, rows, args, extra, &()).map_err(|error| {
+                let ErrorInner::Evaluate(EvaluateError::Other(message)) = &*error.0 else {
+                    return error;
+                };
+                // The codec adds its source location to dimension errors.
+                let message = message
+                    .strip_prefix('[')
+                    .and_then(|message| message.split_once("]: "))
+                    .map_or(message.as_str(), |(_, text)| text);
+                if !message.starts_with("vectors have different dimensions: ") {
+                    return error;
+                }
+                EvaluateError::Custom {
+                    code: 1105,
+                    msg: message.to_owned(),
+                }
+                .into()
+            })
+        },
+        ..vec_l1_distance_fn_meta()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tipb::ScalarFuncSig;
