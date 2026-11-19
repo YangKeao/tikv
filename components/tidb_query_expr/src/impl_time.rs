@@ -17,10 +17,7 @@ use tidb_query_datatype::{
                 MAX_HOUR_PART, MAX_MINUTE_PART, MAX_NANOS, MAX_NANOS_PART, MAX_SECOND_PART,
                 MAX_SECS, NANOS_PER_SEC,
             },
-            time::{
-                MONTH_NAMES, WeekdayExtension, extension::DateTimeExtension, interval::*,
-                weekmode::WeekMode,
-            },
+            time::{MONTH_NAMES, WeekdayExtension, interval::*},
         },
     },
     expr::{EvalContext, SqlMode},
@@ -122,8 +119,7 @@ pub fn week_with_mode(
             .handle_invalid_time_error(Error::incorrect_datetime_value(t))
             .map(|_| Ok(None))?;
     }
-    let week = t.week(WeekMode::from_bits_truncate(*m as u32));
-    Ok(Some(i64::from(week)))
+    Ok(Some(CalendarWeek::Week.extract(wire_core_time(t), *m)))
 }
 
 #[rpn_fn(capture = [ctx])]
@@ -134,8 +130,7 @@ pub fn week_without_mode(ctx: &mut EvalContext, t: &DateTime) -> Result<Option<I
             .handle_invalid_time_error(Error::incorrect_datetime_value(t))
             .map(|_| Ok(None))?;
     }
-    let week = t.week(WeekMode::from_bits_truncate(0u32));
-    Ok(Some(i64::from(week)))
+    Ok(Some(CalendarWeek::Week.extract(wire_core_time(t), 0)))
 }
 
 #[rpn_fn(nullable, capture = [ctx])]
@@ -195,8 +190,7 @@ pub fn week_of_year(ctx: &mut EvalContext, t: Option<&DateTime>) -> Result<Optio
             .handle_invalid_time_error(Error::incorrect_datetime_value(t))
             .map(|_| Ok(None))?;
     }
-    let week = t.week(WeekMode::from_bits_truncate(3));
-    Ok(Some(Int::from(week)))
+    Ok(Some(CalendarWeek::WeekOfYear.extract(wire_core_time(t), 3)))
 }
 
 // year_week_with_mode implements `YEARWEEK` in MySQL.
@@ -213,12 +207,9 @@ pub fn year_week_with_mode(ctx: &mut EvalContext, t: &DateTime, mode: &Int) -> R
             .map(|_| Ok(None))?;
     }
 
-    let (year, week) = t.year_week(WeekMode::from_bits_truncate(*mode as u32));
-    let result = i64::from(week + year * 100);
-    if result < 0 {
-        return Ok(Some(i64::from(u32::MAX)));
-    }
-    Ok(Some(result))
+    Ok(Some(
+        CalendarWeek::YearWeek.extract(wire_core_time(t), *mode),
+    ))
 }
 
 // year_week_without_mode implements `YEARWEEK` in MySQL.
@@ -232,12 +223,7 @@ pub fn year_week_without_mode(ctx: &mut EvalContext, t: &DateTime) -> Result<Opt
             .map(|_| Ok(None))?;
     }
 
-    let (year, week) = t.year_week(WeekMode::from_bits_truncate(0u32));
-    let result = i64::from(week + year * 100);
-    if result < 0 {
-        return Ok(Some(i64::from(u32::MAX)));
-    }
-    Ok(Some(result))
+    Ok(Some(CalendarWeek::YearWeek.extract(wire_core_time(t), 0)))
 }
 
 #[rpn_fn(nullable, capture = [ctx])]
@@ -629,6 +615,44 @@ pub fn make_time(
     }
 }
 
+fn wire_core_time(time: &DateTime) -> tidb_datatype::CoreTime {
+    tidb_datatype::CoreTime::from_raw(time.expression_memory_bits() & !15)
+}
+
+/// Week-numbering operations over typed dates.
+#[derive(Clone, Copy, Debug)]
+pub enum CalendarWeek {
+    /// WEEK with an explicit or session default mode.
+    Week,
+    /// Week of year with mode three.
+    WeekOfYear,
+    /// Year and week using the YEARWEEK convention.
+    YearWeek,
+}
+
+impl CalendarWeek {
+    fn extract(self, time: tidb_datatype::CoreTime, mode: i64) -> Int {
+        match self {
+            Self::Week => i64::from(time.week(mode as u8)),
+            Self::WeekOfYear => i64::from(time.week(3)),
+            Self::YearWeek => {
+                let (year, week) = time.year_week(mode as u8);
+                let value = i64::from(year) * 100 + i64::from(week);
+                if value < 0 {
+                    i64::from(u32::MAX)
+                } else {
+                    value
+                }
+            }
+        }
+    }
+
+    pub(crate) fn extract_native(self, value: tidb_datatype::Time, mode: i64) -> Option<Int> {
+        let core = value.core_time();
+        valid_calendar_date(core).then(|| self.extract(core, mode))
+    }
+}
+
 fn valid_calendar_date(time: tidb_datatype::CoreTime) -> bool {
     (1..=tidb_datatype::get_last_day(time.year(), time.month())).contains(&time.day())
 }
@@ -722,9 +746,7 @@ impl CalendarPart {
                 _ => {}
             }
         }
-        self.extract(tidb_datatype::CoreTime::from_raw(
-            time.expression_memory_bits() & !15,
-        ))
+        self.extract(wire_core_time(time))
     }
 }
 

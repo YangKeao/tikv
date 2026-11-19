@@ -66,6 +66,12 @@ pub enum RpnExpressionNode {
     NativeDate {
         field_type: FieldType,
     },
+    /// Date week-numbering with an optional explicit BIGINT mode.
+    NativeCalendarWeek {
+        op: crate::impl_time::CalendarWeek,
+        explicit_mode: bool,
+        field_type: FieldType,
+    },
     NativeCastReal {
         field_type: FieldType,
     },
@@ -188,6 +194,7 @@ impl RpnExpressionNode {
             | RpnExpressionNode::NativeRegexpLike { field_type, .. }
             | RpnExpressionNode::NativeParameterDecimal { field_type, .. }
             | RpnExpressionNode::NativeDate { field_type }
+            | RpnExpressionNode::NativeCalendarWeek { field_type, .. }
             | RpnExpressionNode::NativeCastReal { field_type }
             | RpnExpressionNode::NativeDoubleMath { field_type, .. }
             | RpnExpressionNode::NativePacketString { field_type, .. }
@@ -223,6 +230,7 @@ impl RpnExpressionNode {
             | RpnExpressionNode::NativeRegexpLike { .. }
             | RpnExpressionNode::NativeParameterDecimal { .. }
             | RpnExpressionNode::NativeDate { .. }
+            | RpnExpressionNode::NativeCalendarWeek { .. }
             | RpnExpressionNode::NativeCastReal { .. }
             | RpnExpressionNode::NativeDoubleMath { .. }
             | RpnExpressionNode::NativePacketString { .. }
@@ -701,6 +709,19 @@ impl RpnExpression {
                     }
                     stack.push(EvalType::DateTime);
                 }
+                RpnExpressionNode::NativeCalendarWeek {
+                    explicit_mode,
+                    field_type,
+                    ..
+                } => {
+                    if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::LongLong
+                        || (*explicit_mode && pop(&mut stack) != Some(EvalType::Int))
+                        || pop(&mut stack) != Some(EvalType::DateTime)
+                    {
+                        return Err(invalid());
+                    }
+                    stack.push(EvalType::Int);
+                }
                 RpnExpressionNode::NativeCastReal { field_type } => {
                     if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::Double
                         || pop(&mut stack) != Some(EvalType::Bytes)
@@ -900,6 +921,7 @@ impl RpnExpression {
             | RpnExpressionNode::NativeRegexpLike { field_type, .. }
             | RpnExpressionNode::NativeParameterDecimal { field_type, .. }
             | RpnExpressionNode::NativeDate { field_type }
+            | RpnExpressionNode::NativeCalendarWeek { field_type, .. }
             | RpnExpressionNode::NativeCastReal { field_type }
             | RpnExpressionNode::NativeDoubleMath { field_type, .. }
             | RpnExpressionNode::NativePacketString { field_type, .. }

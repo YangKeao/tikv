@@ -46,6 +46,10 @@ pub trait InputColumns {
     fn conversion_warnings(&self) -> &dyn tidb_datatype::ConversionWarningAppender {
         &tidb_datatype::IgnoreConversionWarnings
     }
+    /// Statement default for one-argument WEEK.
+    fn default_week_format(&self) -> i64 {
+        0
+    }
     fn date_modes(&self) -> tidb_datatype::DateModes {
         tidb_datatype::DateModes::TIDB_DEFAULT_SQL_MODE
     }
@@ -1364,6 +1368,47 @@ impl RpnExpression {
                     RpnStackNode::ExpressionVector {
                         value: ExpressionVector::Time(values),
                         field_type,
+                    },
+                ))
+            }
+            RpnExpressionNode::NativeCalendarWeek {
+                op,
+                explicit_mode,
+                field_type,
+            } => {
+                let arity = 1 + usize::from(*explicit_mode);
+                let start = stack
+                    .len()
+                    .checked_sub(arity)
+                    .ok_or_else(|| other_err!("missing calendar week operands"))?;
+                let time = &stack[start];
+                let mode = explicit_mode.then(|| &stack[start + 1]);
+                let default_mode =
+                    if matches!(op, crate::impl_time::CalendarWeek::Week) && mode.is_none() {
+                        input_physical_columns.default_week_format()
+                    } else {
+                        0
+                    };
+                let values = (0..output_rows)
+                    .map(|row| {
+                        let mode = if let Some(input) = mode {
+                            match input.get_logical_scalar_ref(row) {
+                                ScalarValueRef::Int(value) => value.copied().unwrap_or(0),
+                                _ => return Err(other_err!("calendar week mode must be BIGINT")),
+                            }
+                        } else {
+                            default_mode
+                        };
+                        Ok(native_time(time, row)?.and_then(|time| op.extract_native(time, mode)))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((
+                    arity,
+                    RpnStackNode::Vector {
+                        value: RpnStackNodeVectorValue::Generated {
+                            physical_value: VectorValue::Int(ChunkedVecSized::from(values)),
+                        },
+                        field_type: field_type.into(),
                     },
                 ))
             }
