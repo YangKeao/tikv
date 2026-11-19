@@ -51,6 +51,18 @@ fn vec_l2_norm(a: VectorFloat32Ref) -> Result<Option<Real>> {
     Ok(Real::new(a.l2_norm()).ok())
 }
 
+/// Uses the native SQL vector parser and its error contract.
+#[rpn_fn]
+pub fn native_vec_from_text(input: BytesRef) -> Result<Option<VectorFloat32>> {
+    use tidb_query_common::error::EvaluateError;
+
+    let invalid = |msg: String| EvaluateError::Custom { code: 1105, msg };
+    let text = std::str::from_utf8(input).map_err(|error| invalid(error.to_string()))?;
+    let vector =
+        tidb_datatype::VectorFloat32::parse(text).map_err(|error| invalid(error.to_string()))?;
+    Ok(Some(VectorFloat32::from_f32(vector.elements().to_vec())?))
+}
+
 /// Native vector functions use the same algorithms and retain SQL errors.
 #[derive(Clone, Copy)]
 pub enum NativeVectorDistance {

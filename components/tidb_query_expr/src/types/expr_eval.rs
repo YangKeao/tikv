@@ -1588,6 +1588,26 @@ where
                 field_type,
             })
         }
+        EvalType::VectorFloat32 => {
+            let mut values = vec![None; count];
+            for (source, positions) in inputs {
+                for (i, out) in positions.iter().enumerate() {
+                    let ScalarValueRef::VectorFloat32(value) = source.get_logical_scalar_ref(i)
+                    else {
+                        return Err(other_err!("vector result mismatch"));
+                    };
+                    values[*out] = value.map(|value| value.to_owned());
+                }
+            }
+            Ok(RpnStackNode::Vector {
+                value: RpnStackNodeVectorValue::Generated {
+                    physical_value: VectorValue::VectorFloat32(ChunkedVecVectorFloat32::from_vec(
+                        values,
+                    )),
+                },
+                field_type: field_type.into(),
+            })
+        }
         _ => Err(other_err!("IF result family is not admitted")),
     }
 }
