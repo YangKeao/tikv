@@ -895,6 +895,35 @@ pub fn period_diff(p1: Option<&Int>, p2: Option<&Int>) -> Result<Option<Int>> {
     }
 }
 
+fn invalid_native_period(function: &str) -> tidb_query_common::error::Error {
+    tidb_query_common::error::EvaluateError::Custom {
+        code: 1210,
+        msg: format!("Incorrect arguments to {function}"),
+    }
+    .into()
+}
+
+/// Native PERIOD_ADD with the signed BIGINT and wrapping month contract.
+#[rpn_fn]
+#[inline]
+pub fn native_period_add(period: &Int, months: &Int) -> Result<Option<Int>> {
+    if !(1..=12).contains(&(period % 100)) {
+        return Err(invalid_native_period("period_add"));
+    }
+    let month = (DateTime::period_to_month(*period as u64) as i64).wrapping_add(*months);
+    Ok(Some(DateTime::month_to_period(month as u64) as i64))
+}
+
+/// Native PERIOD_DIFF rejects impossible month numbers before subtracting.
+#[rpn_fn]
+#[inline]
+pub fn native_period_diff(lhs: &Int, rhs: &Int) -> Result<Option<Int>> {
+    if !(1..=12).contains(&(lhs % 100)) || !(1..=12).contains(&(rhs % 100)) {
+        return Err(invalid_native_period("period_diff"));
+    }
+    period_diff(Some(lhs), Some(rhs))
+}
+
 #[rpn_fn(capture = [ctx])]
 #[inline]
 pub fn last_day(ctx: &mut EvalContext, t: &DateTime) -> Result<Option<DateTime>> {

@@ -297,14 +297,15 @@ impl Time {
         if month == 0 {
             return 0;
         }
-        let year = month / 12;
+        let mut year = month / 12;
         if year < 70 {
-            (year + 2000) * 100 + month % 12 + 1
+            year += 2_000;
         } else if year < 100 {
-            (year + 1900) * 100 + month % 12 + 1
-        } else {
-            year * 100 + month % 12 + 1
+            year += 1_900;
         }
+        year.wrapping_mul(100)
+            .wrapping_add(month % 12)
+            .wrapping_add(1)
     }
 }
 
