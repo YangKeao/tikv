@@ -729,6 +729,28 @@ pub fn make_set(raw_args: &[ScalarValueRef]) -> Result<Option<Bytes>> {
     Ok(Some(output))
 }
 
+/// Native MAKE_SET validates only the strings selected by the mask.
+#[rpn_fn(nullable, raw_varg, min_args = 2, extra_validator = elt_validator)]
+#[inline]
+pub fn native_make_set(raw_args: &[ScalarValueRef]) -> Result<Option<Bytes>> {
+    if let Some(mask) = raw_args[0].as_int() {
+        for (bit, value) in raw_args[1..].iter().take(64).enumerate() {
+            if (*mask as u64) & (1 << bit) != 0
+                && value
+                    .as_bytes()
+                    .is_some_and(|bytes| str::from_utf8(bytes).is_err())
+            {
+                return Err(tidb_query_common::error::EvaluateError::Custom {
+                    code: 1105,
+                    msg: "invalid UTF-8 string datum".into(),
+                }
+                .into());
+            }
+        }
+    }
+    make_set(raw_args)
+}
+
 #[rpn_fn(nullable, raw_varg, min_args = 2, extra_validator = elt_validator)]
 #[inline]
 pub fn elt(raw_args: &[ScalarValueRef]) -> Result<Option<Bytes>> {
@@ -2377,6 +2399,17 @@ mod tests {
                 .unwrap();
             assert_eq!(output, expect_output);
         }
+    }
+
+    #[test]
+    fn pb_make_set_keeps_original_bytes() {
+        let output = RpnFnScalarEvaluator::new()
+            .push_param(Some(2_i64))
+            .push_param(Some(b"valid".to_vec()))
+            .push_param(Some(vec![0xff]))
+            .evaluate::<Bytes>(ScalarFuncSig::MakeSet)
+            .unwrap();
+        assert_eq!(output, Some(vec![0xff]));
     }
 
     #[test]
