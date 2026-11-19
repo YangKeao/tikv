@@ -922,6 +922,31 @@ pub fn trim_3_args(
     }
 }
 
+/// Native BOTH trims the left side before examining the remaining suffix.
+#[rpn_fn(writer)]
+pub fn native_trim_both(arg: BytesRef, pat: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    let leading = trim(arg, pat, TrimDirection::Leading);
+    Ok(writer.write_ref(Some(trim(leading, pat, TrimDirection::Trailing))))
+}
+
+#[rpn_fn(writer)]
+pub fn native_trim_leading(
+    arg: BytesRef,
+    pat: BytesRef,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    Ok(writer.write_ref(Some(trim(arg, pat, TrimDirection::Leading))))
+}
+
+#[rpn_fn(writer)]
+pub fn native_trim_trailing(
+    arg: BytesRef,
+    pat: BytesRef,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    Ok(writer.write_ref(Some(trim(arg, pat, TrimDirection::Trailing))))
+}
+
 enum TrimDirection {
     Both = 1,
     Leading,
@@ -4134,6 +4159,7 @@ mod tests {
     #[test]
     fn test_trim_2_args() {
         let test_cases = vec![
+            (Some("aaaaa"), Some("aaa"), Some("")),
             (None, None, None),
             (Some("x"), None, None),
             (None, Some("x"), None),
