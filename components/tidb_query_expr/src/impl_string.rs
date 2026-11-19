@@ -500,21 +500,39 @@ pub fn insert(
     newstr: BytesRef,
     writer: BytesWriter,
 ) -> Result<BytesGuard> {
-    let pos = *pos;
-    let len = *len;
-    let upos: usize = pos as usize;
-    let mut ulen: usize = len as usize;
-    if pos < 1 || upos > s.len() {
-        return Ok(writer.write_ref(Some(s)));
+    let range = binary_insert_range(s.len(), *pos, *len);
+    Ok(write_binary_insert(s, range, newstr, writer))
+}
+
+fn binary_insert_range(
+    source_len: usize,
+    position: Int,
+    length: Int,
+) -> Option<std::ops::Range<usize>> {
+    let start = usize::try_from(position.checked_sub(1)?).ok()?;
+    if start >= source_len {
+        return None;
     }
-    if ulen > s.len() - upos + 1 || len < 0 {
-        ulen = s.len() - upos + 1;
-    }
-    let mut ret = Vec::with_capacity(newstr.len() + s.len());
-    ret.extend_from_slice(&s[0..upos - 1]);
-    ret.extend_from_slice(newstr);
-    ret.extend_from_slice(&s[upos + ulen - 1..]);
-    Ok(writer.write(Some(ret)))
+    let remaining = source_len - start;
+    let count = usize::try_from(length).unwrap_or(remaining).min(remaining);
+    Some(start..start + count)
+}
+
+fn write_binary_insert(
+    source: BytesRef,
+    range: Option<std::ops::Range<usize>>,
+    replacement: BytesRef,
+    writer: BytesWriter,
+) -> BytesGuard {
+    let Some(range) = range else {
+        return writer.write_ref(Some(source));
+    };
+
+    let mut writer = writer.begin();
+    writer.partial_write(&source[..range.start]);
+    writer.partial_write(replacement);
+    writer.partial_write(&source[range.end..]);
+    writer.finish()
 }
 
 #[rpn_fn(writer)]
@@ -759,6 +777,8 @@ pub enum PacketString {
     Lpad,
     /// RPAD with binary arguments.
     Rpad,
+    /// INSERT with binary source and replacement.
+    Insert,
 }
 
 impl PacketString {
@@ -767,6 +787,7 @@ impl PacketString {
             Self::Space | Self::ToBase64 | Self::FromBase64 => 1,
             Self::Repeat => 2,
             Self::Lpad | Self::Rpad => 3,
+            Self::Insert => 4,
             Self::Concat(args_len) | Self::ConcatWs(args_len) => args_len,
         }
     }
@@ -777,6 +798,14 @@ impl PacketString {
             Self::ToBase64 | Self::FromBase64 => args == [EvalType::Bytes],
             Self::Repeat => args == [EvalType::Bytes, EvalType::Int],
             Self::Lpad | Self::Rpad => args == [EvalType::Bytes, EvalType::Int, EvalType::Bytes],
+            Self::Insert => {
+                args == [
+                    EvalType::Bytes,
+                    EvalType::Int,
+                    EvalType::Int,
+                    EvalType::Bytes,
+                ]
+            }
             Self::Concat(_) => !args.is_empty() && args.iter().all(|arg| *arg == EvalType::Bytes),
             Self::ConcatWs(_) => args.len() >= 2 && args.iter().all(|arg| *arg == EvalType::Bytes),
         }
@@ -798,6 +827,9 @@ impl PacketString {
             }
             Self::Lpad | Self::Rpad => {
                 return self.evaluate_pad(input, args, rows, limit);
+            }
+            Self::Insert => {
+                return Self::evaluate_insert(input, args, rows, limit);
             }
             Self::Space | Self::Repeat => {}
         }
@@ -1034,6 +1066,52 @@ impl PacketString {
                 writer.write(None)
             };
             values = result.into_inner();
+        }
+        Ok(VectorValue::Bytes(values))
+    }
+
+    fn evaluate_insert(
+        input: &dyn crate::InputColumns,
+        args: &[crate::RpnStackNode<'_>],
+        rows: usize,
+        limit: u64,
+    ) -> Result<VectorValue> {
+        let [source, position, length, replacement] = args else {
+            return Err(other_err!("INSERT requires four operands"));
+        };
+        let mut values = ChunkedVecBytes::with_capacity(rows);
+        for row in 0..rows {
+            let (
+                ScalarValueRef::Bytes(source),
+                ScalarValueRef::Int(position),
+                ScalarValueRef::Int(length),
+                ScalarValueRef::Bytes(replacement),
+            ) = (
+                source.get_logical_scalar_ref(row),
+                position.get_logical_scalar_ref(row),
+                length.get_logical_scalar_ref(row),
+                replacement.get_logical_scalar_ref(row),
+            )
+            else {
+                return Err(other_err!("INSERT requires byte and integer operands"));
+            };
+            let (Some(source), Some(position), Some(length), Some(replacement)) =
+                (source, position, length, replacement)
+            else {
+                values.push_null();
+                continue;
+            };
+            let range = binary_insert_range(source.len(), *position, *length);
+            let size = range.as_ref().map_or(Some(source.len()), |range| {
+                (source.len() - range.len()).checked_add(replacement.len())
+            });
+            if size.is_none_or(|size| size as u64 > limit) {
+                input.handle_allowed_packet_overflowed("insert")?;
+                values.push_null();
+            } else {
+                values = write_binary_insert(source, range, replacement, values.into_writer())
+                    .into_inner();
+            }
         }
         Ok(VectorValue::Bytes(values))
     }
