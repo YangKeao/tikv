@@ -343,6 +343,15 @@ fn json_valid(args: &[ScalarValueRef]) -> Result<Option<Int>> {
     Ok(r)
 }
 
+/// Native string validation reports false for invalid UTF-8 or JSON syntax.
+#[rpn_fn]
+pub fn native_json_valid_string(input: BytesRef) -> Result<Option<Int>> {
+    let valid = std::str::from_utf8(input)
+        .ok()
+        .is_some_and(|text| serde_json::from_str::<serde_json::Value>(text).is_ok());
+    Ok(Some(i64::from(valid)))
+}
+
 #[rpn_fn]
 #[inline]
 fn json_unquote(arg: BytesRef) -> Result<Option<Bytes>> {
@@ -1023,6 +1032,10 @@ mod tests {
                 .unwrap();
             assert_eq!(output, expected, "{:?}", vargs);
         }
+        let invalid_utf8 = RpnFnScalarEvaluator::new()
+            .push_param(Some(vec![0xff]))
+            .evaluate::<Int>(ScalarFuncSig::JsonValidStringSig);
+        assert!(invalid_utf8.is_err());
     }
 
     #[test]
