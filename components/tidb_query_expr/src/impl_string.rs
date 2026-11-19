@@ -182,6 +182,15 @@ pub fn ord<C: Collator>(arg: Option<BytesRef>) -> Result<Option<i64>> {
     Ok(Some(result))
 }
 
+/// Typed TiDB ORD propagates NULL while the PB signature maps it to zero.
+#[rpn_fn]
+#[inline]
+pub fn native_ord_utf8mb4(arg: BytesRef) -> Result<Option<Int>> {
+    use tidb_query_datatype::codec::collation::collator::CollatorUtf8Mb4Bin;
+
+    ord::<CollatorUtf8Mb4Bin>(Some(arg))
+}
+
 #[rpn_fn(varg, writer, min_args = 1)]
 #[inline]
 pub fn concat(args: &[BytesRef], writer: BytesWriter) -> Result<BytesGuard> {
@@ -1115,6 +1124,14 @@ pub fn quote(input: Option<BytesRef>) -> Result<Option<Bytes>> {
         }
         _ => Ok(Some(Vec::from("NULL"))),
     }
+}
+
+/// The native signature decodes UTF-8 with replacement before escaping.
+#[rpn_fn(nullable)]
+#[inline]
+pub fn native_quote(input: Option<BytesRef>) -> Result<Option<Bytes>> {
+    let text = input.map(String::from_utf8_lossy);
+    quote(text.as_deref().map(str::as_bytes))
 }
 
 #[rpn_fn(writer)]
@@ -4463,6 +4480,20 @@ mod tests {
             .evaluate(ScalarFuncSig::FromBase64)
             .unwrap();
         assert_eq!(invalid_base64_output, Some(b"".to_vec()));
+    }
+
+    #[test]
+    fn test_native_quote_preserves_pb_raw_bytes() {
+        let raw = [0xe2, 0x82, 0];
+        let quoted = RpnFnScalarEvaluator::new()
+            .push_param(Some(raw.to_vec()))
+            .evaluate::<Bytes>(ScalarFuncSig::Quote)
+            .unwrap();
+        assert_eq!(quoted, Some(vec![b'\'', 0xe2, 0x82, b'\\', b'0', b'\'']));
+        assert_eq!(
+            super::native_quote(Some(&raw)).unwrap(),
+            Some("'�\\0'".as_bytes().to_vec())
+        );
     }
 
     #[test]
