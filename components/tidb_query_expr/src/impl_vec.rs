@@ -87,6 +87,58 @@ pub fn native_cast_string_as_vector(
     Ok(Some(VectorFloat32::from_f32(vector.elements().to_vec())?))
 }
 
+#[rpn_fn]
+pub fn native_vec_add(
+    lhs: VectorFloat32Ref,
+    rhs: VectorFloat32Ref,
+) -> Result<Option<VectorFloat32>> {
+    native_vec_arithmetic(lhs, rhs, tidb_datatype::VectorFloat32::add)
+}
+
+#[rpn_fn]
+pub fn native_vec_sub(
+    lhs: VectorFloat32Ref,
+    rhs: VectorFloat32Ref,
+) -> Result<Option<VectorFloat32>> {
+    native_vec_arithmetic(lhs, rhs, tidb_datatype::VectorFloat32::sub)
+}
+
+#[rpn_fn]
+pub fn native_vec_mul(
+    lhs: VectorFloat32Ref,
+    rhs: VectorFloat32Ref,
+) -> Result<Option<VectorFloat32>> {
+    native_vec_arithmetic(lhs, rhs, tidb_datatype::VectorFloat32::mul)
+}
+
+fn native_vec_arithmetic(
+    lhs: VectorFloat32Ref,
+    rhs: VectorFloat32Ref,
+    operation: impl FnOnce(
+        &tidb_datatype::VectorFloat32,
+        &tidb_datatype::VectorFloat32,
+    ) -> std::result::Result<
+        tidb_datatype::VectorFloat32,
+        tidb_datatype::VectorError,
+    >,
+) -> Result<Option<VectorFloat32>> {
+    use tidb_query_common::error::EvaluateError;
+    use tidb_query_datatype::codec::mysql::VectorFloat32Encoder;
+
+    let invalid = |error: tidb_datatype::VectorError| EvaluateError::Custom {
+        code: 1105,
+        msg: error.to_string(),
+    };
+    let mut encoded = Vec::with_capacity(lhs.encoded_len().max(rhs.encoded_len()));
+    encoded.write_vector_float32(lhs)?;
+    let (lhs, _) = tidb_datatype::deserialize_vector_float32(&encoded).map_err(invalid)?;
+    encoded.clear();
+    encoded.write_vector_float32(rhs)?;
+    let (rhs, _) = tidb_datatype::deserialize_vector_float32(&encoded).map_err(invalid)?;
+    let result = operation(&lhs, &rhs).map_err(invalid)?;
+    Ok(Some(VectorFloat32::from_f32(result.elements().to_vec())?))
+}
+
 /// Native vector functions use the same algorithms and retain SQL errors.
 #[derive(Clone, Copy)]
 pub enum NativeVectorDistance {
