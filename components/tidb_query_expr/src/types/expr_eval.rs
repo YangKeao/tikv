@@ -52,6 +52,14 @@ pub trait InputColumns {
     fn div_precision_increment(&self) -> u32 {
         4
     }
+    /// Size limit for a string produced by the active statement.
+    fn max_allowed_packet(&self) -> u64 {
+        64 << 20
+    }
+    /// Apply the host's packet-overflow warning or error policy.
+    fn handle_allowed_packet_overflowed(&self, _name: &str) -> Result<()> {
+        Err(other_err!("native packet policy unavailable"))
+    }
     fn handle_truncate(&self, _message: &str) -> Result<()> {
         Err(other_err!("native truncate policy unavailable"))
     }
@@ -1370,6 +1378,22 @@ impl RpnExpression {
                     input_physical_columns,
                 )?,
             )),
+            RpnExpressionNode::NativePacketString { op, field_type } => {
+                let args_len = op.args_len();
+                let start = stack
+                    .len()
+                    .checked_sub(args_len)
+                    .ok_or_else(|| other_err!("missing packet string operands"))?;
+                let physical_value =
+                    op.evaluate(input_physical_columns, &stack[start..], output_rows)?;
+                Ok((
+                    args_len,
+                    RpnStackNode::Vector {
+                        value: RpnStackNodeVectorValue::Generated { physical_value },
+                        field_type: field_type.into(),
+                    },
+                ))
+            }
             RpnExpressionNode::NativeArithmetic {
                 op,
                 overflow,

@@ -739,6 +739,79 @@ fn elt_validator(expr: &tipb::Expr) -> Result<()> {
     Ok(())
 }
 
+/// Typed string calls whose result length is subject to the statement packet
+/// limit.
+#[derive(Clone, Copy, Debug)]
+pub enum PacketString {
+    /// SPACE with an integer width.
+    Space,
+    /// REPEAT with a byte string and integer count.
+    Repeat,
+}
+
+impl PacketString {
+    pub(crate) fn args_len(self) -> usize {
+        match self {
+            Self::Space => 1,
+            Self::Repeat => 2,
+        }
+    }
+
+    pub(crate) fn evaluate(
+        self,
+        input: &dyn crate::InputColumns,
+        args: &[crate::RpnStackNode<'_>],
+        rows: usize,
+    ) -> Result<VectorValue> {
+        let limit = input.max_allowed_packet();
+        let count_arg = &args[self.args_len() - 1];
+        let mut values = ChunkedVecBytes::with_capacity(rows);
+        for row in 0..rows {
+            let ScalarValueRef::Int(count) = count_arg.get_logical_scalar_ref(row) else {
+                return Err(other_err!("packet string requires an integer count"));
+            };
+            let Some(count) = count else {
+                values.push_null();
+                continue;
+            };
+            let writer = values.into_writer();
+            let result = match self {
+                Self::Space if (*count).max(0) as u64 > limit => {
+                    input.handle_allowed_packet_overflowed("space")?;
+                    writer.write(None)
+                }
+                Self::Space => space(count, writer)?,
+                Self::Repeat => {
+                    let ScalarValueRef::Bytes(value) = args[0].get_logical_scalar_ref(row) else {
+                        return Err(other_err!("REPEAT requires bytes"));
+                    };
+                    match value {
+                        None => writer.write(None),
+                        Some(bytes) if bytes.is_empty() || *count <= 0 => {
+                            writer.write_ref(Some(b""))
+                        }
+                        Some(bytes) => {
+                            let copies = (*count).min(i64::from(i32::MAX)) as usize;
+                            if bytes
+                                .len()
+                                .checked_mul(copies)
+                                .is_none_or(|size| size as u64 > limit)
+                            {
+                                input.handle_allowed_packet_overflowed("repeat")?;
+                                writer.write(None)
+                            } else {
+                                repeat(bytes, count, writer)?
+                            }
+                        }
+                    }
+                }
+            };
+            values = result.into_inner();
+        }
+        Ok(VectorValue::Bytes(values))
+    }
+}
+
 #[rpn_fn(writer)]
 #[inline]
 pub fn space(len: &Int, writer: BytesWriter) -> Result<BytesGuard> {

@@ -68,6 +68,11 @@ pub enum RpnExpressionNode {
     NativeCastReal {
         field_type: FieldType,
     },
+    /// Sized string result checked against the active statement limit.
+    NativePacketString {
+        op: crate::impl_string::PacketString,
+        field_type: FieldType,
+    },
     NativeArithmetic {
         op: super::NativeArithmetic,
         overflow: String,
@@ -175,6 +180,7 @@ impl RpnExpressionNode {
             | RpnExpressionNode::NativeParameterDecimal { field_type, .. }
             | RpnExpressionNode::NativeDate { field_type }
             | RpnExpressionNode::NativeCastReal { field_type }
+            | RpnExpressionNode::NativePacketString { field_type, .. }
             | RpnExpressionNode::NativeArithmetic { field_type, .. }
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
             | RpnExpressionNode::Jump { field_type, .. }
@@ -208,6 +214,7 @@ impl RpnExpressionNode {
             | RpnExpressionNode::NativeParameterDecimal { .. }
             | RpnExpressionNode::NativeDate { .. }
             | RpnExpressionNode::NativeCastReal { .. }
+            | RpnExpressionNode::NativePacketString { .. }
             | RpnExpressionNode::NativeArithmetic { .. }
             | RpnExpressionNode::JumpIfFalse { .. }
             | RpnExpressionNode::Jump { .. }
@@ -691,6 +698,15 @@ impl RpnExpression {
                     }
                     stack.push(EvalType::Real);
                 }
+                RpnExpressionNode::NativePacketString { op, field_type } => {
+                    if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::VarString
+                        || pop(&mut stack) != Some(EvalType::Int)
+                        || (op.args_len() == 2 && pop(&mut stack) != Some(EvalType::Bytes))
+                    {
+                        return Err(invalid());
+                    }
+                    stack.push(EvalType::Bytes);
+                }
                 RpnExpressionNode::NativeArithmetic { op, field_type, .. } => {
                     let ty = EvalType::try_from(field_type.as_accessor().tp())
                         .map_err(|e| other_err!("{}", e))?;
@@ -853,6 +869,7 @@ impl RpnExpression {
             | RpnExpressionNode::NativeParameterDecimal { field_type, .. }
             | RpnExpressionNode::NativeDate { field_type }
             | RpnExpressionNode::NativeCastReal { field_type }
+            | RpnExpressionNode::NativePacketString { field_type, .. }
             | RpnExpressionNode::NativeArithmetic { field_type, .. }
             | RpnExpressionNode::JumpIfFalse { field_type, .. }
             | RpnExpressionNode::Jump { field_type, .. }
