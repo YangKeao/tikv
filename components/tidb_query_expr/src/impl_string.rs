@@ -587,6 +587,20 @@ pub fn lower(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
     Ok(writer.write_ref(Some(arg)))
 }
 
+/// Native UTF-8 case conversion keeps Go's simple rune mapping.
+#[rpn_fn(writer)]
+pub fn native_upper_utf8(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    let text = tidb_datatype::decode_go_utf8_lossy(arg);
+    Ok(writer.write(Some(tidb_hack::go_to_upper(text).into_bytes())))
+}
+
+/// Native UTF-8 case conversion keeps Go's handling of malformed bytes.
+#[rpn_fn(writer)]
+pub fn native_lower_utf8(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
+    let text = tidb_datatype::decode_go_utf8_lossy(arg);
+    Ok(writer.write(Some(tidb_hack::go_to_lower(text).into_bytes())))
+}
+
 #[rpn_fn(writer)]
 #[inline]
 pub fn hex_str_arg(arg: BytesRef, writer: BytesWriter) -> Result<BytesGuard> {
