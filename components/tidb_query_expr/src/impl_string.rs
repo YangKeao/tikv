@@ -755,6 +755,10 @@ pub enum PacketString {
     ToBase64,
     /// FROM_BASE64 with a byte string.
     FromBase64,
+    /// LPAD with binary arguments.
+    Lpad,
+    /// RPAD with binary arguments.
+    Rpad,
 }
 
 impl PacketString {
@@ -762,6 +766,7 @@ impl PacketString {
         match self {
             Self::Space | Self::ToBase64 | Self::FromBase64 => 1,
             Self::Repeat => 2,
+            Self::Lpad | Self::Rpad => 3,
             Self::Concat(args_len) | Self::ConcatWs(args_len) => args_len,
         }
     }
@@ -771,6 +776,7 @@ impl PacketString {
             Self::Space => args == [EvalType::Int],
             Self::ToBase64 | Self::FromBase64 => args == [EvalType::Bytes],
             Self::Repeat => args == [EvalType::Bytes, EvalType::Int],
+            Self::Lpad | Self::Rpad => args == [EvalType::Bytes, EvalType::Int, EvalType::Bytes],
             Self::Concat(_) => !args.is_empty() && args.iter().all(|arg| *arg == EvalType::Bytes),
             Self::ConcatWs(_) => args.len() >= 2 && args.iter().all(|arg| *arg == EvalType::Bytes),
         }
@@ -789,6 +795,9 @@ impl PacketString {
             }
             Self::ToBase64 | Self::FromBase64 => {
                 return self.evaluate_base64(input, &args[0], rows, limit);
+            }
+            Self::Lpad | Self::Rpad => {
+                return self.evaluate_pad(input, args, rows, limit);
             }
             Self::Space | Self::Repeat => {}
         }
@@ -962,6 +971,67 @@ impl PacketString {
                     .then(|| base64::decode_config(&cleaned, base64::STANDARD).ok())
                     .flatten();
                 writer.write(decoded)
+            };
+            values = result.into_inner();
+        }
+        Ok(VectorValue::Bytes(values))
+    }
+
+    fn evaluate_pad(
+        self,
+        input: &dyn crate::InputColumns,
+        args: &[crate::RpnStackNode<'_>],
+        rows: usize,
+        limit: u64,
+    ) -> Result<VectorValue> {
+        let [source, length, pad] = args else {
+            return Err(other_err!("padding requires three operands"));
+        };
+        let left = matches!(self, Self::Lpad);
+        let name = if left { "lpad" } else { "rpad" };
+        let mut values = ChunkedVecBytes::with_capacity(rows);
+        for row in 0..rows {
+            let (
+                ScalarValueRef::Bytes(source),
+                ScalarValueRef::Int(length),
+                ScalarValueRef::Bytes(pad),
+            ) = (
+                source.get_logical_scalar_ref(row),
+                length.get_logical_scalar_ref(row),
+                pad.get_logical_scalar_ref(row),
+            )
+            else {
+                return Err(other_err!("padding requires bytes, an integer, and bytes"));
+            };
+            let Some(length) = length else {
+                values.push_null();
+                continue;
+            };
+            let width = u64::try_from(*length).unwrap_or(u64::MAX);
+            // With two NULL values, the original call uses the text sizing rule.
+            let requested = if source.is_none() && pad.is_none() {
+                width.saturating_mul(4)
+            } else {
+                width
+            };
+            let writer = values.into_writer();
+            let result = if requested > limit {
+                input.handle_allowed_packet_overflowed(name)?;
+                writer.write(None)
+            } else if width > MAX_BLOB_WIDTH as u64 {
+                writer.write(None)
+            } else if let (Some(source), Some(pad)) = (source, pad) {
+                if source.len() >= width as usize {
+                    writer.write_ref(Some(&source[..width as usize]))
+                } else if pad.is_empty() {
+                    writer.write_ref(Some(b""))
+                } else if left {
+                    lpad(source, length, pad, writer)?
+                } else {
+                    rpad(source, length, pad, writer)?
+                }
+            } else {
+                writer.write(None)
             };
             values = result.into_inner();
         }
