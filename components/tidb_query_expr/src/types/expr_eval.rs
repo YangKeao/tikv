@@ -1394,8 +1394,12 @@ impl RpnExpression {
                     },
                 ))
             }
-            RpnExpressionNode::NativeDoubleMath { op, field_type } => {
-                use crate::impl_math::{DoubleMath, log_with_base};
+            RpnExpressionNode::NativeDoubleMath {
+                op,
+                field_type,
+                overflow,
+            } => {
+                use crate::impl_math::DoubleMath;
                 let args_len = op.args_len();
                 let start = stack
                     .len()
@@ -1418,18 +1422,29 @@ impl RpnExpression {
                     let values = inputs
                         .enumerate()
                         .map(|(row, value)| {
-                            let output = if *op == DoubleMath::LogBase {
+                            let value = value?;
+                            let output = if args_len == 2 {
                                 let other = super::native_arithmetic::real(&stack[start + 1], row)?;
-                                let (Some(base), Some(value)) = (value?, other) else {
+                                let (Some(left), Some(right)) = (value, other) else {
                                     return Ok(None);
                                 };
-                                log_with_base(base, value)
+                                op.binary_value(left, right)
                             } else {
-                                let Some(value) = value? else {
+                                let Some(value) = value else {
                                     return Ok(None);
                                 };
                                 op.real_value(value)
                             };
+                            if let Some(message) = overflow
+                                .as_ref()
+                                .filter(|_| output.is_some_and(|value| !value.is_finite()))
+                            {
+                                return Err(tidb_query_common::error::EvaluateError::Custom {
+                                    code: 1690,
+                                    msg: message.clone(),
+                                }
+                                .into());
+                            }
                             if output.is_none() && op.warns_on_invalid_domain() {
                                 let mut warning = tipb::Error::default();
                                 warning.set_code(3020);

@@ -40,7 +40,9 @@ pub fn log_1_arg(arg: &Real) -> Result<Option<Real>> {
 #[inline]
 #[rpn_fn]
 pub fn log_2_arg(arg0: &Real, arg1: &Real) -> Result<Option<Real>> {
-    Ok(log_with_base(**arg0, **arg1).and_then(f64_to_real))
+    Ok(DoubleMath::LogBase
+        .binary_value(**arg0, **arg1)
+        .and_then(f64_to_real))
 }
 
 #[inline]
@@ -271,12 +273,22 @@ pub enum DoubleMath {
     Log2,
     /// Logarithm with the base as the first operand.
     LogBase,
+    /// Raise the left operand to the right operand.
+    Pow,
+    /// Convert degrees to radians.
+    Radians,
+    /// Convert radians to degrees.
+    Degrees,
 }
 
 impl DoubleMath {
     /// Number of DOUBLE operands.
     pub fn args_len(self) -> usize {
-        if self == Self::LogBase { 2 } else { 1 }
+        if matches!(self, Self::LogBase | Self::Pow) {
+            2
+        } else {
+            1
+        }
     }
 
     pub(crate) fn warns_on_invalid_domain(self) -> bool {
@@ -292,22 +304,25 @@ impl DoubleMath {
             Self::Ln | Self::Log2 if value <= 0.0 => None,
             Self::Ln => Some(value.ln()),
             Self::Log2 => Some(value.log2()),
-            Self::LogBase => unreachable!("LOG with base requires two operands"),
+            Self::Radians => Some(value.to_radians()),
+            Self::Degrees => Some(value.to_degrees()),
+            Self::LogBase | Self::Pow => unreachable!("operation requires two operands"),
             Self::Sign => unreachable!("SIGN returns an integer"),
+        }
+    }
+
+    #[allow(clippy::float_cmp)]
+    pub(crate) fn binary_value(self, lhs: f64, rhs: f64) -> Option<f64> {
+        match self {
+            Self::LogBase if lhs <= 0.0 || lhs == 1.0 || rhs <= 0.0 => None,
+            Self::LogBase => Some(rhs.log(lhs)),
+            Self::Pow => Some(lhs.pow(rhs)),
+            _ => unreachable!("operation does not take two operands"),
         }
     }
 
     pub(crate) fn sign_value(value: f64) -> Int {
         i64::from(value > 0.0) - i64::from(value < 0.0)
-    }
-}
-
-#[allow(clippy::float_cmp)]
-pub(crate) fn log_with_base(base: f64, value: f64) -> Option<f64> {
-    if base <= 0.0 || base == 1.0 || value <= 0.0 {
-        None
-    } else {
-        Some(value.log(base))
     }
 }
 
@@ -328,7 +343,9 @@ fn sqrt(arg: &Real) -> Result<Option<Real>> {
 #[inline]
 #[rpn_fn]
 fn radians(arg: &Real) -> Result<Option<Real>> {
-    Ok(Real::new(**arg * (std::f64::consts::PI / 180_f64)).ok())
+    Ok(DoubleMath::Radians
+        .real_value(**arg)
+        .and_then(|value| Real::new(value).ok()))
 }
 
 #[inline]
@@ -375,7 +392,7 @@ fn cot(arg: &Real) -> Result<Option<Real>> {
 #[inline]
 #[rpn_fn]
 fn pow(lhs: &Real, rhs: &Real) -> Result<Option<Real>> {
-    let pow = (lhs.into_inner()).pow(rhs.into_inner());
+    let pow = DoubleMath::Pow.binary_value(**lhs, **rhs).unwrap();
     if pow.is_infinite() {
         Err(Error::overflow("DOUBLE", format!("pow({}, {})", lhs, rhs)).into())
     } else {
@@ -401,7 +418,7 @@ fn rand_with_seed_first_gen(seed: Option<&i64>) -> Result<Option<Real>> {
 #[inline]
 #[rpn_fn]
 fn degrees(arg: &Real) -> Result<Option<Real>> {
-    let ret = arg.to_degrees();
+    let ret = DoubleMath::Degrees.real_value(**arg).unwrap();
     if ret.is_infinite() {
         Err(Error::overflow("DOUBLE", format!("degrees({})", arg)).into())
     } else {

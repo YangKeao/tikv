@@ -76,6 +76,9 @@ pub enum RpnExpressionNode {
     /// Math over the full native floating-point carrier.
     NativeDoubleMath {
         op: crate::impl_math::DoubleMath,
+        /// Native 1690 message when the scalar calculation must return a finite
+        /// value.
+        overflow: Option<String>,
         field_type: FieldType,
     },
     NativeArithmetic {
@@ -716,7 +719,7 @@ impl RpnExpression {
                     stack.truncate(stack.len() - args_len);
                     stack.push(EvalType::Bytes);
                 }
-                RpnExpressionNode::NativeDoubleMath { op, field_type } => {
+                RpnExpressionNode::NativeDoubleMath { op, field_type, .. } => {
                     use tidb_query_datatype::FieldTypeTp;
                     let (code, output) = if *op == crate::impl_math::DoubleMath::Sign {
                         (FieldTypeTp::LongLong, EvalType::Int)
