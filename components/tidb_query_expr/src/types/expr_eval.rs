@@ -1546,17 +1546,7 @@ where
             let mut values = vec![None; count];
             for (source, positions) in inputs {
                 for (i, out) in positions.iter().enumerate() {
-                    values[*out] = match source {
-                        RpnStackNode::ExpressionScalar { value, .. } => match value.as_ref() {
-                            ExpressionScalar::Real(value) => *value,
-                            _ => return Err(other_err!("IF real result mismatch")),
-                        },
-                        RpnStackNode::ExpressionVector {
-                            value: ExpressionVector::Real(values),
-                            ..
-                        } => values[i],
-                        _ => return Err(other_err!("IF real result mismatch")),
-                    };
+                    values[*out] = super::native_arithmetic::real(source, i)?;
                 }
             }
             Ok(RpnStackNode::ExpressionVector {

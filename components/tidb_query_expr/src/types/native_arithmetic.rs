@@ -92,7 +92,7 @@ pub(super) fn is_null(value: &RpnStackNode<'_>, row: usize) -> bool {
         ),
     }
 }
-fn real(value: &RpnStackNode<'_>, row: usize) -> Result<Option<f64>> {
+pub(super) fn real(value: &RpnStackNode<'_>, row: usize) -> Result<Option<f64>> {
     match value {
         RpnStackNode::ExpressionScalar { value, .. } => match value.as_ref() {
             ExpressionScalar::Real(v) => Ok(*v),
@@ -102,6 +102,12 @@ fn real(value: &RpnStackNode<'_>, row: usize) -> Result<Option<f64>> {
             value: ExpressionVector::Real(v),
             ..
         } => Ok(v[row]),
+        RpnStackNode::Scalar { .. }
+        | RpnStackNode::OwnedScalar(_)
+        | RpnStackNode::Vector { .. } => match value.get_logical_scalar_ref(row) {
+            ScalarValueRef::Real(v) => Ok(v.map(|v| v.into_inner())),
+            _ => Err(other_err!("native real operand required")),
+        },
         _ => Err(other_err!("native real operand required")),
     }
 }
