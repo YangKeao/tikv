@@ -8,7 +8,7 @@ pub use tidb_query_datatype::codec::data_type::{
 };
 use tidb_query_datatype::{
     codec::{batch::LazyBatchColumnVec, data_type::*},
-    expr::EvalContext,
+    expr::{EvalContext, EvalWarnings},
 };
 use tipb::FieldType;
 
@@ -23,6 +23,10 @@ use super::{
 /// A demanded column read. The evaluation context is not borrowed by results.
 pub type InputResult<'a> = Result<RpnStackNode<'a>>;
 
+/// Direct warnings from an SDK kernel to the native statement's owner.
+#[derive(Debug)]
+pub struct NativeKernelWarnings;
+
 /// Adapters supply data and concrete session capabilities; the loop owns
 /// evaluation.
 pub trait InputColumns {
@@ -30,6 +34,9 @@ pub trait InputColumns {
     fn parameter(&self, _order: usize) -> Result<tidb_datatype::Datum> {
         Err(other_err!("native parameters unavailable"))
     }
+    /// Publish a SQL warning raised by a native call to an SDK kernel.
+    fn append_kernel_warning(&self, _warning: &tipb::Error) {}
+
     fn conversion_flags(&self) -> tidb_datatype::ConversionFlags {
         tidb_datatype::STRICT_FLAGS
     }
@@ -1435,13 +1442,18 @@ impl RpnExpression {
                     ));
                 }
                 let mut call_extra = RpnFnCallExtra { ret_field_type };
-                let ret = (func_meta.fn_ptr)(
-                    ctx,
-                    output_rows,
-                    stack_slice,
-                    &mut call_extra,
-                    &**metadata,
-                )?;
+                let prior_warnings = metadata
+                    .is::<NativeKernelWarnings>()
+                    .then(|| std::mem::replace(&mut ctx.warnings, EvalWarnings::without_limit()));
+                let ret =
+                    (func_meta.fn_ptr)(ctx, output_rows, stack_slice, &mut call_extra, &**metadata);
+                if let Some(prior_warnings) = prior_warnings {
+                    let warnings = std::mem::replace(&mut ctx.warnings, prior_warnings);
+                    for warning in &warnings.warnings {
+                        input_physical_columns.append_kernel_warning(warning);
+                    }
+                }
+                let ret = ret?;
                 Ok((
                     *args_len,
                     RpnStackNode::Vector {

@@ -201,6 +201,14 @@ impl EvalWarnings {
         }
     }
 
+    /// Buffer one native kernel call before transferring warnings to its owner.
+    pub fn without_limit() -> Self {
+        Self {
+            max_warning_cnt: usize::MAX,
+            ..Self::default()
+        }
+    }
+
     pub fn append_warning(&mut self, err: Error) {
         self.warning_cnt += 1;
         if self.warnings.len() < self.max_warning_cnt {
