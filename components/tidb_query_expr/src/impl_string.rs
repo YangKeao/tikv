@@ -1095,7 +1095,7 @@ fn substring_utf8(input: BytesRef, pos: Int, len: Int, writer: BytesWriter) -> R
 #[rpn_fn(writer)]
 #[inline]
 pub fn substring_2_args(input: BytesRef, pos: &Int, writer: BytesWriter) -> Result<BytesGuard> {
-    substring(input, *pos, input.len() as Int, writer)
+    substring(input, *pos, input.len() as Int, false, writer)
 }
 
 #[rpn_fn(writer)]
@@ -1106,14 +1106,31 @@ pub fn substring_3_args(
     len: &Int,
     writer: BytesWriter,
 ) -> Result<BytesGuard> {
-    substring(input, *pos, *len, writer)
+    substring(input, *pos, *len, false, writer)
+}
+
+/// Native typed SUBSTRING treats position-plus-length overflow as empty.
+#[rpn_fn(writer)]
+pub fn native_substring_3_args(
+    input: BytesRef,
+    pos: &Int,
+    len: &Int,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
+    substring(input, *pos, *len, true, writer)
 }
 
 #[inline]
-fn substring(input: BytesRef, pos: Int, len: Int, writer: BytesWriter) -> Result<BytesGuard> {
+fn substring(
+    input: BytesRef,
+    pos: Int,
+    len: Int,
+    checked_end: bool,
+    writer: BytesWriter,
+) -> Result<BytesGuard> {
     let (pos, pos_positive) = i64_to_usize(pos, pos > 0);
-    let (len, len_positive) = i64_to_usize(len, len > 0);
-    if pos == 0 || len == 0 || !len_positive {
+    let (length, len_positive) = i64_to_usize(len, len > 0);
+    if pos == 0 || length == 0 || !len_positive {
         return Ok(writer.write_ref(Some(b"")));
     }
 
@@ -1122,7 +1139,10 @@ fn substring(input: BytesRef, pos: Int, len: Int, writer: BytesWriter) -> Result
     } else {
         input.len().checked_sub(pos).unwrap_or(input.len())
     };
-    let end = start.saturating_add(len).min(input.len());
+    if checked_end && (start as i64).checked_add(len).is_none() {
+        return Ok(writer.write_ref(Some(b"")));
+    }
+    let end = start.saturating_add(length).min(input.len());
     Ok(writer.write_ref(Some(&input[start..end])))
 }
 
@@ -4554,6 +4574,12 @@ mod tests {
     #[test]
     fn test_substring_3_args() {
         let cases = vec![
+            (
+                Some(b"abc".to_vec()),
+                Some(-2),
+                Some(i64::MAX),
+                Some(b"bc".to_vec()),
+            ),
             (
                 Some("Quadratically".as_bytes().to_vec()),
                 Some(5),
