@@ -629,6 +629,10 @@ pub fn make_time(
     }
 }
 
+fn valid_calendar_date(time: tidb_datatype::CoreTime) -> bool {
+    (1..=tidb_datatype::get_last_day(time.year(), time.month())).contains(&time.day())
+}
+
 /// Calendar component of an already typed date or datetime.
 #[derive(Clone, Copy, Debug)]
 pub enum CalendarPart {
@@ -690,7 +694,7 @@ impl CalendarPart {
         if matches!(self, Self::Year | Self::Month | Self::Day | Self::Quarter) {
             return Some(self.extract(core));
         }
-        if !(1..=tidb_datatype::get_last_day(core.year(), core.month())).contains(&core.day()) {
+        if !valid_calendar_date(core) {
             return None;
         }
         if matches!(self, Self::ToDays | Self::ToSeconds) {
@@ -724,6 +728,43 @@ impl CalendarPart {
     }
 }
 
+/// Name of an already typed date's weekday or month.
+#[derive(Clone, Copy, Debug)]
+pub enum CalendarName {
+    /// English weekday name.
+    Day,
+    /// English month name.
+    Month,
+}
+
+impl CalendarName {
+    fn extract(self, time: tidb_datatype::CoreTime) -> &'static str {
+        match self {
+            Self::Day => {
+                let weekday = (time.weekday().sunday_index() + 6) % 7;
+                chrono::Weekday::try_from(weekday).unwrap().name()
+            }
+            Self::Month => MONTH_NAMES[usize::from(time.month()) - 1],
+        }
+    }
+
+    pub(crate) fn extract_native(self, time: tidb_datatype::Time) -> Option<&'static [u8]> {
+        let core = time.core_time();
+        valid_calendar_date(core).then(|| self.extract(core).as_bytes())
+    }
+
+    fn extract_wire(self, time: &DateTime) -> Bytes {
+        let name = if matches!(self, Self::Day) && time.month() > 12 {
+            time.weekday().name()
+        } else {
+            self.extract(tidb_datatype::CoreTime::from_raw(
+                time.expression_memory_bits() & !15,
+            ))
+        };
+        name.as_bytes().to_vec()
+    }
+}
+
 #[rpn_fn(nullable)]
 #[inline]
 pub fn month(t: Option<&DateTime>) -> Result<Option<Int>> {
@@ -738,8 +779,7 @@ pub fn month_name(ctx: &mut EvalContext, t: &DateTime) -> Result<Option<Bytes>> 
             .handle_invalid_time_error(Error::incorrect_datetime_value(t))
             .map(|_| Ok(None))?;
     }
-    let month = t.month() as usize;
-    Ok(Some(MONTH_NAMES[month - 1].to_string().into_bytes()))
+    Ok(Some(CalendarName::Month.extract_wire(t)))
 }
 
 #[rpn_fn(nullable)]
@@ -820,7 +860,7 @@ pub fn day_name(ctx: &mut EvalContext, t: Option<&DateTime>) -> Result<Option<By
                     .handle_invalid_time_error(Error::incorrect_datetime_value(t))
                     .map(|_| Ok(None))?;
             }
-            Ok(Some(t.weekday().name().to_string().into_bytes()))
+            Ok(Some(CalendarName::Day.extract_wire(t)))
         }
         None => Ok(None),
     }

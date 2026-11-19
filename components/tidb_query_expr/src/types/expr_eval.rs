@@ -1527,6 +1527,7 @@ impl RpnExpression {
                     )
                 }) && !metadata.is::<super::native_arithmetic::NativeComparisonArgs>()
                     && !metadata.is::<crate::impl_time::CalendarPart>()
+                    && !metadata.is::<crate::impl_time::CalendarName>()
                 {
                     return Err(other_err!(
                         "kernel {} does not yet admit native scalar arguments",
@@ -1610,6 +1611,34 @@ pub fn native_calendar_part_node(part: crate::impl_time::CalendarPart) -> RpnExp
         args_len: 1,
         field_type: tidb_query_datatype::FieldTypeTp::LongLong.into(),
         metadata: Box::new(part),
+    }
+}
+
+/// Build a native date-name call from an already typed Time expression.
+pub fn native_calendar_name_node(name: crate::impl_time::CalendarName) -> RpnExpressionNode {
+    use crate::impl_time::CalendarName;
+
+    RpnExpressionNode::FnCall {
+        func_meta: super::RpnFnMeta {
+            name: "native_calendar_name",
+            fn_ptr: |_, rows, args, _, metadata| {
+                let [source] = args else {
+                    return Err(other_err!("calendar name requires one time operand"));
+                };
+                let name = metadata
+                    .downcast_ref::<CalendarName>()
+                    .ok_or_else(|| other_err!("missing calendar name"))?;
+                let mut values = ChunkedVecBytes::with_capacity(rows);
+                for row in 0..rows {
+                    values.push_ref(native_time(source, row)?.and_then(|t| name.extract_native(t)));
+                }
+                Ok(VectorValue::Bytes(values))
+            },
+            ..crate::impl_time::month_name_fn_meta()
+        },
+        args_len: 1,
+        field_type: tidb_query_datatype::FieldTypeTp::VarString.into(),
+        metadata: Box::new(name),
     }
 }
 
