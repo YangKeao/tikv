@@ -747,6 +747,10 @@ pub enum PacketString {
     Space,
     /// REPEAT with a byte string and integer count.
     Repeat,
+    /// CONCAT with its number of string arguments.
+    Concat(usize),
+    /// CONCAT_WS with its number of arguments, including the separator.
+    ConcatWs(usize),
 }
 
 impl PacketString {
@@ -754,6 +758,16 @@ impl PacketString {
         match self {
             Self::Space => 1,
             Self::Repeat => 2,
+            Self::Concat(args_len) | Self::ConcatWs(args_len) => args_len,
+        }
+    }
+
+    pub(crate) fn accepts(self, args: &[EvalType]) -> bool {
+        match self {
+            Self::Space => args == [EvalType::Int],
+            Self::Repeat => args == [EvalType::Bytes, EvalType::Int],
+            Self::Concat(_) => !args.is_empty() && args.iter().all(|arg| *arg == EvalType::Bytes),
+            Self::ConcatWs(_) => args.len() >= 2 && args.iter().all(|arg| *arg == EvalType::Bytes),
         }
     }
 
@@ -764,6 +778,9 @@ impl PacketString {
         rows: usize,
     ) -> Result<VectorValue> {
         let limit = input.max_allowed_packet();
+        if matches!(self, Self::Concat(_) | Self::ConcatWs(_)) {
+            return self.evaluate_join(input, args, rows, limit);
+        }
         let count_arg = &args[self.args_len() - 1];
         let mut values = ChunkedVecBytes::with_capacity(rows);
         for row in 0..rows {
@@ -804,6 +821,79 @@ impl PacketString {
                             }
                         }
                     }
+                }
+                Self::Concat(_) | Self::ConcatWs(_) => unreachable!(),
+            };
+            values = result.into_inner();
+        }
+        Ok(VectorValue::Bytes(values))
+    }
+
+    fn evaluate_join(
+        self,
+        input: &dyn crate::InputColumns,
+        args: &[crate::RpnStackNode<'_>],
+        rows: usize,
+        limit: u64,
+    ) -> Result<VectorValue> {
+        let mut values = ChunkedVecBytes::with_capacity(rows);
+        let mut parts = Vec::with_capacity(args.len());
+        let mut non_null = Vec::new();
+        for row in 0..rows {
+            parts.clear();
+            for arg in args {
+                let ScalarValueRef::Bytes(part) = arg.get_logical_scalar_ref(row) else {
+                    return Err(other_err!("CONCAT requires byte operands"));
+                };
+                parts.push(part);
+            }
+            let writer = values.into_writer();
+            let result = if matches!(self, Self::ConcatWs(_)) {
+                match parts.first().copied().flatten() {
+                    None => writer.write(None),
+                    Some(separator) => {
+                        let mut size = 0_u64;
+                        for (position, part) in parts[1..].iter().enumerate() {
+                            if let Some(part) = part {
+                                size = size.saturating_add(part.len() as u64);
+                                // Limit accounting follows argument position, including skipped
+                                // NULLs.
+                                if position > 0 {
+                                    size = size.saturating_add(separator.len() as u64);
+                                }
+                                if size > limit {
+                                    break;
+                                }
+                            }
+                        }
+                        if size > limit {
+                            input.handle_allowed_packet_overflowed("concat_ws")?;
+                            writer.write(None)
+                        } else {
+                            writer.write(concat_ws(&parts)?)
+                        }
+                    }
+                }
+            } else {
+                non_null.clear();
+                let mut size = 0usize;
+                for part in &parts {
+                    let Some(part) = part else {
+                        break;
+                    };
+                    size = size.saturating_add(part.len());
+                    if size as u64 > limit {
+                        break;
+                    }
+                    non_null.push(*part);
+                }
+                if size as u64 > limit {
+                    input.handle_allowed_packet_overflowed("concat")?;
+                    writer.write(None)
+                } else if non_null.len() == parts.len() {
+                    concat(&non_null, writer)?
+                } else {
+                    writer.write(None)
                 }
             };
             values = result.into_inner();

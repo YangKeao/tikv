@@ -699,12 +699,14 @@ impl RpnExpression {
                     stack.push(EvalType::Real);
                 }
                 RpnExpressionNode::NativePacketString { op, field_type } => {
+                    let args_len = op.args_len();
                     if field_type.as_accessor().tp() != tidb_query_datatype::FieldTypeTp::VarString
-                        || pop(&mut stack) != Some(EvalType::Int)
-                        || (op.args_len() == 2 && pop(&mut stack) != Some(EvalType::Bytes))
+                        || available < args_len
+                        || !op.accepts(&stack[stack.len() - args_len..])
                     {
                         return Err(invalid());
                     }
+                    stack.truncate(stack.len() - args_len);
                     stack.push(EvalType::Bytes);
                 }
                 RpnExpressionNode::NativeArithmetic { op, field_type, .. } => {
