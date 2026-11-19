@@ -231,6 +231,17 @@ fn abs_int(arg: &Int) -> Result<Option<Int>> {
     }
 }
 
+/// Uses the ordinary signed ABS kernel with a native source diagnostic.
+pub fn native_abs_int_fn_meta() -> crate::RpnFnMeta {
+    crate::RpnFnMeta {
+        fn_ptr: |ctx, rows, args, extra, metadata| {
+            (abs_int_fn_meta().fn_ptr)(ctx, rows, args, extra, &())
+                .map_err(|error| crate::impl_arithmetic::native_overflow(error, metadata))
+        },
+        ..abs_int_fn_meta()
+    }
+}
+
 #[rpn_fn]
 #[inline]
 fn abs_uint(arg: &Int) -> Result<Option<Int>> {

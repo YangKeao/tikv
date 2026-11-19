@@ -16,30 +16,35 @@ pub fn arithmetic<A: ArithmeticOp>(lhs: &A::T, rhs: &A::T) -> Result<Option<A::T
 
 /// Uses the ordinary signed integer kernel with a native source diagnostic.
 pub fn native_int_arithmetic_fn_meta<A: ArithmeticOp<T = Int>>() -> crate::RpnFnMeta {
+    crate::RpnFnMeta {
+        fn_ptr: |ctx, rows, args, extra, metadata| {
+            (arithmetic_fn_meta::<A>().fn_ptr)(ctx, rows, args, extra, &())
+                .map_err(|error| native_overflow(error, metadata))
+        },
+        ..arithmetic_fn_meta::<A>()
+    }
+}
+
+pub(super) fn native_overflow(
+    error: tidb_query_common::error::Error,
+    metadata: &dyn std::any::Any,
+) -> tidb_query_common::error::Error {
     use tidb_query_common::error::{ErrorInner, EvaluateError};
     use tidb_query_datatype::codec::error::ERR_DATA_OUT_OF_RANGE;
 
-    crate::RpnFnMeta {
-        fn_ptr: |ctx, rows, args, extra, metadata| {
-            (arithmetic_fn_meta::<A>().fn_ptr)(ctx, rows, args, extra, &()).map_err(|error| match (
-                &*error.0,
-                metadata.downcast_ref::<String>(),
-            ) {
-                (
-                    ErrorInner::Evaluate(EvaluateError::Custom {
-                        code: ERR_DATA_OUT_OF_RANGE,
-                        ..
-                    }),
-                    Some(message),
-                ) => EvaluateError::Custom {
-                    code: ERR_DATA_OUT_OF_RANGE,
-                    msg: message.clone(),
-                }
-                .into(),
-                _ => error,
-            })
-        },
-        ..arithmetic_fn_meta::<A>()
+    match (&*error.0, metadata.downcast_ref::<String>()) {
+        (
+            ErrorInner::Evaluate(EvaluateError::Custom {
+                code: ERR_DATA_OUT_OF_RANGE,
+                ..
+            }),
+            Some(message),
+        ) => EvaluateError::Custom {
+            code: ERR_DATA_OUT_OF_RANGE,
+            msg: message.clone(),
+        }
+        .into(),
+        _ => error,
     }
 }
 
