@@ -80,6 +80,7 @@ pub(super) fn is_null(value: &RpnStackNode<'_>, row: usize) -> bool {
         },
         RpnStackNode::ExpressionVector { value, .. } => match value {
             ExpressionVector::Time(v) => v[row].is_none(),
+            ExpressionVector::Duration(v) => v[row].is_none(),
             ExpressionVector::Real(v) => v[row].is_none(),
             ExpressionVector::Decimal(v) => v[row].is_none(),
         },

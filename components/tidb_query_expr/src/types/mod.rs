@@ -21,7 +21,7 @@ pub use self::{
     expr_eval::{
         BATCH_MAX_SIZE, InputColumns, InputResult, NativeKernelWarnings, OwnedRpnExecution,
         RpnExecution, RpnExecutionRef, RpnStackNode, RpnStackNodeVectorValue, RpnVectorFieldType,
-        native_calendar_name_node, native_calendar_part_node,
+        native_calendar_name_node, native_calendar_part_node, native_duration_part_node,
     },
     function::{RpnFnCallExtra, RpnFnMeta},
 };

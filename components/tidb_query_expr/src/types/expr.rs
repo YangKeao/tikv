@@ -20,6 +20,7 @@ pub enum ExpressionScalar {
 #[derive(Debug)]
 pub enum ExpressionVector {
     Time(Vec<Option<tidb_datatype::Time>>),
+    Duration(Vec<Option<tidb_datatype::MySqlDuration>>),
     Real(Vec<Option<f64>>),
     Decimal(Vec<Option<ExpressionDecimal>>),
 }

@@ -1528,6 +1528,7 @@ impl RpnExpression {
                 }) && !metadata.is::<super::native_arithmetic::NativeComparisonArgs>()
                     && !metadata.is::<crate::impl_time::CalendarPart>()
                     && !metadata.is::<crate::impl_time::CalendarName>()
+                    && !metadata.is::<crate::impl_time::DurationPart>()
                 {
                     return Err(other_err!(
                         "kernel {} does not yet admit native scalar arguments",
@@ -1639,6 +1640,40 @@ pub fn native_calendar_name_node(name: crate::impl_time::CalendarName) -> RpnExp
         args_len: 1,
         field_type: tidb_query_datatype::FieldTypeTp::VarString.into(),
         metadata: Box::new(name),
+    }
+}
+
+/// Build a duration component call for a native TIME column.
+pub fn native_duration_part_node(part: crate::impl_time::DurationPart) -> RpnExpressionNode {
+    use crate::impl_time::DurationPart;
+
+    RpnExpressionNode::FnCall {
+        func_meta: super::RpnFnMeta {
+            name: "native_duration_part",
+            fn_ptr: |_, _, args, _, metadata| {
+                let [
+                    RpnStackNode::ExpressionVector {
+                        value: ExpressionVector::Duration(values),
+                        ..
+                    },
+                ] = args
+                else {
+                    return Err(other_err!("duration part requires a native TIME column"));
+                };
+                let part = metadata
+                    .downcast_ref::<DurationPart>()
+                    .ok_or_else(|| other_err!("missing duration part"))?;
+                let values: Vec<_> = values
+                    .iter()
+                    .map(|value| value.and_then(|value| part.extract_native(value)))
+                    .collect();
+                Ok(VectorValue::Int(ChunkedVecSized::from(values)))
+            },
+            ..crate::impl_time::hour_fn_meta()
+        },
+        args_len: 1,
+        field_type: tidb_query_datatype::FieldTypeTp::LongLong.into(),
+        metadata: Box::new(part),
     }
 }
 

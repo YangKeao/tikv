@@ -15,7 +15,7 @@ use tidb_query_datatype::{
             Duration, MAX_FSP, RoundMode, Time, TimeType, Tz, check_fsp,
             duration::{
                 MAX_HOUR_PART, MAX_MINUTE_PART, MAX_NANOS, MAX_NANOS_PART, MAX_SECOND_PART,
-                NANOS_PER_SEC,
+                MAX_SECS, NANOS_PER_SEC,
             },
             time::{
                 MONTH_NAMES, WeekdayExtension, extension::DateTimeExtension, interval::*,
@@ -782,34 +782,89 @@ pub fn month_name(ctx: &mut EvalContext, t: &DateTime) -> Result<Option<Bytes>> 
     Ok(Some(CalendarName::Month.extract_wire(t)))
 }
 
+/// Component or whole-second value of an already typed TIME duration.
+#[derive(Clone, Copy, Debug)]
+pub enum DurationPart {
+    /// Absolute hours, including hours beyond 24.
+    Hour,
+    /// Absolute minute component.
+    Minute,
+    /// Absolute second component.
+    Second,
+    /// Absolute fractional microseconds.
+    Microsecond,
+    /// Signed whole seconds.
+    TotalSeconds,
+}
+
+impl DurationPart {
+    fn extract(self, value: tidb_datatype::MySqlDuration) -> i64 {
+        match self {
+            Self::Hour => value.hour(),
+            Self::Minute => value.minute(),
+            Self::Second => value.second(),
+            Self::Microsecond => value.microsecond(),
+            Self::TotalSeconds => value.nanoseconds() / NANOS_PER_SEC,
+        }
+    }
+
+    fn extract_wire(self, value: Duration) -> i64 {
+        self.extract(tidb_datatype::MySqlDuration::from_raw_parts(
+            value.to_nanos(),
+            i64::from(value.fsp()),
+        ))
+    }
+
+    pub(crate) fn extract_native(self, value: tidb_datatype::MySqlDuration) -> Option<i64> {
+        if value.hour() > i64::from(MAX_HOUR_PART) {
+            return match self {
+                Self::Microsecond | Self::TotalSeconds => None,
+                _ => Some(self.extract(tidb_datatype::MySqlDuration::from_raw_parts(MAX_NANOS, 0))),
+            };
+        }
+        if matches!(self, Self::Microsecond) {
+            // The original native call reads the fraction at the input column's FSP.
+            let unit = 10_i64.pow((6 - value.fsp()) as u32);
+            let micros = self.extract(value) / unit * unit;
+            if value.nanoseconds().unsigned_abs() / NANOS_PER_SEC as u64 == MAX_SECS as u64
+                && micros > 0
+            {
+                return None;
+            }
+            return Some(micros);
+        }
+        Some(self.extract(value))
+    }
+}
+
 #[rpn_fn(nullable)]
 #[inline]
 pub fn hour(t: Option<&Duration>) -> Result<Option<Int>> {
-    Ok(t.as_ref().map(|t| i64::from(t.hours())))
+    Ok(t.map(|value| DurationPart::Hour.extract_wire(*value)))
 }
 
 #[rpn_fn(nullable)]
 #[inline]
 pub fn minute(t: Option<&Duration>) -> Result<Option<Int>> {
-    Ok(t.as_ref().map(|t| i64::from(t.minutes())))
+    Ok(t.map(|value| DurationPart::Minute.extract_wire(*value)))
 }
 
 #[rpn_fn(nullable)]
 #[inline]
 pub fn second(t: Option<&Duration>) -> Result<Option<Int>> {
-    Ok(t.as_ref().map(|t| i64::from(t.secs())))
+    Ok(t.map(|value| DurationPart::Second.extract_wire(*value)))
 }
 
 #[rpn_fn(nullable)]
 #[inline]
 pub fn time_to_sec(t: Option<&Duration>) -> Result<Option<Int>> {
-    Ok(t.as_ref().map(|t| t.to_secs()))
+    Ok(t.map(|value| DurationPart::TotalSeconds.extract_wire(*value)))
 }
 
 #[rpn_fn(nullable)]
 #[inline]
 pub fn micro_second(t: Option<&Duration>) -> Result<Option<Int>> {
-    Ok(t.as_ref().map(|t| i64::from(t.subsec_micros())))
+    Ok(t.map(|value| DurationPart::Microsecond.extract_wire(*value)))
 }
 
 #[rpn_fn(nullable, capture = [ctx])]
