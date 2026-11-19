@@ -252,7 +252,7 @@ pub fn to_days(ctx: &mut EvalContext, t: Option<&DateTime>) -> Result<Option<Int
             .handle_invalid_time_error(Error::incorrect_datetime_value(t))
             .map(|_| Ok(None))?;
     }
-    Ok(Some(Int::from(t.day_number())))
+    Ok(Some(CalendarPart::ToDays.extract_wire(t)))
 }
 
 #[rpn_fn(capture = [ctx])]
@@ -263,7 +263,7 @@ pub fn to_seconds(ctx: &mut EvalContext, t: &DateTime) -> Result<Option<Int>> {
             .handle_invalid_time_error(Error::incorrect_datetime_value(t))
             .map(|_| Ok(None))?;
     }
-    Ok(Some(t.second_number()))
+    Ok(Some(CalendarPart::ToSeconds.extract_wire(t)))
 }
 
 #[rpn_fn(writer, capture = [ctx])]
@@ -646,6 +646,10 @@ pub enum CalendarPart {
     Weekday,
     /// One-based day of the year.
     DayOfYear,
+    /// Days since MySQL's year-zero epoch.
+    ToDays,
+    /// Whole seconds since MySQL's year-zero epoch.
+    ToSeconds,
 }
 
 impl CalendarPart {
@@ -667,17 +671,43 @@ impl CalendarPart {
                         })
                         .sum::<i64>()
             }
+            Self::ToDays => i64::from(tidb_datatype::calc_daynr(
+                time.year(),
+                i32::from(time.month()),
+                i32::from(time.day()),
+            )),
+            Self::ToSeconds => {
+                Self::ToDays.extract(time) * 86_400
+                    + i64::from(time.hour()) * 3_600
+                    + i64::from(time.minute()) * 60
+                    + i64::from(time.second())
+            }
         }
     }
 
-    pub(crate) fn extract_native(self, time: tidb_datatype::CoreTime) -> Option<Int> {
-        if matches!(self, Self::DayOfWeek | Self::Weekday | Self::DayOfYear)
-            && !(1..=tidb_datatype::get_last_day(time.year(), time.month())).contains(&time.day())
-        {
-            None
-        } else {
-            Some(self.extract(time))
+    pub(crate) fn extract_native(self, time: tidb_datatype::Time) -> Option<Int> {
+        let core = time.core_time();
+        if matches!(self, Self::Year | Self::Month | Self::Day | Self::Quarter) {
+            return Some(self.extract(core));
         }
+        if !(1..=tidb_datatype::get_last_day(core.year(), core.month())).contains(&core.day()) {
+            return None;
+        }
+        if matches!(self, Self::ToDays | Self::ToSeconds) {
+            if time.kind() == tidb_datatype::TimeType::Date {
+                let days = Self::ToDays.extract(core);
+                return Some(if matches!(self, Self::ToSeconds) {
+                    days * 86_400
+                } else {
+                    days
+                });
+            }
+            let (hour, minute, second) = time.clock();
+            if hour > 23 || minute > 59 || second > 59 {
+                return None;
+            }
+        }
+        Some(self.extract(core))
     }
 
     fn extract_wire(self, time: &DateTime) -> Int {
