@@ -1395,10 +1395,13 @@ impl RpnExpression {
                 ))
             }
             RpnExpressionNode::NativeDoubleMath { op, field_type } => {
-                use crate::impl_math::DoubleMath;
-                let source = stack
-                    .last()
+                use crate::impl_math::{DoubleMath, log_with_base};
+                let args_len = op.args_len();
+                let start = stack
+                    .len()
+                    .checked_sub(args_len)
                     .ok_or_else(|| other_err!("missing math operand"))?;
+                let source = &stack[start];
                 let inputs =
                     (0..output_rows).map(|row| super::native_arithmetic::real(source, row));
                 let output = if *op == DoubleMath::Sign {
@@ -1413,8 +1416,27 @@ impl RpnExpression {
                     }
                 } else {
                     let values = inputs
-                        .map(|value| {
-                            value.map(|value| value.and_then(|value| op.real_value(value)))
+                        .enumerate()
+                        .map(|(row, value)| {
+                            let output = if *op == DoubleMath::LogBase {
+                                let other = super::native_arithmetic::real(&stack[start + 1], row)?;
+                                let (Some(base), Some(value)) = (value?, other) else {
+                                    return Ok(None);
+                                };
+                                log_with_base(base, value)
+                            } else {
+                                let Some(value) = value? else {
+                                    return Ok(None);
+                                };
+                                op.real_value(value)
+                            };
+                            if output.is_none() && op.warns_on_invalid_domain() {
+                                let mut warning = tipb::Error::default();
+                                warning.set_code(3020);
+                                warning.set_msg("Invalid argument for logarithm".into());
+                                input_physical_columns.append_kernel_warning(&warning);
+                            }
+                            Ok(output)
                         })
                         .collect::<Result<Vec<_>>>()?;
                     RpnStackNode::ExpressionVector {
@@ -1422,7 +1444,7 @@ impl RpnExpression {
                         field_type,
                     }
                 };
-                Ok((1, output))
+                Ok((args_len, output))
             }
             RpnExpressionNode::NativeArithmetic {
                 op,

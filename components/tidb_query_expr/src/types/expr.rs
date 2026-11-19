@@ -723,11 +723,16 @@ impl RpnExpression {
                     } else {
                         (FieldTypeTp::Double, EvalType::Real)
                     };
+                    let args_len = op.args_len();
                     if field_type.as_accessor().tp() != code
-                        || pop(&mut stack) != Some(EvalType::Real)
+                        || available < args_len
+                        || stack[stack.len() - args_len..]
+                            .iter()
+                            .any(|ty| *ty != EvalType::Real)
                     {
                         return Err(invalid());
                     }
+                    stack.truncate(stack.len() - args_len);
                     stack.push(output);
                 }
                 RpnExpressionNode::NativeArithmetic { op, field_type, .. } => {

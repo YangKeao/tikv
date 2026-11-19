@@ -34,26 +34,19 @@ pub fn crc32(arg: BytesRef) -> Result<Option<Int>> {
 #[inline]
 #[rpn_fn]
 pub fn log_1_arg(arg: &Real) -> Result<Option<Real>> {
-    Ok(f64_to_real(arg.ln()))
+    Ok(DoubleMath::Ln.real_value(**arg).and_then(f64_to_real))
 }
 
 #[inline]
 #[rpn_fn]
-#[allow(clippy::float_cmp)]
 pub fn log_2_arg(arg0: &Real, arg1: &Real) -> Result<Option<Real>> {
-    Ok({
-        if **arg0 <= 0f64 || **arg0 == 1f64 || **arg1 <= 0f64 {
-            None
-        } else {
-            f64_to_real(arg1.log(**arg0))
-        }
-    })
+    Ok(log_with_base(**arg0, **arg1).and_then(f64_to_real))
 }
 
 #[inline]
 #[rpn_fn]
 pub fn log2(arg: &Real) -> Result<Option<Real>> {
-    Ok(f64_to_real(arg.log2()))
+    Ok(DoubleMath::Log2.real_value(**arg).and_then(f64_to_real))
 }
 
 #[inline]
@@ -261,7 +254,7 @@ fn abs_decimal(arg: &Decimal) -> Result<Option<Decimal>> {
     Ok(Some(res?))
 }
 
-/// Scalar math with an already typed DOUBLE operand.
+/// Scalar math with already typed DOUBLE operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DoubleMath {
     /// Arc sine with the unit interval as its domain.
@@ -272,21 +265,49 @@ pub enum DoubleMath {
     Sqrt,
     /// Integer sign of the operand.
     Sign,
+    /// Natural logarithm.
+    Ln,
+    /// Base-two logarithm.
+    Log2,
+    /// Logarithm with the base as the first operand.
+    LogBase,
 }
 
 impl DoubleMath {
+    /// Number of DOUBLE operands.
+    pub fn args_len(self) -> usize {
+        if self == Self::LogBase { 2 } else { 1 }
+    }
+
+    pub(crate) fn warns_on_invalid_domain(self) -> bool {
+        matches!(self, Self::Ln | Self::Log2 | Self::LogBase)
+    }
+
     pub(crate) fn real_value(self, value: f64) -> Option<f64> {
         match self {
             Self::Asin => (-1.0..=1.0).contains(&value).then(|| value.asin()),
             Self::Acos => (-1.0..=1.0).contains(&value).then(|| value.acos()),
             Self::Sqrt if value < 0.0 => None,
             Self::Sqrt => Some(value.sqrt()),
+            Self::Ln | Self::Log2 if value <= 0.0 => None,
+            Self::Ln => Some(value.ln()),
+            Self::Log2 => Some(value.log2()),
+            Self::LogBase => unreachable!("LOG with base requires two operands"),
             Self::Sign => unreachable!("SIGN returns an integer"),
         }
     }
 
     pub(crate) fn sign_value(value: f64) -> Int {
         i64::from(value > 0.0) - i64::from(value < 0.0)
+    }
+}
+
+#[allow(clippy::float_cmp)]
+pub(crate) fn log_with_base(base: f64, value: f64) -> Option<f64> {
+    if base <= 0.0 || base == 1.0 || value <= 0.0 {
+        None
+    } else {
+        Some(value.log(base))
     }
 }
 
@@ -796,6 +817,7 @@ mod tests {
             (Some(100.0), Some(Real::new(4.605170185988092_f64).unwrap())),
             (Some(-1.0), None),
             (Some(0.0), None),
+            (Some(f64::INFINITY), None),
             (None, None),
         ];
         for (input, expect) in test_cases {
@@ -829,6 +851,8 @@ mod tests {
             (Some(0_f64), Some(123_f64), None),
             (Some(1_f64), Some(123_f64), None),
             (Some(1123_f64), Some(0_f64), None),
+            (Some(2.0), Some(f64::INFINITY), None),
+            (Some(f64::INFINITY), Some(f64::INFINITY), None),
             (None, None, None),
             (Some(2.0_f64), None, None),
             (None, Some(2.0_f64), None),
@@ -850,6 +874,7 @@ mod tests {
             (Some(5_f64), Some(Real::new(2.321928094887362_f64).unwrap())),
             (Some(-1.234_f64), None),
             (Some(0_f64), None),
+            (Some(f64::INFINITY), None),
             (None, None),
         ];
         for (input, expect) in test_cases {
